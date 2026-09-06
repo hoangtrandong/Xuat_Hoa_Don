@@ -12,8 +12,7 @@ import CustomerDetail from "@/components/customers/CustomerDetail";
 import { customers, type Customer } from "@/lib/mock-customers";
 import { formatVND, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
-
-const API_URL = "http://localhost:8000/api/v1";
+import { API_URL } from "@/lib/api";
 const customerTypes = ["Đại lý", "Cửa hàng", "Nhà phân phối", "HORECA"];
 
 function typeVariant(type: string) {

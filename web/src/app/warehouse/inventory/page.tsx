@@ -11,8 +11,7 @@ import Drawer from "@/components/ui/Drawer";
 import { ledgerLabels, type StockLevel, type LedgerEntry, type LedgerType } from "@/lib/mock-inventory";
 import { formatVND, formatDateTime, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
-
-const API_URL = "http://localhost:8000/api/v1";
+import { API_URL } from "@/lib/api";
 
 interface ApiStockLevel {
   product_id: number;

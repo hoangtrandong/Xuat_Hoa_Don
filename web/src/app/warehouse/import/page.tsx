@@ -9,8 +9,7 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { ledgerLabels, type LedgerEntry, type StockLevel } from "@/lib/mock-inventory";
 import { formatNumber, formatDateTime } from "@/lib/format";
-
-const API_URL = "http://localhost:8000/api/v1";
+import { API_URL } from "@/lib/api";
 
 interface ApiStockLevel {
   product_id: number;

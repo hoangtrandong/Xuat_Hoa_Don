@@ -5,6 +5,7 @@ import { FolderOpen, Package, ArrowRight } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import { cn } from "@/lib/utils";
+import { API_URL } from "@/lib/api";
 
 type Category = { id: number; name: string };
 type Product = { category_id: number; status: string };
@@ -16,8 +17,8 @@ export default function CategoriesPage() {
 
   useEffect(() => {
     Promise.all([
-      fetch("http://localhost:8000/api/v1/products/categories/"),
-      fetch("http://localhost:8000/api/v1/products/"),
+      fetch(`${API_URL}/products/categories/`),
+      fetch(`${API_URL}/products/`),
     ]).then(async ([categoryResponse, productResponse]) => {
       if (!categoryResponse.ok || !productResponse.ok) throw new Error("Không thể tải danh mục hàng hóa.");
       setCategories(await categoryResponse.json());

@@ -11,6 +11,7 @@ import ProgressBar from "@/components/ui/ProgressBar";
 import { employees, type Employee } from "@/lib/mock-employees";
 import { formatVND, formatDate, getInitials } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { API_URL } from "@/lib/api";
 
 const avatarColors = ["bg-sky-500", "bg-purple-500", "bg-amber-500", "bg-emerald-500", "bg-rose-500", "bg-indigo-500"];
 
@@ -30,7 +31,7 @@ export default function EmployeesPage() {
   async function createEmployee() {
     setCreateError(""); setCreateMessage("");
     try {
-      const response = await fetch("http://localhost:8000/api/v1/employees/", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+      const response = await fetch(`${API_URL}/employees/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
       const result = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo nhân viên.");
       setCreateMessage("Đã tạo nhân viên thành công trong PostgreSQL."); setCreateOpen(false);

@@ -10,6 +10,7 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { formatVND } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { API_URL } from "@/lib/api";
 
 type CategoryOption = { id: number; name: string };
 type UnitOption = { id: number; name: string };
@@ -43,7 +44,7 @@ export default function ProductsPage() {
   async function uploadProducts(file: File) {
     const body = new FormData();
     body.append("file", file);
-    const response = await fetch("http://localhost:8000/api/v1/products/upload", { method: "POST", body });
+    const response = await fetch(`${API_URL}/products/upload`, { method: "POST", body });
     const result = await response.json() as { imported?: number; detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể tải danh sách SKU.");
     setMessage(`Đã nhập ${result.imported ?? 0} SKU vào PostgreSQL.`);
@@ -51,9 +52,9 @@ export default function ProductsPage() {
   }
   useEffect(() => {
     Promise.all([
-      fetch("http://localhost:8000/api/v1/products/categories/"),
-      fetch("http://localhost:8000/api/v1/products/units/"),
-      fetch("http://localhost:8000/api/v1/products/"),
+      fetch(`${API_URL}/products/categories/`),
+      fetch(`${API_URL}/products/units/`),
+      fetch(`${API_URL}/products/`),
     ]).then(async ([categoryResponse, unitResponse, productResponse]) => {
       if (!categoryResponse.ok || !unitResponse.ok || !productResponse.ok) throw new Error("Không thể tải danh mục, đơn vị và SKU.");
       const loadedCategories = await categoryResponse.json() as CategoryOption[];
@@ -79,7 +80,7 @@ export default function ProductsPage() {
   async function createProduct() {
     setMessage(""); setError("");
     try {
-      const response = await fetch("http://localhost:8000/api/v1/products/", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, category_id: Number(form.category_id), unit_id: Number(form.unit_id), base_price: Number(form.base_price), cost_price: Number(form.cost_price) }) });
+      const response = await fetch(`${API_URL}/products/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, category_id: Number(form.category_id), unit_id: Number(form.unit_id), base_price: Number(form.base_price), cost_price: Number(form.cost_price) }) });
       const result = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo SKU.");
       setMessage("Đã tạo SKU thành công trong PostgreSQL."); setCreateOpen(false);
@@ -138,7 +139,7 @@ export default function ProductsPage() {
         title="Danh sách Hàng hóa"
         actions={
           <div className="flex gap-2">
-          <a href="http://localhost:8000/api/v1/products/template" className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
+          <a href={`${API_URL}/products/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
           <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadProducts(file).catch((uploadError: unknown) => setError(uploadError instanceof Error ? uploadError.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
           <button onClick={() => { setError(""); setMessage(""); setCreateOpen(true); }} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">

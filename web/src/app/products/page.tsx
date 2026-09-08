@@ -35,7 +35,7 @@ export default function ProductsPage() {
   const [supplierFilter, setSupplierFilter] = useState("Tất cả");
   const [statusFilter, setStatusFilter] = useState("Tất cả");
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ sku: "", name: "", category_id: "1", unit_id: "1", supplier: "", base_price: "0", cost_price: "0" });
+  const [form, setForm] = useState({ sku: "", name: "", category_id: "1", unit_id: "1", supplier: "", base_price: "0", cost_price: "0", boxes_per_carton: "1" });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
@@ -80,7 +80,7 @@ export default function ProductsPage() {
   async function createProduct() {
     setMessage(""); setError("");
     try {
-      const response = await fetch(`${API_URL}/products/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, category_id: Number(form.category_id), unit_id: Number(form.unit_id), base_price: Number(form.base_price), cost_price: Number(form.cost_price) }) });
+      const response = await fetch(`${API_URL}/products/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, category_id: Number(form.category_id), unit_id: Number(form.unit_id), base_price: Number(form.base_price), cost_price: Number(form.cost_price), boxes_per_carton: Number(form.boxes_per_carton) }) });
       const result = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo SKU.");
       setMessage("Đã tạo SKU thành công trong PostgreSQL."); setCreateOpen(false);
@@ -204,8 +204,8 @@ export default function ProductsPage() {
       <Drawer open={createOpen} onClose={() => setCreateOpen(false)} title="Thêm SKU" subtitle="Tạo sản phẩm trong PostgreSQL">
         <div className="p-5 space-y-4">
           {error && <div className="bg-red-50 text-red-700 rounded-lg px-3 py-2 text-sm">{error}</div>}
-          {(["sku", "name", "supplier", "base_price", "cost_price"] as const).map((field) => (
-            <label key={field} className="block"><span className="text-xs text-gray-500">{field === "sku" ? "Mã SKU" : field === "name" ? "Tên sản phẩm" : field === "supplier" ? "Nhà cung cấp" : field === "base_price" ? "Giá bán" : "Giá vốn"}</span><input value={form[field]} onChange={(e) => setForm({ ...form, [field]: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border border-gray-200 rounded-lg" /></label>
+          {(["sku", "name", "supplier", "base_price", "cost_price", "boxes_per_carton"] as const).map((field) => (
+            <label key={field} className="block"><span className="text-xs text-gray-500">{field === "sku" ? "Mã SKU" : field === "name" ? "Tên sản phẩm" : field === "supplier" ? "Nhà cung cấp" : field === "base_price" ? "Giá bán" : field === "cost_price" ? "Giá vốn" : "Số hộp / thùng"}</span><input type={field.includes("price") || field === "boxes_per_carton" ? "number" : "text"} min={field === "boxes_per_carton" ? 1 : undefined} value={form[field]} onChange={(e) => setForm({ ...form, [field]: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border border-gray-200 rounded-lg" /></label>
           ))}
           <label className="block"><span className="text-xs text-gray-500">Danh mục</span><select value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border border-gray-200 rounded-lg"><option value="">-- Chọn danh mục --</option>{categoryOptions.map((option, index) => <option key={option.id} value={option.id}>{index + 1}. {option.name}</option>)}</select></label>
           <label className="block"><span className="text-xs text-gray-500">Đơn vị tính</span><select value={form.unit_id} onChange={(e) => setForm({ ...form, unit_id: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border border-gray-200 rounded-lg"><option value="">-- Chọn đơn vị --</option>{unitOptions.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label>

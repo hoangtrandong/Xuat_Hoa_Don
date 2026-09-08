@@ -8,12 +8,18 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import ProgressBar from "@/components/ui/ProgressBar";
-import { employees, type Employee } from "@/lib/mock-employees";
+import { employees as defaultEmployees, type Employee } from "@/lib/mock-employees";
 import { formatVND, formatDate, getInitials } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL } from "@/lib/api";
 
 const avatarColors = ["bg-sky-500", "bg-purple-500", "bg-amber-500", "bg-emerald-500", "bg-rose-500", "bg-indigo-500"];
+
+const POSITION_OPTIONS = [
+  { value: "Nhân viên kinh doanh", label: "Nhân viên kinh doanh" },
+  { value: "Giám sát", label: "Giám sát" },
+  { value: "Giám đốc vùng", label: "Giám đốc vùng" },
+];
 
 function positionVariant(position: string) {
   if (position === "Giám đốc vùng") return "purple";
@@ -25,24 +31,50 @@ export default function EmployeesPage() {
   const [positionFilter, setPositionFilter] = useState("Tất cả");
   const [selected, setSelected] = useState<Employee | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ code: "", name: "", position: "SAS", phone: "", email: "" });
+  const [employeesList, setEmployeesList] = useState<Employee[]>(defaultEmployees);
+  const [form, setForm] = useState({ code: "", name: "", position: "Nhân viên kinh doanh", phone: "", email: "" });
   const [createError, setCreateError] = useState("");
   const [createMessage, setCreateMessage] = useState("");
   async function createEmployee() {
     setCreateError(""); setCreateMessage("");
     try {
       const response = await fetch(`${API_URL}/employees/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-      const result = await response.json() as { detail?: string };
+      const result = await response.json() as { detail?: string; id?: number; code?: string; name?: string; position?: string; phone?: string; email?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo nhân viên.");
+      // Thêm nhân viên mới vào state local để hiển thị ngay lập tức
+      const newEmployee: Employee = {
+        id: result.code || form.code,
+        code: form.code,
+        name: form.name,
+        position: form.position as Employee["position"],
+        territory: "",
+        routes: [],
+        phone: form.phone,
+        email: form.email,
+        status: "active",
+        joinDate: new Date().toISOString().split("T")[0],
+        target: 0,
+        achieved: 0,
+        orders: 0,
+        customersServed: 0,
+        newCustomersTarget: 0,
+        newCustomers: 0,
+        visitTarget: 0,
+        visits: 0,
+        avatar: form.name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase(),
+      };
+      setEmployeesList((prev) => [...prev, newEmployee]);
       setCreateMessage("Đã tạo nhân viên thành công trong PostgreSQL."); setCreateOpen(false);
+      // Reset form
+      setForm({ code: "", name: "", position: "Nhân viên kinh doanh", phone: "", email: "" });
     } catch (e) { setCreateError(e instanceof Error ? e.message : "Không thể tạo nhân viên."); }
   }
 
-    const nvkd = employees.filter((e) => e.position === "Nhân viên kinh doanh").length;
-  const totalAchieved = employees.reduce((s, e) => s + e.achieved, 0);
-  const reached = employees.filter((e) => e.achieved >= e.target * 0.9).length;
+    const nvkd = employeesList.filter((e) => e.position === "Nhân viên kinh doanh").length;
+  const totalAchieved = employeesList.reduce((s, e) => s + e.achieved, 0);
+  const reached = employeesList.filter((e) => e.achieved >= e.target * 0.9).length;
 
-  const filtered = employees.filter(
+  const filtered = employeesList.filter(
     (e) => positionFilter === "Tất cả" || e.position === positionFilter
   );
 
@@ -59,7 +91,7 @@ export default function EmployeesPage() {
       sortable: true,
       render: (_, row) => (
         <div className="flex items-center gap-2.5">
-          <div className={cn("w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0", avatarColors[employees.findIndex((e) => e.code === row.code) % avatarColors.length])}>
+          <div className={cn("w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0", avatarColors[employeesList.findIndex((e) => e.code === row.code) % avatarColors.length])}>
             <span className="text-white text-xs font-bold">{getInitials(row.name)}</span>
           </div>
           <div>
@@ -145,7 +177,7 @@ export default function EmployeesPage() {
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Tổng nhân viên" value={employees.length} icon={<UsersRound size={20} />} color="bg-sky-50 text-sky-600" />
+        <StatCard label="Tổng nhân viên" value={employeesList.length} icon={<UsersRound size={20} />} color="bg-sky-50 text-sky-600" />
         <StatCard label="NV Kinh doanh" value={nvkd} icon={<Users size={20} />} color="bg-purple-50 text-purple-600" />
         <StatCard label="Đạt ≥ 90% mục tiêu" value={reached} icon={<Target size={20} />} color="bg-emerald-50 text-emerald-600" />
         <StatCard label="Tổng doanh số tháng" value={formatVND(totalAchieved)} icon={<TrendingUp size={20} />} color="bg-amber-50 text-amber-600" />
@@ -176,7 +208,11 @@ export default function EmployeesPage() {
           {createError && <div className="bg-red-50 text-red-700 rounded-lg px-3 py-2 text-sm">{createError}</div>}
           <input placeholder="Mã nhân viên" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Họ và tên" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-          <input placeholder="Vị trí (SAS, ASM...)" value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
+          <select value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg">
+            {POSITION_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
           <input placeholder="Số điện thoại" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Email (tùy chọn)" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <button onClick={createEmployee} className="w-full bg-sky-500 text-white rounded-lg py-2.5 text-sm font-medium">Lưu nhân viên</button>

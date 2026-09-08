@@ -20,8 +20,8 @@ def download_product_template():
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "SKU"
-    sheet.append(["sku", "name", "category_code", "unit_code", "supplier", "base_price", "cost_price", "reorder_level", "status"])
-    sheet.append(["SKU-NEW", "Ten san pham", "BKS", "CAI", "", 0, 0, 20, "active"])
+    sheet.append(["sku", "name", "category_code", "unit_code", "supplier", "base_price", "cost_price", "reorder_level", "status", "boxes_per_carton"])
+    sheet.append(["SKU-NEW", "Ten san pham", "BKS", "CAI", "", 0, 0, 20, "active", 1])
     output = BytesIO()
     workbook.save(output)
     return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="mau-sku.xlsx"'})
@@ -61,6 +61,7 @@ def upload_products(file: UploadFile = File(...), db: Session = Depends(get_db))
                 supplier=str(data.get("supplier") or "").strip() or None, base_price=float(data.get("base_price") or 0),
                 cost_price=float(data.get("cost_price") or 0), reorder_level=int(data.get("reorder_level") or 20),
                 status=str(data.get("status") or "active").strip(),
+                boxes_per_carton=max(1, int(data.get("boxes_per_carton") or 1)),
             ))
             imported += 1
         db.commit()

@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List
 
 
@@ -12,6 +12,7 @@ class ProductBase(BaseModel):
     base_price: float = 0
     cost_price: float = 0
     reorder_level: int = 20
+    boxes_per_carton: int = Field(default=1, gt=0)
     status: str = "active"
 
 

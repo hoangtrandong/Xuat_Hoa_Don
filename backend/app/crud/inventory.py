@@ -4,7 +4,7 @@ from typing import List, Optional
 from datetime import datetime
 from uuid import uuid4
 
-from app.models.inventory import InventoryTransaction, Warehouse
+from app.models.inventory import InventoryTransaction, Warehouse, InventoryLot
 from app.models.product import Product, ProductUnit
 from app.schemas.inventory import StockAdjust, StockLevel
 
@@ -32,6 +32,28 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
     if obj_in.quantity < 1:
         raise ValueError("Số lượng phải lớn hơn 0.")
     qty = obj_in.quantity if obj_in.type in ("IN", "OPENING") else -obj_in.quantity
+    lot = None
+    if obj_in.location_id is not None or obj_in.expiry_date is not None:
+        lot = db.scalar(select(InventoryLot).where(
+            InventoryLot.warehouse_id == obj_in.warehouse_id,
+            InventoryLot.product_id == obj_in.product_id,
+            InventoryLot.lot_number == obj_in.lot_number if obj_in.lot_number else InventoryLot.lot_number.is_(None),
+            InventoryLot.location_id == obj_in.location_id,
+            InventoryLot.expiry_date == obj_in.expiry_date,
+        ).with_for_update())
+        if not lot:
+            lot = InventoryLot(
+                warehouse_id=obj_in.warehouse_id, product_id=obj_in.product_id,
+                lot_number=obj_in.lot_number, location_id=obj_in.location_id,
+                expiry_date=obj_in.expiry_date, quantity_on_hand=0,
+                unit_cost=obj_in.unit_cost)
+            db.add(lot)
+            db.flush()
+        if obj_in.expiry_date is not None:
+            lot.expiry_date = obj_in.expiry_date
+        if qty < 0 and lot.quantity_on_hand < obj_in.quantity:
+            raise ValueError("Số lượng xuất vượt quá tồn lô.")
+        lot.quantity_on_hand += qty
     if obj_in.type in ("OUT", "ADJUST"):
         current_stock = db.scalar(
             select(func.coalesce(func.sum(InventoryTransaction.quantity), 0))
@@ -52,6 +74,8 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
         ref_code=obj_in.ref_code,
         note=obj_in.note,
         created_by=created_by,
+        lot_id=lot.id if lot else None, location_id=obj_in.location_id,
+        expiry_date=obj_in.expiry_date,
     )
     db.add(txn)
     db.commit()

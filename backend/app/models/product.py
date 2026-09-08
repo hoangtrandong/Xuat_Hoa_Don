@@ -40,6 +40,8 @@ class Product(Base):
     base_price: Mapped[float] = mapped_column(Float, default=0)
     cost_price: Mapped[float] = mapped_column(Float, default=0)
     reorder_level: Mapped[int] = mapped_column(Integer, default=20)
+    # Number of boxes represented by one carton; quantities are stored in boxes.
+    boxes_per_carton: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

@@ -33,7 +33,7 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
         raise ValueError("Số lượng phải lớn hơn 0.")
     qty = obj_in.quantity if obj_in.type in ("IN", "OPENING") else -obj_in.quantity
     lot = None
-    if obj_in.location_id is not None or obj_in.expiry_date is not None:
+    if obj_in.lot_number is not None or obj_in.location_id is not None or obj_in.expiry_date is not None:
         lot = db.scalar(select(InventoryLot).where(
             InventoryLot.warehouse_id == obj_in.warehouse_id,
             InventoryLot.product_id == obj_in.product_id,

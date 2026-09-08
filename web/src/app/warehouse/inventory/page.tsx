@@ -46,6 +46,25 @@ interface ApiWarehouse {
   manager?: string;
 }
 
+interface ApiLocation {
+  id: number;
+  warehouse_id: number;
+  code: string;
+  name?: string | null;
+  is_active: boolean;
+}
+
+interface ApiLot {
+  id: number;
+  warehouse_id: number;
+  location_id?: number | null;
+  product_id: number;
+  lot_number?: string | null;
+  expiry_date?: string | null;
+  quantity_on_hand: number;
+  unit_cost?: number | null;
+}
+
 function toStockLevel(item: ApiStockLevel): StockLevel {
   return {
     id: String(item.product_id),
@@ -95,28 +114,37 @@ export default function WarehouseInventoryPage() {
   const [warehouseOptions, setWarehouseOptions] = useState<ApiWarehouse[]>([]);
   const [adjWarehouseId, setAdjWarehouseId] = useState<number | "">("");
   const [adjNote, setAdjNote] = useState("");
+  const [adjLotNumber, setAdjLotNumber] = useState("");
+  const [adjExpiryDate, setAdjExpiryDate] = useState("");
+  const [adjLocationId, setAdjLocationId] = useState<number | "">("");
   const [adjError, setAdjError] = useState("");
   const [adjSuccess, setAdjSuccess] = useState("");
 
   const [stockLevels, setStockLevels] = useState<StockLevel[]>([]);
   const [ledgerEntriesState, setLedgerEntriesState] = useState<LedgerEntry[]>([]);
+  const [locations, setLocations] = useState<ApiLocation[]>([]);
+  const [lots, setLots] = useState<ApiLot[]>([]);
   const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     async function loadInventory() {
       try {
-        const [stockResponse, transactionResponse, warehouseResponse] = await Promise.all([
+        const [stockResponse, transactionResponse, warehouseResponse, locationResponse, lotResponse] = await Promise.all([
           fetch(`${API_URL}/inventory/stock-levels/`),
           fetch(`${API_URL}/inventory/transactions/`),
           fetch(`${API_URL}/inventory/warehouses/`),
+          fetch(`${API_URL}/inventory/locations/`),
+          fetch(`${API_URL}/inventory/lots/`),
         ]);
-        if (!stockResponse.ok || !transactionResponse.ok || !warehouseResponse.ok) {
+        if (!stockResponse.ok || !transactionResponse.ok || !warehouseResponse.ok || !locationResponse.ok || !lotResponse.ok) {
           throw new Error("Không thể tải dữ liệu tồn kho từ API.");
         }
         const stocks = await stockResponse.json() as ApiStockLevel[];
         const transactions = await transactionResponse.json() as ApiTransaction[];
         const warehouses = await warehouseResponse.json() as ApiWarehouse[];
+        const locationRows = await locationResponse.json() as ApiLocation[];
+        const lotRows = await lotResponse.json() as ApiLot[];
         if (cancelled) return;
         const stockMap = new Map(stocks.map((item) => [item.product_id, item]));
         const warehouseMap = new Map(warehouses.map((item) => [item.id, item.name]));
@@ -137,6 +165,8 @@ export default function WarehouseInventoryPage() {
           note: item.note ?? "",
         })));
         setWarehouseOptions(warehouses);
+        setLocations(locationRows);
+        setLots(lotRows);
         setLoadError("");
       } catch (error) {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : "Không thể tải dữ liệu tồn kho.");
@@ -276,6 +306,9 @@ export default function WarehouseInventoryPage() {
     setAdjQty(1);
     setAdjWarehouseId(warehouseOptions[0]?.id ?? "");
     setAdjNote("");
+    setAdjLotNumber("");
+    setAdjExpiryDate("");
+    setAdjLocationId("");
     setAdjustOpen(true);
   }
 
@@ -300,6 +333,9 @@ export default function WarehouseInventoryPage() {
           warehouse_id: adjWarehouseId,
           product_id: Number(stock.id),
           quantity: adjQty,
+          lot_number: adjLotNumber.trim() || null,
+          location_id: adjLocationId || null,
+          expiry_date: adjExpiryDate ? `${adjExpiryDate}T00:00:00` : null,
           note: adjNote.trim() || `${ledgerLabels[adjType]} thủ công`,
         }),
       });
@@ -353,6 +389,7 @@ export default function WarehouseInventoryPage() {
           items={[
             { key: "stock", label: "Bảng tồn kho", count: stockLevels.length },
             { key: "ledger", label: "Sổ nhật ký (Ledger)", count: ledgerEntriesState.length },
+            { key: "lots", label: "Lô / vị trí / hạn dùng", count: lots.length },
           ]}
           active={tab}
           onChange={setTab}
@@ -385,7 +422,7 @@ export default function WarehouseInventoryPage() {
             </select>
           }
         />
-      ) : (
+      ) : tab === "ledger" ? (
         <DataTable
           data={filteredLedger}
           columns={ledgerColumns}
@@ -404,6 +441,32 @@ export default function WarehouseInventoryPage() {
               <option value="ADJUST">Điều chỉnh</option>
             </select>
           }
+        />
+      ) : (
+        <DataTable
+          data={lots.map((lot) => {
+            const stock = stockLevels.find((item) => item.id === String(lot.product_id));
+            const location = locations.find((item) => item.id === lot.location_id);
+            return {
+              id: lot.id,
+              productCode: stock?.productCode ?? String(lot.product_id),
+              productName: stock?.productName ?? "Sản phẩm",
+              lotNumber: lot.lot_number ?? "-",
+              location: location ? `${location.code}${location.name ? ` - ${location.name}` : ""}` : "Chưa gán",
+              expiryDate: lot.expiry_date ? new Date(lot.expiry_date).toLocaleDateString("vi-VN") : "Không có",
+              quantity: lot.quantity_on_hand,
+            };
+          })}
+          columns={[
+            { key: "productCode", title: "Mã SKU", sortable: true },
+            { key: "productName", title: "Sản phẩm", sortable: true },
+            { key: "lotNumber", title: "Số lô" },
+            { key: "location", title: "Vị trí kho" },
+            { key: "expiryDate", title: "Hạn sử dụng", sortable: true },
+            { key: "quantity", title: "Tồn theo lô", sortable: true, align: "right", render: (value) => formatNumber(value as number) },
+          ]}
+          searchKeys={["productCode", "productName", "lotNumber", "location", "expiryDate"]}
+          searchPlaceholder="Tìm SKU, lô, vị trí..."
         />
       )}
       {/* Drawer điều chỉnh tồn kho */}
@@ -445,6 +508,25 @@ export default function WarehouseInventoryPage() {
               ))}
             </select>
           </label>
+          <label className="block">
+            <span className="text-xs text-gray-500">Vị trí kho</span>
+            <select value={adjLocationId} onChange={(e) => setAdjLocationId(e.target.value ? Number(e.target.value) : "")} className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500">
+              <option value="">-- Chưa gán vị trí --</option>
+              {locations.filter((location) => location.warehouse_id === adjWarehouseId && location.is_active).map((location) => (
+                <option key={location.id} value={location.id}>{location.code}{location.name ? ` - ${location.name}` : ""}</option>
+              ))}
+            </select>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-xs text-gray-500">Số lô</span>
+              <input value={adjLotNumber} onChange={(e) => setAdjLotNumber(e.target.value)} placeholder="Không bắt buộc" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500" />
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-500">Hạn sử dụng</span>
+              <input type="date" value={adjExpiryDate} onChange={(e) => setAdjExpiryDate(e.target.value)} className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500" />
+            </label>
+          </div>
           <label className="block">
             <span className="text-xs text-gray-500">Ghi chú</span>
             <textarea value={adjNote} onChange={(e) => setAdjNote(e.target.value)} rows={2} placeholder="Lý do điều chỉnh..." className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white" />

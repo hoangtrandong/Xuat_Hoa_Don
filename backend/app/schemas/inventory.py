@@ -22,6 +22,7 @@ class InventoryTransaction(BaseModel):
 
 
 class StockLevel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     product_id: int
     product_code: str
     product_name: str
@@ -30,6 +31,9 @@ class StockLevel(BaseModel):
     reserved: int
     available: int
     reorder_level: int
+    lot_count: int = 0  # Số lô đang có hàng
+    earliest_expiry: Optional[datetime] = None  # Hạn sử dụng gần nhất
+    locations: Optional[str] = None  # Danh sách vị trí (phân cách dấu phẩy)
 
 
 class Warehouse(BaseModel):

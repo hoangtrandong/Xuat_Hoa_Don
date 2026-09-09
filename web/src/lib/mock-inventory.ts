@@ -28,6 +28,9 @@ export interface StockLevel {
   reorderPoint: number;
   unitValue: number;
   totalValue: number;
+  lotCount?: number;
+  earliestExpiry?: string | null;
+  locations?: string | null;
 }
 
 const stockOverrides: Record<string, { onHand?: number; reserved?: number; reorderPoint?: number }> = {

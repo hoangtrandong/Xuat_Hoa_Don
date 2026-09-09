@@ -22,6 +22,9 @@ interface ApiStockLevel {
   reserved: number;
   available: number;
   reorder_level: number;
+  lot_count?: number;
+  earliest_expiry?: string | null;
+  locations?: string | null;
 }
 
 interface ApiTransaction {
@@ -78,6 +81,9 @@ function toStockLevel(item: ApiStockLevel): StockLevel {
     reorderPoint: item.reorder_level,
     unitValue: 0,
     totalValue: 0,
+    lotCount: item.lot_count ?? 0,
+    earliestExpiry: item.earliest_expiry ?? null,
+    locations: item.locations ?? null,
   };
 }
 
@@ -202,6 +208,37 @@ export default function WarehouseInventoryPage() {
       sortable: true,
       align: "right",
       render: (val) => <span className="font-semibold text-gray-900">{formatNumber(val as number)}</span>,
+    },
+    {
+      key: "locations",
+      title: "Vị trí kho",
+      render: (val) => (
+        <span className="text-xs text-gray-600">
+          {val ? String(val) : <span className="text-gray-400">Chưa gán</span>}
+        </span>
+      ),
+    },
+    {
+      key: "earliestExpiry",
+      title: "Hạn sử dụng",
+      sortable: true,
+      render: (val) => {
+        if (!val) return <span className="text-gray-400 text-xs">Không có</span>;
+        const date = new Date(String(val));
+        const isExpired = date < new Date();
+        const isNearExpiry = date < new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+        return (
+          <span className={`text-xs font-medium ${isExpired ? "text-red-600" : isNearExpiry ? "text-amber-600" : "text-gray-600"}`}>
+            {date.toLocaleDateString("vi-VN")}
+          </span>
+        );
+      },
+    },
+    {
+      key: "lotCount",
+      title: "Số lô",
+      align: "right",
+      render: (val) => <span className="text-gray-500">{val}</span>,
     },
     {
       key: "reserved",
@@ -407,8 +444,8 @@ export default function WarehouseInventoryPage() {
         <DataTable
           data={filteredStock}
           columns={stockColumns}
-          searchKeys={["productCode", "productName", "category"]}
-          searchPlaceholder="Tìm SKU, tên sản phẩm..."
+          searchKeys={["productCode", "productName", "category", "locations", "earliestExpiry"]}
+          searchPlaceholder="Tìm SKU, tên sản phẩm, vị trí..."
           toolbar={
             <select
               value={categoryFilter}

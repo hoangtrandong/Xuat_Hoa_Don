@@ -4,7 +4,7 @@ from typing import List, Optional
 from datetime import datetime
 from uuid import uuid4
 
-from app.models.inventory import InventoryTransaction, Warehouse, InventoryLot
+from app.models.inventory import InventoryTransaction, Warehouse, InventoryLot, WarehouseLocation
 from app.models.product import Product, ProductUnit
 from app.schemas.inventory import StockAdjust, StockLevel
 
@@ -84,9 +84,39 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
 
 
 def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[StockLevel]:
-    transaction_join = InventoryTransaction.product_id == Product.id
+    """Tính tồn kho từ inventory_lots (ưu tiên) và inventory_transactions (fallback)."""
+    # Subquery: tổng tồn theo lô từ inventory_lots
+    lot_subquery = (
+        select(
+            InventoryLot.product_id,
+            func.coalesce(func.sum(InventoryLot.quantity_on_hand), 0).label("lot_qty"),
+            func.count(InventoryLot.id).label("lot_count"),
+            func.min(InventoryLot.expiry_date).label("earliest_expiry"),
+        )
+        .where(InventoryLot.quantity_on_hand > 0)
+        .group_by(InventoryLot.product_id)
+    )
     if warehouse_id is not None:
-        transaction_join = (transaction_join & (InventoryTransaction.warehouse_id == warehouse_id))
+        lot_subquery = lot_subquery.where(InventoryLot.warehouse_id == warehouse_id)
+    lot_subquery = lot_subquery.subquery()
+
+    # Subquery: danh sách vị trí duy nhất
+    location_subquery = (
+        select(
+            InventoryLot.product_id,
+            func.string_agg(
+                func.distinct(WarehouseLocation.code), ", "
+            ).label("locations"),
+        )
+        .join(WarehouseLocation, WarehouseLocation.id == InventoryLot.location_id)
+        .where(InventoryLot.quantity_on_hand > 0)
+        .group_by(InventoryLot.product_id)
+    )
+    if warehouse_id is not None:
+        location_subquery = location_subquery.where(InventoryLot.warehouse_id == warehouse_id)
+    location_subquery = location_subquery.subquery()
+
+    # Main query: join với products
     result = db.execute(
         select(
             Product.id.label("product_id"),
@@ -94,12 +124,17 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             Product.name.label("product_name"),
             ProductUnit.name.label("unit"),
             Product.reorder_level,
-            func.coalesce(func.sum(InventoryTransaction.quantity), 0).label("on_hand"),
+            func.coalesce(lot_subquery.c.lot_qty, 0).label("on_hand"),
+            func.coalesce(lot_subquery.c.lot_count, 0).label("lot_count"),
+            lot_subquery.c.earliest_expiry,
+            location_subquery.c.locations,
         )
         .join(ProductUnit, ProductUnit.id == Product.unit_id)
-        .outerjoin(InventoryTransaction, transaction_join)
-        .group_by(Product.id, ProductUnit.name)
+        .outerjoin(lot_subquery, lot_subquery.c.product_id == Product.id)
+        .outerjoin(location_subquery, location_subquery.c.product_id == Product.id)
+        .order_by(Product.sku)
     )
+
     levels = []
     for row in result.all():
         on_hand = int(row.on_hand or 0)
@@ -112,6 +147,9 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             reserved=0,
             available=on_hand,
             reorder_level=row.reorder_level or 20,
+            lot_count=int(row.lot_count or 0),
+            earliest_expiry=row.earliest_expiry,
+            locations=row.locations,
         ))
     return levels
 

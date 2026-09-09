@@ -18,11 +18,21 @@ def _code() -> str:
     return f"DR-{datetime.utcnow():%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}"
 
 
-def _reserved_for_lot(db, lot_id: int, exclude_request_id=None) -> int:
+def _reserved_for_position(
+    db: Session,
+    warehouse_id: int,
+    product_id: int,
+    location_id: int | None,
+    expiry_date,
+    exclude_request_id=None,
+) -> int:
     stmt = (select(func.coalesce(func.sum(DeliveryAllocation.allocated_quantity), 0))
             .join(DeliveryRequestItem, DeliveryRequestItem.id == DeliveryAllocation.item_id)
             .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestItem.request_id)
-            .where(DeliveryAllocation.lot_id == lot_id,
+            .where(DeliveryRequest.warehouse_id == warehouse_id,
+                   DeliveryRequestItem.product_id == product_id,
+                   DeliveryAllocation.location_id == location_id,
+                   DeliveryAllocation.expiry_date == expiry_date,
                    DeliveryRequest.status.in_(ACTIVE_STATUSES)))
     if exclude_request_id:
         stmt = stmt.where(DeliveryRequest.id != exclude_request_id)
@@ -60,19 +70,35 @@ def _allocate(db: Session, request: DeliveryRequest, item: DeliveryRequestItem) 
         InventoryLot.warehouse_id == request.warehouse_id,
         InventoryLot.product_id == item.product_id,
         InventoryLot.quantity_on_hand > 0,
-    ).order_by(InventoryLot.expiry_date.is_(None), InventoryLot.expiry_date, InventoryLot.id)
+    ).order_by(
+        InventoryLot.expiry_date.is_(None),
+        InventoryLot.expiry_date,
+        InventoryLot.location_id.is_(None),
+        InventoryLot.location_id,
+        InventoryLot.id,
+    )
     .with_for_update()).all()
+    positions = {}
     for lot in lots:
-        free = lot.quantity_on_hand - _reserved_for_lot(db, lot.id, request.id)
-        if free <= 0:
-            continue
-        take = min(remaining, free)
-        item.allocations.append(DeliveryAllocation(
-            allocated_quantity=take, allocation_sequence=len(item.allocations) + 1,
-            allocation_strategy="FEFO", lot_id=lot.id, location_id=lot.location_id,
-            expiry_date=lot.expiry_date,
-        ))
-        remaining -= take
+        positions.setdefault((lot.location_id, lot.expiry_date), []).append(lot)
+    for (location_id, expiry_date), position_lots in positions.items():
+        reserved = _reserved_for_position(
+            db, request.warehouse_id, item.product_id, location_id, expiry_date, request.id
+        )
+        free = max(0, sum(lot.quantity_on_hand for lot in position_lots) - reserved)
+        for lot in position_lots:
+            if free <= 0 or remaining <= 0:
+                break
+            take = min(remaining, lot.quantity_on_hand, free)
+            if take <= 0:
+                continue
+            item.allocations.append(DeliveryAllocation(
+                allocated_quantity=take, allocation_sequence=len(item.allocations) + 1,
+                allocation_strategy="FEFO", lot_id=lot.id, location_id=location_id,
+                expiry_date=expiry_date,
+            ))
+            remaining -= take
+            free -= take
         if not remaining:
             break
     if remaining:

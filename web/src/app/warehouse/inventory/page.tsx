@@ -62,7 +62,6 @@ interface ApiLot {
   warehouse_id: number;
   location_id?: number | null;
   product_id: number;
-  lot_number?: string | null;
   expiry_date?: string | null;
   quantity_on_hand: number;
   unit_cost?: number | null;
@@ -120,7 +119,6 @@ export default function WarehouseInventoryPage() {
   const [warehouseOptions, setWarehouseOptions] = useState<ApiWarehouse[]>([]);
   const [adjWarehouseId, setAdjWarehouseId] = useState<number | "">("");
   const [adjNote, setAdjNote] = useState("");
-  const [adjLotNumber, setAdjLotNumber] = useState("");
   const [adjExpiryDate, setAdjExpiryDate] = useState("");
   const [adjLocationId, setAdjLocationId] = useState<number | "">("");
   const [adjError, setAdjError] = useState("");
@@ -343,7 +341,6 @@ export default function WarehouseInventoryPage() {
     setAdjQty(1);
     setAdjWarehouseId(warehouseOptions[0]?.id ?? "");
     setAdjNote("");
-    setAdjLotNumber("");
     setAdjExpiryDate("");
     setAdjLocationId("");
     setAdjustOpen(true);
@@ -370,7 +367,6 @@ export default function WarehouseInventoryPage() {
           warehouse_id: adjWarehouseId,
           product_id: Number(stock.id),
           quantity: adjQty,
-          lot_number: adjLotNumber.trim() || null,
           location_id: adjLocationId || null,
           expiry_date: adjExpiryDate ? `${adjExpiryDate}T00:00:00` : null,
           note: adjNote.trim() || `${ledgerLabels[adjType]} thủ công`,
@@ -426,7 +422,7 @@ export default function WarehouseInventoryPage() {
           items={[
             { key: "stock", label: "Bảng tồn kho", count: stockLevels.length },
             { key: "ledger", label: "Sổ nhật ký (Ledger)", count: ledgerEntriesState.length },
-            { key: "lots", label: "Lô / vị trí / hạn dùng", count: lots.length },
+            { key: "lots", label: "Vị trí / hạn dùng", count: lots.length },
           ]}
           active={tab}
           onChange={setTab}
@@ -488,7 +484,6 @@ export default function WarehouseInventoryPage() {
               id: lot.id,
               productCode: stock?.productCode ?? String(lot.product_id),
               productName: stock?.productName ?? "Sản phẩm",
-              lotNumber: lot.lot_number ?? "-",
               location: location ? `${location.code}${location.name ? ` - ${location.name}` : ""}` : "Chưa gán",
               expiryDate: lot.expiry_date ? new Date(lot.expiry_date).toLocaleDateString("vi-VN") : "Không có",
               quantity: lot.quantity_on_hand,
@@ -497,13 +492,12 @@ export default function WarehouseInventoryPage() {
           columns={[
             { key: "productCode", title: "Mã SKU", sortable: true },
             { key: "productName", title: "Sản phẩm", sortable: true },
-            { key: "lotNumber", title: "Số lô" },
             { key: "location", title: "Vị trí kho" },
             { key: "expiryDate", title: "Hạn sử dụng", sortable: true },
             { key: "quantity", title: "Tồn theo lô", sortable: true, align: "right", render: (value) => formatNumber(value as number) },
           ]}
-          searchKeys={["productCode", "productName", "lotNumber", "location", "expiryDate"]}
-          searchPlaceholder="Tìm SKU, lô, vị trí..."
+          searchKeys={["productCode", "productName", "location", "expiryDate"]}
+          searchPlaceholder="Tìm SKU, vị trí, hạn dùng..."
         />
       )}
       {/* Drawer điều chỉnh tồn kho */}
@@ -554,16 +548,10 @@ export default function WarehouseInventoryPage() {
               ))}
             </select>
           </label>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className="text-xs text-gray-500">Số lô</span>
-              <input value={adjLotNumber} onChange={(e) => setAdjLotNumber(e.target.value)} placeholder="Không bắt buộc" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500" />
-            </label>
-            <label className="block">
+          <label className="block">
               <span className="text-xs text-gray-500">Hạn sử dụng</span>
               <input type="date" value={adjExpiryDate} onChange={(e) => setAdjExpiryDate(e.target.value)} className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500" />
-            </label>
-          </div>
+          </label>
           <label className="block">
             <span className="text-xs text-gray-500">Ghi chú</span>
             <textarea value={adjNote} onChange={(e) => setAdjNote(e.target.value)} rows={2} placeholder="Lý do điều chỉnh..." className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white" />

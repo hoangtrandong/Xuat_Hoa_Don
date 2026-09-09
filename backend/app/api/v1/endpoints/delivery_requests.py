@@ -27,11 +27,8 @@ def _quantity(value: Any, boxes_per_carton: int = 1) -> tuple[int, int, int, str
             cartons, boxes = (int(part) for part in parts)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Số lượng '{raw}' không hợp lệ.") from exc
-        if cartons < 0 or boxes < 0 or boxes > boxes_per_carton:
+        if cartons < 0 or boxes < 0:
             raise ValueError(f"Số lượng '{raw}' không hợp lệ.")
-        if boxes == boxes_per_carton:
-            cartons += 1
-            boxes = 0
         return cartons * boxes_per_carton + boxes, cartons, boxes, raw
     try:
         quantity = int(value)

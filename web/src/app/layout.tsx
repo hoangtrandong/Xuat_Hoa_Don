@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import AppShell from "@/components/layout/AppShell";
@@ -8,6 +8,11 @@ const inter = Inter({ subsets: ["latin", "latin-ext"], variable: "--font-inter" 
 export const metadata: Metadata = {
   title: "DMS - Hệ thống quản lý phân phối",
   description: "Distribution Management System",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({

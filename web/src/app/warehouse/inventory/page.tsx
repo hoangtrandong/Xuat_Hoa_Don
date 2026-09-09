@@ -238,7 +238,7 @@ export default function WarehouseInventoryPage() {
       key: "lotCount",
       title: "Số lô",
       align: "right",
-      render: (val) => <span className="text-gray-500">{val}</span>,
+      render: (val) => <span className="text-gray-500">{Number(val)}</span>,
     },
     {
       key: "reserved",

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.core.database import get_db
-from app.schemas.product import Product, ProductCreate, PriceList, PriceListCreate, ProductCategoryOption, ProductUnitOption
+from app.schemas.product import Product, ProductCreate, ProductUpdate, PriceList, PriceListCreate, ProductCategoryOption, ProductUnitOption
 from app.models.product import ProductCategory, ProductUnit
 from app.models.product import Product as ProductModel
 from app.crud import product as product_crud, price_list as pl_crud
@@ -102,6 +102,33 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
     if not obj:
         raise HTTPException(status_code=404, detail="Product not found")
     return obj
+
+
+@router.patch("/{product_id}", response_model=Product)
+def update_product(product_id: int, payload: ProductUpdate, db: Session = Depends(get_db)):
+    try:
+        obj = product_crud.update(db, product_id, payload)
+        if not obj:
+            raise HTTPException(status_code=404, detail="Product not found")
+        return obj
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/{product_id}")
+def delete_product(product_id: int, db: Session = Depends(get_db)):
+    success = product_crud.delete(db, product_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return {"success": True, "message": "Product deleted"}
+
+
+@router.post("/bulk-delete")
+def bulk_delete_products(product_ids: List[int], db: Session = Depends(get_db)):
+    if not product_ids:
+        raise HTTPException(status_code=400, detail="No product IDs provided")
+    deleted = product_crud.bulk_delete(db, product_ids)
+    return {"success": True, "deleted": deleted}
 
 
 @router.get("/price-lists/", response_model=List[PriceList], tags=["price-lists"])

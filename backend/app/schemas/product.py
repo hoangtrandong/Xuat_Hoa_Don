@@ -20,6 +20,19 @@ class ProductCreate(ProductBase):
     pass
 
 
+class ProductUpdate(BaseModel):
+    sku: Optional[str] = None
+    name: Optional[str] = None
+    category_id: Optional[int] = None
+    unit_id: Optional[int] = None
+    supplier: Optional[str] = None
+    base_price: Optional[float] = None
+    cost_price: Optional[float] = None
+    reorder_level: Optional[int] = None
+    boxes_per_carton: Optional[int] = Field(default=None, gt=0)
+    status: Optional[str] = None
+
+
 class ProductCategoryOption(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

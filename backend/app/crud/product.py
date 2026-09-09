@@ -25,10 +25,58 @@ def create(db: Session, obj_in: ProductCreate) -> Product:
     return product
 
 
+def update(db: Session, product_id: int, obj_in) -> Optional[Product]:
+    product = db.get(Product, product_id)
+    if not product:
+        return None
+    
+    # Check SKU uniqueness if updating SKU
+    if obj_in.sku is not None and obj_in.sku.upper() != product.sku.upper():
+        existing = db.query(Product).filter(Product.sku == obj_in.sku.upper()).first()
+        if existing:
+            raise ValueError(f"SKU {obj_in.sku} đã tồn tại")
+    
+    update_data = obj_in.model_dump(exclude_unset=True)
+    
+    # Normalize SKU to uppercase
+    if "sku" in update_data and update_data["sku"]:
+        update_data["sku"] = update_data["sku"].upper()
+    
+    for field, value in update_data.items():
+        setattr(product, field, value)
+    
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+def delete(db: Session, product_id: int) -> bool:
+    product = db.get(Product, product_id)
+    if not product:
+        return False
+    db.delete(product)
+    db.commit()
+    return True
+
+
+def bulk_delete(db: Session, product_ids: List[int]) -> int:
+    deleted = 0
+    for product_id in product_ids:
+        product = db.get(Product, product_id)
+        if product:
+            db.delete(product)
+            deleted += 1
+    db.commit()
+    return deleted
+
+
 class ProductCRUD:
     get = staticmethod(get)
     list_ = staticmethod(list_)
     create = staticmethod(create)
+    update = staticmethod(update)
+    delete = staticmethod(delete)
+    bulk_delete = staticmethod(bulk_delete)
 
 
 product = ProductCRUD()

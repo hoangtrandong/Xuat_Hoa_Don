@@ -3,6 +3,7 @@ from io import BytesIO
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from zipfile import BadZipFile
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import List
 
@@ -58,6 +59,10 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
         if not required.issubset(headers):
             raise HTTPException(status_code=400, detail=f"Thiếu cột bắt buộc: {', '.join(sorted(required - set(headers)))}")
         imported = 0
+        existing_codes = {
+            code for code in db.execute(select(CustomerModel.code)).scalars().all()
+        }
+        file_codes: set[str] = set()
         for row_number, values in enumerate(rows[1:], start=2):
             data = dict(zip(headers, values))
             if not any(value is not None and str(value).strip() for value in values):
@@ -67,8 +72,9 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: mã khách hàng không được để trống.")
             if not str(data.get("name") or "").strip():
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: tên khách hàng không được để trống.")
-            if crud.get_by_code(db, code):
+            if code in existing_codes or code in file_codes:
                 raise HTTPException(status_code=409, detail=f"Dòng {row_number}: mã khách hàng {code} đã tồn tại.")
+            file_codes.add(code)
             customer = CustomerModel(
                 code=code, name=str(data["name"]).strip(),
                 type=str(data.get("type") or "RETAIL").strip().upper(),

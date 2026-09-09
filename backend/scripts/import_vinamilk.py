@@ -57,10 +57,11 @@ def import_vinamilk(filepath: str):
         for cat in db.execute(select(ProductCategory)).scalars().all():
             categories[cat.code] = cat
 
-        # Cache existing products
+        # Cache existing products (uppercase for case-insensitive comparison)
         existing_skus = set()
         for sku in db.execute(select(Product.sku)).scalars().all():
-            existing_skus.add(sku)
+            if sku:
+                existing_skus.add(sku.upper())
         print(f"Existing products: {len(existing_skus)}")
 
         imported = 0
@@ -80,7 +81,8 @@ def import_vinamilk(filepath: str):
                 if not sku or not name:
                     continue
 
-                sku = str(sku).strip()
+                # Normalize SKU to uppercase for case-insensitive comparison
+                sku = str(sku).strip().upper()
                 name = str(name).strip()
 
                 # Parse conversion ratio
@@ -97,7 +99,7 @@ def import_vinamilk(filepath: str):
                 if not category:
                     category = list(categories.values())[0]  # Fallback
 
-                # Check if product exists
+                # Check if product exists (case-insensitive)
                 if sku in existing_skus:
                     # Skip update for now - just count
                     updated += 1

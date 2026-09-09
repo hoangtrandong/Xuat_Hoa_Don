@@ -37,12 +37,20 @@ def update(db: Session, customer: Customer, obj_in: CustomerUpdate) -> Customer:
     return customer
 
 
+def delete(db: Session, customer: Customer) -> None:
+    if customer.sales_orders:
+        raise ValueError("Không thể xóa khách hàng đã phát sinh đơn hàng.")
+    db.delete(customer)
+    db.commit()
+
+
 class CustomerCRUD:
     get = staticmethod(get)
     get_by_code = staticmethod(get_by_code)
     list_ = staticmethod(list_)
     create = staticmethod(create)
     update = staticmethod(update)
+    delete = staticmethod(delete)
 
 
 customer = CustomerCRUD()

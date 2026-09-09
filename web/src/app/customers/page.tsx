@@ -1,6 +1,6 @@
 "use client";
 // src/app/customers/page.tsx
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Users, CheckCircle2, Wallet, AlertTriangle, Plus, Download, Upload } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
@@ -9,7 +9,7 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import CustomerDetail from "@/components/customers/CustomerDetail";
-import { customers, type Customer } from "@/lib/mock-customers";
+import type { Customer } from "@/lib/mock-customers";
 import { formatVND, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL } from "@/lib/api";
@@ -28,12 +28,30 @@ export default function CustomersPage() {
   const [statusFilter, setStatusFilter] = useState("Tất cả");
   const [routeFilter, setRouteFilter] = useState("Tất cả");
   const [selected, setSelected] = useState<Customer | null>(null);
-  const [customerRows, setCustomerRows] = useState<Customer[]>(customers);
+  const [customerRows, setCustomerRows] = useState<Customer[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ code: "", name: "", type: "RETAIL", tier: "B", phone: "", email: "", citizen_id: "", tax_code: "" });
+  const [form, setForm] = useState({ code: "", name: "", type: "RETAIL", tier: "B", phone: "", email: "", citizen_id: "", tax_code: "", status: "active" });
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [createError, setCreateError] = useState("");
   const [createMessage, setCreateMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    fetch(`${API_URL}/customers/?limit=5000`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Không thể tải danh sách khách hàng.");
+        return response.json() as Promise<Array<Record<string, unknown>>>;
+      })
+      .then((rows) => setCustomerRows(rows.map((row) => ({
+        id: String(row.id), code: String(row.code ?? ""), name: String(row.name ?? ""),
+        type: row.type === "DISTRIBUTOR" ? "Nhà phân phối" : row.type === "WHOLESALE" ? "Đại lý" : row.type === "HORECA" ? "HORECA" : "Cửa hàng",
+        tier: (String(row.tier ?? "B") as Customer["tier"]), phone: String(row.phone ?? ""),
+        contactName: "", email: String(row.email ?? ""), address: "", district: "",
+        routeCode: "", routeName: "", salesRep: "", status: row.status === "inactive" ? "inactive" : "active",
+        debitBalance: Number(row.current_debt ?? 0), totalSpend: 0, lastVisit: "", visitCount: 0,
+        createdAt: String(row.created_at ?? ""),
+      }))))
+      .catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể tải khách hàng."));
+  }, []);
   async function uploadCustomers(file: File) {
     const body = new FormData();
     body.append("file", file);
@@ -46,7 +64,7 @@ export default function CustomersPage() {
   async function createCustomer() {
     setCreateError(""); setCreateMessage("");
     try {
-      const response = await fetch(`${API_URL}/customers/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+      const response = await fetch(`${API_URL}/customers/${editingId ? editingId : ""}`, { method: editingId ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
       const result = await response.json() as {
         detail?: string;
         id: number;
@@ -70,7 +88,7 @@ export default function CustomersPage() {
           : result.type === "HORECA"
             ? "HORECA"
             : "Cửa hàng";
-      setCustomerRows((current) => [{
+      const mapped: Customer = {
         id: String(result.id),
         code: result.code,
         name: result.name,
@@ -92,9 +110,23 @@ export default function CustomersPage() {
         lastVisit: "",
         visitCount: 0,
         createdAt: result.created_at,
-      }, ...current]);
-      setCreateMessage("Đã tạo khách hàng thành công trong PostgreSQL."); setCreateOpen(false);
+      };
+      setCustomerRows((current) => editingId ? current.map((item) => item.id === editingId ? { ...item, ...mapped } : item) : [mapped, ...current]);
+      setCreateMessage(editingId ? "Đã cập nhật khách hàng." : "Đã tạo khách hàng thành công trong PostgreSQL."); setCreateOpen(false); setEditingId(null);
     } catch (e) { setCreateError(e instanceof Error ? e.message : "Không thể tạo khách hàng."); }
+  }
+  function openEdit(customer: Customer) {
+    setEditingId(customer.id);
+    setForm({ code: customer.code, name: customer.name, type: customer.type === "Cửa hàng" ? "RETAIL" : customer.type === "Đại lý" ? "WHOLESALE" : customer.type === "Nhà phân phối" ? "DISTRIBUTOR" : "HORECA", tier: customer.tier, phone: customer.phone, email: customer.email, citizen_id: customer.citizenId ?? "", tax_code: customer.taxCode ?? "", status: customer.status });
+    setSelected(null); setCreateError(""); setCreateOpen(true);
+  }
+  async function deleteCustomer(customer: Customer) {
+    if (!window.confirm(`Xóa khách hàng ${customer.name}?`)) return;
+    const response = await fetch(`${API_URL}/customers/${customer.id}`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({})) as { detail?: string };
+    if (!response.ok) throw new Error(result.detail ?? "Không thể xóa khách hàng.");
+    setCustomerRows((current) => current.filter((item) => item.id !== customer.id));
+    setSelected(null); setCreateMessage("Đã xóa khách hàng.");
   }
 
   const activeCount = customerRows.filter((c) => c.status === "active").length;
@@ -184,7 +216,7 @@ export default function CustomersPage() {
           <a href={`${API_URL}/customers/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
           <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadCustomers(file).catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
-          <button onClick={() => { setCreateError(""); setCreateOpen(true); }} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+          <button onClick={() => { setEditingId(null); setForm({ code: "", name: "", type: "RETAIL", tier: "B", phone: "", email: "", citizen_id: "", tax_code: "", status: "active" }); setCreateError(""); setCreateOpen(true); }}  className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
             <Plus size={16} />
             Thêm khách hàng
           </button>
@@ -243,10 +275,10 @@ export default function CustomersPage() {
         }
       />
       {createMessage && <div className="bg-emerald-50 text-emerald-700 rounded-lg px-4 py-3 text-sm">{createMessage}</div>}
-      <Drawer open={createOpen} onClose={() => setCreateOpen(false)} title="Thêm khách hàng" subtitle="Tạo khách hàng trong PostgreSQL">
+      <Drawer open={createOpen} onClose={() => setCreateOpen(false)} title={editingId ? "Sửa khách hàng" : "Thêm khách hàng"} subtitle="Lưu thông tin khách hàng trong PostgreSQL">
         <div className="p-5 space-y-4">
           {createError && <div className="bg-red-50 text-red-700 rounded-lg px-3 py-2 text-sm">{createError}</div>}
-          <input placeholder="Mã khách hàng" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
+          <input disabled={Boolean(editingId)} placeholder="Mã khách hàng" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg disabled:bg-gray-100" />
           <input placeholder="Tên khách hàng" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg"><option value="RETAIL">Cửa hàng</option><option value="DISTRIBUTOR">Nhà phân phối</option><option value="WHOLESALE">Đại lý</option><option value="HORECA">HORECA</option></select>
           <select value={form.tier} onChange={(e) => setForm({ ...form, tier: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg"><option>A</option><option>B</option><option>C</option></select>
@@ -254,7 +286,8 @@ export default function CustomersPage() {
           <input placeholder="CCCD (tùy chọn)" value={form.citizen_id} onChange={(e) => setForm({ ...form, citizen_id: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Mã số thuế (tùy chọn)" value={form.tax_code} onChange={(e) => setForm({ ...form, tax_code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Email (tùy chọn)" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-          <button onClick={createCustomer} className="w-full bg-sky-500 text-white rounded-lg py-2.5 text-sm font-medium">Lưu khách hàng</button>
+          <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg"><option value="active">Hoạt động</option><option value="inactive">Ngưng giao</option></select>
+          <button onClick={createCustomer} className="w-full bg-sky-500 text-white rounded-lg py-2.5 text-sm font-medium">{editingId ? "Cập nhật khách hàng" : "Lưu khách hàng"}</button>
         </div>
       </Drawer>
 
@@ -271,6 +304,8 @@ export default function CustomersPage() {
               setSelected(null);
               router.push(`/sales/create?customer=${selected.code}`);
             }}
+            onEdit={() => openEdit(selected)}
+            onDelete={() => deleteCustomer(selected).catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể xóa khách hàng."))}
           />
         )}
       </Drawer>

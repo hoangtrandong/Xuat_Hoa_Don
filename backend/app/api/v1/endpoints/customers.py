@@ -9,9 +9,25 @@ from typing import List
 from app.core.database import get_db
 from app.schemas.customer import Customer, CustomerCreate, CustomerUpdate
 from app.crud import customer as crud
-from app.models.customer import Customer as CustomerModel
+from app.models.customer import Customer as CustomerModel, CustomerAddress, CustomerContact
 
 router = APIRouter(prefix="/customers", tags=["customers"])
+
+
+CUSTOMER_HEADER_ALIASES = {
+    "Mã KH": "code",
+    "Tên cửa hàng": "name",
+    "Mã số thuế": "tax_code",
+    "CCCD": "citizen_id",
+    "Tên trên hoá đơn": "invoice_name",
+    "Tên trên hóa đơn": "invoice_name",
+    "Địa chỉ trên hoá đơn": "invoice_address",
+    "Địa chỉ trên hóa đơn": "invoice_address",
+}
+
+
+def _canonical_customer_headers(headers: list[str]) -> list[str]:
+    return [CUSTOMER_HEADER_ALIASES.get(header, header) for header in headers]
 
 
 @router.get("/template")
@@ -35,8 +51,10 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
         rows = list(workbook.active.iter_rows(values_only=True))
         if not rows:
             raise HTTPException(status_code=400, detail="File Excel không có dữ liệu.")
-        headers = [str(value).strip() if value is not None else "" for value in rows[0]]
-        required = {"code", "name", "type", "tier", "phone"}
+        headers = _canonical_customer_headers([
+            str(value).strip() if value is not None else "" for value in rows[0]
+        ])
+        required = {"code", "name"}
         if not required.issubset(headers):
             raise HTTPException(status_code=400, detail=f"Thiếu cột bắt buộc: {', '.join(sorted(required - set(headers)))}")
         imported = 0
@@ -51,15 +69,38 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: tên khách hàng không được để trống.")
             if crud.get_by_code(db, code):
                 raise HTTPException(status_code=409, detail=f"Dòng {row_number}: mã khách hàng {code} đã tồn tại.")
-            db.add(CustomerModel(
-                code=code, name=str(data["name"]).strip(), type=str(data["type"]).strip().upper(),
-                tier=str(data["tier"]).strip().upper(), phone=str(data["phone"]).strip(),
+            customer = CustomerModel(
+                code=code, name=str(data["name"]).strip(),
+                type=str(data.get("type") or "RETAIL").strip().upper(),
+                tier=str(data.get("tier") or "B").strip().upper(),
+                phone=str(data.get("phone") or "").strip(),
                 email=str(data.get("email") or "").strip() or None,
                 citizen_id=str(data.get("citizen_id") or "").strip() or None,
                 tax_code=str(data.get("tax_code") or "").strip() or None,
                 credit_limit=float(data.get("credit_limit") or 0), visit_frequency=int(data.get("visit_frequency") or 2),
                 status=str(data.get("status") or "active").strip(),
-            ))
+            )
+            db.add(customer)
+            db.flush()
+            invoice_name = str(data.get("invoice_name") or "").strip()
+            invoice_address = str(data.get("invoice_address") or "").strip()
+            if invoice_address:
+                db.add(CustomerAddress(
+                    customer_id=customer.id,
+                    label="Địa chỉ hóa đơn",
+                    address=invoice_address,
+                    district="",
+                    city="",
+                    is_default=True,
+                ))
+            if invoice_name:
+                db.add(CustomerContact(
+                    customer_id=customer.id,
+                    name=invoice_name,
+                    phone="",
+                    position="Tên trên hóa đơn",
+                    is_primary=True,
+                ))
             imported += 1
         db.commit()
         return {"imported": imported}
@@ -100,3 +141,15 @@ def update_customer(customer_id: int, payload: CustomerUpdate, db: Session = Dep
     if not obj:
         raise HTTPException(status_code=404, detail="Customer not found")
     return crud.update(db, obj, payload)
+
+
+@router.delete("/{customer_id}", status_code=204)
+def delete_customer(customer_id: int, db: Session = Depends(get_db)):
+    obj = crud.get(db, customer_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    try:
+        crud.delete(db, obj)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=204)

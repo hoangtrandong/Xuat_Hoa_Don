@@ -13,9 +13,11 @@ import { formatVND, formatDate, getInitials } from "@/lib/format";
 interface CustomerDetailProps {
   customer: Customer;
   onCreateOrder: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
 }
 
-export default function CustomerDetail({ customer, onCreateOrder }: CustomerDetailProps) {
+export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDelete }: CustomerDetailProps) {
   const orders = getOrdersByCustomer(customer.code).slice(0, 4);
   const typeVariant =
     customer.type === "Nhà phân phối" ? "purple" :
@@ -111,6 +113,14 @@ export default function CustomerDetail({ customer, onCreateOrder }: CustomerDeta
         <CreditCard size={15} />
         Tạo đơn cho khách hàng này
       </button>
+      <div className="grid grid-cols-2 gap-2">
+        <button onClick={onEdit} className="rounded-lg border border-sky-200 py-2 text-sm font-medium text-sky-600 hover:bg-sky-50">
+          Sửa khách hàng
+        </button>
+        <button onClick={onDelete} className="rounded-lg border border-red-200 py-2 text-sm font-medium text-red-600 hover:bg-red-50">
+          Xóa khách hàng
+        </button>
+      </div>
     </div>
   );
 }

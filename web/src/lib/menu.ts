@@ -50,7 +50,15 @@ export const menuItems: MenuItem[] = [
       { key: "warehouse-inventory", label: "Tồn kho", icon: "BoxesIcon", href: "/warehouse/inventory" },
       { key: "warehouse-in", label: "Nhập kho", icon: "PackagePlus", href: "/warehouse/import" },
       { key: "warehouse-out", label: "Xuất kho", icon: "PackageMinus", href: "/warehouse/export" },
-      { key: "warehouse-delivery-requests", label: "Yêu cầu giao hàng", icon: "ClipboardList", href: "/warehouse/delivery-requests" },
+    ],
+  },
+  {
+    key: "admin",
+    label: "Admin",
+    icon: "ShieldCheck",
+    href: "/admin",
+    children: [
+      { key: "admin-delivery-requests", label: "Yêu cầu giao hàng", icon: "ClipboardList", href: "/warehouse/delivery-requests" },
     ],
   },
   { key: "promotions", label: "Khuyến mãi", icon: "Gift", href: "/promotions" },

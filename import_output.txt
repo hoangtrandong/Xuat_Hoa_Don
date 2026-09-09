@@ -1,0 +1,4 @@
+Import completed!
+  - Imported: 2534 new products
+  - Updated: 123 existing products
+  - Errors: 0

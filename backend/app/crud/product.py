@@ -1,4 +1,5 @@
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -18,9 +19,19 @@ def list_(db: Session, skip: int = 0, limit: int = 100, category_id: Optional[in
 
 
 def create(db: Session, obj_in: ProductCreate) -> Product:
-    product = Product(**obj_in.model_dump())
+    data = obj_in.model_dump()
+    if data.get("sku"):
+        data["sku"] = str(data["sku"]).strip().upper()
+    existing = db.execute(select(Product.id).where(Product.sku == data["sku"])).scalar_one_or_none()
+    if existing:
+        raise ValueError(f"SKU {data['sku']} đã tồn tại.")
+    product = Product(**data)
     db.add(product)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ValueError(f"SKU {data['sku']} đã tồn tại.") from None
     db.refresh(product)
     return product
 

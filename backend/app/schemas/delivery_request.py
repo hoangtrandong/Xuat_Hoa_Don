@@ -26,6 +26,25 @@ class DeliveryPreviewItem(BaseModel):
     available_quantity: int = 0
     shortage_quantity: int = 0
     employee_allocations: Optional[Dict[str, Any]] = None
+    allocations: List["DeliveryAllocation"] = Field(default_factory=list)
+
+
+class FefoPlanPick(BaseModel):
+    location_code: Optional[str] = None
+    lot_number: Optional[str] = None
+    expiry_date: Optional[datetime] = None
+    quantity: int
+    allocation_strategy: str
+
+
+class FefoPlanItem(BaseModel):
+    product_id: int
+    sku: str
+    product_name: str
+    quantity: int
+    planned_quantity: int
+    shortage_quantity: int
+    picks: List[FefoPlanPick] = Field(default_factory=list)
 
 
 class DeliveryAllocation(BaseModel):

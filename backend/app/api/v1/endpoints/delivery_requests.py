@@ -9,7 +9,7 @@ from zipfile import BadZipFile
 
 from app.core.database import get_db
 from app.crud import delivery_request as crud
-from app.schemas.delivery_request import DeliveryRequest, DeliveryRequestCreate, DeliveryPreviewItem
+from app.schemas.delivery_request import DeliveryRequest, DeliveryRequestCreate, DeliveryPreviewItem, FefoPlanItem
 
 router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
 
@@ -80,6 +80,14 @@ def list_requests(status: str | None = None, db: Session = Depends(get_db)):
 def create_request(payload: DeliveryRequestCreate, db: Session = Depends(get_db)):
     try:
         return crud.create(db, payload)
+    except ValueError as exc:
+        return _error(db, exc)
+
+
+@router.post("/plan", response_model=List[FefoPlanItem])
+def plan_request(payload: DeliveryRequestCreate, db: Session = Depends(get_db)):
+    try:
+        return crud.plan(db, payload)
     except ValueError as exc:
         return _error(db, exc)
 

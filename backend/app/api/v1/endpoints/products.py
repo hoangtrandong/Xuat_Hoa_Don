@@ -93,7 +93,10 @@ def list_products(skip: int = 0, limit: int = 100, category_id: int | None = Non
 
 @router.post("/", response_model=Product, status_code=201)
 def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
-    return product_crud.create(db, payload)
+    try:
+        return product_crud.create(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{product_id}", response_model=Product)

@@ -18,8 +18,16 @@ router = APIRouter(prefix="/customers", tags=["customers"])
 CUSTOMER_HEADER_ALIASES = {
     "Mã KH": "code",
     "Tên cửa hàng": "name",
-    "Mã số thuế": "tax_code",
+    "Tên khách hàng": "name",
+    "Loại": "type",
+    "Hạng": "tier",
+    "Số điện thoại": "phone",
+    "Email": "email",
     "CCCD": "citizen_id",
+    "Mã số thuế": "tax_code",
+    "Hạn mức công nợ": "credit_limit",
+    "Tần suất viếng thăm": "visit_frequency",
+    "Trạng thái": "status",
     "Tên trên hoá đơn": "invoice_name",
     "Tên trên hóa đơn": "invoice_name",
     "Địa chỉ trên hoá đơn": "invoice_address",
@@ -35,9 +43,21 @@ def _canonical_customer_headers(headers: list[str]) -> list[str]:
 def download_customer_template():
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Khach hang"
-    sheet.append(["code", "name", "type", "tier", "phone", "email", "citizen_id", "tax_code", "credit_limit", "visit_frequency", "status"])
-    sheet.append(["KH-0004", "Ten khach hang", "RETAIL", "B", "0900000000", "", "", "", 0, 2, "active"])
+    sheet.title = "Khách hàng"
+    sheet.append([
+        "Mã KH",
+        "Tên khách hàng",
+        "Loại",
+        "Hạng",
+        "Số điện thoại",
+        "Email",
+        "CCCD",
+        "Mã số thuế",
+        "Hạn mức công nợ",
+        "Tần suất viếng thăm",
+        "Trạng thái",
+    ])
+    sheet.append(["KH-0004", "Tên khách hàng", "RETAIL", "B", "0900000000", "", "", "", 0, 2, "active"])
     output = BytesIO()
     workbook.save(output)
     return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="mau-khach-hang.xlsx"'})

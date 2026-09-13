@@ -9,7 +9,7 @@ from zipfile import BadZipFile
 
 from app.core.database import get_db
 from app.crud import delivery_request as crud
-from app.schemas.delivery_request import DeliveryRequest, DeliveryRequestCreate, DeliveryPreviewItem, FefoPlanItem
+from app.schemas.delivery_request import DeliveryRequest, DeliveryRequestList, DeliveryRequestCreate, DeliveryPreviewItem, FefoPlanItem
 
 router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
 
@@ -71,8 +71,13 @@ def _error(db, exc):
     raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/", response_model=List[DeliveryRequest])
+@router.get("/", response_model=List[DeliveryRequestList])
 def list_requests(status: str | None = None, db: Session = Depends(get_db)):
+    """Lightweight list endpoint for queue/admin UI — omits item allocations.
+
+    Uses DeliveryRequestList schema (no allocations) so the response is small
+    and serialization is fast even for requests with 100+ SKUs.
+    """
     return crud.list_(db, status)
 
 
@@ -201,6 +206,23 @@ def get_request(request_id: int, db: Session = Depends(get_db)):
     return result
 
 
+@router.put("/{request_id}", response_model=DeliveryRequest)
+def update_request(request_id: int, payload: DeliveryRequestCreate, db: Session = Depends(get_db)):
+    try:
+        return crud.update(db, request_id, payload)
+    except ValueError as exc:
+        return _error(db, exc)
+
+
+@router.delete("/{request_id}", status_code=204)
+def delete_request(request_id: int, db: Session = Depends(get_db)):
+    try:
+        crud.delete(db, request_id)
+        return None
+    except ValueError as exc:
+        return _error(db, exc)
+
+
 @router.post("/{request_id}/submit", response_model=DeliveryRequest)
 def submit_request(request_id: int, db: Session = Depends(get_db)):
     try:
@@ -221,5 +243,13 @@ def receive_request(request_id: int, db: Session = Depends(get_db)):
 def complete_request(request_id: int, db: Session = Depends(get_db)):
     try:
         return crud.transition(db, request_id, "complete")
+    except ValueError as exc:
+        return _error(db, exc)
+
+
+@router.post("/{request_id}/cancel", response_model=DeliveryRequest)
+def cancel_request(request_id: int, db: Session = Depends(get_db)):
+    try:
+        return crud.transition(db, request_id, "cancel")
     except ValueError as exc:
         return _error(db, exc)

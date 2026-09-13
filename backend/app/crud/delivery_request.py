@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.inventory import (
     DeliveryAllocation, DeliveryRequest, DeliveryRequestItem, InventoryLot,
@@ -238,16 +238,20 @@ def get(db: Session, request_id: int):
 
 
 def list_(db: Session, status: str | None = None):
+    """Lightweight list query for the queue/admin UI.
+
+    Loads requests + their items + the related Product in a single joined
+    select (no allocations needed for list views). This keeps the response
+    small and avoids N+1 lazy loads on the @property sku/product_name fields
+    and on the allocations relationship (which is only loaded by the detail
+    endpoint via get()).
+    """
     stmt = select(DeliveryRequest).options(
         selectinload(DeliveryRequest.items)
-        .selectinload(DeliveryRequestItem.product)        # tránh N+1: sku & product_name là @property -> self.product
-    ).options(
-        selectinload(DeliveryRequest.items)
-        .selectinload(DeliveryRequestItem.allocations)  # tránh N+1: allocations được serialize trong schema
+        .selectinload(DeliveryRequestItem.product)
     ).order_by(DeliveryRequest.created_at.desc())
     if status:
         stmt = stmt.where(DeliveryRequest.status == status.upper())
-    # Eager-load 3 cấp (items + product + allocations) để tránh N+1 lazy queries tới Neon remote.
     return list(db.scalars(stmt).all())
 
 
@@ -271,8 +275,13 @@ def transition(db: Session, request_id: int, action: str):
     ).where(DeliveryRequest.id == request_id).with_for_update())
     if not request:
         raise ValueError("Không tìm thấy yêu cầu xuất kho.")
-    expected = {"submit": "DRAFT", "receive": "SUBMITTED", "complete": "RECEIVED"}
-    if action not in expected or request.status != expected[action]:
+    expected = {
+        "submit": {"DRAFT"},
+        "receive": {"SUBMITTED"},
+        "complete": {"RECEIVED"},
+        "cancel": {"DRAFT", "SUBMITTED", "RECEIVED"}
+    }
+    if action not in expected or request.status not in expected[action]:
         raise ValueError(f"Không thể {action} khi yêu cầu đang ở trạng thái {request.status}.")
     now = datetime.utcnow()
     try:
@@ -282,6 +291,8 @@ def transition(db: Session, request_id: int, action: str):
             request.status, request.submitted_at = "SUBMITTED", now
         elif action == "receive":
             request.status, request.received_at = "RECEIVED", now
+        elif action == "cancel":
+            request.status, request.cancelled_at = "CANCELLED", now
         else:
             for item in request.items:
                 for allocation in item.allocations:
@@ -306,8 +317,81 @@ def transition(db: Session, request_id: int, action: str):
         raise
 
 
+def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> DeliveryRequest:
+    request = db.scalar(select(DeliveryRequest).options(
+        selectinload(DeliveryRequest.items)
+    ).where(DeliveryRequest.id == request_id).with_for_update())
+    if not request:
+        raise ValueError("Không tìm thấy yêu cầu xuất kho.")
+    if request.status != "DRAFT":
+        raise ValueError(f"Chỉ có thể cập nhật yêu cầu ở trạng thái DRAFT. Trạng thái hiện tại: {request.status}")
+    if not db.get(Warehouse, payload.warehouse_id):
+        raise ValueError("Không tìm thấy kho.")
+
+    merged = {}
+    employee_allocations = {}
+    for row in payload.items:
+        if not db.get(Product, row.product_id):
+            raise ValueError(f"Không tìm thấy sản phẩm {row.product_id}.")
+        if row.quantity <= 0 and not row.requested_quantity_raw:
+            raise ValueError("Số lượng phải lớn hơn 0.")
+        merged[row.product_id] = merged.get(row.product_id, 0) + row.quantity
+        if row.employee_allocations:
+            target = employee_allocations.setdefault(row.product_id, {})
+            for employee, allocation in row.employee_allocations.items():
+                if isinstance(allocation, dict):
+                    existing = target.setdefault(employee, {})
+                    existing["quantity"] = existing.get("quantity", 0) + int(allocation.get("quantity", 0))
+                    for key in ("raw", "cartons", "boxes"):
+                        if key in allocation:
+                            existing[key] = allocation[key]
+                else:
+                    target[employee] = target.get(employee, 0) + int(allocation)
+
+    try:
+        request.warehouse_id = payload.warehouse_id
+        request.note = payload.note
+        
+        # Delete old items
+        for item in request.items:
+            db.delete(item)
+        db.flush()
+        
+        # Create new items
+        raw_quantities = {row.product_id: row.requested_quantity_raw for row in payload.items}
+        for product_id, quantity in merged.items():
+            item = DeliveryRequestItem(request_id=request.id, product_id=product_id, quantity=quantity,
+                                       requested_quantity_raw=raw_quantities.get(product_id),
+                                       employee_allocations=employee_allocations.get(product_id))
+            db.add(item)
+        
+        db.commit()
+        return get(db, request.id)
+    except Exception:
+        db.rollback()
+        raise
+
+
+def delete(db: Session, request_id: int):
+    request = db.scalar(select(DeliveryRequest).where(DeliveryRequest.id == request_id).with_for_update())
+    if not request:
+        raise ValueError("Không tìm thấy yêu cầu xuất kho.")
+    if request.status != "DRAFT":
+        raise ValueError(f"Chỉ có thể xóa yêu cầu ở trạng thái DRAFT. Trạng thái hiện tại: {request.status}")
+    
+    try:
+        db.delete(request)
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
 class DeliveryRequestCRUD:
     create = staticmethod(create)
+    update = staticmethod(update)
+    delete = staticmethod(delete)
     get = staticmethod(get)
     list_ = staticmethod(list_)
     plan = staticmethod(plan)

@@ -71,6 +71,36 @@ class DeliveryRequestItem(BaseModel):
     employee_allocations: Optional[Dict[str, Any]] = None
 
 
+class DeliveryRequestItemList(BaseModel):
+    """Lightweight item for list endpoints - avoids loading full Product/Allocation rows."""
+    id: int
+    product_id: int
+    quantity: int
+    requested_quantity_raw: Optional[str] = None
+    sku: Optional[str] = None
+    product_name: Optional[str] = None
+    available_quantity: int = 0
+    shortage_quantity: int = 0
+
+
+class DeliveryRequestList(BaseModel):
+    """Lightweight request summary for list views - skips items.allocations."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    code: str
+    warehouse_id: int
+    status: str
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+    submitted_at: Optional[datetime] = None
+    received_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    created_at: datetime
+    items: List[DeliveryRequestItemList] = Field(default_factory=list)
+    item_count: int = 0
+
+
 class DeliveryRequest(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -82,5 +112,6 @@ class DeliveryRequest(BaseModel):
     submitted_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
     created_at: datetime
     items: List[DeliveryRequestItem] = Field(default_factory=list)

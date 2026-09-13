@@ -5,6 +5,8 @@ from sqlalchemy import pool
 
 from alembic import context
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 from app.core.database import Base
 from app import models  # noqa: F401

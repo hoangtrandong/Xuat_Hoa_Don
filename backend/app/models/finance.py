@@ -28,7 +28,7 @@ class Receivable(Base):
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
     due_date: Mapped[datetime | None] = mapped_column(DateTime)
     paid: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
-    status: Mapped[str] = mapped_column(String(15), default="OPEN")  # OPEN | PAID | OVERDUE
+    status: Mapped[str] = mapped_column(String(15), default="OPEN")  # OPEN | PARTIAL | PAID | OVERDUE
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     customer: Mapped["Customer"] = relationship()

@@ -25,6 +25,9 @@ class Customer(Base):
     territory_id: Mapped[int | None] = mapped_column(ForeignKey("sales_territories.id"))
     route_id: Mapped[int | None] = mapped_column(ForeignKey("routes.id"))
     assigned_employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
+    # Phát sinh Phase 2: 1 cửa hàng → nhiều mã KH; mã KH quản lý bởi 1 công ty xuất hóa đơn.
+    store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), index=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     addresses: Mapped[List["CustomerAddress"]] = relationship(back_populates="customer", cascade="all, delete-orphan")
@@ -32,6 +35,70 @@ class Customer(Base):
     territory: Mapped["SalesTerritory | None"] = relationship(back_populates="customers")
     route: Mapped["Route | None"] = relationship(back_populates="customers")
     sales_orders: Mapped[List["SalesOrder"]] = relationship(back_populates="customer")
+    store: Mapped["Store | None"] = relationship(back_populates="customers")
+    company: Mapped["Company | None"] = relationship(back_populates="customers")
+
+    @property
+    def store_code(self) -> str | None:
+        return self.store.code if self.store else None
+
+    @property
+    def store_name(self) -> str | None:
+        return self.store.name if self.store else None
+
+    @property
+    def company_code(self) -> str | None:
+        return self.company.code if self.company else None
+
+    @property
+    def company_name(self) -> str | None:
+        return self.company.name if self.company else None
+
+
+class Store(Base):
+    """Cửa hàng / điểm bán vật lý."""
+
+    __tablename__ = "stores"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    phone: Mapped[str | None] = mapped_column(String(20))
+    owner_name: Mapped[str | None] = mapped_column(String(120))
+    # Lưu ý: KHÔNG lưu MST ở cấp cửa hàng. MST nằm ở mã khách hàng (customers.tax_code)
+    # vì 1 cửa hàng có thể có nhiều mã KH với các MST khác nhau.
+    address: Mapped[str | None] = mapped_column(String(255))
+    district: Mapped[str | None] = mapped_column(String(80))
+    city: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(15), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    customers: Mapped[List["Customer"]] = relationship(back_populates="store")
+
+    @property
+    def customer_count(self) -> int:
+        return len(self.customers)
+
+
+class Company(Base):
+    """Công ty quản lý / công ty xuất hóa đơn (công ty con của đơn vị phân phối)."""
+
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    tax_code: Mapped[str | None] = mapped_column(String(30), index=True)  # MST — KHÔNG unique
+    phone: Mapped[str | None] = mapped_column(String(20))
+    address: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(15), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    customers: Mapped[List["Customer"]] = relationship(back_populates="company")
+
+    @property
+    def customer_count(self) -> int:
+        return len(self.customers)
 
 
 class CustomerAddress(Base):

@@ -7,6 +7,7 @@ from uuid import uuid4
 from app.models.inventory import InventoryTransaction, Warehouse, InventoryLot, WarehouseLocation
 from app.models.product import Product, ProductUnit
 from app.schemas.inventory import StockAdjust, StockLevel
+from app.crud.finance import record_debt_on_sales_export
 
 
 def _generate_code() -> str:
@@ -64,13 +65,14 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
         )
         if obj_in.quantity > int(current_stock or 0):
             raise ValueError("Số lượng xuất vượt quá tồn kho.")
+    ref_type = obj_in.ref_type or ("SO" if obj_in.type == "OUT" else "ADJ")
     txn = InventoryTransaction(
         code=_generate_code(),
         type=obj_in.type,
         warehouse_id=obj_in.warehouse_id,
         product_id=obj_in.product_id,
         quantity=qty,
-        ref_type=obj_in.ref_type or ("SO" if obj_in.type == "OUT" else "ADJ"),
+        ref_type=ref_type,
         ref_code=obj_in.ref_code,
         note=obj_in.note,
         created_by=created_by,
@@ -78,6 +80,10 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
         expiry_date=obj_in.expiry_date,
     )
     db.add(txn)
+    db.flush()
+    # Công nợ khách hàng: ghi khi thủ kho xuất kho thành công gắn đơn bán.
+    if obj_in.type == "OUT" and (ref_type or "").upper() == "SO":
+        record_debt_on_sales_export(db, obj_in.ref_code)
     db.commit()
     db.refresh(txn)
     return txn

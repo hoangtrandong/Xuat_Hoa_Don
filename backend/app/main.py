@@ -20,6 +20,7 @@ async def add_cors_headers(request: Request, call_next):
         response = await call_next(request)
     except Exception as exc:
         # Handle exceptions and still add CORS headers
+        
         response = JSONResponse(
             status_code=500,
             content={"detail": str(exc)}

@@ -1,9 +1,6 @@
 import type { Metadata, Viewport } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import AppShell from "@/components/layout/AppShell";
-
-const inter = Inter({ subsets: ["latin", "latin-ext"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
   title: "DMS - Hệ thống quản lý phân phối",
@@ -22,7 +19,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="vi">
-      <body className={`${inter.className} font-sans`}>
+      <head>
+        <meta charSet="utf-8" />
+      </head>
+      <body className="font-sans">
         <AppShell>{children}</AppShell>
       </body>
     </html>

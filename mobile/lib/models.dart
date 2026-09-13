@@ -21,6 +21,11 @@ class Customer {
     required this.status,
     required this.debitBalance,
     required this.totalSpend,
+    // Phase 2: cửa hàng & công ty quản lý
+    this.storeCode,
+    this.storeName,
+    this.companyCode,
+    this.companyName,
   });
 
   final String id;
@@ -38,6 +43,10 @@ class Customer {
   final String status;
   int debitBalance;
   final int totalSpend;
+  final String? storeCode;
+  final String? storeName;
+  final String? companyCode;
+  final String? companyName;
 }
 
 class Product {

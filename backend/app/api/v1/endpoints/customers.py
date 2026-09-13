@@ -11,6 +11,7 @@ from app.core.database import get_db
 from app.schemas.customer import Customer, CustomerCreate, CustomerUpdate
 from app.crud import customer as crud
 from app.models.customer import Customer as CustomerModel, CustomerAddress, CustomerContact
+from app.models.customer import Store as StoreModel, Company as CompanyModel
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -28,6 +29,11 @@ CUSTOMER_HEADER_ALIASES = {
     "Hạn mức công nợ": "credit_limit",
     "Tần suất viếng thăm": "visit_frequency",
     "Trạng thái": "status",
+    "Mã cửa hàng": "store_code",
+    "Mã CH": "store_code",
+    "Mã công ty quản lý": "company_code",
+    "Công ty quản lý": "company_code",
+    "Mã công ty": "company_code",
     "Tên trên hoá đơn": "invoice_name",
     "Tên trên hóa đơn": "invoice_name",
     "Địa chỉ trên hoá đơn": "invoice_address",
@@ -48,7 +54,6 @@ def download_customer_template():
         "Mã KH",
         "Tên khách hàng",
         "Loại",
-        "Hạng",
         "Số điện thoại",
         "Email",
         "CCCD",
@@ -56,8 +61,10 @@ def download_customer_template():
         "Hạn mức công nợ",
         "Tần suất viếng thăm",
         "Trạng thái",
+        "Mã cửa hàng",
+        "Mã công ty quản lý",
     ])
-    sheet.append(["KH-0004", "Tên khách hàng", "RETAIL", "B", "0900000000", "", "", "", 0, 2, "active"])
+    sheet.append(["KH-0004", "Tên khách hàng", "RETAIL", "0900000000", "", "", "", 0, 2, "active", "CH-0001", "CT001"])
     output = BytesIO()
     workbook.save(output)
     return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="mau-khach-hang.xlsx"'})
@@ -95,6 +102,30 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
             if code in existing_codes or code in file_codes:
                 raise HTTPException(status_code=409, detail=f"Dòng {row_number}: mã khách hàng {code} đã tồn tại.")
             file_codes.add(code)
+            # Phase 2: liên kết mã KH với cửa hàng và công ty quản lý (nếu có trong file).
+            store_id = None
+            store_code = str(data.get("store_code") or "").strip()
+            if store_code:
+                store_obj = db.query(StoreModel).filter(StoreModel.code == store_code).first()
+                if not store_obj:
+                    store_obj = StoreModel(
+                        code=store_code,
+                        name=str(data.get("name") or store_code).strip(),
+                    )
+                    db.add(store_obj)
+                    db.flush()
+                store_id = store_obj.id
+
+            company_id = None
+            company_code = str(data.get("company_code") or "").strip()
+            if company_code:
+                company_obj = db.query(CompanyModel).filter(CompanyModel.code == company_code).first()
+                if not company_obj:
+                    company_obj = CompanyModel(code=company_code, name=company_code)
+                    db.add(company_obj)
+                    db.flush()
+                company_id = company_obj.id
+
             customer = CustomerModel(
                 code=code, name=str(data["name"]).strip(),
                 type=str(data.get("type") or "RETAIL").strip().upper(),
@@ -105,6 +136,8 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
                 tax_code=str(data.get("tax_code") or "").strip() or None,
                 credit_limit=float(data.get("credit_limit") or 0), visit_frequency=int(data.get("visit_frequency") or 2),
                 status=str(data.get("status") or "active").strip(),
+                store_id=store_id,
+                company_id=company_id,
             )
             db.add(customer)
             db.flush()

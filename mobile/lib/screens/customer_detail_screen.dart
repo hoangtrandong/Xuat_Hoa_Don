@@ -41,7 +41,17 @@ class CustomerDetailScreen extends StatelessWidget {
                         Text('${c.type} · Tier ${c.tier}', style: const TextStyle(fontWeight: FontWeight.w600)),
                         const SizedBox(height: 4),
                         Text('${c.address}, ${c.district}', style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-                        Text('${c.contactName} · ${c.phone}', style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                        if (c.storeCode != null || c.companyName != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              [
+                                if (c.storeName != null) 'CH: ${c.storeName}${c.storeCode != null ? ' (${c.storeCode})' : ''}',
+                                if (c.companyName != null) 'Công ty: ${c.companyName}',
+                              ].join(' · '),
+                              style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                            ),
+                          ),
                       ],
                     ),
                   ),

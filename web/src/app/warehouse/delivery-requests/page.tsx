@@ -113,11 +113,23 @@ export default function DeliveryRequestsPage() {
       return { product_id: productId, quantity: item.quantity, requested_quantity_raw: item.requested_quantity_raw, employee_allocations: item.employee_allocations };
     });
     const response = await fetch(`${API_URL}/delivery-requests/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: Number(warehouseId), items }) });
-    const result = await response.json() as { detail?: string; code?: string };
+    const result = await response.json() as { detail?: string; id?: number; code?: string; status?: string };
     if (!response.ok) { setError(result.detail ?? "Không thể tạo yêu cầu."); return; }
+    // Tự động submit: FEFO khớp lô + đặt trước tồn kho, yêu cầu chuyển sang SUBMITTED
+    // để thủ kho thấy trong "Hàng đợi xuất kho".
+    let submitNote = "";
+    if (result.id) {
+      const submitResponse = await fetch(`${API_URL}/delivery-requests/${result.id}/submit`, { method: "POST" });
+      const submitResult = await submitResponse.json().catch(() => ({})) as { detail?: string };
+      if (!submitResponse.ok) {
+        submitNote = ` Tuy nhiên gửi xác nhận thất bại: ${submitResult.detail ?? "lỗi không xác định"}.`;
+      } else {
+        submitNote = " Đã gửi xác nhận đến thủ kho.";
+      }
+    }
     setPreview([]);
     setPlan(null);
-    setMessage(`Đã xác nhận tạo yêu cầu ${result.code ?? ""}.`);
+    setMessage(`Đã tạo yêu cầu ${result.code ?? ""}.${submitNote}`);
     await load();
   }
 

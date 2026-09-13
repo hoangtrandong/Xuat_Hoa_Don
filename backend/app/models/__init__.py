@@ -1,5 +1,5 @@
 from app.models.user import User, Role, Permission
-from app.models.customer import Customer, CustomerAddress, CustomerContact
+from app.models.customer import Customer, CustomerAddress, CustomerContact, Store, Company
 from app.models.product import Product, ProductCategory, ProductUnit, PriceList, PriceListItem
 from app.models.inventory import (
     Warehouse, WarehouseLocation, InventoryLot, InventoryTransaction, DeliveryRequest, DeliveryRequestItem,
@@ -12,7 +12,7 @@ from app.models.finance import Payment, Receivable
 
 __all__ = [
     "User", "Role", "Permission",
-    "Customer", "CustomerAddress", "CustomerContact",
+    "Customer", "CustomerAddress", "CustomerContact", "Store", "Company",
     "Product", "ProductCategory", "ProductUnit", "PriceList", "PriceListItem",
     "Warehouse", "WarehouseLocation", "InventoryLot", "InventoryTransaction", "DeliveryRequest", "DeliveryRequestItem",
     "DeliveryAllocation",

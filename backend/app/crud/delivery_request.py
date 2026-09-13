@@ -240,11 +240,14 @@ def get(db: Session, request_id: int):
 def list_(db: Session, status: str | None = None):
     stmt = select(DeliveryRequest).options(
         selectinload(DeliveryRequest.items)
+        .selectinload(DeliveryRequestItem.product)        # tránh N+1: sku & product_name là @property -> self.product
+    ).options(
+        selectinload(DeliveryRequest.items)
+        .selectinload(DeliveryRequestItem.allocations)  # tránh N+1: allocations được serialize trong schema
     ).order_by(DeliveryRequest.created_at.desc())
     if status:
         stmt = stmt.where(DeliveryRequest.status == status.upper())
-    # The list view only needs request metadata. Stock is loaded by the
-    # detail endpoint to avoid one aggregate query per item over Neon.
+    # Eager-load 3 cấp (items + product + allocations) để tránh N+1 lazy queries tới Neon remote.
     return list(db.scalars(stmt).all())
 
 

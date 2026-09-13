@@ -26,6 +26,13 @@ export interface Customer {
   lastVisit: string;
   visitCount: number;
   createdAt: string;
+  // Phase 2: cửa hàng & công ty quản lý
+  storeId?: string;
+  companyId?: string;
+  storeCode?: string;
+  storeName?: string;
+  companyCode?: string;
+  companyName?: string;
 }
 
 export const customers: Customer[] = [

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 
@@ -16,4 +16,7 @@ def list_payments(skip: int = 0, limit: int = 100, customer_id: int | None = Non
 
 @router.post("/", response_model=Payment, status_code=201)
 def create_payment(payload: PaymentCreate, db: Session = Depends(get_db)):
-    return crud.create(db, payload)
+    try:
+        return crud.create(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

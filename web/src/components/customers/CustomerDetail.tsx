@@ -55,6 +55,8 @@ export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDele
         <InfoRow icon={<Mail size={14} />} label="Email" value={customer.email} />
         <InfoRow icon={<MapPin size={14} />} label="Địa chỉ" value={`${customer.address}, ${customer.district}`} />
         <InfoRow icon={<RouteIcon size={14} />} label="Tuyến bán" value={`${customer.routeName} (${customer.routeCode}) - ${customer.salesRep}`} />
+        <InfoRow icon={<MapPin size={14} />} label="Cửa hàng" value={customer.storeCode ? `${customer.storeName ?? ""} (${customer.storeCode})` : "Chưa gán"} />
+        <InfoRow icon={<CreditCard size={14} />} label="Công ty quản lý" value={customer.companyName ? `${customer.companyName} (${customer.companyCode ?? ""})` : "Chưa gán"} />
         <InfoRow icon={<Truck size={14} />} label="Ngày tạo" value={formatDate(customer.createdAt)} />
       </div>
 

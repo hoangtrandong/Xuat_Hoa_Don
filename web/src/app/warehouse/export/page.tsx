@@ -331,8 +331,9 @@ export default function ExportPage() {
             </select>
           </label>
           <label className="block">
-            <span className="text-xs text-gray-500">Mã đơn bán (tùy chọn)</span>
+            <span className="text-xs text-gray-500">Mã đơn bán (bắt buộc để ghi công nợ KH)</span>
             <input value={refCode} onChange={(e) => setRefCode(e.target.value)} placeholder="VD: SO-260906-009" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500" />
+            <p className="mt-1 text-xs text-gray-400">Khi xuất kho thành công kèm mã đơn, hệ thống ghi công nợ cho khách hàng của đơn đó.</p>
           </label>
           <label className="block">
             <span className="text-xs text-gray-500">Ghi chú</span>

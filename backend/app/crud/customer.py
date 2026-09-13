@@ -1,5 +1,5 @@
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional
 
 from app.models.customer import Customer
@@ -15,7 +15,13 @@ def get_by_code(db: Session, code: str) -> Optional[Customer]:
 
 
 def list_(db: Session, skip: int = 0, limit: int = 100, status: Optional[str] = None) -> List[Customer]:
-    stmt = select(Customer).offset(skip).limit(limit)
+    stmt = (
+        select(Customer)
+        .options(selectinload(Customer.store), selectinload(Customer.company))
+        .order_by(Customer.code)
+        .offset(skip)
+        .limit(limit)
+    )
     if status:
         stmt = stmt.where(Customer.status == status)
     return list(db.execute(stmt).scalars().all())

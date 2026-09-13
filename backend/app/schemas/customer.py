@@ -18,6 +18,9 @@ class CustomerBase(BaseModel):
     territory_id: Optional[int] = None
     route_id: Optional[int] = None
     assigned_employee_id: Optional[int] = None
+    # Phase 2: thuộc cửa hàng + công ty quản lý / xuất hóa đơn
+    store_id: Optional[int] = None
+    company_id: Optional[int] = None
 
 
 class CustomerCreate(CustomerBase):
@@ -35,6 +38,8 @@ class CustomerUpdate(BaseModel):
     credit_limit: Optional[float] = None
     status: Optional[str] = None
     assigned_employee_id: Optional[int] = None
+    store_id: Optional[int] = None
+    company_id: Optional[int] = None
 
 
 class Customer(CustomerBase):
@@ -42,3 +47,8 @@ class Customer(CustomerBase):
     id: int
     current_debt: float = 0
     created_at: datetime
+    # Chỉ đọc: điền từ quan hệ store / company để giao diện hiển thị nhanh.
+    store_code: Optional[str] = None
+    store_name: Optional[str] = None
+    company_code: Optional[str] = None
+    company_name: Optional[str] = None

@@ -26,7 +26,9 @@ export const menuItems: MenuItem[] = [
     icon: "Users",
     href: "/customers",
     children: [
-      { key: "customers-list", label: "Danh sách", icon: "List", href: "/customers" },
+      { key: "customers-stores", label: "Cửa hàng", icon: "Store", href: "/customers/stores" },
+      { key: "customers-list", label: "Khách hàng", icon: "List", href: "/customers" },
+      { key: "customers-companies", label: "Công ty quản lý", icon: "Building2", href: "/customers/companies" },
       { key: "customers-routes", label: "Tuyến bán hàng", icon: "MapPin", href: "/customers/routes" },
     ],
   },
@@ -47,6 +49,7 @@ export const menuItems: MenuItem[] = [
     icon: "Warehouse",
     href: "/warehouse",
     children: [
+      { key: "warehouse-queue", label: "Hàng đợi xuất kho", icon: "ClipboardList", href: "/warehouse/delivery-queue" },
       { key: "warehouse-inventory", label: "Tồn kho", icon: "BoxesIcon", href: "/warehouse/inventory" },
       { key: "warehouse-in", label: "Nhập kho", icon: "PackagePlus", href: "/warehouse/import" },
       { key: "warehouse-out", label: "Xuất kho", icon: "PackageMinus", href: "/warehouse/export" },

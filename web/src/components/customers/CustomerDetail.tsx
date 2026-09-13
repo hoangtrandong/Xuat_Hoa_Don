@@ -39,7 +39,7 @@ export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDele
           <Badge variant={customer.status === "active" ? "success" : "danger"}>
             {customer.status === "active" ? "Hoạt động" : "Ngưng giao"}
           </Badge>
-          <Badge variant={typeVariant}>{customer.type}</Badge>
+          <Badge variant={typeVariant}>{customer.type}</Badge>  
         </div>
       </div>
 

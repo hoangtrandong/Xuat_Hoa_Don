@@ -4,16 +4,37 @@ import PageHeader from "@/components/ui/PageHeader";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
-import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle } from "lucide-react";
+import StatCard from "@/components/ui/StatCard";
+import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban } from "lucide-react";
 import { API_URL } from "@/lib/api";
 
 type Item = { id: number; product_id: number; sku: string; product_name: string; quantity: number; requested_quantity_raw: string | null; };
 type StockPick = { location_code: string | null; lot_number: string | null; expiry_date: string | null; quantity: number; allocation_strategy: string; };
 type StockPlanItem = { product_id: number; sku: string; product_name: string; quantity: number; planned_quantity: number; shortage_quantity: number; picks: StockPick[]; };
 type DeliveryRequest = { id: number; code: string; warehouse_id: number; status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED" | "CANCELLED"; note: string | null; created_by: string | null; submitted_at: string | null; received_at: string | null; completed_at: string | null; cancelled_at: string | null; created_at: string; items: Item[]; };
+type AdminDeliveryRequestRow = DeliveryRequest & { searchText: string; totalQuantity: number; skuSummary: string; };
 
 const statusLabel: Record<string, string> = { DRAFT: "Nháp", SUBMITTED: "Chờ nhận", RECEIVED: "Đang xuất", COMPLETED: "Hoàn thành", CANCELLED: "Đã hủy" };
 const statusVariant: Record<string, "default" | "info" | "warning" | "success" | "danger"> = { DRAFT: "default", SUBMITTED: "warning", RECEIVED: "info", COMPLETED: "success", CANCELLED: "danger" };
+
+function totalQuantityOf(request: Pick<DeliveryRequest, "items">) {
+  return request.items.reduce((sum, item) => sum + item.quantity, 0);
+}
+
+function toSearchText(request: DeliveryRequest) {
+  return [
+    request.code,
+    request.created_by,
+    request.note,
+    statusLabel[request.status],
+    ...request.items.flatMap((item) => [item.sku, item.product_name]),
+  ].filter(Boolean).join(" ");
+}
+
+function csvCell(value: string | number | null | undefined) {
+  const text = String(value ?? "");
+  return `"${text.replace(/"/g, '""')}"`;
+}
 
 export default function AdminDeliveryRequestsPage() {
   const [rows, setRows] = useState<DeliveryRequest[]>([]);
@@ -98,18 +119,60 @@ export default function AdminDeliveryRequestsPage() {
     } catch (e) { setError(e instanceof Error ? e.message : "Thao tác thất bại."); } finally { setLoading(false); }
   }
 
-  const filteredRows = useMemo(() => rows.filter((r) => {
+  const enrichedRows = useMemo<AdminDeliveryRequestRow[]>(() => rows.map((row) => ({
+    ...row,
+    searchText: toSearchText(row),
+    totalQuantity: totalQuantityOf(row),
+    skuSummary: row.items.map((item) => `${item.sku} - ${item.product_name}`).join("; "),
+  })), [rows]);
+
+  const stats = useMemo(() => ({
+    total: rows.length,
+    draft: rows.filter((row) => row.status === "DRAFT").length,
+    submitted: rows.filter((row) => row.status === "SUBMITTED").length,
+    received: rows.filter((row) => row.status === "RECEIVED").length,
+    completed: rows.filter((row) => row.status === "COMPLETED").length,
+    cancelled: rows.filter((row) => row.status === "CANCELLED").length,
+  }), [rows]);
+
+  const filteredRows = useMemo(() => enrichedRows.filter((r) => {
     if (statusFilter !== "ALL" && r.status !== statusFilter) return false;
     if (dateFilter && new Date(r.created_at).toISOString().split("T")[0] !== dateFilter) return false;
     return true;
-  }), [rows, statusFilter, dateFilter]);
+  }), [enrichedRows, statusFilter, dateFilter]);
 
   const stockOk = stockPlan !== null && stockPlan.every((p) => p.shortage_quantity === 0);
   const totalShortage = stockPlan?.reduce((s, p) => s + p.shortage_quantity, 0) ?? 0;
 
-  const columns: Column<DeliveryRequest>[] = [
+  function exportCsv() {
+    const headers = ["Mã yêu cầu", "Kho", "Người tạo", "Trạng thái", "Ngày tạo", "Số SKU", "Tổng số lượng", "Ghi chú", "Danh sách SKU"];
+    const lines = filteredRows.map((row) => [
+      row.code,
+      row.warehouse_id,
+      row.created_by ?? "",
+      statusLabel[row.status] ?? row.status,
+      new Date(row.created_at).toLocaleString("vi-VN"),
+      row.items.length,
+      row.totalQuantity,
+      row.note ?? "",
+      row.skuSummary,
+    ].map(csvCell).join(","));
+    const csv = `\uFEFF${headers.map(csvCell).join(",")}\n${lines.join("\n")}`;
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `delivery-requests-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  const columns: Column<AdminDeliveryRequestRow>[] = [
     { key: "code", title: "Mã yêu cầu", sortable: true },
     { key: "items", title: "Số SKU", align: "center", render: (_, row) => <span className="font-medium">{row.items?.length || 0}</span> },
+    { key: "totalQuantity", title: "Tổng SL", sortable: true, align: "right", render: (val) => <span className="font-semibold text-gray-900">{Number(val).toLocaleString("vi-VN")}</span> },
     { key: "created_by", title: "Người tạo", render: (val) => <span className="text-gray-600">{val ? String(val) : "—"}</span> },
     { key: "created_at", title: "Ngày tạo", sortable: true, render: (_, row) => <span className="text-gray-600 text-xs">{new Date(row.created_at).toLocaleString("vi-VN")}</span> },
     { key: "status", title: "Trạng thái", sortable: true, render: (val) => <Badge variant={statusVariant[String(val)] ?? "default"}>{statusLabel[String(val)] ?? String(val)}</Badge> },
@@ -120,6 +183,15 @@ export default function AdminDeliveryRequestsPage() {
       <PageHeader title="Quản lý yêu cầu xuất hàng" subtitle="Theo dõi toàn bộ danh sách các yêu cầu giao hàng" />
       {error && !selected && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">{error}</div>}
       {message && !selected && <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg px-4 py-3 text-sm">{message}</div>}
+
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+        <StatCard label="Tổng yêu cầu" value={stats.total} icon={<ClipboardList size={20} />} color="bg-sky-50 text-sky-600" />
+        <StatCard label="Nháp" value={stats.draft} icon={<Pencil size={20} />} color="bg-gray-50 text-gray-600" />
+        <StatCard label="Chờ nhận" value={stats.submitted} icon={<Send size={20} />} color="bg-amber-50 text-amber-600" />
+        <StatCard label="Đang xuất" value={stats.received} icon={<Truck size={20} />} color="bg-blue-50 text-blue-600" />
+        <StatCard label="Hoàn thành" value={stats.completed} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
+        <StatCard label="Đã hủy" value={stats.cancelled} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />
+      </div>
 
       <div className="flex flex-col sm:flex-row gap-4 items-end">
         <div>
@@ -135,14 +207,27 @@ export default function AdminDeliveryRequestsPage() {
         {(statusFilter !== "ALL" || dateFilter) && <button onClick={() => { setStatusFilter("ALL"); setDateFilter(""); }} className="text-sm text-sky-600 hover:text-sky-800 font-medium pb-2">Xóa bộ lọc</button>}
       </div>
 
-      <DataTable data={filteredRows} columns={columns} searchKeys={["code", "created_by", "note"]} searchPlaceholder="Tìm mã yêu cầu, người tạo..." pageSize={15} onRowClick={openDetail} emptyMessage="Không có yêu cầu xuất kho nào" />
+      <DataTable
+        data={filteredRows}
+        columns={columns}
+        searchKeys={["searchText"]}
+        searchPlaceholder="Tìm mã yêu cầu, SKU, sản phẩm, người tạo..."
+        pageSize={15}
+        onRowClick={openDetail}
+        emptyMessage="Không có yêu cầu xuất kho nào"
+        toolbar={
+          <button onClick={exportCsv} disabled={filteredRows.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+            <FileDown size={15} /> Xuất CSV
+          </button>
+        }
+      />
 
       <Drawer open={selected !== null} onClose={() => { setSelected(null); setEditing(false); setStockPlan(null); setError(""); setMessage(""); }} title={editing ? "Chỉnh sửa yêu cầu" : "Chi tiết yêu cầu xuất kho"} subtitle={selected?.code}>
         {selected && (
           <div className="p-5 space-y-5">
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-full bg-sky-500 flex items-center justify-center flex-shrink-0"><ClipboardList size={20} className="text-white" /></div>
-              <div className="flex-1 min-w-0"><p className="font-bold text-gray-900 text-sm truncate">{selected.code}</p><p className="text-xs text-gray-400">Kho #{selected.warehouse_id} · {selected.items.length} SKU</p></div>
+              <div className="flex-1 min-w-0"><p className="font-bold text-gray-900 text-sm truncate">{selected.code}</p><p className="text-xs text-gray-400">Kho #{selected.warehouse_id} · {selected.items.length} SKU · {totalQuantityOf(selected).toLocaleString("vi-VN")} sản phẩm</p></div>
               <Badge variant={statusVariant[selected.status] ?? "default"}>{statusLabel[selected.status]}</Badge>
             </div>
             {error && <div className="bg-red-50 border border-red-200 text-red-600 rounded-lg px-3 py-2 text-sm">{error}</div>}
@@ -151,6 +236,16 @@ export default function AdminDeliveryRequestsPage() {
             {!editing ? (
               <>
                 <div className="rounded-xl bg-gray-50 px-4 py-3 space-y-2">
+                  <div className="grid grid-cols-2 gap-3 pb-2 border-b border-gray-100">
+                    <div className="rounded-lg bg-white px-3 py-2 border border-gray-100">
+                      <p className="text-xs text-gray-400">Số SKU</p>
+                      <p className="text-lg font-bold text-gray-900">{selected.items.length}</p>
+                    </div>
+                    <div className="rounded-lg bg-white px-3 py-2 border border-gray-100">
+                      <p className="text-xs text-gray-400">Tổng số lượng</p>
+                      <p className="text-lg font-bold text-gray-900">{totalQuantityOf(selected).toLocaleString("vi-VN")}</p>
+                    </div>
+                  </div>
                   <div className="flex justify-between text-sm"><span className="text-gray-400">Người tạo</span><span className="text-gray-700 font-medium">{selected.created_by || "—"}</span></div>
                   <div className="flex justify-between text-sm"><span className="text-gray-400">Ngày tạo</span><span className="text-gray-700">{new Date(selected.created_at).toLocaleString("vi-VN")}</span></div>
                   {selected.note && <div className="flex justify-between text-sm"><span className="text-gray-400">Ghi chú</span><span className="text-gray-700 text-right max-w-[60%]">{selected.note}</span></div>}

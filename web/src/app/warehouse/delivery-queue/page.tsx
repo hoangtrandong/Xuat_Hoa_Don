@@ -15,7 +15,7 @@ type DeliveryRequest = {
   id: number;
   code: string;
   warehouse_id: number;
-  status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED";
+  status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED" | "CANCELLED";
   note: string | null;
   created_by: string | null;
   submitted_at: string | null;
@@ -87,10 +87,10 @@ export default function DeliveryQueuePage() {
       const response = await fetch(`${API_URL}/delivery-requests/${id}/${action}`, { method: "POST" });
       const result = await response.json().catch(() => ({})) as { detail?: string };
       if (!response.ok) {
-        let actionStr = action === "receive" ? "nhận" : action === "complete" ? "hoàn thành" : "hủy";
+        const actionStr = action === "receive" ? "nhận" : action === "complete" ? "hoàn thành" : "hủy";
         throw new Error(result.detail ?? `Không thể ${actionStr} yêu cầu.`);
       }
-      let successMsg = action === "receive" ? "Đã nhận yêu cầu, tiến hành xuất kho." : 
+      const successMsg = action === "receive" ? "Đã nhận yêu cầu, tiến hành xuất kho." : 
                        action === "complete" ? "Đã xuất kho hoàn thành, tồn kho đã trừ." : 
                        "Đã hủy yêu cầu thành công.";
       setMessage(successMsg);

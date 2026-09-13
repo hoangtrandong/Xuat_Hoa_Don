@@ -39,13 +39,15 @@ const statusLabel: Record<string, string> = {
   SUBMITTED: "Chờ nhận",
   RECEIVED: "Đang xuất",
   COMPLETED: "Hoàn thành",
+  CANCELLED: "Đã hủy",
 };
 
-const statusVariant: Record<string, "default" | "info" | "warning" | "success"> = {
+const statusVariant: Record<string, "default" | "info" | "warning" | "success" | "danger"> = {
   DRAFT: "default",
   SUBMITTED: "warning",
   RECEIVED: "info",
   COMPLETED: "success",
+  CANCELLED: "danger",
 };
 
 export default function DeliveryQueuePage() {
@@ -55,29 +57,43 @@ export default function DeliveryQueuePage() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const [statusFilter, setStatusFilter] = useState<"SUBMITTED" | "RECEIVED">("SUBMITTED");
+
+  // Polling mỗi 5s để cập nhật trạng thái thời gian thực.
+  useEffect(() => {
+    const timer = window.setTimeout(() => load(), 5000);
+    return () => window.clearTimeout(timer);
+  }, [statusFilter]);
+
   async function load() {
     try {
-      const [submitted, received] = await Promise.all([
-        fetch(`${API_URL}/delivery-requests/?status=SUBMITTED`),
-        fetch(`${API_URL}/delivery-requests/?status=RECEIVED`),
-      ]);
-      if (!submitted.ok || !received.ok) throw new Error("Không thể tải hàng đợi yêu cầu.");
-      const data: DeliveryRequest[] = [...(await submitted.json()), ...(await received.json())];
-      setRows(data.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
+      const response = await fetch(`${API_URL}/delivery-requests/`);
+      if (!response.ok) throw new Error("Không thể tải hàng đợi yêu cầu.");
+      const data: DeliveryRequest[] = await response.json();
+      const sorted = data.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      
+      const filtered = sorted.filter(r => r.status === statusFilter);
+      setRows(filtered);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không thể tải dữ liệu.");
     }
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [statusFilter]);
 
-  async function transition(id: number, action: "receive" | "complete") {
+  async function transition(id: number, action: "receive" | "complete" | "cancel") {
     setError(""); setMessage(""); setLoading(true);
     try {
       const response = await fetch(`${API_URL}/delivery-requests/${id}/${action}`, { method: "POST" });
       const result = await response.json().catch(() => ({})) as { detail?: string };
-      if (!response.ok) throw new Error(result.detail ?? `Không thể ${action === "receive" ? "nhận" : "hoàn thành"} yêu cầu.`);
-      setMessage(action === "receive" ? "Đã nhận yêu cầu, tiến hành xuất kho." : "Đã xuất kho hoàn thành, tồn kho đã trừ.");
+      if (!response.ok) {
+        let actionStr = action === "receive" ? "nhận" : action === "complete" ? "hoàn thành" : "hủy";
+        throw new Error(result.detail ?? `Không thể ${actionStr} yêu cầu.`);
+      }
+      let successMsg = action === "receive" ? "Đã nhận yêu cầu, tiến hành xuất kho." : 
+                       action === "complete" ? "Đã xuất kho hoàn thành, tồn kho đã trừ." : 
+                       "Đã hủy yêu cầu thành công.";
+      setMessage(successMsg);
       setSelected(null);
       load();
     } catch (e) {
@@ -136,6 +152,21 @@ return (
         <StatCard label="Đang xuất" value={receivedCount} icon={<Package size={20} />} color="bg-sky-50 text-sky-600" />
         <StatCard label="Tổng SKU chờ xử lý" value={totalItems} icon={<Truck size={20} />} color="bg-purple-50 text-purple-600" />
         <StatCard label="Tổng yêu cầu" value={rows.length} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
+      </div>
+
+      <div className="flex space-x-2 border-b border-gray-200 pb-2">
+        <button
+          onClick={() => setStatusFilter("SUBMITTED")}
+          className={`px-4 py-2 text-sm font-medium rounded-t-lg ${statusFilter === "SUBMITTED" ? "bg-blue-50 text-blue-600 border-b-2 border-blue-600" : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"}`}
+        >
+          Chờ nhận
+        </button>
+        <button
+          onClick={() => setStatusFilter("RECEIVED")}
+          className={`px-4 py-2 text-sm font-medium rounded-t-lg ${statusFilter === "RECEIVED" ? "bg-blue-50 text-blue-600 border-b-2 border-blue-600" : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"}`}
+        >
+          Đang xuất
+        </button>
       </div>
 
       <DataTable
@@ -215,7 +246,23 @@ return (
                   ✓ Đã hoàn thành
                 </div>
               )}
+              {selected.status === "CANCELLED" && (
+                <div className="rounded-lg bg-red-50 border border-red-200 py-2.5 text-sm font-medium text-red-700 text-center">
+                  ✗ Đã hủy
+                </div>
+              )}
             </div>
+            {(selected.status === "SUBMITTED" || selected.status === "RECEIVED") && (
+              <div className="grid grid-cols-1">
+                <button
+                  onClick={() => transition(selected.id, "cancel")}
+                  disabled={loading}
+                  className="rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-600 py-2 text-sm font-medium transition-colors mt-2"
+                >
+                  {loading ? "Đang xử lý..." : "Hủy yêu cầu"}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </Drawer>

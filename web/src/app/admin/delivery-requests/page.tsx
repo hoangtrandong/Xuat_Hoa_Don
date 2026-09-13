@@ -5,7 +5,8 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import StatCard from "@/components/ui/StatCard";
-import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban } from "lucide-react";
+import DeliveryRequestExcelCreate from "@/components/delivery-requests/DeliveryRequestExcelCreate";
+import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload } from "lucide-react";
 import { API_URL } from "@/lib/api";
 
 type Item = { id: number; product_id: number; sku: string; product_name: string; quantity: number; requested_quantity_raw: string | null; };
@@ -43,6 +44,10 @@ export default function AdminDeliveryRequestsPage() {
   const [selected, setSelected] = useState<DeliveryRequest | null>(null);
   const [editing, setEditing] = useState(false); const [editNote, setEditNote] = useState(""); const [editItems, setEditItems] = useState<{ quantity: string; sku: string; product_name: string; product_id: number }[]>([]);
   const [stockPlan, setStockPlan] = useState<StockPlanItem[] | null>(null); const [checkingStock, setCheckingStock] = useState(false);
+  const [activeTab, setActiveTab] = useState<"list" | "create">(() => {
+    if (typeof window === "undefined") return "list";
+    return new URLSearchParams(window.location.search).get("tab") === "create" ? "create" : "list";
+  });
 
   useEffect(() => { load(); }, []);
 
@@ -184,43 +189,65 @@ export default function AdminDeliveryRequestsPage() {
       {error && !selected && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">{error}</div>}
       {message && !selected && <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg px-4 py-3 text-sm">{message}</div>}
 
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
-        <StatCard label="Tổng yêu cầu" value={stats.total} icon={<ClipboardList size={20} />} color="bg-sky-50 text-sky-600" />
-        <StatCard label="Nháp" value={stats.draft} icon={<Pencil size={20} />} color="bg-gray-50 text-gray-600" />
-        <StatCard label="Chờ nhận" value={stats.submitted} icon={<Send size={20} />} color="bg-amber-50 text-amber-600" />
-        <StatCard label="Đang xuất" value={stats.received} icon={<Truck size={20} />} color="bg-blue-50 text-blue-600" />
-        <StatCard label="Hoàn thành" value={stats.completed} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
-        <StatCard label="Đã hủy" value={stats.cancelled} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />
+      <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
+        <button onClick={() => setActiveTab("list")} className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${activeTab === "list" ? "bg-sky-500 text-white shadow-sm" : "text-gray-600 hover:bg-gray-50"}`}>
+          <ClipboardList size={16} /> Danh sách yêu cầu
+        </button>
+        <button onClick={() => setActiveTab("create")} className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${activeTab === "create" ? "bg-sky-500 text-white shadow-sm" : "text-gray-600 hover:bg-gray-50"}`}>
+          <Upload size={16} /> Tạo từ Excel
+        </button>
       </div>
 
-      <div className="flex flex-col sm:flex-row gap-4 items-end">
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Trạng thái</label>
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-full sm:w-48 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500">
-            <option value="ALL">Tất cả</option><option value="DRAFT">Nháp</option><option value="SUBMITTED">Chờ nhận</option><option value="RECEIVED">Đang xuất</option><option value="COMPLETED">Hoàn thành</option><option value="CANCELLED">Đã hủy</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Ngày tạo</label>
-          <input type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="w-full sm:w-48 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500" />
-        </div>
-        {(statusFilter !== "ALL" || dateFilter) && <button onClick={() => { setStatusFilter("ALL"); setDateFilter(""); }} className="text-sm text-sky-600 hover:text-sky-800 font-medium pb-2">Xóa bộ lọc</button>}
-      </div>
+      {activeTab === "list" ? (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+            <StatCard label="Tổng yêu cầu" value={stats.total} icon={<ClipboardList size={20} />} color="bg-sky-50 text-sky-600" />
+            <StatCard label="Nháp" value={stats.draft} icon={<Pencil size={20} />} color="bg-gray-50 text-gray-600" />
+            <StatCard label="Chờ nhận" value={stats.submitted} icon={<Send size={20} />} color="bg-amber-50 text-amber-600" />
+            <StatCard label="Đang xuất" value={stats.received} icon={<Truck size={20} />} color="bg-blue-50 text-blue-600" />
+            <StatCard label="Hoàn thành" value={stats.completed} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
+            <StatCard label="Đã hủy" value={stats.cancelled} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />
+          </div>
 
-      <DataTable
-        data={filteredRows}
-        columns={columns}
-        searchKeys={["searchText"]}
-        searchPlaceholder="Tìm mã yêu cầu, SKU, sản phẩm, người tạo..."
-        pageSize={15}
-        onRowClick={openDetail}
-        emptyMessage="Không có yêu cầu xuất kho nào"
-        toolbar={
-          <button onClick={exportCsv} disabled={filteredRows.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
-            <FileDown size={15} /> Xuất CSV
-          </button>
-        }
-      />
+          <div className="flex flex-col sm:flex-row gap-4 items-end">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Trạng thái</label>
+              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-full sm:w-48 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500">
+                <option value="ALL">Tất cả</option><option value="DRAFT">Nháp</option><option value="SUBMITTED">Chờ nhận</option><option value="RECEIVED">Đang xuất</option><option value="COMPLETED">Hoàn thành</option><option value="CANCELLED">Đã hủy</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Ngày tạo</label>
+              <input type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="w-full sm:w-48 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500" />
+            </div>
+            {(statusFilter !== "ALL" || dateFilter) && <button onClick={() => { setStatusFilter("ALL"); setDateFilter(""); }} className="text-sm text-sky-600 hover:text-sky-800 font-medium pb-2">Xóa bộ lọc</button>}
+          </div>
+
+          <DataTable
+            data={filteredRows}
+            columns={columns}
+            searchKeys={["searchText"]}
+            searchPlaceholder="Tìm mã yêu cầu, SKU, sản phẩm, người tạo..."
+            pageSize={15}
+            onRowClick={openDetail}
+            emptyMessage="Không có yêu cầu xuất kho nào"
+            toolbar={
+              <button onClick={exportCsv} disabled={filteredRows.length === 0} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+                <FileDown size={15} /> Xuất CSV
+              </button>
+            }
+          />
+        </>
+      ) : (
+        <DeliveryRequestExcelCreate
+          embedded
+          onCreated={async (request) => {
+            await load();
+            setActiveTab("list");
+            setMessage(`Đã tạo yêu cầu ${request.code ?? ""}. Danh sách đã được cập nhật.`);
+          }}
+        />
+      )}
 
       <Drawer open={selected !== null} onClose={() => { setSelected(null); setEditing(false); setStockPlan(null); setError(""); setMessage(""); }} title={editing ? "Chỉnh sửa yêu cầu" : "Chi tiết yêu cầu xuất kho"} subtitle={selected?.code}>
         {selected && (

@@ -61,8 +61,7 @@ export const menuItems: MenuItem[] = [
     icon: "ShieldCheck",
     href: "/admin",
     children: [
-      { key: "admin-delivery-list", label: "Danh sách yêu cầu", icon: "List", href: "/admin/delivery-requests" },
-      { key: "admin-delivery-requests", label: "Tạo yêu cầu (Excel)", icon: "ClipboardList", href: "/warehouse/delivery-requests" },
+      { key: "admin-delivery-requests", label: "Yêu cầu xuất hàng", icon: "ClipboardList", href: "/admin/delivery-requests" },
     ],
   },
   { key: "promotions", label: "Khuyến mãi", icon: "Gift", href: "/promotions" },

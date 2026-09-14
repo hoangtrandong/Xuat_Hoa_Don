@@ -44,8 +44,6 @@ def create_location_transfer(db: Session, payload, created_by: str = "system") -
             raise ValueError("Vị trí nguồn không thuộc kho hoặc không hoạt động.")
         if not destination or destination.warehouse_id != payload.warehouse_id or not destination.is_active:
             raise ValueError("Vị trí đích không thuộc kho hoặc không hoạt động.")
-        if lot.location_id != item.source_location_id:
-            raise ValueError("Vị trí nguồn không khớp với lô tồn.")
         if item.source_location_id == item.destination_location_id:
             raise ValueError("Vị trí nguồn và đích phải khác nhau.")
         if item.lot_id:

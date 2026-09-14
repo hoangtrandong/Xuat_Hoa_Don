@@ -53,6 +53,7 @@ export const menuItems: MenuItem[] = [
       { key: "warehouse-inventory", label: "Tồn kho", icon: "BoxesIcon", href: "/warehouse/inventory" },
       { key: "warehouse-in", label: "Nhập kho", icon: "PackagePlus", href: "/warehouse/import" },
       { key: "warehouse-out", label: "Xuất kho", icon: "PackageMinus", href: "/warehouse/export" },
+      { key: "warehouse-transfer", label: "Điều chuyển vị trí", icon: "MapPin", href: "/warehouse/transfers" },
     ],
   },
   {

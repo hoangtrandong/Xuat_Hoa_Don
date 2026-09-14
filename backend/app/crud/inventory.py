@@ -7,6 +7,7 @@ from uuid import uuid4
 from app.models.inventory import (
     InventoryTransaction, Warehouse, InventoryLot, WarehouseLocation,
     DeliveryAllocation, DeliveryRequest, DeliveryRequestItem,
+    InventoryTransfer, InventoryTransferItem,
 )
 from app.models.product import Product, ProductUnit
 from app.schemas.inventory import StockAdjust, StockLevel
@@ -25,6 +26,98 @@ def list_transactions(db: Session, skip: int = 0, limit: int = 100, product_id: 
     if txn_type:
         stmt = stmt.where(InventoryTransaction.type == txn_type)
     return list(db.execute(stmt).scalars().all())
+
+
+def create_location_transfer(db: Session, payload, created_by: str = "system") -> InventoryTransfer:
+    if not db.get(Warehouse, payload.warehouse_id):
+        raise ValueError("Không tìm thấy kho.")
+    if not payload.items:
+        raise ValueError("Phiếu điều chuyển phải có ít nhất một dòng.")
+    transfer = InventoryTransfer(
+        code=f"LTR-{datetime.utcnow():%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
+        warehouse_id=payload.warehouse_id, note=payload.note, created_by=payload.created_by or created_by,
+    )
+    for item in payload.items:
+        lot = db.get(InventoryLot, item.lot_id)
+        source = db.get(WarehouseLocation, item.source_location_id)
+        destination = db.get(WarehouseLocation, item.destination_location_id)
+        if not lot or lot.warehouse_id != payload.warehouse_id or lot.product_id != item.product_id:
+            raise ValueError("Lô tồn không thuộc sản phẩm hoặc kho đã chọn.")
+        if not source or source.warehouse_id != payload.warehouse_id or not source.is_active:
+            raise ValueError("Vị trí nguồn không thuộc kho hoặc không hoạt động.")
+        if not destination or destination.warehouse_id != payload.warehouse_id or not destination.is_active:
+            raise ValueError("Vị trí đích không thuộc kho hoặc không hoạt động.")
+        if lot.location_id != item.source_location_id:
+            raise ValueError("Vị trí nguồn không khớp với lô tồn.")
+        if item.source_location_id == item.destination_location_id:
+            raise ValueError("Vị trí nguồn và đích phải khác nhau.")
+        transfer.items.append(InventoryTransferItem(
+            product_id=item.product_id, lot_id=item.lot_id,
+            source_location_id=item.source_location_id,
+            destination_location_id=item.destination_location_id, quantity=item.quantity,
+        ))
+    db.add(transfer)
+    db.commit()
+    db.refresh(transfer)
+    return transfer
+
+
+def confirm_location_transfer(db: Session, transfer_id: int) -> InventoryTransfer:
+    transfer = db.get(InventoryTransfer, transfer_id)
+    if not transfer:
+        raise ValueError("Không tìm thấy phiếu điều chuyển.")
+    if transfer.status != "DRAFT":
+        raise ValueError("Chỉ phiếu nháp mới được xác nhận.")
+    now = datetime.utcnow()
+    transfer_code = transfer.code
+    for item in transfer.items:
+        source_lot = db.scalar(select(InventoryLot).where(
+            InventoryLot.id == item.lot_id,
+            InventoryLot.location_id == item.source_location_id,
+        ).with_for_update())
+        if not source_lot or source_lot.quantity_on_hand < item.quantity:
+            raise ValueError("Tồn tại vị trí nguồn không đủ để điều chuyển.")
+        destination_lot = db.scalar(select(InventoryLot).where(
+            InventoryLot.warehouse_id == transfer.warehouse_id,
+            InventoryLot.product_id == item.product_id,
+            InventoryLot.location_id == item.destination_location_id,
+            InventoryLot.lot_number == source_lot.lot_number,
+            InventoryLot.expiry_date == source_lot.expiry_date,
+        ).with_for_update())
+        if not destination_lot:
+            destination_lot = InventoryLot(
+                warehouse_id=transfer.warehouse_id, product_id=item.product_id,
+                location_id=item.destination_location_id, lot_number=source_lot.lot_number,
+                expiry_date=source_lot.expiry_date, quantity_on_hand=0,
+                unit_cost=source_lot.unit_cost,
+            )
+            db.add(destination_lot)
+            db.flush()
+        source_lot.quantity_on_hand -= item.quantity
+        destination_lot.quantity_on_hand += item.quantity
+        db.add_all([
+            InventoryTransaction(
+                code=f"{transfer_code}-OUT-{item.id}", type="LOCATION_TRANSFER_OUT",
+                warehouse_id=transfer.warehouse_id, product_id=item.product_id,
+                quantity=-item.quantity, ref_type="LOCATION_TRANSFER", ref_code=transfer_code,
+                note=transfer.note, created_by=transfer.created_by, created_at=now,
+                lot_id=source_lot.id, location_id=item.source_location_id,
+                expiry_date=source_lot.expiry_date,
+            ),
+            InventoryTransaction(
+                code=f"{transfer_code}-IN-{item.id}", type="LOCATION_TRANSFER_IN",
+                warehouse_id=transfer.warehouse_id, product_id=item.product_id,
+                quantity=item.quantity, ref_type="LOCATION_TRANSFER", ref_code=transfer_code,
+                note=transfer.note, created_by=transfer.created_by, created_at=now,
+                lot_id=destination_lot.id, location_id=item.destination_location_id,
+                expiry_date=source_lot.expiry_date,
+            ),
+        ])
+    transfer.status = "CONFIRMED"
+    transfer.confirmed_at = now
+    db.commit()
+    db.refresh(transfer)
+    return transfer
 
 
 def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -> InventoryTransaction:

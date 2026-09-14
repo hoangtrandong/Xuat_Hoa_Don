@@ -39,12 +39,12 @@ class InventoryTransaction(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(30), unique=True, index=True)
-    type: Mapped[str] = mapped_column(String(10))  # OPENING | IN | OUT | ADJUST
+    type: Mapped[str] = mapped_column(String(30))  # OPENING | IN | OUT | ADJUST | LOCATION_TRANSFER_*
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"))
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     quantity: Mapped[int] = mapped_column(Integer)  # + nhập / - xuất
     unit_cost: Mapped[float | None] = mapped_column(Float)
-    ref_type: Mapped[str | None] = mapped_column(String(10))  # PO | SO | ADJ | OPENING
+    ref_type: Mapped[str | None] = mapped_column(String(30))  # PO | SO | ADJ | OPENING | LOCATION_TRANSFER
     ref_code: Mapped[str | None] = mapped_column(String(40))
     note: Mapped[str | None] = mapped_column(String(255))
     created_by: Mapped[str | None] = mapped_column(String(120))
@@ -80,6 +80,39 @@ class InventoryLot(Base):
     location: Mapped["WarehouseLocation | None"] = relationship(back_populates="lots")
     product: Mapped["Product"] = relationship()
     transactions: Mapped[List["InventoryTransaction"]] = relationship(back_populates="lot")
+
+
+class InventoryTransfer(Base):
+    __tablename__ = "inventory_transfers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(30), unique=True, index=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"))
+    status: Mapped[str] = mapped_column(String(15), default="DRAFT", index=True)
+    note: Mapped[str | None] = mapped_column(String(255))
+    created_by: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    items: Mapped[List["InventoryTransferItem"]] = relationship(
+        back_populates="transfer", cascade="all, delete-orphan"
+    )
+
+
+class InventoryTransferItem(Base):
+    __tablename__ = "inventory_transfer_items"
+    __table_args__ = (CheckConstraint("quantity > 0", name="ck_transfer_item_qty_positive"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    transfer_id: Mapped[int] = mapped_column(ForeignKey("inventory_transfers.id", ondelete="CASCADE"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    lot_id: Mapped[int] = mapped_column(ForeignKey("inventory_lots.id"))
+    source_location_id: Mapped[int] = mapped_column(ForeignKey("warehouse_locations.id"))
+    destination_location_id: Mapped[int] = mapped_column(ForeignKey("warehouse_locations.id"))
+    quantity: Mapped[int] = mapped_column(Integer)
+
+    transfer: Mapped["InventoryTransfer"] = relationship(back_populates="items")
+    lot: Mapped["InventoryLot"] = relationship()
 
 
 class DeliveryRequest(Base):

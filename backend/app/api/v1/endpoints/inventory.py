@@ -12,10 +12,12 @@ from app.core.database import get_db
 from app.schemas.inventory import (
     InventoryImportConfirm, InventoryImportItem, InventoryTransaction, StockLevel,
     StockAdjust, Warehouse, WarehouseLocation, InventoryLot,
+    InventoryTransferCreate, InventoryTransferResponse,
 )
 from app.models.inventory import (
     InventoryLot as LotModel, InventoryTransaction as TransactionModel,
     Warehouse as WarehouseModel, WarehouseLocation as LocationModel,
+    InventoryTransfer as TransferModel,
 )
 from app.models.product import Product
 from app.crud import inventory_transaction as crud
@@ -227,3 +229,24 @@ def adjust_stock(payload: StockAdjust, db: Session = Depends(get_db)):
         return crud.adjust(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/transfers/", response_model=InventoryTransferResponse, status_code=201)
+def create_location_transfer(payload: InventoryTransferCreate, db: Session = Depends(get_db)):
+    try:
+        return crud.create_location_transfer(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/transfers/{transfer_id}/confirm", response_model=InventoryTransferResponse)
+def confirm_location_transfer(transfer_id: int, db: Session = Depends(get_db)):
+    try:
+        return crud.confirm_location_transfer(db, transfer_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/transfers/", response_model=List[InventoryTransferResponse])
+def list_location_transfers(db: Session = Depends(get_db)):
+    return db.query(TransferModel).order_by(TransferModel.created_at.desc()).all()

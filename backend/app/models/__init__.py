@@ -3,7 +3,7 @@ from app.models.customer import Customer, CustomerAddress, CustomerContact, Stor
 from app.models.product import Product, ProductCategory, ProductUnit, PriceList, PriceListItem
 from app.models.inventory import (
     Warehouse, WarehouseLocation, InventoryLot, InventoryTransaction, DeliveryRequest, DeliveryRequestItem,
-    DeliveryAllocation,
+    DeliveryAllocation, InventoryTransfer, InventoryTransferItem,
 )
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
@@ -15,7 +15,7 @@ __all__ = [
     "Customer", "CustomerAddress", "CustomerContact", "Store", "Company",
     "Product", "ProductCategory", "ProductUnit", "PriceList", "PriceListItem",
     "Warehouse", "WarehouseLocation", "InventoryLot", "InventoryTransaction", "DeliveryRequest", "DeliveryRequestItem",
-    "DeliveryAllocation",
+    "DeliveryAllocation", "InventoryTransfer", "InventoryTransferItem",
     "SalesOrder", "SalesOrderItem",
     "Promotion", "PromotionRule", "PromotionItem",
     "Employee", "SalesTerritory", "Route", "Visit",

@@ -112,3 +112,38 @@ class InventoryImportConfirm(BaseModel):
     document_date: Optional[datetime] = None
     note: Optional[str] = None
     created_by: Optional[str] = None
+
+
+class InventoryTransferItemCreate(BaseModel):
+    product_id: int
+    lot_id: int
+    source_location_id: int
+    destination_location_id: int
+    quantity: int = Field(gt=0)
+
+
+class InventoryTransferCreate(BaseModel):
+    warehouse_id: int
+    items: List[InventoryTransferItemCreate] = Field(min_length=1)
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class InventoryTransferItemResponse(InventoryTransferItemCreate):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InventoryTransferResponse(BaseModel):
+    id: int
+    code: str
+    warehouse_id: int
+    status: str
+    note: Optional[str]
+    created_by: Optional[str]
+    created_at: datetime
+    confirmed_at: Optional[datetime]
+    items: List[InventoryTransferItemResponse]
+
+    model_config = ConfigDict(from_attributes=True)

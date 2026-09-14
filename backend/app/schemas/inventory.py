@@ -95,6 +95,7 @@ class InventoryImportItem(BaseModel):
     allocations: List["InventoryImportAllocation"] = Field(default_factory=list)
     delivery_references: Optional[str] = None
     po_references: Optional[str] = None
+    received_at: Optional[datetime] = None
 
 
 class InventoryImportAllocation(BaseModel):
@@ -107,5 +108,6 @@ class InventoryImportConfirm(BaseModel):
     items: List[InventoryImportItem] = Field(min_length=1)
     ref_code: Optional[str] = None
     delivery_references: Optional[str] = None
+    received_at: Optional[datetime] = None
     note: Optional[str] = None
     created_by: Optional[str] = None

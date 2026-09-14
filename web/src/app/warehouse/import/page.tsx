@@ -47,6 +47,7 @@ interface ImportItem {
   lot_number: string; expiry_date: string; source_location_code?: string | null;
   cartons: number; loose_boxes: number; quantity: number; allocations: ImportAllocation[];
   delivery_references?: string | null; po_references?: string | null;
+  received_at?: string | null;
 }
 interface ApiLocation { id: number; warehouse_id: number; code: string; is_active: boolean }
 
@@ -153,6 +154,7 @@ export default function ImportPage() {
           warehouse_id: receiptWarehouseId,
           items: receiptItems,
           delivery_references: receiptItems[0]?.delivery_references || null,
+          received_at: receiptItems[0]?.received_at || null,
           ref_code: receiptItems[0]?.po_references || refCode.trim() || null,
           note: note.trim() || null,
         }),

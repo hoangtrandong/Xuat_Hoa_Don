@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date, time, timedelta
 from io import BytesIO
 import re
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -42,6 +42,28 @@ def _parse_sku(item: Any) -> str:
     return re.split(r"\s+-\s+", str(item or "").strip(), maxsplit=1)[0].strip().upper()
 
 
+def _parse_import_datetime(value: Any) -> datetime | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time.min)
+    if isinstance(value, (int, float)):
+        # Excel stores dates as days from 1899-12-30.
+        return datetime(1899, 12, 30) + timedelta(days=float(value))
+    text = str(value).strip()
+    for format_string in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+                          "%d/%m/%Y", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
+                          "%d-%m-%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+                          "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, format_string)
+        except ValueError:
+            continue
+    raise ValueError(f"Ô H6 có thời gian không hợp lệ: '{text}'.")
+
+
 @router.post("/import/upload", response_model=List[InventoryImportItem])
 def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not db.get(WarehouseModel, warehouse_id):
@@ -69,6 +91,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
         po_references = ", ".join(dict.fromkeys(
             part.strip() for part in (po_values or "").split(",") if part.strip()
         )) or None
+        received_at = _parse_import_datetime(rows[5][7] if len(rows) > 5 and len(rows[5]) > 7 else None)
         products = {product.sku.upper(): product for product in db.scalars(select(Product)).all()}
         grouped: dict[tuple[str, str], dict[str, Any]] = {}
         for row_number, values in enumerate(rows[12:], 13):
@@ -96,6 +119,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 "source_location_code": values[location_index] if location_index is not None and location_index < len(values) else None,
                 "cartons": 0, "loose_boxes": 0, "quantity": 0, "allocations": [],
                 "delivery_references": delivery_references, "po_references": po_references,
+                "received_at": received_at,
             })
             item["quantity"] += quantity
             item["cartons"] += int(values[carton_index] or 0) if carton_index is not None and carton_index < len(values) else 0
@@ -111,7 +135,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
 def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depends(get_db)):
     if not db.get(WarehouseModel, payload.warehouse_id):
         raise HTTPException(status_code=400, detail="Không tìm thấy kho.")
-    now = datetime.utcnow()
+    transaction_time = payload.received_at or datetime.utcnow()
     created: list[TransactionModel] = []
     try:
         for item in payload.items:
@@ -141,7 +165,7 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                     db.flush()
                 lot.quantity_on_hand += allocation.quantity
                 transaction = TransactionModel(
-                    code=f"ITT-{now:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
+                    code=f"ITT-{transaction_time:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
                     type="IN", warehouse_id=payload.warehouse_id, product_id=item.product_id,
                     quantity=allocation.quantity, lot_id=lot.id, location_id=allocation.location_id,
                     expiry_date=item.expiry_date, ref_type="PO", ref_code=payload.ref_code,
@@ -150,6 +174,7 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                         f"{item.sku} - {item.lot_number}"
                     ),
                     created_by=payload.created_by,
+                    created_at=transaction_time,
                 )
                 db.add(transaction)
                 created.append(transaction)

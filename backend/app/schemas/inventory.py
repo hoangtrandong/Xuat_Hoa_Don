@@ -93,8 +93,8 @@ class InventoryImportItem(BaseModel):
     loose_boxes: int = 0
     quantity: int = Field(gt=0)
     allocations: List["InventoryImportAllocation"] = Field(default_factory=list)
-    receipt_code: Optional[str] = None
-    po_code: Optional[str] = None
+    delivery_references: Optional[str] = None
+    po_references: Optional[str] = None
 
 
 class InventoryImportAllocation(BaseModel):
@@ -106,6 +106,6 @@ class InventoryImportConfirm(BaseModel):
     warehouse_id: int
     items: List[InventoryImportItem] = Field(min_length=1)
     ref_code: Optional[str] = None
-    receipt_code: Optional[str] = None
+    delivery_references: Optional[str] = None
     note: Optional[str] = None
     created_by: Optional[str] = None

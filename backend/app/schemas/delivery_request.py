@@ -31,7 +31,6 @@ class DeliveryPreviewItem(BaseModel):
 
 class FefoPlanPick(BaseModel):
     location_code: Optional[str] = None
-    lot_number: Optional[str] = None
     expiry_date: Optional[datetime] = None
     quantity: int
     allocation_strategy: str

@@ -1,13 +1,155 @@
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
+from io import BytesIO
+import re
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
-from typing import List
-
+from typing import Any, List
+from zipfile import BadZipFile
 from app.core.database import get_db
-from app.schemas.inventory import InventoryTransaction, StockLevel, StockAdjust, Warehouse, WarehouseLocation, InventoryLot
-from app.models.inventory import Warehouse as WarehouseModel, WarehouseLocation as LocationModel, InventoryLot as LotModel
+from app.schemas.inventory import (
+    InventoryImportConfirm, InventoryImportItem, InventoryTransaction, StockLevel,
+    StockAdjust, Warehouse, WarehouseLocation, InventoryLot,
+)
+from app.models.inventory import (
+    InventoryLot as LotModel, InventoryTransaction as TransactionModel,
+    Warehouse as WarehouseModel, WarehouseLocation as LocationModel,
+)
+from app.models.product import Product
 from app.crud import inventory_transaction as crud
+from uuid import uuid4
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
+
+
+def _header(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _parse_expiry(lot_number: str) -> datetime:
+    match = re.match(r"^(\d{6})(?:-|$)", lot_number.strip())
+    if not match:
+        raise ValueError(f"Lot '{lot_number}' không có ngày HSD dạng yymmdd.")
+    try:
+        return datetime.strptime(match.group(1), "%y%m%d")
+    except ValueError as exc:
+        raise ValueError(f"Lot '{lot_number}' có ngày HSD không hợp lệ.") from exc
+
+
+def _parse_sku(item: Any) -> str:
+    return re.split(r"\s+-\s+", str(item or "").strip(), maxsplit=1)[0].strip().upper()
+
+
+@router.post("/import/upload", response_model=List[InventoryImportItem])
+def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not db.get(WarehouseModel, warehouse_id):
+        raise HTTPException(status_code=400, detail="Không tìm thấy kho.")
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
+    try:
+        workbook = load_workbook(BytesIO(file.file.read()), read_only=True, data_only=True)
+        sheet = workbook.worksheets[0]
+        rows = list(sheet.iter_rows(values_only=True))
+        if len(rows) < 13:
+            raise ValueError("File Excel không có dữ liệu từ dòng 13.")
+        headers = [_header(value) for value in rows[11]]
+        required = {"item", "lot", "s.lượng"}
+        if not required.issubset(headers):
+            raise ValueError("File phải có các cột Item, Lot và S.Lượng ở dòng 12.")
+        indexes = {name: headers.index(name) for name in required}
+        location_index = headers.index("vị trí") if "vị trí" in headers else None
+        unit_index = headers.index("đvt") if "đvt" in headers else None
+        carton_index = headers.index("thùng") if "thùng" in headers else None
+        loose_index = headers.index("hộp") if "hộp" in headers else None
+        products = {product.sku.upper(): product for product in db.scalars(select(Product)).all()}
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for row_number, values in enumerate(rows[12:], 13):
+            if not any(value is not None and str(value).strip() for value in values):
+                continue
+            sku = _parse_sku(values[indexes["item"]] if indexes["item"] < len(values) else None)
+            lot_number = str(values[indexes["lot"]] if indexes["lot"] < len(values) else "").strip()
+            if not sku or not lot_number:
+                continue
+            product = products.get(sku)
+            if not product:
+                raise ValueError(f"Dòng {row_number}: không tìm thấy mã sản phẩm {sku}.")
+            try:
+                quantity = int(values[indexes["s.lượng"]])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Dòng {row_number}: S.Lượng phải là số hộp.") from exc
+            if quantity <= 0:
+                raise ValueError(f"Dòng {row_number}: S.Lượng phải lớn hơn 0.")
+            expiry_date = _parse_expiry(lot_number)
+            key = (sku, lot_number)
+            item = grouped.setdefault(key, {
+                "product_id": product.id, "sku": product.sku, "product_name": product.name,
+                "unit": values[unit_index] if unit_index is not None and unit_index < len(values) else None,
+                "lot_number": lot_number, "expiry_date": expiry_date,
+                "source_location_code": values[location_index] if location_index is not None and location_index < len(values) else None,
+                "cartons": 0, "loose_boxes": 0, "quantity": 0, "allocations": [],
+            })
+            item["quantity"] += quantity
+            item["cartons"] += int(values[carton_index] or 0) if carton_index is not None and carton_index < len(values) else 0
+            item["loose_boxes"] += int(values[loose_index] or 0) if loose_index is not None and loose_index < len(values) else 0
+        return [InventoryImportItem(**item) for item in grouped.values()]
+    except HTTPException:
+        raise
+    except (ValueError, TypeError, InvalidFileException, BadZipFile, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/import/confirm", response_model=List[InventoryTransaction], status_code=201)
+def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depends(get_db)):
+    if not db.get(WarehouseModel, payload.warehouse_id):
+        raise HTTPException(status_code=400, detail="Không tìm thấy kho.")
+    now = datetime.utcnow()
+    created: list[TransactionModel] = []
+    try:
+        for item in payload.items:
+            if not db.get(Product, item.product_id):
+                raise ValueError(f"Không tìm thấy sản phẩm {item.sku}.")
+            total_allocated = sum(allocation.quantity for allocation in item.allocations)
+            if total_allocated != item.quantity:
+                raise ValueError(f"{item.sku} / {item.lot_number}: phân bổ {total_allocated}/{item.quantity} hộp.")
+            for allocation in item.allocations:
+                location = db.get(LocationModel, allocation.location_id)
+                if not location or location.warehouse_id != payload.warehouse_id or not location.is_active:
+                    raise ValueError(f"Vị trí {allocation.location_id} không thuộc kho hoặc không hoạt động.")
+                lot = db.scalar(select(LotModel).where(
+                    LotModel.warehouse_id == payload.warehouse_id,
+                    LotModel.product_id == item.product_id,
+                    LotModel.location_id == allocation.location_id,
+                    LotModel.lot_number == item.lot_number,
+                    LotModel.expiry_date == item.expiry_date,
+                ).with_for_update())
+                if not lot:
+                    lot = LotModel(
+                        warehouse_id=payload.warehouse_id, product_id=item.product_id,
+                        location_id=allocation.location_id, lot_number=item.lot_number,
+                        expiry_date=item.expiry_date, quantity_on_hand=0,
+                    )
+                    db.add(lot)
+                    db.flush()
+                lot.quantity_on_hand += allocation.quantity
+                transaction = TransactionModel(
+                    code=f"ITT-{now:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
+                    type="IN", warehouse_id=payload.warehouse_id, product_id=item.product_id,
+                    quantity=allocation.quantity, lot_id=lot.id, location_id=allocation.location_id,
+                    expiry_date=item.expiry_date, ref_type="PO", ref_code=payload.ref_code,
+                    note=payload.note or f"Nhập kho {item.sku} - {item.lot_number}",
+                    created_by=payload.created_by,
+                )
+                db.add(transaction)
+                created.append(transaction)
+        db.commit()
+        for transaction in created:
+            db.refresh(transaction)
+        return created
+    except (ValueError, TypeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/warehouses/", response_model=List[Warehouse])

@@ -208,16 +208,23 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
                 remaining = 0
         product = products.get(product_id)
         pick_rows: list[FefoPlanPick] = []
-        for location_id, lot_id, expiry_date, take, strategy in picks:
+        position_rows: dict[tuple[int | None, datetime | None, str], FefoPlanPick] = {}
+        for location_id, _lot_id, expiry_date, take, strategy in picks:
             location = db.get(WarehouseLocation, location_id) if location_id is not None else None
-            lot = db.get(InventoryLot, lot_id) if lot_id is not None else None
-            pick_rows.append(FefoPlanPick(
-                location_code=location.code if location else None,
-                lot_number=lot.lot_number if lot else None,
-                expiry_date=expiry_date,
-                quantity=take,
-                allocation_strategy=strategy,
-            ))
+            location_code = location.code if location else None
+            key = (location_id, expiry_date, strategy)
+            row = position_rows.get(key)
+            if row is None:
+                row = FefoPlanPick(
+                    location_code=location_code,
+                    expiry_date=expiry_date,
+                    quantity=take,
+                    allocation_strategy=strategy,
+                )
+                position_rows[key] = row
+                pick_rows.append(row)
+            else:
+                row.quantity += take
         result.append(FefoPlanItem(
             product_id=product_id,
             sku=product.sku if product else str(product_id),

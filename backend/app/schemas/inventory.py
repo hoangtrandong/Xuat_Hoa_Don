@@ -1,6 +1,7 @@
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List
+from pydantic import Field
 
 
 class InventoryTransaction(BaseModel):
@@ -78,3 +79,30 @@ class InventoryLot(BaseModel):
     expiry_date: Optional[datetime] = None
     quantity_on_hand: int
     unit_cost: Optional[float] = None
+
+
+class InventoryImportItem(BaseModel):
+    product_id: int
+    sku: str
+    product_name: str
+    unit: Optional[str] = None
+    lot_number: str
+    expiry_date: datetime
+    source_location_code: Optional[str] = None
+    cartons: int = 0
+    loose_boxes: int = 0
+    quantity: int = Field(gt=0)
+    allocations: List["InventoryImportAllocation"] = Field(default_factory=list)
+
+
+class InventoryImportAllocation(BaseModel):
+    location_id: int
+    quantity: int = Field(gt=0)
+
+
+class InventoryImportConfirm(BaseModel):
+    warehouse_id: int
+    items: List[InventoryImportItem] = Field(min_length=1)
+    ref_code: Optional[str] = None
+    note: Optional[str] = None
+    created_by: Optional[str] = None

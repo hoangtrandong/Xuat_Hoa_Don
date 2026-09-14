@@ -19,6 +19,7 @@ def seed_lots():
         warehouses = db.execute(select(Warehouse)).scalars().all()
         locations = []
         location_codes = ["A1", "A2", "B1", "B2"]
+        locations_by_warehouse = {}
         
         for wh in warehouses:
             for code in location_codes:
@@ -39,6 +40,12 @@ def seed_lots():
                     locations.append(loc)
         
         db.flush()
+        for wh in warehouses:
+            locations_by_warehouse[wh.id] = db.execute(
+                select(WarehouseLocation)
+                .where(WarehouseLocation.warehouse_id == wh.id)
+                .order_by(WarehouseLocation.code)
+            ).scalars().all()
         print(f"Da tao {len(locations)} vi tri kho")
 
         # 2. Tinh ton kho hien co theo san pham va kho
@@ -67,11 +74,8 @@ def seed_lots():
                 
                 if not existing_lot:
                     # Tim vi tri trong kho
-                    location = db.execute(
-                        select(WarehouseLocation)
-                        .where(WarehouseLocation.warehouse_id == warehouse_id)
-                        .limit(1)
-                    ).scalar_one_or_none()
+                    warehouse_locations = locations_by_warehouse.get(warehouse_id, [])
+                    location = warehouse_locations[product_id % len(warehouse_locations)] if warehouse_locations else None
                     
                     lot = InventoryLot(
                         warehouse_id=warehouse_id,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { PackagePlus, Truck, PackageCheck, ClipboardList } from "lucide-react";
+import { PackagePlus, Truck, PackageCheck, ClipboardList, Upload, MapPin } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -40,6 +40,14 @@ interface ApiWarehouse {
   id: number;
   name: string;
 }
+
+interface ImportAllocation { location_id: number; quantity: number }
+interface ImportItem {
+  product_id: number; sku: string; product_name: string; unit?: string | null;
+  lot_number: string; expiry_date: string; source_location_code?: string | null;
+  cartons: number; loose_boxes: number; quantity: number; allocations: ImportAllocation[];
+}
+interface ApiLocation { id: number; warehouse_id: number; code: string; is_active: boolean }
 
 function toStockLevel(item: ApiStockLevel): StockLevel {
   return {
@@ -90,6 +98,66 @@ export default function ImportPage() {
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [receiptItems, setReceiptItems] = useState<ImportItem[]>([]);
+  const [receiptWarehouseId, setReceiptWarehouseId] = useState<number | "">("");
+  const [receiptLocations, setReceiptLocations] = useState<ApiLocation[]>([]);
+  const [receiptDrafts, setReceiptDrafts] = useState<Record<number, { locationId: number | ""; quantity: number }>>({});
+  const [receiptUploading, setReceiptUploading] = useState(false);
+  const [receiptConfirming, setReceiptConfirming] = useState(false);
+
+  async function loadReceiptLocations(warehouse: number | "") {
+    if (!warehouse) { setReceiptLocations([]); return; }
+    const response = await fetch(`${API_URL}/inventory/locations/?warehouse_id=${warehouse}`);
+    if (!response.ok) throw new Error("Không thể tải vị trí kho.");
+    setReceiptLocations(await response.json() as ApiLocation[]);
+  }
+
+  async function uploadReceipt(file: File) {
+    if (!receiptWarehouseId) { setError("Vui lòng chọn kho nhập trước khi upload."); return; }
+    setError(""); setSuccess(""); setReceiptUploading(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const response = await fetch(`${API_URL}/inventory/import/upload?warehouse_id=${receiptWarehouseId}`, { method: "POST", body });
+      const result = await response.json() as ImportItem[] | { detail?: string };
+      if (!response.ok) throw new Error("detail" in result ? result.detail ?? "Không thể đọc file nhập kho." : "Không thể đọc file nhập kho.");
+      setReceiptItems(result as ImportItem[]);
+      setReceiptDrafts({});
+      setSuccess(`Đã đọc ${(result as ImportItem[]).length} dòng mã hàng + lot. Hãy phân bổ vị trí.`);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Không thể đọc file nhập kho.");
+    } finally { setReceiptUploading(false); }
+  }
+
+  function addReceiptAllocation(index: number) {
+    const draft = receiptDrafts[index];
+    if (!draft?.locationId || draft.quantity < 1) { setError("Chọn vị trí và nhập số lượng hộp hợp lệ."); return; }
+    setReceiptItems((items) => items.map((item, itemIndex) => itemIndex === index
+      ? { ...item, allocations: [...item.allocations, { location_id: Number(draft.locationId), quantity: draft.quantity }] }
+      : item));
+    setReceiptDrafts((drafts) => ({ ...drafts, [index]: { locationId: "", quantity: 1 } }));
+    setError("");
+  }
+
+  async function confirmReceiptImport() {
+    setError(""); setSuccess("");
+    if (!receiptWarehouseId || receiptItems.length === 0) { setError("Chưa có dữ liệu nhập kho."); return; }
+    const incomplete = receiptItems.find((item) => item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0) !== item.quantity);
+    if (incomplete) { setError(`${incomplete.sku} / ${incomplete.lot_number} chưa được phân bổ đủ số hộp.`); return; }
+    setReceiptConfirming(true);
+    try {
+      const response = await fetch(`${API_URL}/inventory/import/confirm`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ warehouse_id: receiptWarehouseId, items: receiptItems, ref_code: refCode.trim() || null, note: note.trim() || null }),
+      });
+      const result = await response.json() as { detail?: string };
+      if (!response.ok) throw new Error(result.detail ?? "Không thể xác nhận nhập kho.");
+      setReceiptItems([]); setSuccess("Đã xác nhận nhập kho và cập nhật tồn theo từng vị trí.");
+      setVersion((current) => current + 1);
+    } catch (confirmError) {
+      setError(confirmError instanceof Error ? confirmError.message : "Không thể xác nhận nhập kho.");
+    } finally { setReceiptConfirming(false); }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -181,9 +249,16 @@ export default function ImportPage() {
   return (
     <div className="space-y-6">
       <PageHeader title="Nhập kho" subtitle="Phiếu nhập kho từ nhà cung cấp và tồn đầu kỳ" actions={
-        <button onClick={openImport} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-          <PackagePlus size={16} /> Tạo phiếu nhập
-        </button>
+        <div className="flex gap-2">
+          <select value={receiptWarehouseId} onChange={(event) => { const value = Number(event.target.value) || ""; setReceiptWarehouseId(value); loadReceiptLocations(value).catch((e) => setError(e instanceof Error ? e.message : "Không thể tải vị trí kho.")); }} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm">
+            <option value="">Chọn kho nhập</option>{warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+          </select>
+          <label className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-medium cursor-pointer">
+            <Upload size={16} /> {receiptUploading ? "Đang đọc…" : "Upload phiếu xếp hàng"}
+            <input type="file" accept=".xlsx,.xlsm" className="hidden" disabled={receiptUploading || !receiptWarehouseId} onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadReceipt(file); event.target.value = ""; }} />
+          </label>
+          <button onClick={openImport} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"><PackagePlus size={16} /> Tạo phiếu nhập</button>
+        </div>
       } />
       {loadError && <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">{loadError}</div>}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -192,6 +267,13 @@ export default function ImportPage() {
         <StatCard label="Đơn PO liên quan" value={poCount} icon={<PackageCheck size={20} />} color="bg-purple-50 text-purple-600" />
         <StatCard label="Tồn đầu kỳ" value={inEntries.filter((entry) => entry.type === "OPENING").length} icon={<PackagePlus size={20} />} color="bg-amber-50 text-amber-600" />
       </div>
+      {receiptItems.length > 0 && <div className="bg-white rounded-xl border border-emerald-100 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div><h2 className="font-semibold">Phân bổ vị trí từ file Excel</h2><p className="text-xs text-gray-500 mt-1">Tồn kho quản lý theo hộp; số lượng tổng trong file là nguồn chính.</p></div>
+          <button disabled={receiptConfirming} onClick={() => confirmReceiptImport()} className="bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50">{receiptConfirming ? "Đang ghi…" : "Xác nhận nhập kho"}</button>
+        </div>
+        <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-4 py-3 text-left">Mã hàng</th><th className="px-4 py-3 text-left">Lot / HSD</th><th className="px-4 py-3 text-right">Tổng hộp</th><th className="px-4 py-3 text-left">Phân bổ vị trí</th><th className="px-4 py-3 text-left">Thêm vị trí</th></tr></thead><tbody>{receiptItems.map((item, index) => { const allocated = item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0); const draft = receiptDrafts[index] ?? { locationId: "", quantity: Math.max(1, item.quantity - allocated) }; return <tr key={`${item.sku}-${item.lot_number}`} className="border-t border-gray-50 align-top"><td className="px-4 py-3"><b>{item.sku}</b><div className="text-xs text-gray-500">{item.product_name}</div></td><td className="px-4 py-3">{item.lot_number}<div className="text-xs text-gray-500">HSD {new Date(item.expiry_date).toLocaleDateString("vi-VN")}</div></td><td className="px-4 py-3 text-right font-medium">{item.quantity}<div className={`text-xs ${allocated === item.quantity ? "text-emerald-600" : "text-amber-600"}`}>{allocated}/{item.quantity} đã xếp</div></td><td className="px-4 py-3">{item.allocations.length === 0 ? <span className="text-gray-400">Chưa phân bổ</span> : item.allocations.map((allocation, allocationIndex) => <div key={`${allocation.location_id}-${allocationIndex}`} className="flex items-center gap-1 text-xs mb-1"><MapPin size={12} />{receiptLocations.find((location) => location.id === allocation.location_id)?.code ?? allocation.location_id}: {allocation.quantity} hộp</div>)}</td><td className="px-4 py-3"><div className="flex gap-1"><select value={draft.locationId} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, locationId: Number(event.target.value) || "" } }))} className="border rounded px-2 py-1 text-xs"><option value="">Vị trí</option>{receiptLocations.filter((location) => location.is_active).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select><input type="number" min={1} max={item.quantity - allocated} value={draft.quantity} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, quantity: Number(event.target.value) || 1 } }))} className="w-20 border rounded px-2 py-1 text-xs" /><button onClick={() => addReceiptAllocation(index)} className="bg-sky-500 text-white rounded px-2 text-xs">+</button></div></td></tr>; })}</tbody></table></div>
+      </div>}
       <DataTable data={inEntries} columns={columns} searchKeys={["code", "productName", "productCode", "refCode", "createdBy"]} searchPlaceholder="Tìm phiếu nhập, sản phẩm, PO..." />
       <Drawer open={importOpen} onClose={() => setImportOpen(false)} title="Tạo phiếu nhập kho" subtitle="Ghi nhận nhập hàng và cập nhật tồn kho">
         <div className="p-5 space-y-4">

@@ -63,6 +63,10 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
         unit_index = headers.index("đvt") if "đvt" in headers else None
         carton_index = headers.index("thùng") if "thùng" in headers else None
         loose_index = headers.index("hộp") if "hộp" in headers else None
+        receipt_code = str(rows[6][1] or "").strip() if len(rows) > 6 and len(rows[6]) > 1 else None
+        po_code = str(rows[7][1] or "").strip() if len(rows) > 7 and len(rows[7]) > 1 else None
+        receipt_code = receipt_code or None
+        po_code = po_code or None
         products = {product.sku.upper(): product for product in db.scalars(select(Product)).all()}
         grouped: dict[tuple[str, str], dict[str, Any]] = {}
         for row_number, values in enumerate(rows[12:], 13):
@@ -89,6 +93,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 "lot_number": lot_number, "expiry_date": expiry_date,
                 "source_location_code": values[location_index] if location_index is not None and location_index < len(values) else None,
                 "cartons": 0, "loose_boxes": 0, "quantity": 0, "allocations": [],
+                "receipt_code": receipt_code, "po_code": po_code,
             })
             item["quantity"] += quantity
             item["cartons"] += int(values[carton_index] or 0) if carton_index is not None and carton_index < len(values) else 0
@@ -138,7 +143,7 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                     type="IN", warehouse_id=payload.warehouse_id, product_id=item.product_id,
                     quantity=allocation.quantity, lot_id=lot.id, location_id=allocation.location_id,
                     expiry_date=item.expiry_date, ref_type="PO", ref_code=payload.ref_code,
-                    note=payload.note or f"Nhập kho {item.sku} - {item.lot_number}",
+                    note=payload.note or f"Phiếu nhập {payload.receipt_code or '-'} - {item.sku} - {item.lot_number}",
                     created_by=payload.created_by,
                 )
                 db.add(transaction)

@@ -16,6 +16,7 @@ interface Lot {
 }
 interface TransferRow {
   product_id: number; source_location_id: number | ""; destination_location_id: number | ""; quantity: number;
+  product_query: string;
 }
 interface Transfer {
   id: number; code: string; warehouse_id: number; status: string; note: string | null;
@@ -58,7 +59,7 @@ export default function LocationTransferPage() {
       ) as [Warehouse[], Location[], Product[], Lot[], Transfer[]];
       setWarehouses(warehouseData); setLocations(locationData); setProducts(productData);
       setLots(lotData); setTransfers(transferData);
-      setWarehouseId((current) => current || warehouseData[0]?.id || "");
+      setWarehouseId((current) => current || warehouseData.find((warehouse) => /tổng/i.test(warehouse.name))?.id || warehouseData[0]?.id || "");
       setError("");
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Không thể tải dữ liệu điều chuyển.");
@@ -68,7 +69,7 @@ export default function LocationTransferPage() {
   useEffect(() => { loadData(); }, []);
 
   function addRow() {
-    setRows((current) => [...current, { product_id: 0, source_location_id: "", destination_location_id: "", quantity: 1 }]);
+    setRows((current) => [...current, { product_id: 0, product_query: "", source_location_id: "", destination_location_id: "", quantity: 1 }]);
   }
 
   function updateRow(index: number, patch: Partial<TransferRow>) {
@@ -99,7 +100,7 @@ export default function LocationTransferPage() {
     try {
       const createResponse = await fetch(`${API_URL}/inventory/transfers/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ warehouse_id: warehouseId, items: rows, note: note.trim() || null, created_by: "admin" }),
+        body: JSON.stringify({ warehouse_id: warehouseId, items: rows.map(({ product_query: _productQuery, ...row }) => row), note: note.trim() || null, created_by: "admin" }),
       });
       const created = await createResponse.json() as Transfer & { detail?: string };
       if (!createResponse.ok) throw new Error(created.detail ?? "Không thể tạo phiếu điều chuyển.");
@@ -124,7 +125,7 @@ export default function LocationTransferPage() {
         <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-3 py-3 text-left">2. Mã hàng</th><th className="px-3 py-3 text-left">3. Vị trí nguồn</th><th className="px-3 py-3 text-right">Tồn tại nguồn</th><th className="px-3 py-3 text-right">4. Số lượng</th><th className="px-3 py-3 text-left">5. Vị trí đích</th><th className="w-10" /></tr></thead><tbody>{rows.map((row, index) => {
           const available = availableFor(row.product_id, row.source_location_id);
           const allocations = previewLots(row).reduce((result, lot) => { const remaining = row.quantity - result.used; const quantity = Math.max(0, Math.min(remaining, lot.quantity_on_hand)); return { used: result.used + quantity, rows: quantity ? [...result.rows, `${lot.lot_number || "Không lot"} · HSD ${lot.expiry_date ? new Date(lot.expiry_date).toLocaleDateString("vi-VN") : "-"}: ${quantity}`] : result.rows }; }, { used: 0, rows: [] as string[] });
-          return <tr key={index} className="border-t align-top"><td className="px-3 py-3 min-w-56"><select value={row.product_id || ""} onChange={(event) => updateRow(index, { product_id: Number(event.target.value) || 0, source_location_id: "", destination_location_id: "" })} className="w-full border rounded px-2 py-2 text-xs"><option value="">Chọn mã hàng</option>{products.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name}</option>)}</select></td><td className="px-3 py-3 min-w-36"><select value={row.source_location_id} disabled={!row.product_id} onChange={(event) => updateRow(index, { source_location_id: Number(event.target.value) || "" })} className="w-full border rounded px-2 py-2 text-xs"><option value="">Chọn nguồn</option>{activeLocations.filter((location) => availableFor(row.product_id, location.id) > 0).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select></td><td className="px-3 py-3 text-right font-medium">{formatNumber(available)}<div className="text-xs text-gray-400">hộp</div></td><td className="px-3 py-3"><input type="number" min={1} max={available || 1} value={row.quantity} onChange={(event) => updateRow(index, { quantity: Number(event.target.value) || 1 })} className="w-24 border rounded px-2 py-2 text-right text-sm" /><div className="text-xs text-gray-400 mt-1">{allocations.rows.length ? `${allocations.rows.join("; ")}` : "FEFO tự động"}</div></td><td className="px-3 py-3"><select value={row.destination_location_id} disabled={!row.source_location_id} onChange={(event) => updateRow(index, { destination_location_id: Number(event.target.value) || "" })} className="border rounded px-2 py-2 text-xs"><option value="">Chọn đích</option>{activeLocations.filter((location) => location.id !== row.source_location_id).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select></td><td className="px-3 py-3"><button onClick={() => setRows((current) => current.filter((_, rowIndex) => rowIndex !== index))} className="text-red-500 p-1" title="Xóa dòng"><Trash2 size={16} /></button></td></tr>;
+          return <tr key={index} className="border-t align-top"><td className="px-3 py-3 min-w-56"><input list={`products-${index}`} value={row.product_query} onChange={(event) => { const query = event.target.value; const product = products.find((item) => item.sku.toLowerCase() === query.trim().toLowerCase()); updateRow(index, { product_query: query, product_id: product?.id || 0, source_location_id: "", destination_location_id: "" }); }} placeholder="Tìm theo mã sản phẩm" className="w-full border rounded px-2 py-2 text-xs" /><datalist id={`products-${index}`}>{products.map((product) => <option key={product.id} value={product.sku}>{product.name}</option>)}</datalist><div className="text-xs text-gray-500 mt-1">{productMap.get(row.product_id)?.name || "Nhập/chọn đúng mã SKU"}</div></td><td className="px-3 py-3 min-w-36"><select value={row.source_location_id} disabled={!row.product_id} onChange={(event) => updateRow(index, { source_location_id: Number(event.target.value) || "" })} className="w-full border rounded px-2 py-2 text-xs"><option value="">Chọn nguồn</option>{activeLocations.filter((location) => availableFor(row.product_id, location.id) > 0).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select></td><td className="px-3 py-3 text-right font-medium">{formatNumber(available)}<div className="text-xs text-gray-400">hộp</div></td><td className="px-3 py-3"><input type="number" min={1} max={available || 1} value={row.quantity} onChange={(event) => updateRow(index, { quantity: Number(event.target.value) || 1 })} className="w-24 border rounded px-2 py-2 text-right text-sm" /><div className="text-xs text-gray-400 mt-1">{allocations.rows.length ? `${allocations.rows.join("; ")}` : "FEFO tự động"}</div></td><td className="px-3 py-3"><select value={row.destination_location_id} disabled={!row.source_location_id} onChange={(event) => updateRow(index, { destination_location_id: Number(event.target.value) || "" })} className="border rounded px-2 py-2 text-xs"><option value="">Chọn đích</option>{activeLocations.filter((location) => location.id !== row.source_location_id).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select></td><td className="px-3 py-3"><button onClick={() => setRows((current) => current.filter((_, rowIndex) => rowIndex !== index))} className="text-red-500 p-1" title="Xóa dòng"><Trash2 size={16} /></button></td></tr>;
         })}</tbody></table></div>
         {!rows.length && <div className="text-center text-sm text-gray-400 py-8">Chưa có dòng điều chuyển. Nhấn “Thêm dòng” để bắt đầu.</div>}
         <div className="flex items-end gap-3"><label className="block flex-1"><span className="text-xs text-gray-500">Ghi chú</span><input value={note} onChange={(event) => setNote(event.target.value)} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" placeholder="Ví dụ: Sắp xếp lại khu vực A" /></label><button onClick={createAndConfirm} disabled={saving || loading || !rows.length} className="flex items-center gap-2 bg-emerald-500 text-white rounded-lg px-4 py-2 text-sm disabled:opacity-50"><CheckCircle2 size={16} />{saving ? "Đang xử lý…" : "Xác nhận điều chuyển"}</button></div>

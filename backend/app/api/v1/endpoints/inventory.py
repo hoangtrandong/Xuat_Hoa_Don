@@ -20,7 +20,7 @@ from app.models.inventory import (
     InventoryTransfer as TransferModel,
 )
 from app.models.product import Product
-from app.crud import inventory_transaction as crud
+from app.crud import inventory as crud
 from uuid import uuid4
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -197,7 +197,7 @@ def list_warehouses(db: Session = Depends(get_db)):
 
 @router.get("/transactions/", response_model=List[InventoryTransaction])
 def list_transactions(skip: int = 0, limit: int = 100, product_id: int | None = None, txn_type: str | None = None, db: Session = Depends(get_db)):
-    return crud.list_(db, skip=skip, limit=limit, product_id=product_id, txn_type=txn_type)
+    return crud.list_transactions(db, skip=skip, limit=limit, product_id=product_id, txn_type=txn_type)
 
 
 @router.get("/locations/", response_model=List[WarehouseLocation])
@@ -220,13 +220,13 @@ def list_lots(warehouse_id: int | None = None, product_id: int | None = None, db
 
 @router.get("/stock-levels/", response_model=List[StockLevel])
 def stock_levels(warehouse_id: int | None = None, db: Session = Depends(get_db)):
-    return crud.stock_levels(db, warehouse_id=warehouse_id)
+    return crud.get_stock_levels(db, warehouse_id=warehouse_id)
 
 
 @router.post("/adjust/", response_model=InventoryTransaction, status_code=201)
 def adjust_stock(payload: StockAdjust, db: Session = Depends(get_db)):
     try:
-        return crud.adjust(db, payload)
+        return crud.adjust_stock(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

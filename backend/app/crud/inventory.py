@@ -4,7 +4,10 @@ from typing import List, Optional
 from datetime import datetime
 from uuid import uuid4
 
-from app.models.inventory import InventoryTransaction, Warehouse, InventoryLot, WarehouseLocation
+from app.models.inventory import (
+    InventoryTransaction, Warehouse, InventoryLot, WarehouseLocation,
+    DeliveryAllocation, DeliveryRequest, DeliveryRequestItem,
+)
 from app.models.product import Product, ProductUnit
 from app.schemas.inventory import StockAdjust, StockLevel
 from app.crud.finance import record_debt_on_sales_export
@@ -122,6 +125,22 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
         location_subquery = location_subquery.where(InventoryLot.warehouse_id == warehouse_id)
     location_subquery = location_subquery.subquery()
 
+    # Aktywne yêu cầu, które rezerwują towar (te same statusy co w delivery_request.py)
+    active_statuses = ("DRAFT", "SUBMITTED", "RECEIVED")
+    # Subquery: ilość zarezerwowana przez aktywne yêu cầu (do policzenia stanu netto)
+    reserved_subquery = (
+        select(
+            DeliveryRequestItem.product_id,
+            func.coalesce(func.sum(DeliveryAllocation.allocated_quantity), 0).label("reserved_qty"),
+        )
+        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestItem.request_id)
+        .join(DeliveryAllocation, DeliveryAllocation.item_id == DeliveryRequestItem.id)
+        .where(DeliveryRequest.status.in_(active_statuses))
+    )
+    if warehouse_id is not None:
+        reserved_subquery = reserved_subquery.where(DeliveryRequest.warehouse_id == warehouse_id)
+    reserved_subquery = reserved_subquery.group_by(DeliveryRequestItem.product_id).subquery()
+
     # Main query: join với products
     result = db.execute(
         select(
@@ -131,6 +150,7 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             ProductUnit.name.label("unit"),
             Product.reorder_level,
             func.coalesce(lot_subquery.c.lot_qty, 0).label("on_hand"),
+            func.coalesce(reserved_subquery.c.reserved_qty, 0).label("reserved_qty"),
             func.coalesce(lot_subquery.c.lot_count, 0).label("lot_count"),
             lot_subquery.c.earliest_expiry,
             location_subquery.c.locations,
@@ -138,20 +158,23 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
         .join(ProductUnit, ProductUnit.id == Product.unit_id)
         .outerjoin(lot_subquery, lot_subquery.c.product_id == Product.id)
         .outerjoin(location_subquery, location_subquery.c.product_id == Product.id)
+        .outerjoin(reserved_subquery, reserved_subquery.c.product_id == Product.id)
         .order_by(Product.sku)
     )
 
     levels = []
     for row in result.all():
         on_hand = int(row.on_hand or 0)
+        reserved = int(row.reserved_qty or 0)
+        available = max(0, on_hand - reserved)
         levels.append(StockLevel(
             product_id=row.product_id,
             product_code=row.product_code,
             product_name=row.product_name,
             unit=row.unit,
             on_hand=on_hand,
-            reserved=0,
-            available=on_hand,
+            reserved=reserved,
+            available=available,
             reorder_level=row.reorder_level or 20,
             lot_count=int(row.lot_count or 0),
             earliest_expiry=row.earliest_expiry,

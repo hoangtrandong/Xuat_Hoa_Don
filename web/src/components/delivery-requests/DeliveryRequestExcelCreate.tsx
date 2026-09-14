@@ -8,7 +8,7 @@ type Warehouse = { id: number; name: string };
 type ProductOption = { id: number; sku: string; name: string };
 type PreviewItem = {
   product_id: number; sku: string; product_name: string; quantity: number;
-  requested_quantity_raw?: string | null; available_quantity: number; shortage_quantity: number;
+  requested_quantity_raw?: string | null; available_quantity: number; reserved_quantity?: number; shortage_quantity: number;
   employee_allocations?: Record<string, unknown> | null;
 };
 
@@ -142,13 +142,14 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
     setPlan(null);
     const response = await fetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${encodeURIComponent(warehouseId)}`);
     if (!response.ok) throw new Error("Không thể kiểm tra tồn kho.");
-    const stocks = await response.json() as Array<{ product_id: number; available: number }>;
+    const stocks = await response.json() as Array<{ product_id: number; available: number; reserved?: number }>;
     const availableByProduct = new Map(stocks.map((stock) => [stock.product_id, stock.available]));
+    const reservedByProduct = new Map(stocks.map((stock) => [stock.product_id, stock.reserved ?? 0]));
     setPreview((items) => items.map((item) => {
       const available = availableByProduct.get(item.product_id) ?? 0;
-      return { ...item, available_quantity: available, shortage_quantity: Math.max(0, item.quantity - available) };
+      return { ...item, available_quantity: available, reserved_quantity: reservedByProduct.get(item.product_id) ?? 0, shortage_quantity: Math.max(0, item.quantity - available) };
     }));
-    setMessage("Đã kiểm tra tồn kho. Chưa tìm vị trí.");
+    setMessage("Đã kiểm tra tồn kho (po odjęciu rezerwacji). Chưa tìm vị trí.");
   }
 
   async function findLocations() {
@@ -257,7 +258,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between"><div className="flex items-center gap-2"><ClipboardList size={18} className="text-sky-500" /><span className="font-semibold">Danh sách sản phẩm upload</span></div>{preview.length > 0 && <div className="flex gap-2"><button onClick={() => checkStock().catch((e) => setError(e instanceof Error ? e.message : "Không thể kiểm tra tồn kho."))} className="bg-amber-500 text-white px-3 py-2 rounded-lg text-sm">Check tồn</button><button disabled={planning} onClick={() => findLocations()} className="bg-indigo-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50">{planning ? "Đang tìm…" : "Tìm vị trí"}</button><button onClick={() => confirmPreview().catch((e) => setError(e instanceof Error ? e.message : "Không thể tạo yêu cầu."))} className="bg-emerald-500 text-white px-3 py-2 rounded-lg text-sm">Xác nhận tạo yêu cầu</button></div>}</div>
         {preview.length === 0 ? <div className="p-8 text-center text-sm text-gray-500">Chọn kho và upload Excel để xem danh sách sản phẩm.</div> : <div className="overflow-x-auto">
-          <table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left px-5 py-3">Mã hàng</th><th className="text-left px-5 py-3">Tên sản phẩm</th><th className="text-right px-5 py-3">Số lượng yêu cầu</th><th className="text-right px-5 py-3">Tồn thực tế</th><th className="text-right px-5 py-3">Thiếu</th></tr></thead><tbody>{preview.map((item, index) => <tr key={`${item.sku}-${index}`} className={item.shortage_quantity > 0 ? "bg-red-50" : ""}><td className="px-5 py-2"><input list="delivery-product-options" value={item.sku} placeholder="Tìm mã SKU..." onChange={(event) => { const sku = event.target.value; selectPreviewSku(index, sku); }} onBlur={(event) => replacePreviewSku(index, event.target.value).catch(() => setError("Không thể kiểm tra mã thay thế."))} className="w-40 border rounded px-2 py-1" /></td><td className="px-5 py-2">{item.product_name}</td><td className="px-5 py-2 text-right">{item.requested_quantity_raw ?? item.quantity}</td><td className="px-5 py-2 text-right">{item.available_quantity || "-"}</td><td className={`px-5 py-2 text-right font-medium ${item.shortage_quantity > 0 ? "text-red-600" : "text-gray-500"}`}>{item.shortage_quantity || "-"}</td></tr>)}</tbody></table>
+          <table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left px-5 py-3">Mã hàng</th><th className="text-left px-5 py-3">Tên sản phẩm</th><th className="text-right px-5 py-3">Số lượng yêu cầu</th><th className="text-right px-5 py-3">Tồn thực tế</th><th className="text-right px-5 py-3">Zarezerwowane</th><th className="text-right px-5 py-3">Thiếu</th></tr></thead><tbody>{preview.map((item, index) => <tr key={`${item.sku}-${index}`} className={item.shortage_quantity > 0 ? "bg-red-50" : ""}><td className="px-5 py-2"><input list="delivery-product-options" value={item.sku} placeholder="Tìm mã SKU..." onChange={(event) => { const sku = event.target.value; selectPreviewSku(index, sku); }} onBlur={(event) => replacePreviewSku(index, event.target.value).catch(() => setError("Không thể kiểm tra mã thay thế."))} className="w-40 border rounded px-2 py-1" /></td><td className="px-5 py-2">{item.product_name}</td><td className="px-5 py-2 text-right">{item.requested_quantity_raw ?? item.quantity}</td><td className="px-5 py-2 text-right">{item.available_quantity || "-"}</td><td className="px-5 py-2 text-right">{item.reserved_quantity || "-"}</td><td className={`px-5 py-2 text-right font-medium ${item.shortage_quantity > 0 ? "text-red-600" : "text-gray-500"}`}>{item.shortage_quantity || "-"}</td></tr>)}</tbody></table>
         </div>}
       </div>
       {plan && plan.length > 0 && (

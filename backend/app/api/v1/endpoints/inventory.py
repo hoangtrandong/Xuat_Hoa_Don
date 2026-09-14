@@ -247,6 +247,14 @@ def confirm_location_transfer(transfer_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/transfers/{transfer_id}/cancel", response_model=InventoryTransferResponse)
+def cancel_location_transfer(transfer_id: int, db: Session = Depends(get_db)):
+    try:
+        return crud.cancel_location_transfer(db, transfer_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/transfers/", response_model=List[InventoryTransferResponse])
 def list_location_transfers(db: Session = Depends(get_db)):
     return db.query(TransferModel).order_by(TransferModel.created_at.desc()).all()

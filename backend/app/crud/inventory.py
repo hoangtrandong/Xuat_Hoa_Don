@@ -134,6 +134,18 @@ def confirm_location_transfer(db: Session, transfer_id: int) -> InventoryTransfe
     return transfer
 
 
+def cancel_location_transfer(db: Session, transfer_id: int) -> InventoryTransfer:
+    transfer = db.get(InventoryTransfer, transfer_id)
+    if not transfer:
+        raise ValueError("Không tìm thấy phiếu điều chuyển.")
+    if transfer.status != "DRAFT":
+        raise ValueError("Chỉ phiếu nháp mới được hủy.")
+    transfer.status = "CANCELLED"
+    db.commit()
+    db.refresh(transfer)
+    return transfer
+
+
 def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -> InventoryTransaction:
     product = db.get(Product, obj_in.product_id)
     if not product:

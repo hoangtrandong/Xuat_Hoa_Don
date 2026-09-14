@@ -116,7 +116,7 @@ class InventoryImportConfirm(BaseModel):
 
 class InventoryTransferItemCreate(BaseModel):
     product_id: int
-    lot_id: int
+    lot_id: Optional[int] = None
     source_location_id: int
     destination_location_id: int
     quantity: int = Field(gt=0)

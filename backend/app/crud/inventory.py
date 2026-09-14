@@ -38,11 +38,8 @@ def create_location_transfer(db: Session, payload, created_by: str = "system") -
         warehouse_id=payload.warehouse_id, note=payload.note, created_by=payload.created_by or created_by,
     )
     for item in payload.items:
-        lot = db.get(InventoryLot, item.lot_id)
         source = db.get(WarehouseLocation, item.source_location_id)
         destination = db.get(WarehouseLocation, item.destination_location_id)
-        if not lot or lot.warehouse_id != payload.warehouse_id or lot.product_id != item.product_id:
-            raise ValueError("Lô tồn không thuộc sản phẩm hoặc kho đã chọn.")
         if not source or source.warehouse_id != payload.warehouse_id or not source.is_active:
             raise ValueError("Vị trí nguồn không thuộc kho hoặc không hoạt động.")
         if not destination or destination.warehouse_id != payload.warehouse_id or not destination.is_active:
@@ -51,11 +48,30 @@ def create_location_transfer(db: Session, payload, created_by: str = "system") -
             raise ValueError("Vị trí nguồn không khớp với lô tồn.")
         if item.source_location_id == item.destination_location_id:
             raise ValueError("Vị trí nguồn và đích phải khác nhau.")
-        transfer.items.append(InventoryTransferItem(
-            product_id=item.product_id, lot_id=item.lot_id,
-            source_location_id=item.source_location_id,
-            destination_location_id=item.destination_location_id, quantity=item.quantity,
-        ))
+        if item.lot_id:
+            lots = [db.get(InventoryLot, item.lot_id)]
+        else:
+            lots = list(db.scalars(select(InventoryLot).where(
+                InventoryLot.warehouse_id == payload.warehouse_id,
+                InventoryLot.product_id == item.product_id,
+                InventoryLot.location_id == item.source_location_id,
+                InventoryLot.quantity_on_hand > 0,
+            ).order_by(InventoryLot.expiry_date.asc().nulls_last(), InventoryLot.id)).all())
+        lots = [lot for lot in lots if lot and lot.warehouse_id == payload.warehouse_id
+                and lot.product_id == item.product_id and lot.location_id == item.source_location_id]
+        remaining = item.quantity
+        for lot in lots:
+            if remaining <= 0:
+                break
+            allocated = min(remaining, lot.quantity_on_hand)
+            transfer.items.append(InventoryTransferItem(
+                product_id=item.product_id, lot_id=lot.id,
+                source_location_id=item.source_location_id,
+                destination_location_id=item.destination_location_id, quantity=allocated,
+            ))
+            remaining -= allocated
+        if remaining:
+            raise ValueError("Tồn theo mã hàng tại vị trí nguồn không đủ số lượng điều chuyển.")
     db.add(transfer)
     db.commit()
     db.refresh(transfer)

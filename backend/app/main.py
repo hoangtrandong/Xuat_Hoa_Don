@@ -1,3 +1,8 @@
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -6,10 +11,22 @@ from app.core.config import settings
 from app.api.v1.router import api_router
 
 
+def run_database_migrations() -> None:
+    alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    command.upgrade(alembic_config, "head")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    run_database_migrations()
+    yield
+
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version="0.1.0",
     openapi_url=f"{settings.API_V1_PREFIX}/openapi.json",
+    lifespan=lifespan,
 )
 
 # Custom middleware to add CORS headers to ALL responses (including errors)

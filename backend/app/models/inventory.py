@@ -49,6 +49,7 @@ class InventoryTransaction(Base):
     note: Mapped[str | None] = mapped_column(String(255))
     created_by: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    document_date: Mapped[datetime | None] = mapped_column(DateTime)
     lot_id: Mapped[int | None] = mapped_column(ForeignKey("inventory_lots.id"))
     location_id: Mapped[int | None] = mapped_column(ForeignKey("warehouse_locations.id"))
     expiry_date: Mapped[datetime | None] = mapped_column(DateTime)

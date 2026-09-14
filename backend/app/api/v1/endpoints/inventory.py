@@ -91,7 +91,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
         po_references = ", ".join(dict.fromkeys(
             part.strip() for part in (po_values or "").split(",") if part.strip()
         )) or None
-        received_at = _parse_import_datetime(rows[5][7] if len(rows) > 5 and len(rows[5]) > 7 else None)
+        document_date = _parse_import_datetime(rows[5][7] if len(rows) > 5 and len(rows[5]) > 7 else None)
         products = {product.sku.upper(): product for product in db.scalars(select(Product)).all()}
         grouped: dict[tuple[str, str], dict[str, Any]] = {}
         for row_number, values in enumerate(rows[12:], 13):
@@ -119,7 +119,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 "source_location_code": values[location_index] if location_index is not None and location_index < len(values) else None,
                 "cartons": 0, "loose_boxes": 0, "quantity": 0, "allocations": [],
                 "delivery_references": delivery_references, "po_references": po_references,
-                "received_at": received_at,
+                "document_date": document_date,
             })
             item["quantity"] += quantity
             item["cartons"] += int(values[carton_index] or 0) if carton_index is not None and carton_index < len(values) else 0
@@ -135,7 +135,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
 def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depends(get_db)):
     if not db.get(WarehouseModel, payload.warehouse_id):
         raise HTTPException(status_code=400, detail="Không tìm thấy kho.")
-    transaction_time = payload.received_at or datetime.utcnow()
+    transaction_time = datetime.utcnow()
     created: list[TransactionModel] = []
     try:
         for item in payload.items:
@@ -175,6 +175,7 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                     ),
                     created_by=payload.created_by,
                     created_at=transaction_time,
+                    document_date=payload.document_date,
                 )
                 db.add(transaction)
                 created.append(transaction)

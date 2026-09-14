@@ -34,6 +34,7 @@ interface ApiTransaction {
   note: string | null;
   created_by: string | null;
   created_at: string;
+  document_date: string | null;
 }
 
 interface ApiWarehouse {
@@ -47,7 +48,7 @@ interface ImportItem {
   lot_number: string; expiry_date: string; source_location_code?: string | null;
   cartons: number; loose_boxes: number; quantity: number; allocations: ImportAllocation[];
   delivery_references?: string | null; po_references?: string | null;
-  received_at?: string | null;
+  document_date?: string | null;
 }
 interface ApiLocation { id: number; warehouse_id: number; code: string; is_active: boolean }
 
@@ -154,7 +155,7 @@ export default function ImportPage() {
           warehouse_id: receiptWarehouseId,
           items: receiptItems,
           delivery_references: receiptItems[0]?.delivery_references || null,
-          received_at: receiptItems[0]?.received_at || null,
+          document_date: receiptItems[0]?.document_date || null,
           ref_code: receiptItems[0]?.po_references || refCode.trim() || null,
           note: note.trim() || null,
         }),
@@ -278,7 +279,7 @@ export default function ImportPage() {
       </div>
       {receiptItems.length > 0 && <div className="bg-white rounded-xl border border-emerald-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-          <div><h2 className="font-semibold">Phân bổ vị trí từ file Excel</h2><p className="text-xs text-gray-500 mt-1">Tồn kho quản lý theo hộp; số lượng tổng trong file là nguồn chính.</p><div className="text-xs text-gray-600 mt-2">Mã delivery tham chiếu: <b>{receiptItems[0]?.delivery_references || "-"}</b> · PO liên quan: <b>{receiptItems[0]?.po_references || "-"}</b></div></div>
+          <div><h2 className="font-semibold">Phân bổ vị trí từ file Excel</h2><p className="text-xs text-gray-500 mt-1">Tồn kho quản lý theo hộp; số lượng tổng trong file là nguồn chính.</p><div className="text-xs text-gray-600 mt-2">Mã delivery tham chiếu: <b>{receiptItems[0]?.delivery_references || "-"}</b> · PO liên quan: <b>{receiptItems[0]?.po_references || "-"}</b> · Ngày chứng từ H6: <b>{receiptItems[0]?.document_date ? formatDateTime(receiptItems[0].document_date) : "-"}</b></div></div>
           <button disabled={receiptConfirming} onClick={() => confirmReceiptImport()} className="bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50">{receiptConfirming ? "Đang ghi…" : "Xác nhận nhập kho"}</button>
         </div>
         <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-4 py-3 text-left">Mã hàng</th><th className="px-4 py-3 text-left">Lot / HSD</th><th className="px-4 py-3 text-right">Tổng hộp</th><th className="px-4 py-3 text-left">Phân bổ vị trí</th><th className="px-4 py-3 text-left">Thêm vị trí</th></tr></thead><tbody>{receiptItems.map((item, index) => { const allocated = item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0); const draft = receiptDrafts[index] ?? { locationId: "", quantity: Math.max(1, item.quantity - allocated) }; return <tr key={`${item.sku}-${item.lot_number}`} className="border-t border-gray-50 align-top"><td className="px-4 py-3"><b>{item.sku}</b><div className="text-xs text-gray-500">{item.product_name}</div></td><td className="px-4 py-3">{item.lot_number}<div className="text-xs text-gray-500">HSD {new Date(item.expiry_date).toLocaleDateString("vi-VN")}</div></td><td className="px-4 py-3 text-right font-medium">{item.quantity}<div className={`text-xs ${allocated === item.quantity ? "text-emerald-600" : "text-amber-600"}`}>{allocated}/{item.quantity} đã xếp</div></td><td className="px-4 py-3">{item.allocations.length === 0 ? <span className="text-gray-400">Chưa phân bổ</span> : item.allocations.map((allocation, allocationIndex) => <div key={`${allocation.location_id}-${allocationIndex}`} className="flex items-center gap-1 text-xs mb-1"><MapPin size={12} />{receiptLocations.find((location) => location.id === allocation.location_id)?.code ?? allocation.location_id}: {allocation.quantity} hộp</div>)}</td><td className="px-4 py-3"><div className="flex gap-1"><select value={draft.locationId} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, locationId: Number(event.target.value) || "" } }))} className="border rounded px-2 py-1 text-xs"><option value="">Vị trí</option>{receiptLocations.filter((location) => location.is_active).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select><input type="number" min={1} max={item.quantity - allocated} value={draft.quantity} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, quantity: Number(event.target.value) || 1 } }))} className="w-20 border rounded px-2 py-1 text-xs" /><button onClick={() => addReceiptAllocation(index)} className="bg-sky-500 text-white rounded px-2 text-xs">+</button></div></td></tr>; })}</tbody></table></div>

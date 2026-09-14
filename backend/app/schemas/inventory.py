@@ -17,6 +17,7 @@ class InventoryTransaction(BaseModel):
     note: Optional[str]
     created_by: Optional[str]
     created_at: datetime
+    document_date: Optional[datetime] = None
     lot_id: Optional[int] = None
     location_id: Optional[int] = None
     expiry_date: Optional[datetime] = None
@@ -95,7 +96,7 @@ class InventoryImportItem(BaseModel):
     allocations: List["InventoryImportAllocation"] = Field(default_factory=list)
     delivery_references: Optional[str] = None
     po_references: Optional[str] = None
-    received_at: Optional[datetime] = None
+    document_date: Optional[datetime] = None
 
 
 class InventoryImportAllocation(BaseModel):
@@ -108,6 +109,6 @@ class InventoryImportConfirm(BaseModel):
     items: List[InventoryImportItem] = Field(min_length=1)
     ref_code: Optional[str] = None
     delivery_references: Optional[str] = None
-    received_at: Optional[datetime] = None
+    document_date: Optional[datetime] = None
     note: Optional[str] = None
     created_by: Optional[str] = None

@@ -3,6 +3,7 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 from sqlalchemy import text
+from time import monotonic, sleep
 
 from alembic import context
 import os
@@ -77,14 +78,28 @@ def run_migrations_online() -> None:
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"connect_timeout": 15},
     )
 
     with connectable.connect() as connection:
         # Multiple application instances can start together on deploy. Serialize
         # migrations so they cannot both apply the same revision concurrently.
         if connection.dialect.name == "postgresql":
-            connection.execute(text("SELECT pg_advisory_lock(hashtext('dms_alembic_migrations'))"))
+            deadline = monotonic() + 60
+            acquired = False
+            while monotonic() < deadline:
+                acquired = bool(connection.scalar(text(
+                    "SELECT pg_try_advisory_lock(hashtext('dms_alembic_migrations'))"
+                )))
+                if acquired:
+                    break
+                sleep(1)
+            if not acquired:
+                raise RuntimeError("Timed out waiting for the database migration lock.")
         try:
+            if connection.dialect.name == "postgresql":
+                connection.execute(text("SET lock_timeout = '60s'"))
+                connection.execute(text("SET statement_timeout = '120s'"))
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,

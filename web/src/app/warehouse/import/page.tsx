@@ -267,8 +267,8 @@ export default function ImportPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Nhập kho" subtitle="Phiếu nhập kho từ nhà cung cấp và tồn đầu kỳ" actions={
-        <div className="flex gap-2">
+      <PageHeader title="Nhập kho" subtitle="Phiếu nhập kho từ nhà cung cấp và tồn đầu kỳ" className="flex-col gap-3 md:flex-row md:items-center" actions={
+        <div className="flex w-full flex-wrap justify-end gap-2">
           <select value={receiptWarehouseId} onChange={(event) => { const value = Number(event.target.value) || ""; setReceiptWarehouseId(value); loadReceiptLocations(value).catch((e) => setError(e instanceof Error ? e.message : "Không thể tải vị trí kho.")); }} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm">
             <option value="">Chọn kho nhập</option>{warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
           </select>

@@ -258,7 +258,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between"><div className="flex items-center gap-2"><ClipboardList size={18} className="text-sky-500" /><span className="font-semibold">Danh sách sản phẩm upload</span></div>{preview.length > 0 && <div className="flex gap-2"><button onClick={() => checkStock().catch((e) => setError(e instanceof Error ? e.message : "Không thể kiểm tra tồn kho."))} className="bg-amber-500 text-white px-3 py-2 rounded-lg text-sm">Check tồn</button><button disabled={planning} onClick={() => findLocations()} className="bg-indigo-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50">{planning ? "Đang tìm…" : "Tìm vị trí"}</button><button onClick={() => confirmPreview().catch((e) => setError(e instanceof Error ? e.message : "Không thể tạo yêu cầu."))} className="bg-emerald-500 text-white px-3 py-2 rounded-lg text-sm">Xác nhận tạo yêu cầu</button></div>}</div>
         {preview.length === 0 ? <div className="p-8 text-center text-sm text-gray-500">Chọn kho và upload Excel để xem danh sách sản phẩm.</div> : <div className="overflow-x-auto">
-          <table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left px-5 py-3">Mã hàng</th><th className="text-left px-5 py-3">Tên sản phẩm</th><th className="text-right px-5 py-3">Số lượng yêu cầu</th><th className="text-right px-5 py-3">Tồn thực tế</th><th className="text-right px-5 py-3">Đã giữ</th><th className="text-right px-5 py-3">Thiếu</th></tr></thead><tbody>{preview.map((item, index) => <tr key={`${item.sku}-${index}`} className={item.shortage_quantity > 0 ? "bg-red-50" : ""}><td className="px-5 py-2"><input list="delivery-product-options" value={item.sku} placeholder="Tìm mã SKU..." onChange={(event) => { const sku = event.target.value; selectPreviewSku(index, sku); }} onBlur={(event) => replacePreviewSku(index, event.target.value).catch(() => setError("Không thể kiểm tra mã thay thế."))} className="w-40 border rounded px-2 py-1" /></td><td className="px-5 py-2">{item.product_name}</td><td className="px-5 py-2 text-right">{item.requested_quantity_raw ?? item.quantity}</td><td className="px-5 py-2 text-right">{item.available_quantity || "-"}</td><td className="px-5 py-2 text-right">{item.reserved_quantity || "-"}</td><td className={`px-5 py-2 text-right font-medium ${item.shortage_quantity > 0 ? "text-red-600" : "text-gray-500"}`}>{item.shortage_quantity || "-"}</td></tr>)}</tbody></table>
+          <table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left px-5 py-3">Mã hàng</th><th className="text-left px-5 py-3">Tên sản phẩm</th><th className="text-right px-5 py-3">Yêu cầu gốc</th><th className="text-right px-5 py-3">Tổng hộp quy đổi</th><th className="text-right px-5 py-3">Tồn thực tế</th><th className="text-right px-5 py-3">Đã giữ</th><th className="text-right px-5 py-3">Thiếu</th></tr></thead><tbody>{preview.map((item, index) => <tr key={`${item.sku}-${index}`} className={item.shortage_quantity > 0 ? "bg-red-50" : ""}><td className="px-5 py-2"><input list="delivery-product-options" value={item.sku} placeholder="Tìm mã SKU..." onChange={(event) => { const sku = event.target.value; selectPreviewSku(index, sku); }} onBlur={(event) => replacePreviewSku(index, event.target.value).catch(() => setError("Không thể kiểm tra mã thay thế."))} className="w-40 border rounded px-2 py-1" /></td><td className="px-5 py-2">{item.product_name}</td><td className="px-5 py-2 text-right">{item.requested_quantity_raw ?? `${item.quantity} hộp`}</td><td className="px-5 py-2 text-right font-medium">{item.quantity} hộp</td><td className="px-5 py-2 text-right">{item.available_quantity || "-"}</td><td className="px-5 py-2 text-right">{item.reserved_quantity || "-"}</td><td className={`px-5 py-2 text-right font-medium ${item.shortage_quantity > 0 ? "text-red-600" : "text-gray-500"}`}>{item.shortage_quantity || "-"}</td></tr>)}</tbody></table>
         </div>}
       </div>
       {plan && plan.length > 0 && (
@@ -273,6 +273,8 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                 <tr>
                   <th className="text-left px-5 py-3">Mã hàng</th>
                   <th className="text-left px-5 py-3">Tên sản phẩm</th>
+                  <th className="text-right px-5 py-3">Yêu cầu gốc</th>
+                  <th className="text-right px-5 py-3">Tổng hộp</th>
                   <th className="text-left px-5 py-3">Vị trí</th>
                   <th className="text-left px-5 py-3">Lô</th>
                   <th className="text-left px-5 py-3">HSD</th>
@@ -285,6 +287,8 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                     <tr key={item.sku} className="bg-red-50">
                       <td className="px-5 py-2 font-medium">{item.sku}</td>
                       <td className="px-5 py-2">{item.product_name}</td>
+                      <td className="px-5 py-2 text-right">{preview.find((previewItem) => previewItem.sku === item.sku)?.requested_quantity_raw ?? `${item.quantity} hộp`}</td>
+                      <td className="px-5 py-2 text-right">{item.quantity} hộp</td>
                       <td colSpan={4} className="px-5 py-2 text-red-600">Thiếu {item.shortage_quantity} đơn vị</td>
                     </tr>
                   ) : (
@@ -292,6 +296,8 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                       <tr key={`${item.sku}-${pickIndex}`} className={pickIndex === 0 ? "" : "border-t border-gray-50"}>
                         {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-5 py-2 font-medium">{item.sku}</td>}
                         {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-5 py-2">{item.product_name}</td>}
+                        {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-5 py-2 text-right">{preview.find((previewItem) => previewItem.sku === item.sku)?.requested_quantity_raw ?? `${item.quantity} hộp`}</td>}
+                        {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-5 py-2 text-right font-medium">{item.quantity} hộp</td>}
                         <td className="px-5 py-2">{pick.location_code ?? "-"}</td>
                         <td className="px-5 py-2">{pick.lot_number ?? "-"}</td>
                         <td className="px-5 py-2">{pick.expiry_date ? formatDate(pick.expiry_date) : "-"}</td>

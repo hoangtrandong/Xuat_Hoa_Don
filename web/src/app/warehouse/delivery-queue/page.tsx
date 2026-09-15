@@ -208,8 +208,10 @@ return (
                       <p className="text-xs text-gray-400">{item.sku}</p>
                     </div>
                     <div className="text-right">
-                      <p className="text-sm font-bold text-gray-900">{item.quantity}</p>
-                      <p className="text-xs text-gray-400">Yêu cầu</p>
+                      <p className="text-sm font-bold text-gray-900">{item.requested_quantity_raw || `${item.quantity} hộp`}</p>
+                      <p className="text-xs text-gray-400">Yêu cầu gốc</p>
+                      <p className="text-sm font-semibold text-sky-700">{item.quantity} hộp</p>
+                      <p className="text-xs text-gray-400">Tổng hộp quy đổi</p>
                     </div>
                   </div>
                 ))}

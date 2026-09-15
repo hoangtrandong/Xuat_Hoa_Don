@@ -190,6 +190,15 @@ export default function ImportPage() {
         setStockLevels(stocks.map(toStockLevel));
         setLedgerEntries(transactions.map((item) => toLedgerEntry(item, stockMap, warehouseMap)));
         setWarehouses(warehouseList);
+        if (!receiptWarehouseId) {
+          const defaultWarehouse = warehouseList.find((warehouse) => /tong|tổng/i.test(warehouse.name)) ?? warehouseList[0];
+          if (defaultWarehouse) {
+            setReceiptWarehouseId(defaultWarehouse.id);
+            loadReceiptLocations(defaultWarehouse.id).catch((locationError) => {
+              if (!cancelled) setError(locationError instanceof Error ? locationError.message : "Không thể tải vị trí kho.");
+            });
+          }
+        }
         setLoadError("");
       } catch (loadErrorValue) {
         if (!cancelled) setLoadError(loadErrorValue instanceof Error ? loadErrorValue.message : "Không thể tải dữ liệu kho.");
@@ -197,7 +206,7 @@ export default function ImportPage() {
     }
     load();
     return () => { cancelled = true; };
-  }, [version]);
+  }, [version, receiptWarehouseId]);
 
   const inEntries = ledgerEntries.filter((entry) => entry.type === "IN" || entry.type === "OPENING");
   const qtyIn = inEntries.filter((entry) => entry.type === "IN").reduce((sum, entry) => sum + entry.quantity, 0);

@@ -2,6 +2,7 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+from sqlalchemy import text
 
 from alembic import context
 import os
@@ -79,14 +80,22 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-        )
+        # Multiple application instances can start together on deploy. Serialize
+        # migrations so they cannot both apply the same revision concurrently.
+        if connection.dialect.name == "postgresql":
+            connection.execute(text("SELECT pg_advisory_lock(hashtext('dms_alembic_migrations'))"))
+        try:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_type=True,
+            )
 
-        with context.begin_transaction():
-            context.run_migrations()
+            with context.begin_transaction():
+                context.run_migrations()
+        finally:
+            if connection.dialect.name == "postgresql":
+                connection.execute(text("SELECT pg_advisory_unlock(hashtext('dms_alembic_migrations'))"))
 
 
 if context.is_offline_mode():

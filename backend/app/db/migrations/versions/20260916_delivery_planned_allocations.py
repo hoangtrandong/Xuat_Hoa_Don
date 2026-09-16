@@ -1,13 +1,13 @@
 """store admin delivery location and expiry plan
 
-Revision ID: 20260916_delivery_planned_allocations
+Revision ID: 20260916_delivery_plan
 Revises: 20260914_location_transfers
 """
 from alembic import op
 import sqlalchemy as sa
 
 
-revision = "20260916_delivery_planned_allocations"
+revision = "20260916_delivery_plan"
 down_revision = "20260914_location_transfers"
 branch_labels = None
 depends_on = None

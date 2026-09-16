@@ -96,10 +96,10 @@ def run_migrations_online() -> None:
                 sleep(1)
             if not acquired:
                 raise RuntimeError("Timed out waiting for the database migration lock.")
+            # The lock probe starts an implicit SQLAlchemy transaction. End it
+            # before Alembic creates its own migration transaction.
+            connection.commit()
         try:
-            if connection.dialect.name == "postgresql":
-                connection.execute(text("SET lock_timeout = '60s'"))
-                connection.execute(text("SET statement_timeout = '120s'"))
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,
@@ -107,6 +107,9 @@ def run_migrations_online() -> None:
             )
 
             with context.begin_transaction():
+                if connection.dialect.name == "postgresql":
+                    connection.execute(text("SET LOCAL lock_timeout = '60s'"))
+                    connection.execute(text("SET LOCAL statement_timeout = '120s'"))
                 context.run_migrations()
         finally:
             if connection.dialect.name == "postgresql":

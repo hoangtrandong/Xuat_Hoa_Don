@@ -5,7 +5,6 @@ Revises: 20260914_location_transfers
 """
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy import inspect
 
 
 revision = "20260916_delivery_planned_allocations"
@@ -15,14 +14,21 @@ depends_on = None
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    columns = {column["name"] for column in inspect(bind).get_columns("delivery_request_items")}
-    if "planned_allocations" not in columns:
+    # IF NOT EXISTS makes retries and concurrent startup attempts harmless.
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(sa.text(
+            "ALTER TABLE delivery_request_items "
+            "ADD COLUMN IF NOT EXISTS planned_allocations JSON"
+        ))
+    else:
         op.add_column("delivery_request_items", sa.Column("planned_allocations", sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    columns = {column["name"] for column in inspect(bind).get_columns("delivery_request_items")}
-    if "planned_allocations" in columns:
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(sa.text(
+            "ALTER TABLE delivery_request_items "
+            "DROP COLUMN IF EXISTS planned_allocations"
+        ))
+    else:
         op.drop_column("delivery_request_items", "planned_allocations")

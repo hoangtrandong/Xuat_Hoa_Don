@@ -112,6 +112,7 @@ class InventoryImportItem(BaseModel):
     cartons: int = 0
     loose_boxes: int = 0
     quantity: int = Field(gt=0)
+    boxes_per_carton: int = Field(default=1, ge=1)
     allocations: List["InventoryImportAllocation"] = Field(default_factory=list)
     delivery_references: Optional[str] = None
     po_references: Optional[str] = None

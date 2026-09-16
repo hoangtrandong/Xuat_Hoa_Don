@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
+import traceback
 
 from alembic import command
 from alembic.config import Config
@@ -10,10 +12,17 @@ from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.api.v1.router import api_router
 
+logger = logging.getLogger(__name__)
+
 
 def run_database_migrations() -> None:
     alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
-    command.upgrade(alembic_config, "head")
+    try:
+        command.upgrade(alembic_config, "head")
+    except Exception:
+        logger.error("Database migration failed during application startup.")
+        traceback.print_exc()
+        raise
 
 
 @asynccontextmanager

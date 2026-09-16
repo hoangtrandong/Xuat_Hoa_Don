@@ -8,7 +8,6 @@ class DeliveryRequestItemCreate(BaseModel):
     quantity: int = Field(ge=0)
     requested_quantity_raw: Optional[str] = None
     employee_allocations: Optional[Dict[str, Any]] = None
-    planned_allocations: Optional[List[Dict[str, Any]]] = None
 
 
 class DeliveryRequestCreate(BaseModel):
@@ -69,7 +68,6 @@ class DeliveryRequestItem(BaseModel):
     shortage_quantity: int = 0
     allocations: List[DeliveryAllocation] = Field(default_factory=list)
     employee_allocations: Optional[Dict[str, Any]] = None
-    planned_allocations: Optional[List[Dict[str, Any]]] = None
 
 
 class DeliveryRequestItemList(BaseModel):
@@ -82,7 +80,6 @@ class DeliveryRequestItemList(BaseModel):
     product_name: Optional[str] = None
     available_quantity: int = 0
     shortage_quantity: int = 0
-    planned_allocations: Optional[List[Dict[str, Any]]] = None
 
 
 class DeliveryRequestList(BaseModel):

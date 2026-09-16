@@ -146,7 +146,6 @@ def create(db: Session, payload: DeliveryRequestCreate) -> DeliveryRequest:
         raise ValueError("Không tìm thấy kho.")
     merged = {}
     employee_allocations = {}
-    planned_allocations = {}
     for row in payload.items:
         if not db.get(Product, row.product_id):
             raise ValueError(f"Không tìm thấy sản phẩm {row.product_id}.")
@@ -164,8 +163,6 @@ def create(db: Session, payload: DeliveryRequestCreate) -> DeliveryRequest:
                             existing[key] = allocation[key]
                 else:
                     target[employee] = target.get(employee, 0) + int(allocation)
-        if row.planned_allocations:
-            planned_allocations.setdefault(row.product_id, []).extend(row.planned_allocations)
     request = DeliveryRequest(code=_code(), warehouse_id=payload.warehouse_id,
                               note=payload.note, created_by=payload.created_by)
     try:
@@ -175,8 +172,7 @@ def create(db: Session, payload: DeliveryRequestCreate) -> DeliveryRequest:
         for product_id, quantity in merged.items():
             item = DeliveryRequestItem(request_id=request.id, product_id=product_id, quantity=quantity,
                                        requested_quantity_raw=raw_quantities.get(product_id),
-                                       employee_allocations=employee_allocations.get(product_id),
-                                       planned_allocations=planned_allocations.get(product_id))
+                                       employee_allocations=employee_allocations.get(product_id))
             db.add(item)
             db.flush()
         db.commit()
@@ -341,7 +337,6 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
 
     merged = {}
     employee_allocations = {}
-    planned_allocations = {}
     for row in payload.items:
         if not db.get(Product, row.product_id):
             raise ValueError(f"Không tìm thấy sản phẩm {row.product_id}.")
@@ -359,8 +354,6 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
                             existing[key] = allocation[key]
                 else:
                     target[employee] = target.get(employee, 0) + int(allocation)
-        if row.planned_allocations:
-            planned_allocations.setdefault(row.product_id, []).extend(row.planned_allocations)
 
     try:
         request.warehouse_id = payload.warehouse_id
@@ -376,8 +369,7 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
         for product_id, quantity in merged.items():
             item = DeliveryRequestItem(request_id=request.id, product_id=product_id, quantity=quantity,
                                        requested_quantity_raw=raw_quantities.get(product_id),
-                                       employee_allocations=employee_allocations.get(product_id),
-                                       planned_allocations=planned_allocations.get(product_id))
+                                       employee_allocations=employee_allocations.get(product_id))
             db.add(item)
         
         db.commit()

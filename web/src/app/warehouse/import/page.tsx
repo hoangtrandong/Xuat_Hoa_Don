@@ -271,6 +271,13 @@ export default function ImportPage() {
           <button onClick={openImport} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"><PackagePlus size={16} /> Tạo phiếu nhập</button>
         </div>
       } />
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
+        <p className="font-medium">Không thể upload phiếu nhập kho</p>
+        <p className="mt-1">{error}</p>
+        {error.toLowerCase().includes("không tìm thấy mã sản phẩm") && (
+          <p className="mt-1 text-red-600">Vui lòng thêm mã sản phẩm này vào Hàng hóa → Danh sách SKU rồi upload lại file.</p>
+        )}
+      </div>}
       {loadError && <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">{loadError}</div>}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label="Phiếu nhập trong kỳ" value={inEntries.filter((entry) => entry.type === "IN").length} icon={<ClipboardList size={20} />} color="bg-sky-50 text-sky-600" />

@@ -31,6 +31,12 @@ type DeliveryRequest = {
     requested_quantity_raw: string | null;
     available_quantity: number;
     shortage_quantity: number;
+    planned_allocations?: {
+      location_code?: string | null;
+      expiry_date?: string | null;
+      quantity: number;
+      allocation_strategy?: string;
+    }[] | null;
   }[];
 };
 
@@ -202,15 +208,27 @@ return (
               <h4 className="text-sm font-semibold text-gray-700 mb-2">Danh sách sản phẩm</h4>
               <div className="rounded-xl border border-gray-100 divide-y divide-gray-50">
                 {selected.items.map((item) => (
-                  <div key={item.id} className="flex items-center justify-between px-4 py-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-800 truncate">{item.product_name}</p>
-                      <p className="text-xs text-gray-400">{item.sku}</p>
+                  <div key={item.id} className="px-4 py-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate">{item.product_name}</p>
+                        <p className="text-xs text-gray-400">{item.sku}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-bold text-gray-900">{item.quantity}</p>
+                        <p className="text-xs text-gray-400">Yêu cầu</p>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <p className="text-sm font-bold text-gray-900">{item.quantity}</p>
-                      <p className="text-xs text-gray-400">Yêu cầu</p>
-                    </div>
+                    {item.planned_allocations && item.planned_allocations.length > 0 && (
+                      <div className="ml-4 mt-2 rounded-lg bg-sky-50 px-3 py-2 text-xs text-sky-800">
+                        <p className="font-medium mb-1">Kế hoạch vị trí/HSD từ admin</p>
+                        {item.planned_allocations.map((allocation, allocationIndex) => (
+                          <div key={allocationIndex}>
+                            {allocation.location_code || "—"} · HSD {allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"} · {allocation.quantity} hộp
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

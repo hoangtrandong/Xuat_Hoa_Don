@@ -114,7 +114,20 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       if (productId <= 0) {
         throw new Error(`Không tìm thấy SKU ${item.sku} trong hệ thống. Hãy kiểm tra lại mã sản phẩm.`);
       }
-      return { product_id: productId, quantity: item.quantity, requested_quantity_raw: item.requested_quantity_raw, employee_allocations: item.employee_allocations };
+      const planned = plan?.find((planItem) => (
+        planItem.product_id === productId
+        || planItem.sku.trim().toUpperCase() === item.sku.trim().toUpperCase()
+      ));
+      return {
+        product_id: productId, quantity: item.quantity, requested_quantity_raw: item.requested_quantity_raw,
+        employee_allocations: item.employee_allocations,
+        planned_allocations: planned?.picks.map((pick) => ({
+          location_code: pick.location_code,
+          expiry_date: pick.expiry_date,
+          quantity: pick.quantity,
+          allocation_strategy: pick.allocation_strategy,
+        })),
+      };
     });
     const response = await fetch(`${API_URL}/delivery-requests/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: Number(warehouseId), items }) });
     const result = await response.json() as { detail?: string; id?: number; code?: string; status?: string };

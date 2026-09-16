@@ -44,6 +44,7 @@ type DeliveryRequest = {
     planned_allocations?: {
       location_code?: string | null;
       location_id?: number | null;
+      lot_number?: string | null;
       expiry_date?: string | null;
       quantity: number;
       allocation_strategy?: string;
@@ -275,8 +276,8 @@ return (
                           const actual = (item.allocations ?? []).find((pick) => pick.location_id === allocation.location_id && pick.expiry_date === allocation.expiry_date);
                           return (
                             <div key={`${allocationIndex}-${allocation.location_code}`} className="grid grid-cols-4 gap-2 border-t border-gray-100 px-3 py-2 text-gray-700">
-                              <span>{allocation.location_code || "—"}</span>
-                              <span>{allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
+                              <span>{allocation.location_code || (allocation.location_id ? `#${allocation.location_id}` : "—")}</span>
+                              <span>{allocation.lot_number ?? "—"} · {allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
                               <span className="text-right">{allocation.quantity}</span>
                               <span className="text-right font-semibold text-emerald-600">{actual?.allocated_quantity ?? "—"}</span>
                             </div>

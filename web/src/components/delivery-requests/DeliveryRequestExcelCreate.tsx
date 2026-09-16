@@ -14,6 +14,7 @@ type PreviewItem = {
 
 type PickRow = {
   location_code: string | null;
+  location_id: number | null;
   lot_number: string | null;
   expiry_date: string | null;
   quantity: number;
@@ -123,6 +124,8 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         employee_allocations: item.employee_allocations,
         planned_allocations: planned?.picks.map((pick) => ({
           location_code: pick.location_code,
+          location_id: pick.location_id,
+          lot_number: pick.lot_number,
           expiry_date: pick.expiry_date,
           quantity: pick.quantity,
           allocation_strategy: pick.allocation_strategy,

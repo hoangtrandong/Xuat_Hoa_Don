@@ -219,8 +219,11 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
             key = (location_id, expiry_date, strategy)
             row = position_rows.get(key)
             if row is None:
+                lot = db.get(InventoryLot, _lot_id) if _lot_id is not None else None
                 row = FefoPlanPick(
                     location_code=location_code,
+                    location_id=location_id,
+                    lot_number=lot.lot_number if lot else None,
                     expiry_date=expiry_date,
                     quantity=take,
                     allocation_strategy=strategy,
@@ -243,7 +246,12 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
 
 def get(db: Session, request_id: int):
     request = db.scalar(select(DeliveryRequest).options(
-        selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.allocations)
+        selectinload(DeliveryRequest.items)
+        .selectinload(DeliveryRequestItem.allocations)
+        .options(
+            selectinload(DeliveryAllocation.location),
+            selectinload(DeliveryAllocation.lot),
+        )
     ).where(DeliveryRequest.id == request_id))
     return _with_stock(db, request)
 

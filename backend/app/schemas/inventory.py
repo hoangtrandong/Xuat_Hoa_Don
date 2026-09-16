@@ -82,6 +82,25 @@ class InventoryLot(BaseModel):
     unit_cost: Optional[float] = None
 
 
+class InventoryLotDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    warehouse_id: int
+    location_id: Optional[int] = None
+    location_code: Optional[str] = None
+    location_name: Optional[str] = None
+    product_id: int
+    product_code: str
+    product_name: str
+    unit: str
+    lot_number: Optional[str] = None
+    expiry_date: Optional[datetime] = None
+    quantity_on_hand: int
+    reserved_quantity: int = 0
+    available_quantity: int = 0
+    unit_cost: Optional[float] = None
+
+
 class InventoryImportItem(BaseModel):
     product_id: int
     sku: str
@@ -90,6 +109,7 @@ class InventoryImportItem(BaseModel):
     lot_number: str
     expiry_date: datetime
     source_location_code: Optional[str] = None
+    boxes_per_carton: int = Field(default=1, gt=0)
     cartons: int = 0
     loose_boxes: int = 0
     quantity: int = Field(gt=0)

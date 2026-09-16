@@ -31,8 +31,19 @@ type DeliveryRequest = {
     requested_quantity_raw: string | null;
     available_quantity: number;
     shortage_quantity: number;
+    allocations?: {
+      allocated_quantity: number;
+      allocation_sequence: number;
+      allocation_strategy: string;
+      lot_id?: number | null;
+      location_id?: number | null;
+      location_code?: string | null;
+      lot_number?: string | null;
+      expiry_date?: string | null;
+    }[];
     planned_allocations?: {
       location_code?: string | null;
+      location_id?: number | null;
       expiry_date?: string | null;
       quantity: number;
       allocation_strategy?: string;
@@ -59,6 +70,8 @@ const statusVariant: Record<string, "default" | "info" | "warning" | "success" |
 export default function DeliveryQueuePage() {
   const [rows, setRows] = useState<DeliveryRequest[]>([]);
   const [selected, setSelected] = useState<DeliveryRequest | null>(null);
+  const [selectedDetail, setSelectedDetail] = useState<DeliveryRequest | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
@@ -101,6 +114,7 @@ export default function DeliveryQueuePage() {
                        "Đã hủy yêu cầu thành công.";
       setMessage(successMsg);
       setSelected(null);
+      setSelectedDetail(null);
       load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Thao tác thất bại.");
@@ -108,6 +122,21 @@ export default function DeliveryQueuePage() {
       setLoading(false);
     }
   }
+
+  async function openRequest(request: DeliveryRequest) {
+      setSelected(request);
+      setSelectedDetail(null);
+      setDetailLoading(true);
+      try {
+        const response = await fetch(`${API_URL}/delivery-requests/${request.id}`);
+        if (!response.ok) throw new Error("Không thể tải chi tiết yêu cầu.");
+        setSelectedDetail(await response.json() as DeliveryRequest);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Không thể tải chi tiết yêu cầu.");
+      } finally {
+        setDetailLoading(false);
+      }
+    }
 
   const submittedCount = rows.filter((r) => r.status === "SUBMITTED").length;
   const receivedCount = rows.filter((r) => r.status === "RECEIVED").length;
@@ -180,12 +209,30 @@ return (
         columns={columns}
         searchKeys={["code", "created_by", "note"]}
         searchPlaceholder="Tìm mã yêu cầu, người tạo..."
-        onRowClick={(row) => setSelected(row)}
+        onRowClick={openRequest}
         emptyMessage="Không có yêu cầu xuất kho nào cần xử lý"
       />
-<Drawer open={selected !== null} onClose={() => setSelected(null)} title="Chi tiết yêu cầu xuất kho" subtitle={selected?.code}>
+<Drawer open={selected !== null} onClose={() => { setSelected(null); setSelectedDetail(null); }} title="Chi tiết yêu cầu xuất kho" subtitle={selected?.code}>
         {selected && (
           <div className="p-5 space-y-5">
+            {detailLoading && (
+              <div className="rounded-lg bg-sky-50 px-3 py-2 text-sm text-sky-700">Đang tải kế hoạch lấy hàng và tồn giữ...</div>
+            )}
+            {(() => {
+              const detail = selectedDetail ?? selected;
+              const requested = detail.items.reduce((sum, item) => sum + item.quantity, 0);
+              const planned = detail.items.reduce((sum, item) => sum + (item.planned_allocations ?? []).reduce((total, allocation) => total + allocation.quantity, 0), 0);
+              const allocated = detail.items.reduce((sum, item) => sum + (item.allocations ?? []).reduce((total, allocation) => total + allocation.allocated_quantity, 0), 0);
+              const shortage = detail.items.reduce((sum, item) => sum + item.shortage_quantity, 0);
+              return (
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="rounded-lg bg-gray-50 px-3 py-2"><p className="text-xs text-gray-500">Tổng yêu cầu</p><p className="font-bold text-gray-900">{requested} hộp</p></div>
+                  <div className="rounded-lg bg-sky-50 px-3 py-2"><p className="text-xs text-sky-600">Kế hoạch admin</p><p className="font-bold text-sky-800">{planned} hộp</p></div>
+                  <div className="rounded-lg bg-emerald-50 px-3 py-2"><p className="text-xs text-emerald-600">Đã giữ thực tế</p><p className="font-bold text-emerald-800">{allocated} hộp</p></div>
+                  <div className={`rounded-lg px-3 py-2 ${shortage > 0 ? "bg-red-50" : "bg-gray-50"}`}><p className={`text-xs ${shortage > 0 ? "text-red-600" : "text-gray-500"}`}>Còn thiếu</p><p className={`font-bold ${shortage > 0 ? "text-red-700" : "text-gray-900"}`}>{shortage} hộp</p></div>
+                </div>
+              );
+            })()}
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-full bg-sky-500 flex items-center justify-center flex-shrink-0">
                 <ClipboardList size={20} className="text-white" />
@@ -207,7 +254,7 @@ return (
             <div>
               <h4 className="text-sm font-semibold text-gray-700 mb-2">Danh sách sản phẩm</h4>
               <div className="rounded-xl border border-gray-100 divide-y divide-gray-50">
-                {selected.items.map((item) => (
+                {(selectedDetail ?? selected).items.map((item) => (
                   <div key={item.id} className="px-4 py-3">
                     <div className="flex items-center justify-between">
                       <div className="flex-1 min-w-0">
@@ -219,16 +266,32 @@ return (
                         <p className="text-xs text-gray-400">Yêu cầu</p>
                       </div>
                     </div>
-                    {item.planned_allocations && item.planned_allocations.length > 0 && (
-                      <div className="ml-4 mt-2 rounded-lg bg-sky-50 px-3 py-2 text-xs text-sky-800">
-                        <p className="font-medium mb-1">Kế hoạch vị trí/HSD từ admin</p>
-                        {item.planned_allocations.map((allocation, allocationIndex) => (
-                          <div key={allocationIndex}>
-                            {allocation.location_code || "—"} · HSD {allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"} · {allocation.quantity} hộp
+                    {(item.planned_allocations?.length || item.allocations?.length) ? (
+                      <div className="ml-4 mt-2 overflow-hidden rounded-lg border border-gray-100 text-xs">
+                        <div className="grid grid-cols-4 gap-2 bg-gray-50 px-3 py-2 font-medium text-gray-500">
+                          <span>Vị trí</span><span>Lot/HSD</span><span className="text-right">Kế hoạch</span><span className="text-right">Đã giữ</span>
+                        </div>
+                        {(item.planned_allocations ?? []).map((allocation, allocationIndex) => {
+                          const actual = (item.allocations ?? []).find((pick) => pick.location_id === allocation.location_id && pick.expiry_date === allocation.expiry_date);
+                          return (
+                            <div key={`${allocationIndex}-${allocation.location_code}`} className="grid grid-cols-4 gap-2 border-t border-gray-100 px-3 py-2 text-gray-700">
+                              <span>{allocation.location_code || "—"}</span>
+                              <span>{allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
+                              <span className="text-right">{allocation.quantity}</span>
+                              <span className="text-right font-semibold text-emerald-600">{actual?.allocated_quantity ?? "—"}</span>
+                            </div>
+                          );
+                        })}
+                        {!item.planned_allocations?.length && (item.allocations ?? []).map((allocation) => (
+                          <div key={`actual-${allocation.allocation_sequence}`} className="grid grid-cols-4 gap-2 border-t border-gray-100 px-3 py-2 text-gray-700">
+                            <span>{allocation.location_code ?? (allocation.location_id ? `#${allocation.location_id}` : "—")}</span>
+                            <span>{allocation.lot_number ?? "—"} · {allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
+                            <span className="text-right">—</span>
+                            <span className="text-right font-semibold text-emerald-600">{allocation.allocated_quantity}</span>
                           </div>
                         ))}
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 ))}
               </div>

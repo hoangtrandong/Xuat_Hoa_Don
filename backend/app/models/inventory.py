@@ -183,3 +183,11 @@ class DeliveryAllocation(Base):
     item: Mapped["DeliveryRequestItem"] = relationship(back_populates="allocations")
     lot: Mapped["InventoryLot | None"] = relationship()
     location: Mapped["WarehouseLocation | None"] = relationship()
+
+    @property
+    def location_code(self) -> str | None:
+        return self.location.code if self.location else None
+
+    @property
+    def lot_number(self) -> str | None:
+        return self.lot.lot_number if self.lot else None

@@ -4,22 +4,23 @@ import re
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from typing import Any, List
 from zipfile import BadZipFile
 from app.core.database import get_db
 from app.schemas.inventory import (
     InventoryImportConfirm, InventoryImportItem, InventoryTransaction, StockLevel,
-    StockAdjust, Warehouse, WarehouseLocation, InventoryLot,
+    StockAdjust, Warehouse, WarehouseLocation, InventoryLot, InventoryLotDetail,
     InventoryTransferCreate, InventoryTransferResponse,
 )
 from app.models.inventory import (
     InventoryLot as LotModel, InventoryTransaction as TransactionModel,
     Warehouse as WarehouseModel, WarehouseLocation as LocationModel,
-    InventoryTransfer as TransferModel,
+    InventoryTransfer as TransferModel, DeliveryAllocation, DeliveryRequest,
+    DeliveryRequestItem,
 )
-from app.models.product import Product
+from app.models.product import Product, ProductUnit
 from app.crud import inventory as crud
 from uuid import uuid4
 
@@ -232,6 +233,74 @@ def list_lots(warehouse_id: int | None = None, product_id: int | None = None, db
     if product_id is not None:
         query = query.filter(LotModel.product_id == product_id)
     return query.all()
+
+
+@router.get("/lot-details/", response_model=List[InventoryLotDetail])
+def list_lot_details(
+    warehouse_id: int | None = None,
+    product_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Return stock by lot/location with active delivery reservations."""
+    query = db.query(LotModel).filter(LotModel.quantity_on_hand > 0)
+    if warehouse_id is not None:
+        query = query.filter(LotModel.warehouse_id == warehouse_id)
+    if product_id is not None:
+        query = query.filter(LotModel.product_id == product_id)
+    lots = query.order_by(LotModel.expiry_date, LotModel.id).all()
+    if not lots:
+        return []
+
+    lot_ids = [lot.id for lot in lots]
+    reservation_rows = db.query(
+        DeliveryAllocation.lot_id,
+        func.coalesce(func.sum(DeliveryAllocation.allocated_quantity), 0),
+    ).join(
+        DeliveryRequestItem, DeliveryRequestItem.id == DeliveryAllocation.item_id,
+    ).join(
+        DeliveryRequest, DeliveryRequest.id == DeliveryRequestItem.request_id,
+    ).filter(
+        DeliveryAllocation.lot_id.in_(lot_ids),
+        DeliveryRequest.status.in_(("DRAFT", "SUBMITTED", "RECEIVED")),
+    ).group_by(DeliveryAllocation.lot_id).all()
+    reserved_by_lot = {lot_id: int(quantity) for lot_id, quantity in reservation_rows}
+    products = {
+        product.id: product
+        for product in db.query(Product).filter(Product.id.in_({lot.product_id for lot in lots})).all()
+    }
+    units = {
+        unit.id: unit
+        for unit in db.query(ProductUnit).filter(
+            ProductUnit.id.in_({product.unit_id for product in products.values()})
+        ).all()
+    } if products else {}
+    location_ids = {lot.location_id for lot in lots if lot.location_id is not None}
+    locations = {
+        location.id: location
+        for location in db.query(LocationModel).filter(LocationModel.id.in_(location_ids)).all()
+    } if location_ids else {}
+
+    return [
+        InventoryLotDetail(
+            id=lot.id,
+            warehouse_id=lot.warehouse_id,
+            location_id=lot.location_id,
+            location_code=locations[lot.location_id].code if lot.location_id in locations else None,
+            location_name=locations[lot.location_id].name if lot.location_id in locations else None,
+            product_id=lot.product_id,
+            product_code=products[lot.product_id].sku if lot.product_id in products else str(lot.product_id),
+            product_name=products[lot.product_id].name if lot.product_id in products else "Sản phẩm",
+            unit=units[products[lot.product_id].unit_id].name
+            if lot.product_id in products and products[lot.product_id].unit_id in units else "",
+            lot_number=lot.lot_number,
+            expiry_date=lot.expiry_date,
+            quantity_on_hand=lot.quantity_on_hand,
+            reserved_quantity=reserved_by_lot.get(lot.id, 0),
+            available_quantity=max(0, lot.quantity_on_hand - reserved_by_lot.get(lot.id, 0)),
+            unit_cost=lot.unit_cost,
+        )
+        for lot in lots
+    ]
 
 
 @router.get("/stock-levels/", response_model=List[StockLevel])

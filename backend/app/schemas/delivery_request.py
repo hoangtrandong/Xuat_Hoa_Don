@@ -54,6 +54,8 @@ class DeliveryAllocation(BaseModel):
     allocation_strategy: str
     lot_id: Optional[int] = None
     location_id: Optional[int] = None
+    location_code: Optional[str] = None
+    lot_number: Optional[str] = None
     expiry_date: Optional[datetime] = None
 
 

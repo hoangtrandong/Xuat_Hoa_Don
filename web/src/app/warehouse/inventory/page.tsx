@@ -67,6 +67,24 @@ interface ApiLot {
   unit_cost?: number | null;
 }
 
+interface ApiLotDetail {
+  id: number;
+  warehouse_id: number;
+  location_id?: number | null;
+  location_code?: string | null;
+  location_name?: string | null;
+  product_id: number;
+  product_code: string;
+  product_name: string;
+  unit: string;
+  lot_number?: string | null;
+  expiry_date?: string | null;
+  quantity_on_hand: number;
+  reserved_quantity: number;
+  available_quantity: number;
+  unit_cost?: number | null;
+}
+
 function toStockLevel(item: ApiStockLevel): StockLevel {
   return {
     id: String(item.product_id),
@@ -128,20 +146,24 @@ export default function WarehouseInventoryPage() {
   const [ledgerEntriesState, setLedgerEntriesState] = useState<LedgerEntry[]>([]);
   const [locations, setLocations] = useState<ApiLocation[]>([]);
   const [lots, setLots] = useState<ApiLot[]>([]);
+  const [lotDetails, setLotDetails] = useState<ApiLotDetail[]>([]);
+  const [lotProductFilter, setLotProductFilter] = useState("Tất cả");
+  const [lotWarehouseFilter, setLotWarehouseFilter] = useState<number | "">("");
   const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     async function loadInventory() {
       try {
-        const [stockResponse, transactionResponse, warehouseResponse, locationResponse, lotResponse] = await Promise.all([
+        const [stockResponse, transactionResponse, warehouseResponse, locationResponse, lotResponse, lotDetailResponse] = await Promise.all([
           fetch(`${API_URL}/inventory/stock-levels/`),
           fetch(`${API_URL}/inventory/transactions/`),
           fetch(`${API_URL}/inventory/warehouses/`),
           fetch(`${API_URL}/inventory/locations/`),
           fetch(`${API_URL}/inventory/lots/`),
+          fetch(`${API_URL}/inventory/lot-details/`),
         ]);
-        if (!stockResponse.ok || !transactionResponse.ok || !warehouseResponse.ok || !locationResponse.ok || !lotResponse.ok) {
+        if (!stockResponse.ok || !transactionResponse.ok || !warehouseResponse.ok || !locationResponse.ok || !lotResponse.ok || !lotDetailResponse.ok) {
           throw new Error("Không thể tải dữ liệu tồn kho từ API.");
         }
         const stocks = await stockResponse.json() as ApiStockLevel[];
@@ -149,6 +171,7 @@ export default function WarehouseInventoryPage() {
         const warehouses = await warehouseResponse.json() as ApiWarehouse[];
         const locationRows = await locationResponse.json() as ApiLocation[];
         const lotRows = await lotResponse.json() as ApiLot[];
+        const lotDetailRows = await lotDetailResponse.json() as ApiLotDetail[];
         if (cancelled) return;
         const stockMap = new Map(stocks.map((item) => [item.product_id, item]));
         const warehouseMap = new Map(warehouses.map((item) => [item.id, item.name]));
@@ -171,6 +194,7 @@ export default function WarehouseInventoryPage() {
         setWarehouseOptions(warehouses);
         setLocations(locationRows);
         setLots(lotRows);
+        setLotDetails(lotDetailRows);
         setLoadError("");
       } catch (error) {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : "Không thể tải dữ liệu tồn kho.");
@@ -477,27 +501,63 @@ export default function WarehouseInventoryPage() {
         />
       ) : (
         <DataTable
-          data={lots.map((lot) => {
-            const stock = stockLevels.find((item) => item.id === String(lot.product_id));
-            const location = locations.find((item) => item.id === lot.location_id);
-            return {
-              id: lot.id,
-              productCode: stock?.productCode ?? String(lot.product_id),
-              productName: stock?.productName ?? "Sản phẩm",
-              location: location ? `${location.code}${location.name ? ` - ${location.name}` : ""}` : "Chưa gán",
-              expiryDate: lot.expiry_date ? new Date(lot.expiry_date).toLocaleDateString("vi-VN") : "Không có",
-              quantity: lot.quantity_on_hand,
-            };
-          })}
+          data={lotDetails
+            .filter((lot) => lotProductFilter === "Tất cả" || lot.product_code === lotProductFilter)
+            .filter((lot) => !lotWarehouseFilter || lot.warehouse_id === lotWarehouseFilter)}
           columns={[
-            { key: "productCode", title: "Mã SKU", sortable: true },
-            { key: "productName", title: "Sản phẩm", sortable: true },
-            { key: "location", title: "Vị trí kho" },
-            { key: "expiryDate", title: "Hạn sử dụng", sortable: true },
-            { key: "quantity", title: "Tồn theo lô", sortable: true, align: "right", render: (value) => formatNumber(value as number) },
+            { key: "product_code", title: "Mã SKU", sortable: true },
+            {
+              key: "product_name",
+              title: "Sản phẩm",
+              sortable: true,
+              render: (value, row) => (
+                <div>
+                  <p className="font-medium text-gray-900">{String(value)}</p>
+                  <p className="text-xs text-gray-400">{row.unit}</p>
+                </div>
+              ),
+            },
+            {
+              key: "location_code",
+              title: "Vị trí",
+              sortable: true,
+              render: (value, row) => (
+                <span>{String(value ?? "Chưa gán")}{row.location_name ? ` - ${row.location_name}` : ""}</span>
+              ),
+            },
+            { key: "lot_number", title: "Lot", sortable: true, render: (value) => String(value ?? "—") },
+            {
+              key: "expiry_date",
+              title: "Hạn sử dụng",
+              sortable: true,
+              render: (value) => value ? new Date(String(value)).toLocaleDateString("vi-VN") : "Không có",
+            },
+            { key: "quantity_on_hand", title: "Tồn", sortable: true, align: "right", render: (value) => formatNumber(value as number) },
+            { key: "reserved_quantity", title: "Đã giữ", sortable: true, align: "right", render: (value) => <span className="text-amber-600">{formatNumber(value as number)}</span> },
+            { key: "available_quantity", title: "Khả dụng", sortable: true, align: "right", render: (value) => <span className="font-semibold text-emerald-600">{formatNumber(value as number)}</span> },
           ]}
-          searchKeys={["productCode", "productName", "location", "expiryDate"]}
-          searchPlaceholder="Tìm SKU, vị trí, hạn dùng..."
+          searchKeys={["product_code", "product_name", "location_code", "location_name", "lot_number", "expiry_date"]}
+          searchPlaceholder="Tìm SKU, tên, vị trí, lot, hạn dùng..."
+          toolbar={
+            <div className="flex flex-wrap gap-2">
+              <select
+                value={lotWarehouseFilter}
+                onChange={(event) => setLotWarehouseFilter(event.target.value ? Number(event.target.value) : "")}
+                className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                <option value="">Tất cả kho</option>
+                {warehouseOptions.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+              </select>
+              <select
+                value={lotProductFilter}
+                onChange={(event) => setLotProductFilter(event.target.value)}
+                className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                <option value="Tất cả">Tất cả mã hàng</option>
+                {stockLevels.map((stock) => <option key={stock.productCode} value={stock.productCode}>{stock.productCode}</option>)}
+              </select>
+            </div>
+          }
         />
       )}
       {/* Drawer điều chỉnh tồn kho */}

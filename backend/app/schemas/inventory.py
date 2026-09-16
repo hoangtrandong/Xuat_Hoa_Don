@@ -97,6 +97,10 @@ class InventoryImportItem(BaseModel):
     delivery_references: Optional[str] = None
     po_references: Optional[str] = None
     document_date: Optional[datetime] = None
+    invoice_number: Optional[str] = None
+    unit_price: Optional[float] = None
+    amount: Optional[float] = None
+    note: Optional[str] = None
 
 
 class InventoryImportAllocation(BaseModel):
@@ -108,6 +112,7 @@ class InventoryImportConfirm(BaseModel):
     warehouse_id: int
     items: List[InventoryImportItem] = Field(min_length=1)
     ref_code: Optional[str] = None
+    invoice_number: Optional[str] = None
     delivery_references: Optional[str] = None
     document_date: Optional[datetime] = None
     note: Optional[str] = None

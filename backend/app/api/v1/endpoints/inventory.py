@@ -30,18 +30,35 @@ def _header(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
-def _parse_expiry(lot_number: str) -> datetime:
+def _parse_expiry(value: Any, lot_number: str) -> datetime:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"Lot '{lot_number}' không có HSD.")
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time.min)
+    text = str(value).strip()
+    for format_string in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y", "%y%m%d"):
+        try:
+            return datetime.strptime(text, format_string)
+        except ValueError:
+            continue
     match = re.match(r"^(\d{6})(?:-|$)", lot_number.strip())
-    if not match:
-        raise ValueError(f"Lot '{lot_number}' không có ngày HSD dạng yymmdd.")
-    try:
-        return datetime.strptime(match.group(1), "%y%m%d")
-    except ValueError as exc:
-        raise ValueError(f"Lot '{lot_number}' có ngày HSD không hợp lệ.") from exc
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%y%m%d")
+        except ValueError:
+            pass
+    raise ValueError(f"HSD '{text}' của lot '{lot_number}' không hợp lệ.")
 
 
 def _parse_sku(item: Any) -> str:
-    return re.split(r"\s+-\s+", str(item or "").strip(), maxsplit=1)[0].strip().upper()
+    text = str(item or "").strip()
+    if " - " in text:
+        return text.split(" - ", 1)[0].strip().upper()
+    if "-" in text:
+        return text.split("-", 1)[0].strip().upper()
+    return text.upper()
 
 
 def _parse_import_datetime(value: Any) -> datetime | None:
@@ -76,30 +93,26 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
         workbook = load_workbook(BytesIO(file.file.read()), read_only=True, data_only=True)
         sheet = workbook.worksheets[0]
         rows = list(sheet.iter_rows(values_only=True))
-        if len(rows) < 13:
-            raise ValueError("File Excel không có dữ liệu từ dòng 13.")
-        headers = [_header(value) for value in rows[11]]
-        required = {"item", "lot", "s.lượng"}
+        if len(rows) < 16:
+            raise ValueError("File Excel không có dữ liệu từ dòng 16.")
+        headers = [_header(value) for value in rows[14]]
+        required = {"tên sản phẩm", "lot", "hạn sử dụng", "số lượng"}
         if not required.issubset(headers):
-            raise ValueError("File phải có các cột Item, Lot và S.Lượng ở dòng 12.")
+            raise ValueError("File phải có các cột Tên Sản Phẩm, Lot, Hạn sử dụng và Số Lượng ở dòng 15.")
         indexes = {name: headers.index(name) for name in required}
-        location_index = headers.index("vị trí") if "vị trí" in headers else None
         unit_index = headers.index("đvt") if "đvt" in headers else None
-        carton_index = headers.index("thùng") if "thùng" in headers else None
-        loose_index = headers.index("hộp") if "hộp" in headers else None
-        delivery_references = str(rows[6][1] or "").strip() if len(rows) > 6 and len(rows[6]) > 1 else None
-        po_values = str(rows[7][1] or "").strip() if len(rows) > 7 and len(rows[7]) > 1 else None
-        delivery_references = delivery_references or None
-        po_references = ", ".join(dict.fromkeys(
-            part.strip() for part in (po_values or "").split(",") if part.strip()
-        )) or None
-        document_date = _parse_import_datetime(rows[5][7] if len(rows) > 5 and len(rows[5]) > 7 else None)
+        price_index = headers.index("đơn giá") if "đơn giá" in headers else None
+        amount_index = headers.index("thành tiền") if "thành tiền" in headers else None
+        note_index = headers.index("ghi chú") if "ghi chú" in headers else None
+        invoice_number = str(rows[7][1] or "").strip() if len(rows) > 7 and len(rows[7]) > 1 else None
+        invoice_number = invoice_number or None
+        document_date = _parse_import_datetime(rows[7][7] if len(rows) > 7 and len(rows[7]) > 7 else None)
         products = {product.sku.upper(): product for product in db.scalars(select(Product)).all()}
         grouped: dict[tuple[str, str], dict[str, Any]] = {}
-        for row_number, values in enumerate(rows[12:], 13):
+        for row_number, values in enumerate(rows[15:], 16):
             if not any(value is not None and str(value).strip() for value in values):
                 continue
-            sku = _parse_sku(values[indexes["item"]] if indexes["item"] < len(values) else None)
+            sku = _parse_sku(values[indexes["tên sản phẩm"]] if indexes["tên sản phẩm"] < len(values) else None)
             lot_number = str(values[indexes["lot"]] if indexes["lot"] < len(values) else "").strip()
             if not sku or not lot_number:
                 continue
@@ -107,25 +120,26 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
             if not product:
                 raise ValueError(f"Dòng {row_number}: không tìm thấy mã sản phẩm {sku}.")
             try:
-                quantity = int(values[indexes["s.lượng"]])
+                quantity = int(values[indexes["số lượng"]])
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"Dòng {row_number}: S.Lượng phải là số hộp.") from exc
             if quantity <= 0:
                 raise ValueError(f"Dòng {row_number}: S.Lượng phải lớn hơn 0.")
-            expiry_date = _parse_expiry(lot_number)
-            key = (sku, lot_number)
+            expiry_date = _parse_expiry(values[indexes["hạn sử dụng"]], lot_number)
+            key = (sku, lot_number, expiry_date)
             item = grouped.setdefault(key, {
                 "product_id": product.id, "sku": product.sku, "product_name": product.name,
                 "unit": values[unit_index] if unit_index is not None and unit_index < len(values) else None,
                 "lot_number": lot_number, "expiry_date": expiry_date,
-                "source_location_code": values[location_index] if location_index is not None and location_index < len(values) else None,
                 "cartons": 0, "loose_boxes": 0, "quantity": 0, "allocations": [],
-                "delivery_references": delivery_references, "po_references": po_references,
+                "delivery_references": None, "po_references": None,
                 "document_date": document_date,
+                "invoice_number": invoice_number,
+                "unit_price": float(values[price_index] or 0) if price_index is not None and price_index < len(values) else None,
+                "amount": float(values[amount_index] or 0) if amount_index is not None and amount_index < len(values) else None,
+                "note": str(values[note_index]).strip() if note_index is not None and note_index < len(values) and values[note_index] is not None else None,
             })
             item["quantity"] += quantity
-            item["cartons"] += int(values[carton_index] or 0) if carton_index is not None and carton_index < len(values) else 0
-            item["loose_boxes"] += int(values[loose_index] or 0) if loose_index is not None and loose_index < len(values) else 0
         return [InventoryImportItem(**item) for item in grouped.values()]
     except HTTPException:
         raise
@@ -170,10 +184,12 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                     code=f"ITT-{transaction_time:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
                     type="IN", warehouse_id=payload.warehouse_id, product_id=item.product_id,
                     quantity=allocation.quantity, lot_id=lot.id, location_id=allocation.location_id,
-                    expiry_date=item.expiry_date, ref_type="PO", ref_code=payload.ref_code,
+                    expiry_date=item.expiry_date, unit_cost=item.unit_price,
+                    ref_type="INVOICE", ref_code=payload.invoice_number or payload.ref_code,
                     note=payload.note or (
-                        f"Delivery {payload.delivery_references or '-'} - "
-                        f"{item.sku} - {item.lot_number}"
+                        f"Hóa đơn {payload.invoice_number or payload.ref_code or '-'} - "
+                        f"{item.sku} - {item.lot_number}" +
+                        (f" - {item.note}" if item.note else "")
                     ),
                     created_by=payload.created_by,
                     created_at=transaction_time,

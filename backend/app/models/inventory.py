@@ -163,6 +163,10 @@ class DeliveryRequestItem(Base):
     def product_name(self) -> str:
         return self.product.name
 
+    @property
+    def boxes_per_carton(self) -> int:
+        return max(1, self.product.boxes_per_carton or 1)
+
 
 class DeliveryAllocation(Base):
     """A quantity reserved from one exact lot and warehouse location."""

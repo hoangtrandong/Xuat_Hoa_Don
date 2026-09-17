@@ -27,6 +27,7 @@ type DeliveryRequest = {
     product_id: number;
     sku: string;
     product_name: string;
+    boxes_per_carton: number;
     quantity: number;
     requested_quantity_raw: string | null;
     available_quantity: number;
@@ -72,6 +73,7 @@ export default function DeliveryQueuePage() {
   const [rows, setRows] = useState<DeliveryRequest[]>([]);
   const [selected, setSelected] = useState<DeliveryRequest | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<DeliveryRequest | null>(null);
+  const [locationCodes, setLocationCodes] = useState<Record<number, string>>({});
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -127,17 +129,38 @@ export default function DeliveryQueuePage() {
   async function openRequest(request: DeliveryRequest) {
       setSelected(request);
       setSelectedDetail(null);
+      setLocationCodes({});
       setDetailLoading(true);
       try {
-        const response = await fetch(`${API_URL}/delivery-requests/${request.id}`);
-        if (!response.ok) throw new Error("Không thể tải chi tiết yêu cầu.");
-        setSelectedDetail(await response.json() as DeliveryRequest);
+        const [detailResponse, locationsResponse] = await Promise.all([
+          fetch(`${API_URL}/delivery-requests/${request.id}`),
+          fetch(`${API_URL}/inventory/locations/?warehouse_id=${request.warehouse_id}`),
+        ]);
+        if (!detailResponse.ok || !locationsResponse.ok) throw new Error("Không thể tải chi tiết yêu cầu.");
+        const locations = await locationsResponse.json() as Array<{ id: number; code: string }>;
+        setLocationCodes(Object.fromEntries(locations.map((location) => [location.id, location.code])));
+        setSelectedDetail(await detailResponse.json() as DeliveryRequest);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Không thể tải chi tiết yêu cầu.");
       } finally {
         setDetailLoading(false);
       }
     }
+
+  function displayLocation(code: string | null | undefined, id: number | null | undefined) {
+    return code || (id ? locationCodes[id] : null) || "Chưa xác định";
+  }
+
+  function formatQuantity(quantity: number, boxesPerCarton?: number | null) {
+    const safeQuantity = Number.isFinite(quantity) ? Math.max(0, quantity) : 0;
+    const safeBoxesPerCarton = Number.isFinite(boxesPerCarton) && (boxesPerCarton ?? 0) > 1
+      ? Math.floor(boxesPerCarton as number)
+      : null;
+    if (!safeBoxesPerCarton) return `${safeQuantity} hộp`;
+    const cartons = Math.floor(safeQuantity / safeBoxesPerCarton);
+    const boxes = safeQuantity % safeBoxesPerCarton;
+    return `${cartons}T ${boxes}H (${safeQuantity} hộp)`;
+  }
 
   const submittedCount = rows.filter((r) => r.status === "SUBMITTED").length;
   const receivedCount = rows.filter((r) => r.status === "RECEIVED").length;
@@ -222,14 +245,17 @@ return (
             {(() => {
               const detail = selectedDetail ?? selected;
               const requested = detail.items.reduce((sum, item) => sum + item.quantity, 0);
-              const planned = detail.items.reduce((sum, item) => sum + (item.planned_allocations ?? []).reduce((total, allocation) => total + allocation.quantity, 0), 0);
               const allocated = detail.items.reduce((sum, item) => sum + (item.allocations ?? []).reduce((total, allocation) => total + allocation.allocated_quantity, 0), 0);
+              const planned = detail.items.reduce((sum, item) => {
+                const itemPlan = (item.planned_allocations ?? []).reduce((total, allocation) => total + allocation.quantity, 0);
+                return sum + (itemPlan || (item.allocations ?? []).reduce((total, allocation) => total + allocation.allocated_quantity, 0));
+              }, 0);
               const shortage = detail.items.reduce((sum, item) => sum + item.shortage_quantity, 0);
               return (
                 <div className="grid grid-cols-2 gap-2">
                   <div className="rounded-lg bg-gray-50 px-3 py-2"><p className="text-xs text-gray-500">Tổng yêu cầu</p><p className="font-bold text-gray-900">{requested} hộp</p></div>
-                  <div className="rounded-lg bg-sky-50 px-3 py-2"><p className="text-xs text-sky-600">Kế hoạch admin</p><p className="font-bold text-sky-800">{planned} hộp</p></div>
-                  <div className="rounded-lg bg-emerald-50 px-3 py-2"><p className="text-xs text-emerald-600">Đã giữ thực tế</p><p className="font-bold text-emerald-800">{allocated} hộp</p></div>
+                  <div className="rounded-lg bg-sky-50 px-3 py-2"><p className="text-xs text-sky-600">Phân bổ lấy hàng</p><p className="font-bold text-sky-800">{planned} hộp</p></div>
+                  <div className="rounded-lg bg-emerald-50 px-3 py-2"><p className="text-xs text-emerald-600">Đã giữ cho yêu cầu</p><p className="font-bold text-emerald-800">{allocated} hộp</p><p className="text-[10px] text-emerald-700">Chưa trừ tồn vật lý</p></div>
                   <div className={`rounded-lg px-3 py-2 ${shortage > 0 ? "bg-red-50" : "bg-gray-50"}`}><p className={`text-xs ${shortage > 0 ? "text-red-600" : "text-gray-500"}`}>Còn thiếu</p><p className={`font-bold ${shortage > 0 ? "text-red-700" : "text-gray-900"}`}>{shortage} hộp</p></div>
                 </div>
               );
@@ -263,32 +289,37 @@ return (
                         <p className="text-xs text-gray-400">{item.sku}</p>
                       </div>
                       <div className="text-right">
-                        <p className="text-sm font-bold text-gray-900">{item.quantity}</p>
-                        <p className="text-xs text-gray-400">Yêu cầu</p>
+                        <p className="text-sm font-bold text-gray-900">{formatQuantity(item.quantity, item.boxes_per_carton)}</p>
+                        <p className="text-xs text-gray-400">Yêu cầu · 1T = {item.boxes_per_carton}H</p>
                       </div>
                     </div>
                     {(item.planned_allocations?.length || item.allocations?.length) ? (
                       <div className="ml-4 mt-2 overflow-hidden rounded-lg border border-gray-100 text-xs">
                         <div className="grid grid-cols-4 gap-2 bg-gray-50 px-3 py-2 font-medium text-gray-500">
-                          <span>Vị trí</span><span>Lot/HSD</span><span className="text-right">Kế hoạch</span><span className="text-right">Đã giữ</span>
+                          <span>Vị trí</span><span>Lot/HSD</span><span className="text-right">Số lượng lấy</span><span className="text-right">Trạng thái</span>
                         </div>
                         {(item.planned_allocations ?? []).map((allocation, allocationIndex) => {
-                          const actual = (item.allocations ?? []).find((pick) => pick.location_id === allocation.location_id && pick.expiry_date === allocation.expiry_date);
+                          const actual = (item.allocations ?? []).find((pick) => (
+                            (allocation.location_id != null && pick.location_id === allocation.location_id
+                              || allocation.location_code != null && pick.location_code === allocation.location_code)
+                            && pick.expiry_date === allocation.expiry_date
+                            && (allocation.lot_number == null || pick.lot_number == null || pick.lot_number === allocation.lot_number)
+                          ));
                           return (
                             <div key={`${allocationIndex}-${allocation.location_code}`} className="grid grid-cols-4 gap-2 border-t border-gray-100 px-3 py-2 text-gray-700">
-                              <span>{allocation.location_code || (allocation.location_id ? `#${allocation.location_id}` : "—")}</span>
+                              <span>{displayLocation(allocation.location_code, allocation.location_id)}</span>
                               <span>{allocation.lot_number ?? "—"} · {allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
-                              <span className="text-right">{allocation.quantity}</span>
-                              <span className="text-right font-semibold text-emerald-600">{actual?.allocated_quantity ?? "—"}</span>
+                              <span className="text-right">{formatQuantity(allocation.quantity, item.boxes_per_carton)}</span>
+                              <span className={`text-right font-semibold ${actual && actual.allocated_quantity === allocation.quantity ? "text-emerald-600" : "text-amber-600"}`}>{actual ? (actual.allocated_quantity === allocation.quantity ? "Khớp" : "Đã thay đổi") : "Chưa giữ"}</span>
                             </div>
                           );
                         })}
                         {!item.planned_allocations?.length && (item.allocations ?? []).map((allocation) => (
                           <div key={`actual-${allocation.allocation_sequence}`} className="grid grid-cols-4 gap-2 border-t border-gray-100 px-3 py-2 text-gray-700">
-                            <span>{allocation.location_code ?? (allocation.location_id ? `#${allocation.location_id}` : "—")}</span>
+                            <span>{displayLocation(allocation.location_code, allocation.location_id)}</span>
                             <span>{allocation.lot_number ?? "—"} · {allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
-                            <span className="text-right">—</span>
-                            <span className="text-right font-semibold text-emerald-600">{allocation.allocated_quantity}</span>
+                            <span className="text-right">{formatQuantity(allocation.allocated_quantity, item.boxes_per_carton)}</span>
+                            <span className="text-right font-semibold text-emerald-600">Đã giữ</span>
                           </div>
                         ))}
                       </div>

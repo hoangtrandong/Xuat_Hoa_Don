@@ -63,7 +63,7 @@ export default function ProductsPage() {
     Promise.all([
       fetch(`${API_URL}/products/categories/`),
       fetch(`${API_URL}/products/units/`),
-      fetch(`${API_URL}/products/`),
+      fetch(`${API_URL}/products/?limit=10000`),
     ]).then(async ([categoryResponse, unitResponse, productResponse]) => {
       if (!categoryResponse.ok || !unitResponse.ok || !productResponse.ok) throw new Error("Không thể tải danh mục, đơn vị và SKU.");
       const loadedCategories = await categoryResponse.json() as CategoryOption[];

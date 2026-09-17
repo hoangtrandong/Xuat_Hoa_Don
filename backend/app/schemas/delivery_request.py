@@ -69,6 +69,7 @@ class DeliveryRequestItem(BaseModel):
     requested_quantity_raw: Optional[str] = None
     sku: str
     product_name: str
+    boxes_per_carton: int = 1
     available_quantity: int = 0
     shortage_quantity: int = 0
     allocations: List[DeliveryAllocation] = Field(default_factory=list)
@@ -84,6 +85,7 @@ class DeliveryRequestItemList(BaseModel):
     requested_quantity_raw: Optional[str] = None
     sku: Optional[str] = None
     product_name: Optional[str] = None
+    boxes_per_carton: int = 1
     available_quantity: int = 0
     shortage_quantity: int = 0
     planned_allocations: Optional[List[Dict[str, Any]]] = None

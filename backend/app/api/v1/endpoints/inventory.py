@@ -132,7 +132,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 "product_id": product.id, "sku": product.sku, "product_name": product.name,
                 "unit": values[unit_index] if unit_index is not None and unit_index < len(values) else None,
                 "lot_number": lot_number, "expiry_date": expiry_date,
-                "boxes_per_carton": max(1, product.boxes_per_carton or 1),
+                "boxes_per_carton": max(1, int(product.boxes_per_carton or 1)),
                 "cartons": 0, "loose_boxes": 0, "quantity": 0, "allocations": [],
                 "delivery_references": None, "po_references": None,
                 "document_date": document_date,
@@ -142,6 +142,9 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 "note": str(values[note_index]).strip() if note_index is not None and note_index < len(values) and values[note_index] is not None else None,
             })
             item["quantity"] += quantity
+            item["cartons"], item["loose_boxes"] = divmod(
+                item["quantity"], item["boxes_per_carton"],
+            )
         return [InventoryImportItem(**item) for item in grouped.values()]
     except HTTPException:
         raise

@@ -109,6 +109,7 @@ class InventoryImportItem(BaseModel):
     lot_number: str
     expiry_date: datetime
     source_location_code: Optional[str] = None
+    boxes_per_carton: int = Field(default=1, gt=0)
     cartons: int = 0
     loose_boxes: int = 0
     quantity: int = Field(gt=0)

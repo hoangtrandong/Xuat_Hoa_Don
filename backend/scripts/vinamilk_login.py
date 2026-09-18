@@ -121,21 +121,13 @@ def login_and_get_cookie() -> str:
                     "input#username, input#UserName, input[type='text']",
                     timeout=LOGIN_TIMEOUT,
                 )
-                page.evaluate(
-                    "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }",
-                    username_input,
-                    username,
-                )
+                username_input.fill(username)
 
                 password_input = page.wait_for_selector(
                     "input#password, input#Password, input[type='password']",
                     timeout=LOGIN_TIMEOUT,
                 )
-                page.evaluate(
-                    "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }",
-                    password_input,
-                    password,
-                )
+                password_input.fill(password)
 
                 print("[vinamilk_login] Điền thông tin. Click nút Đăng nhập...")
                 page.click(

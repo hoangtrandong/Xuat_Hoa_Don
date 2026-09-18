@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     SECRET_KEY: str = "change-me-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
+    VINAMILK_SESSION_COOKIE: str = ""
 
     @property
     def sqlalchemy_database_uri(self) -> str:

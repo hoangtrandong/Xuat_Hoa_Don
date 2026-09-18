@@ -1,0 +1,10 @@
+# Python dependencies cho scripts tự động đăng nhập Vinamilk (Playwright)
+# Cài đặt:  pip install -r web/scripts/requirements.txt
+# Sau đó:    playwright install chromium
+
+playwright>=1.49.0
+python-dotenv>=1.0.0
+
+# Chỉ cần trên Windows để đọc Windows Credential Manager
+# (tự động bỏ qua nếu không có)
+pywin32>=306; sys_platform == "win32"

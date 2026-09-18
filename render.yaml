@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: dms-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: VINAMILK_USERNAME
+        sync: false
+      - key: VINAMILK_PASSWORD
+        sync: false
+      - key: VINAMILK_SESSION_COOKIE
+        sync: false

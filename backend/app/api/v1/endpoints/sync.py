@@ -1,49 +1,128 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy.orm import Session
-from app.core.database import get_db
-import os
-import subprocess
+import asyncio
+import json
+from pathlib import Path
 
-from app.services.vinamilk_sync import sync_from_excel
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+from playwright.async_api import Browser, Error as PlaywrightError, async_playwright
+from dotenv import dotenv_values
+from app.core.config import settings
+from scripts.vinamilk_login import login_and_get_cookie
 
 router = APIRouter()
+_cookie_refresh_lock = asyncio.Lock()
+_runtime_cookie = ""
 
-def run_playwright_and_sync(db: Session):
-    # Đường dẫn đến file tải về
-    download_dir = "C:\\DATA\\VINAMILK"
-    excel_file = os.path.join(download_dir, "DanhSachChiTietDonHang.xlsx")
-    
-    # Nếu file đã cũ hoặc muốn tải file mới nhất, bạn có thể gọi script playwright tại đây.
-    # subprocess.run(["python", "D:\\Python\\Intergration\\vinamilk_automation_playwright.py"])
-    
-    if not os.path.exists(excel_file):
-        raise Exception("Không tìm thấy file Excel. Có thể script tải về bị lỗi.")
-        
+VINAMILK_URL = "https://vinamilk.dmsone.vn/sale-product/search-sale/search"
+
+
+class VinamilkSearchRequest(BaseModel):
+    orderNumber: str = ""
+    refOrderNumber: str = ""
+    fromDate: str
+    toDate: str
+    deliveryDate: str = ""
+    customerCode: str = ""
+    customerName: str = ""
+    orderSource: str = "0"
+    priorityCode: str = "-1"
+    csvStatus: str = ""
+    xmlStatus: str = ""
+    saleStaff: str = ""
+    deliveryStaff: str = ""
+    orderType: str = "IN"
+    saleOrderType: str = "-1"
+    page: int = Field(default=1, ge=1)
+    rows: int = Field(default=500, ge=1, le=500)
+
+def read_cookie() -> str:
+    if _runtime_cookie:
+        return _runtime_cookie
+    local_env = Path(__file__).resolve().parents[3] / ".env.local"
+    local_cookie = dotenv_values(local_env).get("VINAMILK_SESSION_COOKIE", "")
+    return (local_cookie or settings.VINAMILK_SESSION_COOKIE).strip()
+
+
+async def refresh_cookie() -> str:
+    global _runtime_cookie
+    async with _cookie_refresh_lock:
+        cookie = await asyncio.to_thread(login_and_get_cookie)
+        if not cookie:
+            raise RuntimeError("Đăng nhập thành công nhưng không tạo được cookie Vinamilk.")
+        _runtime_cookie = cookie
+        return cookie
+
+
+async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str, object]:
+    form["page"] = str(form["page"])
+    form["rows"] = str(form["rows"])
+    cookies: list[dict[str, str]] = [
+        {"name": part.split("=", 1)[0].strip(), "value": part.split("=", 1)[1].strip(),
+         "domain": "vinamilk.dmsone.vn", "path": "/"}
+        for part in session_cookie.split(";")
+        if "=" in part and part.split("=", 1)[0].strip()
+    ]
+
     try:
-        # Gọi hàm sync
-        synced_count = sync_from_excel(db, excel_file)
-        print(f"Sync thành công {synced_count} đơn hàng.")
-    except Exception as e:
-        print(f"Lỗi khi sync: {str(e)}")
+        async with async_playwright() as playwright:
+            browser: Browser = await playwright.chromium.launch(headless=True)
+            try:
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+                    locale="en-US",
+                )
+                await context.add_cookies(cookies)
+                page = await context.new_page()
+                await page.goto(
+                    "https://vinamilk.dmsone.vn/sale-product/search-sale/info",
+                    wait_until="domcontentloaded",
+                    timeout=30_000,
+                )
+                result = await page.evaluate(
+                    """async ({ url, form }) => {
+                      const response = await fetch(url, {
+                        method: "POST",
+                        headers: {
+                          "accept": "application/json, text/javascript, */*; q=0.01",
+                          "accept-language": "en-US,en;q=0.9,vi;q=0.8,en-ID;q=0.7",
+                          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                          "x-requested-with": "XMLHttpRequest"
+                        },
+                        body: new URLSearchParams(form).toString()
+                      });
+                      return { status: response.status, body: await response.text() };
+                    }""",
+                    {"url": VINAMILK_URL, "form": form},
+                )
+            finally:
+                await browser.close()
+    except PlaywrightError as exc:
+        raise RuntimeError(f"Playwright không thể gọi Vinamilk: {exc}") from exc
+
+    if result["status"] in (401, 403):
+        return result
+    if result["status"] >= 400:
+        raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
+    return result
+
 
 @router.post("/vinamilk")
-def trigger_sync(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """
-    Kích hoạt tiến trình đồng bộ dữ liệu từ Vinamilk DMS.
-    Do quá trình tải file bằng Playwright có thể mất thời gian (khoảng 10-30s),
-    chúng ta sử dụng BackgroundTasks để trả về response ngay lập tức cho Frontend.
-    """
-    # 1. Tuỳ chọn A: Chạy trong background
-    # background_tasks.add_task(run_playwright_and_sync, db)
-    # return {"message": "Tiến trình đồng bộ đang chạy ngầm", "status": "processing"}
-    
-    # 2. Tuỳ chọn B: Chạy trực tiếp (Chờ lấy kết quả ngay - Phù hợp nếu file đã có sẵn)
+async def trigger_sync(request: VinamilkSearchRequest):
+    session_cookie = read_cookie()
+    if not session_cookie:
+        raise HTTPException(status_code=503, detail="Chưa cấu hình cookie hoặc thông tin đăng nhập Vinamilk.")
+
+    form = request.model_dump()
+    form["page"] = str(form["page"])
+    form["rows"] = str(form["rows"])
     try:
-        excel_file = "C:\\DATA\\VINAMILK\\DanhSachChiTietDonHang.xlsx"
-        if not os.path.exists(excel_file):
-            return {"success": False, "message": "Chưa có file Excel. Hãy chạy script Playwright trước."}
-            
-        synced_count = sync_from_excel(db, excel_file)
-        return {"success": True, "message": f"Đã đồng bộ {synced_count} đơn hàng", "synced_count": synced_count}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        result = await fetch_vinamilk(session_cookie, form)
+        if result["status"] in (401, 403):
+            session_cookie = await refresh_cookie()
+            result = await fetch_vinamilk(session_cookie, form)
+        if result["status"] >= 400:
+            raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
+        return json.loads(str(result["body"]))
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

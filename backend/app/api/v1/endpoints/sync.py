@@ -110,13 +110,13 @@ async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str,
 @router.post("/vinamilk")
 async def trigger_sync(request: VinamilkSearchRequest):
     session_cookie = read_cookie()
-    if not session_cookie:
-        raise HTTPException(status_code=503, detail="Chưa cấu hình cookie hoặc thông tin đăng nhập Vinamilk.")
 
     form = request.model_dump()
     form["page"] = str(form["page"])
     form["rows"] = str(form["rows"])
     try:
+        if not session_cookie:
+            session_cookie = await refresh_cookie()
         result = await fetch_vinamilk(session_cookie, form)
         if result["status"] in (401, 403):
             session_cookie = await refresh_cookie()

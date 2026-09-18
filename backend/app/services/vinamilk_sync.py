@@ -1,0 +1,170 @@
+import os
+import openpyxl
+from datetime import datetime
+from sqlalchemy.orm import Session
+from app.models.sales import SalesOrder, SalesOrderItem
+from app.models.customer import Customer
+from app.models.product import Product, ProductUnit, ProductCategory
+from app.models.employee import Employee
+from app.models.inventory import Warehouse
+
+def sync_from_excel(db: Session, file_path: str):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File {file_path} not found")
+
+    wb = openpyxl.load_workbook(file_path, data_only=True)
+    sheet = wb.active
+
+    headers = [cell.value for cell in sheet[1]]
+    
+    # get default warehouse
+    warehouse = db.query(Warehouse).first()
+    if not warehouse:
+        warehouse = Warehouse(code="DEF", name="Default Warehouse")
+        db.add(warehouse)
+        db.commit()
+
+    # get default category
+    category = db.query(ProductCategory).first()
+    if not category:
+        category = ProductCategory(code="DEF", name="Default Category")
+        db.add(category)
+        db.commit()
+
+    # Caching dictionaries to avoid N+1 queries
+    emp_cache = {e.code: e for e in db.query(Employee).all()}
+    cust_cache = {c.code: c for c in db.query(Customer).all()}
+    prod_cache = {p.sku: p for p in db.query(Product).all()}
+    unit_cache = {u.name: u for u in db.query(ProductUnit).all()}
+
+    orders_dict = {}
+
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        row_dict = dict(zip(headers, row))
+        
+        order_code = str(row_dict.get('Số đơn hàng'))
+        if not order_code or order_code == 'None':
+            continue
+            
+        # Employee
+        emp_code = str(row_dict.get('Mã NVBH'))
+        emp_name = str(row_dict.get('Tên NVBH') or '')
+        employee = None
+        if emp_code and emp_code != 'None':
+            employee = emp_cache.get(emp_code)
+            if not employee:
+                employee = Employee(code=emp_code, name=emp_name, phone="0000000000", position="SALES")
+                db.add(employee)
+                db.flush()
+                emp_cache[emp_code] = employee
+
+        # Customer
+        cust_code = str(row_dict.get('Mã KH'))
+        cust_name = str(row_dict.get('Tên KH') or '')
+        customer = None
+        if cust_code and cust_code != 'None':
+            customer = cust_cache.get(cust_code)
+            if not customer:
+                customer = Customer(code=cust_code, name=cust_name, phone="0000000000", type="RETAIL")
+                db.add(customer)
+                db.flush()
+                cust_cache[cust_code] = customer
+
+        # Product
+        prod_sku = str(row_dict.get('Mã sản phẩm'))
+        prod_name = str(row_dict.get('Sản phẩm') or '')
+        prod_unit_name = str(row_dict.get('ĐVT') or 'CAI')
+        
+        product = None
+        if prod_sku and prod_sku != 'None':
+            product = prod_cache.get(prod_sku)
+            if not product:
+                unit = unit_cache.get(prod_unit_name)
+                if not unit:
+                    unit = ProductUnit(code=prod_unit_name[:10], name=prod_unit_name)
+                    db.add(unit)
+                    db.flush()
+                    unit_cache[prod_unit_name] = unit
+                    
+                product = Product(sku=prod_sku, name=prod_name, category_id=category.id, unit_id=unit.id)
+                db.add(product)
+                db.flush()
+                prod_cache[prod_sku] = product
+
+        if order_code not in orders_dict:
+            # parse date
+            raw_date = row_dict.get('Ngày')
+            delivery_date = None
+            if isinstance(raw_date, datetime):
+                delivery_date = raw_date
+            elif isinstance(raw_date, str):
+                try:
+                    delivery_date = datetime.strptime(raw_date, "%d/%m/%Y")
+                except:
+                    pass
+
+            orders_dict[order_code] = {
+                'customer_id': customer.id if customer else None,
+                'employee_id': employee.id if employee else None,
+                'status': "COMPLETED",
+                'delivery_date': delivery_date,
+                'items': []
+            }
+            
+        qty = float(row_dict.get('Số lượng') or 0)
+        price = float(row_dict.get('Đơn giá') or 0)
+        discount = float(row_dict.get('Số tiền CK') or 0)
+        
+        if product:
+            orders_dict[order_code]['items'].append({
+                'product_id': product.id,
+                'quantity': int(qty),
+                'price': price,
+                'discount': discount,
+                'line_total': (qty * price) - discount
+            })
+
+    for code, order_data in orders_dict.items():
+        if not order_data['customer_id']:
+            continue
+            
+        order = db.query(SalesOrder).filter(SalesOrder.code == code).first()
+        if not order:
+            order = SalesOrder(
+                code=code,
+                customer_id=order_data['customer_id'],
+                employee_id=order_data['employee_id'],
+                warehouse_id=warehouse.id,
+                status=order_data['status'],
+                payment_status="UNPAID",
+                source="VINAMILK",
+                delivery_date=order_data['delivery_date']
+            )
+            db.add(order)
+            db.flush()
+        else:
+            for item in order.items:
+                db.delete(item)
+            db.flush()
+            
+        subtotal = 0
+        total_discount = 0
+        for item_data in order_data['items']:
+            item = SalesOrderItem(
+                order_id=order.id,
+                product_id=item_data['product_id'],
+                quantity=item_data['quantity'],
+                price=item_data['price'],
+                discount=item_data['discount'],
+                line_total=item_data['line_total']
+            )
+            subtotal += (item_data['quantity'] * item_data['price'])
+            total_discount += item_data['discount']
+            db.add(item)
+            
+        order.subtotal = subtotal
+        order.discount = total_discount
+        order.total = subtotal - total_discount
+        
+    db.commit()
+    return len(orders_dict)

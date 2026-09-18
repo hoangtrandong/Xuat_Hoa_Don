@@ -36,6 +36,7 @@ export default function SalesOrdersPage() {
   const [selected, setSelected] = useState<SalesOrder | null>(null);
   const [orders, setOrders] = useState<SalesOrder[]>([]);
   const [toast, setToast] = useState("");
+  const [isSyncing, setIsSyncing] = useState(false);
 
   useEffect(() => {
     setOrders(getAllOrders());
@@ -45,6 +46,27 @@ export default function SalesOrdersPage() {
       window.sessionStorage.removeItem("dms-order-created");
     }
   }, []);
+
+  const handleSyncVinamilk = async () => {
+    setIsSyncing(true);
+    setToast("Đang đồng bộ dữ liệu từ Vinamilk DMS...");
+    try {
+      // Gọi API FastAPI
+      const res = await fetch("http://localhost:8000/api/v1/sync/vinamilk", {
+        method: "POST"
+      });
+      const data = await res.json();
+      if (data.success) {
+        setToast(`Đồng bộ thành công ${data.synced_count} đơn hàng!`);
+      } else {
+        setToast(`Lỗi đồng bộ: ${data.message || "Unknown"}`);
+      }
+    } catch (error) {
+      setToast("Lỗi kết nối tới Server. Vui lòng thử lại.");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   const today = "2026-09-06";
   const todayOrders = orders.filter((o) => o.createdAt.startsWith(today));
@@ -112,19 +134,29 @@ export default function SalesOrdersPage() {
   return (
     <div className="space-y-6">
       {toast && (
-        <div className="flex items-center justify-between gap-3 bg-emerald-50 text-emerald-700 rounded-xl px-4 py-3 text-sm">
-          <span className="flex items-center gap-2"><CheckCircle2 size={16} /> Đã tạo đơn hàng <strong>{toast}</strong> thành công.</span>
-          <button onClick={() => setToast("")} className="text-emerald-500 hover:text-emerald-700"><Ban size={14} /></button>
+        <div className="flex items-center justify-between gap-3 bg-sky-50 text-sky-700 rounded-xl px-4 py-3 text-sm">
+          <span className="flex items-center gap-2"><CheckCircle2 size={16} /> <strong>{toast}</strong></span>
+          <button onClick={() => setToast("")} className="text-sky-500 hover:text-sky-700"><Ban size={14} /></button>
         </div>
       )}
       <PageHeader
         title="Đơn hàng bán"
         subtitle="Quản lý đơn đặt hàng, phiếu bán và trạng thái xử lý"
         actions={
-          <Link href="/sales/create" className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-            <Plus size={16} />
-            Tạo đơn hàng
-          </Link>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleSyncVinamilk}
+              disabled={isSyncing}
+              className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+            >
+              <Clock3 size={16} className={isSyncing ? "animate-spin" : ""} />
+              {isSyncing ? "Đang đồng bộ..." : "Đồng bộ Vinamilk DMS"}
+            </button>
+            <Link href="/sales/create" className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+              <Plus size={16} />
+              Tạo đơn hàng
+            </Link>
+          </div>
         }
       />
 

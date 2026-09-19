@@ -38,7 +38,7 @@ class VinamilkSearchRequest(BaseModel):
 def read_cookie() -> str:
     if _runtime_cookie:
         return _runtime_cookie
-    local_env = Path(__file__).resolve().parents[3] / ".env.local"
+    local_env = Path(__file__).resolve().parents[4] / ".env.local"
     local_cookie = dotenv_values(local_env).get("VINAMILK_SESSION_COOKIE", "")
     return (local_cookie or settings.VINAMILK_SESSION_COOKIE).strip()
 

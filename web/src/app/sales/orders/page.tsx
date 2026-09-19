@@ -40,7 +40,8 @@ const remoteColumnDefinitions = [
   { title: "Số đơn hàng", keys: ["orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode"] },
   { title: "Mã CTKM", keys: ["promotionCode", "campaignCode", "ctkmCode", "promotionId"] },
   { title: "Tên CTKM", keys: ["promotionName", "campaignName"] },
-  { title: "Ngày", keys: ["orderDate", "initialOrderDate"] },
+  { title: "Ngày tạo", keys: ["createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo"] },
+  { title: "Ngày giao", keys: ["deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao"] },
   { title: "Mã NVBH", keys: ["staffCode", "salesStaffCode"] },
   { title: "Tên NVBH", keys: ["staffName", "salesStaffName"] },
   { title: "Mã KH", keys: ["customerCode", "shopCode"] },
@@ -96,6 +97,24 @@ function hasRemoteValue(value: unknown) {
 function displayRemoteValue(value: unknown) {
   if (value === null || value === undefined) return "";
   return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function formatVinamilkDate(value: unknown, withTime: boolean) {
+  if (value === null || value === undefined || value === "") return value;
+  const raw = String(value).trim();
+  const date = new Date(raw.includes("/") && !raw.includes("T") ? raw.split(" ")[0].split("/").reverse().join("-") + (raw.includes(" ") ? `T${raw.split(" ")[1]}` : "") : raw);
+  if (Number.isNaN(date.getTime())) return value;
+
+  const datePart = date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" });
+  if (!withTime) return datePart;
+  const timePart = date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  return `${datePart} ${timePart}`;
+}
+
+function formatRemoteColumnValue(title: string, value: unknown) {
+  if (title === "Ngày tạo") return formatVinamilkDate(value, true);
+  if (title === "Ngày giao") return formatVinamilkDate(value, false);
+  return displayRemoteValue(value);
 }
 
 function numericValue(value: unknown) {
@@ -157,7 +176,7 @@ export default function SalesOrdersPage() {
       key: title,
       title,
       sortable: true,
-      render: (value) => displayRemoteValue(value),
+      render: (value) => formatRemoteColumnValue(title, value),
     }));
 
   const remoteStatuses = Array.from(
@@ -188,7 +207,10 @@ export default function SalesOrdersPage() {
 
   function downloadExcel() {
     if (remoteOrders.length === 0) return;
-    const worksheet = XLSX.utils.json_to_sheet(remoteOrders);
+    const exportRows = remoteOrders.map((order) =>
+      Object.fromEntries(Object.entries(order).map(([key, value]) => [key, formatRemoteColumnValue(key, value)]))
+    );
+    const worksheet = XLSX.utils.json_to_sheet(exportRows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Don hang");
     XLSX.writeFile(workbook, `don-hang-vinamilk-${fromDate}-den-${toDate}.xlsx`);

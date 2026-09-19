@@ -112,7 +112,7 @@ def login_and_get_cookie() -> str:
             page = context.new_page()
 
             print(f"[vinamilk_login] Mở trang: {LOGIN_URL}")
-            page.goto(LOGIN_URL, wait_until="networkidle")
+            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=LOGIN_TIMEOUT)
             time.sleep(2)  # chờ JS render form
 
             # ---- Bước 1: Điền thông tin đăng nhập ----

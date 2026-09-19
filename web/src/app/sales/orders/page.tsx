@@ -99,11 +99,11 @@ function displayRemoteValue(value: unknown) {
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-function formatVinamilkDate(value: unknown, withTime: boolean) {
-  if (value === null || value === undefined || value === "") return value;
+function formatVinamilkDate(value: unknown, withTime: boolean): string {
+  if (value === null || value === undefined || value === "") return "";
   const raw = String(value).trim();
   const date = new Date(raw.includes("/") && !raw.includes("T") ? raw.split(" ")[0].split("/").reverse().join("-") + (raw.includes(" ") ? `T${raw.split(" ")[1]}` : "") : raw);
-  if (Number.isNaN(date.getTime())) return value;
+  if (Number.isNaN(date.getTime())) return displayRemoteValue(value);
 
   const datePart = date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" });
   if (!withTime) return datePart;
@@ -111,7 +111,7 @@ function formatVinamilkDate(value: unknown, withTime: boolean) {
   return `${datePart} ${timePart}`;
 }
 
-function formatRemoteColumnValue(title: string, value: unknown) {
+function formatRemoteColumnValue(title: string, value: unknown): string {
   if (title === "Ngày tạo") return formatVinamilkDate(value, true);
   if (title === "Ngày giao") return formatVinamilkDate(value, false);
   return displayRemoteValue(value);

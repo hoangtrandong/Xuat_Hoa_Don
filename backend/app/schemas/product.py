@@ -49,6 +49,8 @@ class Product(ProductBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
     created_at: datetime
+    representative_sku: Optional[str] = None
+    representative_name: Optional[str] = None
 
 
 class PriceListItem(BaseModel):

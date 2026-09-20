@@ -51,6 +51,22 @@ class Product(Base):
     group_items: Mapped[List["ProductGroupItem"]] = relationship(back_populates="product")
     company_links: Mapped[List["ProductCompany"]] = relationship(back_populates="product")
 
+    @property
+    def representative_product(self) -> "Product | None":
+        if not self.group_items:
+            return None
+        return self.group_items[0].group.representative_product
+
+    @property
+    def representative_sku(self) -> str | None:
+        product = self.representative_product
+        return product.sku if product else None
+
+    @property
+    def representative_name(self) -> str | None:
+        product = self.representative_product
+        return product.name if product else None
+
 
 class ProductGroup(Base):
     """A group of equivalent SKUs with one existing SKU as representative."""

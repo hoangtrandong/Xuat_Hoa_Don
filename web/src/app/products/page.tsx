@@ -28,6 +28,8 @@ type ProductRow = {
   boxes_per_carton: number;
   stock: number;
   status: string;
+  representative_sku: string | null;
+  representative_name: string | null;
 };
 type ProductGroupRow = {
   id: number;
@@ -63,9 +65,9 @@ export default function ProductsPage() {
     const body = new FormData();
     body.append("file", file);
     const response = await fetch(`${API_URL}/products/upload`, { method: "POST", body });
-    const result = await response.json() as { imported?: number; detail?: string };
+    const result = await response.json() as { imported?: number; updated?: number; representative_updated?: number; detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể tải danh sách SKU.");
-    setMessage(`Đã nhập ${result.imported ?? 0} SKU vào PostgreSQL.`);
+    setMessage(`Đã thêm ${result.imported ?? 0} SKU, cập nhật ${result.updated ?? 0} SKU và xử lý ${result.representative_updated ?? 0} liên kết đại diện.`);
     window.location.reload();
   }
   async function loadGroups() {
@@ -86,7 +88,7 @@ export default function ProductsPage() {
       setCategories(loadedCategories);
       setCategoryOptions(loadedCategories);
       setUnitOptions(loadedUnits);
-      setProducts(loadedProducts.map((product: { id: number; sku: string; name: string; category_id: number; unit_id: number; supplier?: string; base_price: number; cost_price: number; boxes_per_carton: number; status: string }) => ({
+      setProducts(loadedProducts.map((product: { id: number; sku: string; name: string; category_id: number; unit_id: number; supplier?: string; base_price: number; cost_price: number; boxes_per_carton: number; status: string; representative_sku?: string | null; representative_name?: string | null }) => ({
         id: product.id,
         code: product.sku,
         name: product.name,
@@ -100,6 +102,8 @@ export default function ProductsPage() {
         boxes_per_carton: product.boxes_per_carton ?? 1,
         stock: 0,
         status: product.status,
+        representative_sku: product.representative_sku ?? null,
+        representative_name: product.representative_name ?? null,
       })));
     }).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Không thể tải dữ liệu."));
   }, []);
@@ -239,6 +243,8 @@ export default function ProductsPage() {
     },
     { key: "code", title: "Mã SKU", sortable: true },
     { key: "name", title: "Tên sản phẩm", sortable: true },
+    { key: "representative_sku", title: "SKU đại diện", sortable: true, render: (value) => value ? <span className="font-medium text-emerald-700">{String(value)}</span> : <span className="text-gray-400">Chưa nhóm</span> },
+    { key: "representative_name", title: "Tên sản phẩm đại diện", sortable: true, render: (value) => value ? String(value) : <span className="text-gray-400">-</span> },
     { key: "category", title: "Danh mục", sortable: true },
     { key: "unit", title: "ĐVT" },
     { key: "supplier", title: "Nhà cung cấp", sortable: true },

@@ -95,6 +95,8 @@ class Company(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     customers: Mapped[List["Customer"]] = relationship(back_populates="company")
+    product_links: Mapped[List["ProductCompany"]] = relationship(back_populates="company")
+    product_group_links: Mapped[List["ProductGroupCompany"]] = relationship(back_populates="company")
 
     @property
     def customer_count(self) -> int:

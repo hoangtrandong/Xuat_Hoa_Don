@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Integer, Float, Text, Enum
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Integer, Float, Text, Enum, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import List
 
@@ -48,6 +48,69 @@ class Product(Base):
     category: Mapped["ProductCategory"] = relationship(back_populates="products")
     unit: Mapped["ProductUnit"] = relationship(back_populates="products")
     price_list_items: Mapped[List["PriceListItem"]] = relationship(back_populates="product")
+    group_items: Mapped[List["ProductGroupItem"]] = relationship(back_populates="product")
+    company_links: Mapped[List["ProductCompany"]] = relationship(back_populates="product")
+
+
+class ProductGroup(Base):
+    """A group of equivalent SKUs with one existing SKU as representative."""
+
+    __tablename__ = "product_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    representative_product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    status: Mapped[str] = mapped_column(String(15), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    representative_product: Mapped["Product"] = relationship(foreign_keys=[representative_product_id])
+    items: Mapped[List["ProductGroupItem"]] = relationship(back_populates="group", cascade="all, delete-orphan")
+    company_links: Mapped[List["ProductGroupCompany"]] = relationship(back_populates="group", cascade="all, delete-orphan")
+
+
+class ProductGroupItem(Base):
+    __tablename__ = "product_group_items"
+    __table_args__ = (UniqueConstraint("product_id", name="uq_product_group_items_product"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_group_id: Mapped[int] = mapped_column(ForeignKey("product_groups.id", ondelete="CASCADE"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
+    conversion_factor: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    group: Mapped["ProductGroup"] = relationship(back_populates="items")
+    product: Mapped["Product"] = relationship(back_populates="group_items")
+
+
+class ProductCompany(Base):
+    __tablename__ = "product_companies"
+    __table_args__ = (UniqueConstraint("product_id", "company_id", name="uq_product_companies_product_company"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(20), default="MANAGER")
+    company_product_code: Mapped[str | None] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(15), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    product: Mapped["Product"] = relationship(back_populates="company_links")
+    company: Mapped["Company"] = relationship(back_populates="product_links")
+
+
+class ProductGroupCompany(Base):
+    __tablename__ = "product_group_companies"
+    __table_args__ = (UniqueConstraint("product_group_id", "company_id", name="uq_product_group_companies_group_company"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_group_id: Mapped[int] = mapped_column(ForeignKey("product_groups.id", ondelete="CASCADE"))
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(20), default="MANAGER")
+    status: Mapped[str] = mapped_column(String(15), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    group: Mapped["ProductGroup"] = relationship(back_populates="company_links")
+    company: Mapped["Company"] = relationship(back_populates="product_group_links")
 
 
 class PriceList(Base):

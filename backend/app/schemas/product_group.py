@@ -21,6 +21,8 @@ class ProductGroupRepresentativeUpdate(BaseModel):
 class ProductGroupCompanyLinkCreate(BaseModel):
     company_id: int
     role: str = "MANAGER"
+    distributor_sku: Optional[str] = None
+    distributor_name: Optional[str] = None
 
 
 class ProductGroupItemView(BaseModel):
@@ -56,6 +58,8 @@ class ProductGroupCompanyLinkView(BaseModel):
     product_group_id: int
     company_id: int
     role: str
+    distributor_sku: Optional[str] = None
+    distributor_name: Optional[str] = None
     status: str
 
 
@@ -65,10 +69,15 @@ class ProductCompanyAssignmentView(BaseModel):
     company_name: str
     role: str
     status: str
+    distributor_sku: Optional[str] = None
+    distributor_name: Optional[str] = None
 
 
 class ProductCompanyManagementView(BaseModel):
-    product_id: int
-    sku: str
-    name: str
+    product_group_id: int
+    group_name: str
+    representative_sku: str
+    representative_name: str
+    member_skus: List[str] = []
+    member_names: List[str] = []
     companies: List[ProductCompanyAssignmentView] = []

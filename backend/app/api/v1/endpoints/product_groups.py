@@ -30,8 +30,8 @@ def download_product_company_template():
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "SKU-Cong ty"
-    sheet.append(["sku", "company_code", "role"])
-    sheet.append(["01CX01", "001", "MANAGER"])
+    sheet.append(["sku", "company_code", "distributor_sku", "distributor_name", "role"])
+    sheet.append(["01CX01", "001", "NPP-01CX01-A", "Sản phẩm NPP A", "MANAGER"])
     output = BytesIO()
     workbook.save(output)
     return Response(
@@ -51,12 +51,24 @@ def upload_product_company_links(file: UploadFile = File(...), db: Session = Dep
         if not rows:
             raise HTTPException(status_code=400, detail="File Excel không có dữ liệu.")
         headers = [str(value).strip().lower() if value is not None else "" for value in rows[0]]
-        required = {"sku", "company_code"}
+        required = {"sku", "company_code", "distributor_sku"}
         if not required.issubset(headers):
             raise HTTPException(status_code=400, detail="File cần có cột sku và company_code.")
         products = {product.sku: product for product in db.scalars(select(Product)).all()}
         companies = {company.code: company for company in db.scalars(select(Company)).all()}
-        existing = {(link.product_id, link.company_id) for link in db.scalars(select(ProductCompany)).all()}
+        group_items = db.scalars(select(ProductGroupItem).options(selectinload(ProductGroupItem.product), selectinload(ProductGroupItem.group))).all()
+        groups = {item.product.sku: item.group for item in group_items}
+        groups_by_name = {item.group.name.strip().casefold(): item.group for item in group_items}
+        group_company_links = db.execute(
+            select(ProductGroupCompany, Company)
+            .join(Company, Company.id == ProductGroupCompany.company_id)
+        ).all()
+        groups_by_npp = {
+            f"{company.code.casefold()}|{link.distributor_sku.strip().casefold()}": link.product_group_id
+            for link, company in group_company_links
+            if link.distributor_sku and company.code
+        }
+        existing = {(link.product_group_id, link.company_id) for link in db.scalars(select(ProductGroupCompany)).all()}
         added = 0
         skipped = 0
         errors: list[str] = []
@@ -65,6 +77,9 @@ def upload_product_company_links(file: UploadFile = File(...), db: Session = Dep
             sku = str(data.get("sku") or "").strip().upper()
             company_code = str(data.get("company_code") or "").strip()
             role = str(data.get("role") or "MANAGER").strip().upper()
+            group_name = str(data.get("group_name") or "").strip()
+            distributor_sku = str(data.get("distributor_sku") or "").strip()
+            distributor_name = str(data.get("distributor_name") or "").strip() or None
             if not sku and not company_code:
                 continue
             product = products.get(sku)
@@ -72,11 +87,38 @@ def upload_product_company_links(file: UploadFile = File(...), db: Session = Dep
             if not product or not company:
                 errors.append(f"Dòng {row_number}: không tìm thấy SKU {sku} hoặc công ty {company_code}.")
                 continue
-            key = (product.id, company.id)
+            group_key = group_name.casefold() if group_name else f"{company_code.casefold()}|{distributor_sku.casefold()}"
+            group = groups_by_name.get(group_key)
+            if not group and not group_name:
+                existing_group_id = groups_by_npp.get(group_key)
+                group = db.get(ProductGroup, existing_group_id) if existing_group_id else None
+            group = group or groups.get(sku)
+            if not group:
+                group = ProductGroup(name=group_name or f"SKU dùng chung {distributor_sku}", representative_product_id=product.id)
+                db.add(group)
+                db.flush()
+                db.add(ProductGroupItem(product_group_id=group.id, product_id=product.id))
+                groups[sku] = group
+                groups_by_name[group_key] = group
+            elif not db.scalar(select(ProductGroupItem).where(ProductGroupItem.product_group_id == group.id, ProductGroupItem.product_id == product.id)):
+                if product.id in groups and groups[product.sku].id != group.id:
+                    old_group = groups[product.sku]
+                    old_items = db.scalars(select(ProductGroupItem).where(ProductGroupItem.product_group_id == old_group.id)).all()
+                    old_links = db.scalars(select(ProductGroupCompany).where(ProductGroupCompany.product_group_id == old_group.id)).all()
+                    if len(old_items) != 1 or old_links:
+                        errors.append(f"Dòng {row_number}: SKU {sku} đã thuộc nhóm khác.")
+                        continue
+                    db.delete(old_items[0])
+                db.add(ProductGroupItem(product_group_id=group.id, product_id=product.id))
+                db.flush()
+                groups[sku] = group
+            if not group_name:
+                groups_by_npp[group_key] = group.id
+            key = (group.id, company.id)
             if key in existing:
                 skipped += 1
                 continue
-            db.add(ProductCompany(product_id=product.id, company_id=company.id, role=role))
+            db.add(ProductGroupCompany(product_group_id=group.id, company_id=company.id, role=role, distributor_sku=distributor_sku, distributor_name=distributor_name))
             existing.add(key)
             added += 1
         if errors:
@@ -109,6 +151,35 @@ def assign_companies_to_all_products(company_ids: list[int], db: Session = Depen
                 added += 1
     db.commit()
     return {"products": len(products), "companies": len(companies), "added": added}
+
+
+@router.post("/companies/assign-all")
+def assign_companies_to_all_groups(company_ids: list[int], db: Session = Depends(get_db)):
+    if not company_ids:
+        raise HTTPException(status_code=400, detail="Cần chọn ít nhất một công ty.")
+    companies = db.scalars(select(Company).where(Company.id.in_(set(company_ids)))).all()
+    if len(companies) != len(set(company_ids)):
+        raise HTTPException(status_code=400, detail="Một hoặc nhiều công ty không tồn tại.")
+    products = db.scalars(select(Product).order_by(Product.sku)).all()
+    grouped_product_ids = set(db.scalars(select(ProductGroupItem.product_id)).all())
+    groups = db.scalars(select(ProductGroup)).all()
+    for product in products:
+        if product.id in grouped_product_ids:
+            continue
+        group = ProductGroup(name=f"Nhóm {product.sku}", representative_product_id=product.id)
+        db.add(group)
+        db.flush()
+        db.add(ProductGroupItem(product_group_id=group.id, product_id=product.id))
+        groups.append(group)
+    existing = {(link.product_group_id, link.company_id) for link in db.scalars(select(ProductGroupCompany)).all()}
+    added = 0
+    for group in groups:
+        for company in companies:
+            if (group.id, company.id) not in existing:
+                db.add(ProductGroupCompany(product_group_id=group.id, company_id=company.id, role="MANAGER"))
+                added += 1
+    db.commit()
+    return {"groups": len(groups), "companies": len(companies), "added": added}
 
 
 def _load_group(db: Session, group_id: int) -> ProductGroup:
@@ -197,7 +268,7 @@ def link_group_company(group_id: int, payload: ProductGroupCompanyLinkCreate, db
     _load_group(db, group_id)
     if not db.get(Company, payload.company_id):
         raise HTTPException(status_code=404, detail="Company not found")
-    link = ProductGroupCompany(product_group_id=group_id, company_id=payload.company_id, role=payload.role.strip().upper())
+    link = ProductGroupCompany(product_group_id=group_id, company_id=payload.company_id, role=payload.role.strip().upper(), distributor_sku=payload.distributor_sku, distributor_name=payload.distributor_name)
     db.add(link)
     try:
         db.commit()
@@ -248,24 +319,26 @@ def list_product_companies(product_id: int, db: Session = Depends(get_db)):
 
 @router.get("/products/company-links", response_model=list[ProductCompanyManagementView])
 def list_product_company_links(db: Session = Depends(get_db)):
-    rows = db.execute(
-        select(Product, ProductCompany, Company)
-        .outerjoin(ProductCompany, ProductCompany.product_id == Product.id)
-        .outerjoin(Company, Company.id == ProductCompany.company_id)
-        .order_by(Product.sku, Company.name)
-    ).all()
-    result: dict[int, ProductCompanyManagementView] = {}
-    for product, link, company in rows:
-        item = result.setdefault(product.id, ProductCompanyManagementView(product_id=product.id, sku=product.sku, name=product.name))
-        if link and company:
-            item.companies.append({
-                "id": link.id,
-                "company_id": company.id,
-                "company_name": company.name,
-                "role": link.role,
-                "status": link.status,
-            })
-    return list(result.values())
+    groups = db.scalars(select(ProductGroup).options(selectinload(ProductGroup.items).selectinload(ProductGroupItem.product), selectinload(ProductGroup.company_links).selectinload(ProductGroupCompany.company))).all()
+    result: list[ProductCompanyManagementView] = []
+    for group in groups:
+        members = [item.product for item in group.items]
+        companies = []
+        for link in group.company_links:
+            company = link.company
+            if company:
+                companies.append({"id": link.id, "company_id": company.id, "company_name": company.name, "role": link.role, "status": link.status, "distributor_sku": link.distributor_sku, "distributor_name": link.distributor_name})
+        representative = next((p for p in members if p.id == group.representative_product_id), None)
+        result.append(ProductCompanyManagementView(
+            product_group_id=group.id,
+            group_name=group.name,
+            representative_sku=representative.sku if representative else str(group.representative_product_id),
+            representative_name=representative.name if representative else "Chưa xác định",
+            member_skus=[p.sku for p in members],
+            member_names=[p.name for p in members],
+            companies=companies,
+        ))
+    return result
 
 
 @router.delete("/products/{product_id}/companies/{company_id}")

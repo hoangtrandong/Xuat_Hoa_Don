@@ -128,6 +128,8 @@ class ProductGroupCompany(Base):
     product_group_id: Mapped[int] = mapped_column(ForeignKey("product_groups.id", ondelete="CASCADE"))
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(String(20), default="MANAGER")
+    distributor_sku: Mapped[str | None] = mapped_column(String(50))
+    distributor_name: Mapped[str | None] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

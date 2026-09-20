@@ -10,7 +10,7 @@ import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, F
 import { API_URL } from "@/lib/api";
 
 type Item = { id: number; product_id: number; sku: string; product_name: string; quantity: number; requested_quantity_raw: string | null; };
-type StockPick = { location_code: string | null; lot_number: string | null; expiry_date: string | null; quantity: number; allocation_strategy: string; };
+type StockPick = { lot_id: number | null; location_code: string | null; location_id: number | null; lot_number: string | null; expiry_date: string | null; quantity: number; allocation_strategy: string; };
 type StockPlanItem = { product_id: number; sku: string; product_name: string; quantity: number; planned_quantity: number; shortage_quantity: number; picks: StockPick[]; };
 type DeliveryRequest = { id: number; code: string; warehouse_id: number; status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED" | "CANCELLED"; note: string | null; created_by: string | null; submitted_at: string | null; received_at: string | null; completed_at: string | null; cancelled_at: string | null; created_at: string; items: Item[]; };
 type AdminDeliveryRequestRow = DeliveryRequest & { searchText: string; totalQuantity: number; skuSummary: string; };
@@ -114,6 +114,32 @@ export default function AdminDeliveryRequestsPage() {
     const successMap = { submit: "Đã gửi xác nhận — yêu cầu chuyển sang Chờ nhận.", receive: "Đã chuyển sang Đang xuất.", complete: "Đã hoàn thành xuất kho — tồn kho đã được trừ." };
     setLoading(true); setError(""); setMessage("");
     try {
+      if (action === "submit" && stockPlan) {
+        const items = selected.items.map((item) => {
+          const planned = stockPlan.find((planItem) => planItem.product_id === item.product_id);
+          return {
+            product_id: item.product_id,
+            quantity: item.quantity,
+            requested_quantity_raw: item.requested_quantity_raw,
+            planned_allocations: planned?.picks.map((pick) => ({
+              lot_id: pick.lot_id,
+              location_id: pick.location_id,
+              location_code: pick.location_code,
+              lot_number: pick.lot_number,
+              expiry_date: pick.expiry_date,
+              quantity: pick.quantity,
+              allocation_strategy: pick.allocation_strategy,
+            })),
+          };
+        });
+        const planResponse = await fetch(`${API_URL}/delivery-requests/${selected.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ warehouse_id: selected.warehouse_id, note: selected.note, items }),
+        });
+        const planResult = await planResponse.json().catch(() => ({})) as { detail?: string };
+        if (!planResponse.ok) throw new Error(planResult.detail ?? "Không thể lưu vị trí lấy hàng.");
+      }
       const res = await fetch(`${API_URL}/delivery-requests/${selected.id}/${action}`, { method: "POST" });
       const result = await res.json().catch(() => ({})) as { detail?: string };
       if (!res.ok) throw new Error(result.detail ?? "Thao tác thất bại.");
@@ -325,7 +351,7 @@ export default function AdminDeliveryRequestsPage() {
                           {plan.shortage_quantity > 0 ? <span className="text-red-600 font-bold">Thiếu {plan.shortage_quantity}</span> : <span className="text-emerald-600 font-medium">✓ Đủ ({plan.planned_quantity})</span>}
                         </div>
                         {plan.picks.filter(p => p.location_code).map((pick, j) => (
-                          <p key={j} className="text-gray-400 pl-2">+ {pick.location_code} · Lô {pick.lot_number || "—"} · {pick.quantity} cái</p>
+                          <p key={j} className="text-gray-400 pl-2">+ {pick.location_code ?? "Không xác định"} · Lô {pick.lot_number ?? "không mã"} · HSD {pick.expiry_date ? new Date(pick.expiry_date).toLocaleDateString("vi-VN") : "—"} · {pick.quantity} cái</p>
                         ))}
                       </div>
                     ))}

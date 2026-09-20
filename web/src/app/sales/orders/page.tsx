@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
 // src/app/sales/orders/page.tsx
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ShoppingCart, CircleCheck, Clock3, Ban, Plus, CheckCircle2, RefreshCw, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import PageHeader from "@/components/ui/PageHeader";
@@ -131,6 +131,7 @@ export default function SalesOrdersPage() {
   const [toDate, setToDate] = useState(defaultDateRange.to);
   const [remoteOrders, setRemoteOrders] = useState<RemoteOrder[]>([]);
   const [remoteError, setRemoteError] = useState("");
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(20);
   const [orderFilter, setOrderFilter] = useState("");
   const [customerFilter, setCustomerFilter] = useState("");
@@ -142,6 +143,19 @@ export default function SalesOrdersPage() {
     const created = window.sessionStorage.getItem("dms-order-created");
     if (created) window.sessionStorage.removeItem("dms-order-created");
   }, []);
+
+  const loadLocalOrders = useCallback(async () => {
+    const response = await fetch(`${API_URL}/sync/vinamilk-orders?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}`);
+    const payload = await response.json() as { rows?: unknown; last_synced_at?: string | null; detail?: string };
+    if (!response.ok) throw new Error(payload.detail ?? "Không thể tải dữ liệu đơn hàng đã đồng bộ.");
+    const rows = Array.isArray(payload.rows) ? payload.rows : [];
+    setRemoteOrders(rows.filter((row): row is RemoteOrder => typeof row === "object" && row !== null).map(normalizeRemoteOrder));
+    setLastSyncedAt(payload.last_synced_at ?? null);
+  }, [fromDate, toDate]);
+
+  useEffect(() => {
+    loadLocalOrders().catch((error) => setRemoteError(error instanceof Error ? error.message : "Không thể tải dữ liệu."));
+  }, [loadLocalOrders]);
 
   const handleSyncVinamilk = async () => {
     setIsSyncing(true);
@@ -158,9 +172,9 @@ export default function SalesOrdersPage() {
         const message = payload && typeof payload === "object" && "detail" in payload ? String(payload.detail) : "Không lấy được dữ liệu.";
         throw new Error(message);
       }
-      const rows = extractRemoteRows(payload).map(normalizeRemoteOrder);
-      setRemoteOrders(rows);
-      setToast(`Đã lấy ${rows.length} bản ghi từ Vinamilk DMS.`);
+      const rows = extractRemoteRows(payload);
+      await loadLocalOrders();
+      setToast(`Đã đồng bộ ${rows.length} bản ghi vào database.`);
     } catch (error) {
       setRemoteOrders([]);
       setRemoteError(error instanceof Error ? error.message : "Lỗi kết nối tới Server.");
@@ -275,7 +289,7 @@ export default function SalesOrdersPage() {
             <button onClick={clearFilters} className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">Xóa lọc</button>
           </div>
         </div>
-        {remoteOrders.length > 0 && <p className="text-sm text-gray-500">Đang hiển thị {filteredRemoteOrders.length}/{remoteOrders.length} bản ghi sau lọc.</p>}
+        {remoteOrders.length > 0 && <p className="text-sm text-gray-500">Đang hiển thị {filteredRemoteOrders.length}/{remoteOrders.length} bản ghi sau lọc.{lastSyncedAt && ` Cập nhật gần nhất: ${formatVinamilkDate(lastSyncedAt, true)}`}</p>}
         {remoteError && <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700"><AlertTriangle size={16} />{remoteError}</div>}
       </section>
 
@@ -290,7 +304,7 @@ export default function SalesOrdersPage() {
         />
       ) : (
         <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-12 text-center text-sm text-gray-400">
-          Chưa có dữ liệu. Chọn khoảng ngày rồi bấm “Đồng bộ Vinamilk DMS”.
+          Chưa có dữ liệu trong database. Chọn khoảng ngày rồi bấm “Đồng bộ Vinamilk DMS” để cập nhật.
         </div>
       )}
     </div>

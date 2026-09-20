@@ -55,6 +55,52 @@ def _legacy_available(db, warehouse_id, product_id, exclude_request_id=None):
     return int(on_hand) - int(db.scalar(reserved) or 0)
 
 
+def _available_at_location(
+    db: Session,
+    warehouse_id: int,
+    product_id: int,
+    location_id: int,
+    exclude_request_id: int | None = None,
+) -> int:
+    """Return available quantity for a product at one location.
+
+    Inventory lots are used as the current position balance, but lot identity is
+    intentionally ignored. Legacy transactions without a lot remain supported.
+    """
+    lot_stock = db.scalar(select(func.coalesce(func.sum(InventoryLot.quantity_on_hand), 0)).where(
+        InventoryLot.warehouse_id == warehouse_id,
+        InventoryLot.product_id == product_id,
+        InventoryLot.location_id == location_id,
+    )) or 0
+    legacy_stock = db.scalar(select(func.coalesce(func.sum(InventoryTransaction.quantity), 0)).where(
+        InventoryTransaction.warehouse_id == warehouse_id,
+        InventoryTransaction.product_id == product_id,
+        InventoryTransaction.location_id == location_id,
+        InventoryTransaction.lot_id.is_(None),
+    )) or 0
+    reserved = (select(func.coalesce(func.sum(DeliveryAllocation.allocated_quantity), 0))
+        .join(DeliveryRequestItem, DeliveryRequestItem.id == DeliveryAllocation.item_id)
+        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestItem.request_id)
+        .where(DeliveryRequest.warehouse_id == warehouse_id,
+               DeliveryRequest.status.in_(ACTIVE_STATUSES),
+               DeliveryRequestItem.product_id == product_id,
+               DeliveryAllocation.location_id == location_id))
+    if exclude_request_id:
+        reserved = reserved.where(DeliveryRequest.id != exclude_request_id)
+    return max(0, int(lot_stock) + int(legacy_stock) - int(db.scalar(reserved) or 0))
+
+
+def _reserved_for_lot(db: Session, lot_id: int, exclude_request_id: int | None = None) -> int:
+    stmt = (select(func.coalesce(func.sum(DeliveryAllocation.allocated_quantity), 0))
+        .join(DeliveryRequestItem, DeliveryRequestItem.id == DeliveryAllocation.item_id)
+        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestItem.request_id)
+        .where(DeliveryAllocation.lot_id == lot_id,
+               DeliveryRequest.status.in_(ACTIVE_STATUSES)))
+    if exclude_request_id:
+        stmt = stmt.where(DeliveryRequest.id != exclude_request_id)
+    return int(db.scalar(stmt) or 0)
+
+
 def available_for_product(db: Session, warehouse_id: int, product_id: int) -> int:
     lot_stock = db.scalar(select(func.coalesce(func.sum(InventoryLot.quantity_on_hand), 0)).where(
         InventoryLot.warehouse_id == warehouse_id, InventoryLot.product_id == product_id,
@@ -117,28 +163,50 @@ def _fefo_picks(
 
 
 def _allocate(db: Session, request: DeliveryRequest, item: DeliveryRequestItem) -> None:
-    # Rebuild reservations, using earliest expiry first. Null expiry is last.
+    planned = item.planned_allocations or []
+    if not planned:
+        raise ValueError(f"Sản phẩm {item.sku} chưa được chỉ định vị trí lấy hàng.")
+
+    planned_by_location: dict[int, int] = {}
+    for allocation in planned:
+        location_id = allocation.get("location_id") if isinstance(allocation, dict) else None
+        lot_id = allocation.get("lot_id") if isinstance(allocation, dict) else None
+        quantity = allocation.get("quantity") if isinstance(allocation, dict) else None
+        if not isinstance(location_id, int) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError(f"Sản phẩm {item.sku} có phân bổ vị trí không hợp lệ.")
+        location = db.get(WarehouseLocation, location_id)
+        if not location or location.warehouse_id != request.warehouse_id or not location.is_active:
+            raise ValueError(f"Vị trí lấy hàng của sản phẩm {item.sku} không hợp lệ.")
+        if lot_id is not None:
+            lot = db.get(InventoryLot, lot_id)
+            if not lot or lot.warehouse_id != request.warehouse_id or lot.product_id != item.product_id or lot.location_id != location_id:
+                raise ValueError(f"Lô được chỉ định của sản phẩm {item.sku} không hợp lệ.")
+            if lot.quantity_on_hand - _reserved_for_lot(db, lot.id, request.id) < quantity:
+                raise ValueError(f"Lô của sản phẩm {item.sku} tại vị trí {location.code} không còn đủ tồn.")
+        elif _available_at_location(db, request.warehouse_id, item.product_id, location_id, request.id) < quantity:
+            raise ValueError(f"Sản phẩm {item.sku} tại vị trí {location.code} không còn đủ tồn.")
+        planned_by_location[location_id] = planned_by_location.get(location_id, 0) + quantity
+
+    planned_quantity = sum(planned_by_location.values())
+    if planned_quantity != item.quantity:
+        raise ValueError(
+            f"Sản phẩm {item.sku} phải được chỉ định đủ {item.quantity} đơn vị, "
+            f"hiện mới chỉ định {planned_quantity}."
+        )
+
     item.allocations.clear()
-    picks, remaining = _fefo_picks(
-        db, request.warehouse_id, item.product_id, item.quantity,
-        exclude_request_id=request.id, for_update=True,
-    )
-    for location_id, lot_id, expiry_date, take, _strategy in picks:
+    for allocation in planned:
+        location_id = allocation["location_id"]
+        lot_id = allocation.get("lot_id")
+        quantity = allocation["quantity"]
         item.allocations.append(DeliveryAllocation(
-            allocated_quantity=take, allocation_sequence=len(item.allocations) + 1,
-            allocation_strategy="FEFO", lot_id=lot_id, location_id=location_id,
-            expiry_date=expiry_date,
+            allocated_quantity=quantity,
+            allocation_sequence=len(item.allocations) + 1,
+            allocation_strategy="FEFO" if lot_id is not None else "LOCATION_STOCK",
+            lot_id=lot_id,
+            location_id=location_id,
+            expiry_date=(db.get(InventoryLot, lot_id).expiry_date if lot_id is not None else None),
         ))
-    if remaining:
-        legacy = _legacy_available(db, request.warehouse_id, item.product_id, request.id)
-        if legacy >= remaining:
-            item.allocations.append(DeliveryAllocation(
-                allocated_quantity=remaining, allocation_sequence=len(item.allocations) + 1,
-                allocation_strategy="LEGACY_STOCK"))
-            remaining = 0
-    if remaining:
-        product = db.get(Product, item.product_id)
-        raise ValueError(f"Sản phẩm {product.sku if product else item.product_id} không đủ tồn kho.")
 
 
 def create(db: Session, payload: DeliveryRequestCreate) -> DeliveryRequest:
@@ -187,7 +255,7 @@ def create(db: Session, payload: DeliveryRequestCreate) -> DeliveryRequest:
 
 
 def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
-    """Build a read-only FEFO picking plan without persisting any allocation."""
+    """Build a read-only FEFO plan grouped by location for admin confirmation."""
     if not db.get(Warehouse, payload.warehouse_id):
         raise ValueError("Không tìm thấy kho.")
     merged: dict[int, int] = {}
@@ -204,34 +272,21 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
     }
     result: list[FefoPlanItem] = []
     for product_id, quantity in merged.items():
-        picks, remaining = _fefo_picks(db, payload.warehouse_id, product_id, quantity)
-        if remaining:
-            legacy = _legacy_available(db, payload.warehouse_id, product_id)
-            if legacy >= remaining:
-                picks.append((None, None, None, remaining, "LEGACY_STOCK"))
-                remaining = 0
         product = products.get(product_id)
         pick_rows: list[FefoPlanPick] = []
-        position_rows: dict[tuple[int | None, datetime | None, str], FefoPlanPick] = {}
-        for location_id, _lot_id, expiry_date, take, strategy in picks:
+        picks, remaining = _fefo_picks(db, payload.warehouse_id, product_id, quantity)
+        for location_id, lot_id, expiry_date, take, strategy in picks:
             location = db.get(WarehouseLocation, location_id) if location_id is not None else None
-            location_code = location.code if location else None
-            key = (location_id, expiry_date, strategy)
-            row = position_rows.get(key)
-            if row is None:
-                lot = db.get(InventoryLot, _lot_id) if _lot_id is not None else None
-                row = FefoPlanPick(
-                    location_code=location_code,
-                    location_id=location_id,
-                    lot_number=lot.lot_number if lot else None,
-                    expiry_date=expiry_date,
-                    quantity=take,
-                    allocation_strategy=strategy,
-                )
-                position_rows[key] = row
-                pick_rows.append(row)
-            else:
-                row.quantity += take
+            lot = db.get(InventoryLot, lot_id) if lot_id is not None else None
+            pick_rows.append(FefoPlanPick(
+                lot_id=lot_id,
+                location_code=location.code if location else None,
+                location_id=location_id,
+                lot_number=lot.lot_number if lot else None,
+                expiry_date=expiry_date,
+                quantity=take,
+                allocation_strategy=strategy,
+            ))
         result.append(FefoPlanItem(
             product_id=product_id,
             sku=product.sku if product else str(product_id),

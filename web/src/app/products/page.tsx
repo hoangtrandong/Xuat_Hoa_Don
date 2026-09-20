@@ -28,8 +28,6 @@ type ProductRow = {
   boxes_per_carton: number;
   stock: number;
   status: string;
-  representative_sku: string | null;
-  representative_name: string | null;
 };
 export default function ProductsPage() {
   const router = useRouter();
@@ -87,8 +85,6 @@ export default function ProductsPage() {
         boxes_per_carton: product.boxes_per_carton ?? 1,
         stock: 0,
         status: product.status,
-        representative_sku: product.representative_sku ?? null,
-        representative_name: product.representative_name ?? null,
       })));
     }).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Không thể tải dữ liệu."));
   }, []);
@@ -195,8 +191,6 @@ export default function ProductsPage() {
     },
     { key: "code", title: "Mã SKU", sortable: true },
     { key: "name", title: "Tên sản phẩm", sortable: true },
-    { key: "representative_sku", title: "SKU đại diện", sortable: true, render: (value) => value ? <span className="font-medium text-emerald-700">{String(value)}</span> : <span className="text-gray-400">Chưa nhóm</span> },
-    { key: "representative_name", title: "Tên sản phẩm đại diện", sortable: true, render: (value) => value ? String(value) : <span className="text-gray-400">-</span> },
     { key: "category", title: "Danh mục", sortable: true },
     { key: "unit", title: "ĐVT" },
     { key: "supplier", title: "Nhà cung cấp", sortable: true },

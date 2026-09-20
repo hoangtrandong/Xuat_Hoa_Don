@@ -12,6 +12,7 @@ from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
 from app.models.employee import Employee, SalesTerritory, Route, Visit
 from app.models.finance import Payment, Receivable
+from app.models.vinamilk import VinamilkOrderSnapshot, VinamilkSyncRun
 
 __all__ = [
     "User", "Role", "Permission",
@@ -24,4 +25,5 @@ __all__ = [
     "Promotion", "PromotionRule", "PromotionItem",
     "Employee", "SalesTerritory", "Route", "Visit",
     "Payment", "Receivable",
+    "VinamilkOrderSnapshot", "VinamilkSyncRun",
 ]

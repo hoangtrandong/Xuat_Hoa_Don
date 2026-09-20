@@ -13,6 +13,7 @@ type PreviewItem = {
 };
 
 type PickRow = {
+  lot_id: number | null;
   location_code: string | null;
   location_id: number | null;
   lot_number: string | null;
@@ -123,6 +124,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         product_id: productId, quantity: item.quantity, requested_quantity_raw: item.requested_quantity_raw,
         employee_allocations: item.employee_allocations,
         planned_allocations: planned?.picks.map((pick) => ({
+          lot_id: pick.lot_id,
           location_code: pick.location_code,
           location_id: pick.location_id,
           lot_number: pick.lot_number,
@@ -135,7 +137,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
     const response = await fetch(`${API_URL}/delivery-requests/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: Number(warehouseId), items }) });
     const result = await response.json() as { detail?: string; id?: number; code?: string; status?: string };
     if (!response.ok) { setError(result.detail ?? "Không thể tạo yêu cầu."); return; }
-    // Tự động submit: FEFO khớp lô + đặt trước tồn kho, yêu cầu chuyển sang SUBMITTED
+    // Tự động submit sau khi kế hoạch FEFO đã được lưu cùng yêu cầu.
     // để thủ kho thấy trong "Hàng đợi xuất kho".
     let submitNote = "";
     if (result.id) {
@@ -280,7 +282,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       {plan && plan.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
           <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-            <div className="flex items-center gap-2"><MapPin size={18} className="text-indigo-500" /><span className="font-semibold">Kế hoạch lấy hàng FEFO</span></div>
+            <div className="flex items-center gap-2"><MapPin size={18} className="text-indigo-500" /><span className="font-semibold">Kế hoạch lấy hàng FEFO (HSD gần nhất trước)</span></div>
             <button onClick={() => setPlan(null)} className="text-xs text-gray-400 hover:text-gray-600">Ẩn</button>
           </div>
           <div className="overflow-x-auto">

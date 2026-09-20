@@ -31,6 +31,7 @@ class DeliveryPreviewItem(BaseModel):
 
 
 class FefoPlanPick(BaseModel):
+    lot_id: Optional[int] = None
     location_code: Optional[str] = None
     location_id: Optional[int] = None
     lot_number: Optional[str] = None

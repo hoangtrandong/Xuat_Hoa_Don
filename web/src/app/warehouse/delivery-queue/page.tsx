@@ -236,7 +236,7 @@ return (
         onRowClick={openRequest}
         emptyMessage="Không có yêu cầu xuất kho nào cần xử lý"
       />
-<Drawer open={selected !== null} onClose={() => { setSelected(null); setSelectedDetail(null); }} title="Chi tiết yêu cầu xuất kho" subtitle={selected?.code}>
+<Drawer size="4xl" open={selected !== null} onClose={() => { setSelected(null); setSelectedDetail(null); }} title="Chi tiết yêu cầu xuất kho" subtitle={selected?.code}>
         {selected && (
           <div className="p-5 space-y-5">
             {detailLoading && (
@@ -294,9 +294,9 @@ return (
                       </div>
                     </div>
                     {(item.planned_allocations?.length || item.allocations?.length) ? (
-                      <div className="ml-4 mt-2 overflow-hidden rounded-lg border border-gray-100 text-xs">
-                        <div className="grid grid-cols-4 gap-2 bg-gray-50 px-3 py-2 font-medium text-gray-500">
-                          <span>Vị trí</span><span>Lot/HSD</span><span className="text-right">Số lượng lấy</span><span className="text-right">Trạng thái</span>
+                      <div className="ml-4 mt-2 overflow-x-auto rounded-lg border border-gray-100 text-xs">
+                        <div className="grid min-w-[680px] grid-cols-[minmax(85px,.85fr)_minmax(140px,1.35fr)_minmax(80px,.8fr)_minmax(120px,1.25fr)_minmax(100px,1.1fr)] gap-3 bg-gray-50 px-3 py-2 font-medium text-gray-500">
+                          <span>Vị trí</span><span>Lot</span><span>HSD</span><span className="text-right">Số lượng lấy</span><span className="text-right">Trạng thái</span>
                         </div>
                         {(item.planned_allocations ?? []).map((allocation, allocationIndex) => {
                           const actual = (item.allocations ?? []).find((pick) => (
@@ -306,18 +306,20 @@ return (
                             && (allocation.lot_number == null || pick.lot_number == null || pick.lot_number === allocation.lot_number)
                           ));
                           return (
-                            <div key={`${allocationIndex}-${allocation.location_code}`} className="grid grid-cols-4 gap-2 border-t border-gray-100 px-3 py-2 text-gray-700">
+                            <div key={`${allocationIndex}-${allocation.location_code}`} className="grid min-w-[680px] grid-cols-[minmax(85px,.85fr)_minmax(140px,1.35fr)_minmax(80px,.8fr)_minmax(120px,1.25fr)_minmax(100px,1.1fr)] gap-3 border-t border-gray-100 px-3 py-2 text-gray-700">
                               <span>{displayLocation(allocation.location_code, allocation.location_id)}</span>
-                              <span>{allocation.lot_number ?? "—"} · {allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
+                              <span>{allocation.lot_number ?? "—"}</span>
+                              <span>{allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
                               <span className="text-right">{formatQuantity(allocation.quantity, item.boxes_per_carton)}</span>
                               <span className={`text-right font-semibold ${actual && actual.allocated_quantity === allocation.quantity ? "text-emerald-600" : "text-amber-600"}`}>{actual ? (actual.allocated_quantity === allocation.quantity ? "Khớp" : "Đã thay đổi") : "Chưa giữ"}</span>
                             </div>
                           );
                         })}
                         {!item.planned_allocations?.length && (item.allocations ?? []).map((allocation) => (
-                          <div key={`actual-${allocation.allocation_sequence}`} className="grid grid-cols-4 gap-2 border-t border-gray-100 px-3 py-2 text-gray-700">
+                          <div key={`actual-${allocation.allocation_sequence}`} className="grid min-w-[680px] grid-cols-[minmax(85px,.85fr)_minmax(140px,1.35fr)_minmax(80px,.8fr)_minmax(120px,1.25fr)_minmax(100px,1.1fr)] gap-3 border-t border-gray-100 px-3 py-2 text-gray-700">
                             <span>{displayLocation(allocation.location_code, allocation.location_id)}</span>
-                            <span>{allocation.lot_number ?? "—"} · {allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
+                            <span>{allocation.lot_number ?? "—"}</span>
+                            <span>{allocation.expiry_date ? new Date(allocation.expiry_date).toLocaleDateString("vi-VN") : "—"}</span>
                             <span className="text-right">{formatQuantity(allocation.allocated_quantity, item.boxes_per_carton)}</span>
                             <span className="text-right font-semibold text-emerald-600">Đã giữ</span>
                           </div>

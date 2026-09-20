@@ -57,3 +57,18 @@ class ProductGroupCompanyLinkView(BaseModel):
     company_id: int
     role: str
     status: str
+
+
+class ProductCompanyAssignmentView(BaseModel):
+    id: int
+    company_id: int
+    company_name: str
+    role: str
+    status: str
+
+
+class ProductCompanyManagementView(BaseModel):
+    product_id: int
+    sku: str
+    name: str
+    companies: List[ProductCompanyAssignmentView] = []

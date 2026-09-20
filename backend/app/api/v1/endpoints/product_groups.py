@@ -8,6 +8,7 @@ from app.models.customer import Company
 from app.models.product import Product, ProductCompany, ProductGroup, ProductGroupCompany, ProductGroupItem
 from app.schemas.product_group import (
     ProductCompanyLinkView,
+    ProductCompanyManagementView,
     ProductGroupCompanyLinkCreate,
     ProductGroupCompanyLinkView,
     ProductGroupCreate,
@@ -142,3 +143,51 @@ def link_product_company(product_id: int, payload: ProductGroupCompanyLinkCreate
         raise HTTPException(status_code=409, detail="Công ty đã được gán vào SKU này.") from None
     db.refresh(link)
     return link
+
+
+@router.get("/products/{product_id}/companies", response_model=list[ProductCompanyLinkView])
+def list_product_companies(product_id: int, db: Session = Depends(get_db)):
+    if not db.get(Product, product_id):
+        raise HTTPException(status_code=404, detail="SKU not found")
+    return db.scalars(
+        select(ProductCompany)
+        .where(ProductCompany.product_id == product_id)
+        .order_by(ProductCompany.role, ProductCompany.company_id)
+    ).all()
+
+
+@router.get("/products/company-links", response_model=list[ProductCompanyManagementView])
+def list_product_company_links(db: Session = Depends(get_db)):
+    rows = db.execute(
+        select(Product, ProductCompany, Company)
+        .outerjoin(ProductCompany, ProductCompany.product_id == Product.id)
+        .outerjoin(Company, Company.id == ProductCompany.company_id)
+        .order_by(Product.sku, Company.name)
+    ).all()
+    result: dict[int, ProductCompanyManagementView] = {}
+    for product, link, company in rows:
+        item = result.setdefault(product.id, ProductCompanyManagementView(product_id=product.id, sku=product.sku, name=product.name))
+        if link and company:
+            item.companies.append({
+                "id": link.id,
+                "company_id": company.id,
+                "company_name": company.name,
+                "role": link.role,
+                "status": link.status,
+            })
+    return list(result.values())
+
+
+@router.delete("/products/{product_id}/companies/{company_id}")
+def unlink_product_company(product_id: int, company_id: int, db: Session = Depends(get_db)):
+    link = db.scalar(
+        select(ProductCompany).where(
+            ProductCompany.product_id == product_id,
+            ProductCompany.company_id == company_id,
+        )
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Company is not linked to this SKU")
+    db.delete(link)
+    db.commit()
+    return {"success": True}

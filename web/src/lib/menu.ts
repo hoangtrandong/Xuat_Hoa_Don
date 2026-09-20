@@ -16,6 +16,7 @@ export const menuItems: MenuItem[] = [
     href: "/products",
     children: [
       { key: "products-list", label: "Danh sách SKU", icon: "List", href: "/products" },
+      { key: "products-company-management", label: "SKU theo công ty", icon: "Building2", href: "/products/company-management" },
       { key: "products-categories", label: "Danh mục", icon: "FolderOpen", href: "/products/categories" },
       { key: "products-price", label: "Bảng giá", icon: "Tag", href: "/products/price-lists" },
     ],

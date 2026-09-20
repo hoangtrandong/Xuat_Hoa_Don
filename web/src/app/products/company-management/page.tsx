@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Building2, Link2, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Building2, Link2, Trash2, Download, Upload, UsersRound } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
@@ -20,6 +20,8 @@ export default function ProductCompanyManagementPage() {
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   async function load(): Promise<ProductCompanyRow[]> {
     const [productsResponse, companiesResponse] = await Promise.all([
@@ -63,6 +65,34 @@ export default function ProductCompanyManagementPage() {
     setMessage("Đã gỡ công ty khỏi SKU.");
   }
 
+  async function uploadAssignments(file: File) {
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const body = new FormData(); body.append("file", file);
+      const response = await fetch(`${API_URL}/product-groups/products/companies/upload`, { method: "POST", body });
+      const result = await response.json() as { added?: number; skipped?: number; detail?: string };
+      if (!response.ok) throw new Error(result.detail ?? "Không thể nhập file Excel.");
+      await load();
+      setMessage(`Đã gán ${result.added ?? 0} quan hệ SKU-công ty; bỏ qua ${result.skipped ?? 0} quan hệ đã có.`);
+    } catch (uploadError) { setError(uploadError instanceof Error ? uploadError.message : "Không thể nhập file Excel."); }
+    finally { setBusy(false); }
+  }
+
+  async function assignAllToTwoCompanies() {
+    const targets = companies.filter((company) => company.code === "001" || company.code === "002");
+    if (targets.length !== 2) { setError("Không tìm đủ Cty Trung Đông (001) và Cty Mai Gold (002)."); return; }
+    if (!window.confirm(`Gán ${targets.map((company) => company.name).join(" và ")} cho toàn bộ ${rows.length} SKU hiện tại?`)) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const response = await fetch(`${API_URL}/product-groups/products/companies/assign-all`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(targets.map((company) => company.id)) });
+      const result = await response.json() as { added?: number; products?: number; detail?: string };
+      if (!response.ok) throw new Error(result.detail ?? "Không thể gán công ty cho toàn bộ SKU.");
+      await load();
+      setMessage(`Đã gán ${result.added ?? 0} quan hệ cho ${result.products ?? rows.length} SKU.`);
+    } catch (assignError) { setError(assignError instanceof Error ? assignError.message : "Không thể gán công ty."); }
+    finally { setBusy(false); }
+  }
+
   const columns: Column<ProductCompanyRow>[] = [
     { key: "sku", title: "Mã SKU", sortable: true },
     { key: "name", title: "Tên sản phẩm", sortable: true },
@@ -73,7 +103,7 @@ export default function ProductCompanyManagementPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="SKU theo công ty quản lý" subtitle="Gán một SKU cho một hoặc nhiều công ty quản lý độc lập." />
+      <PageHeader title="SKU theo công ty quản lý" subtitle="Gán một SKU cho một hoặc nhiều công ty quản lý độc lập." actions={<div className="flex flex-wrap gap-2"><a href={`${API_URL}/product-groups/products/companies/template`} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700"><Download size={16} />Tải mẫu Excel</a><button onClick={() => fileInput.current?.click()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"><Upload size={16} />Upload Excel</button><input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadAssignments(file); event.target.value = ""; }} /><button onClick={assignAllToTwoCompanies} disabled={busy || rows.length === 0} className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"><UsersRound size={16} />Gán Mai Gold + Trung Đông</button></div>} />
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
       {message && <div className="rounded-lg bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">

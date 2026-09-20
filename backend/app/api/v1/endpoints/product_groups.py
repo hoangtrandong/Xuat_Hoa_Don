@@ -1,4 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
+from io import BytesIO
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
+from zipfile import BadZipFile
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -19,6 +23,92 @@ from app.schemas.product_group import (
 )
 
 router = APIRouter(prefix="/product-groups", tags=["product-groups"])
+
+
+@router.get("/products/companies/template")
+def download_product_company_template():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "SKU-Cong ty"
+    sheet.append(["sku", "company_code", "role"])
+    sheet.append(["01CX01", "001", "MANAGER"])
+    output = BytesIO()
+    workbook.save(output)
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="mau-sku-cong-ty.xlsx"'},
+    )
+
+
+@router.post("/products/companies/upload")
+def upload_product_company_links(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
+    try:
+        workbook = load_workbook(BytesIO(file.file.read()), read_only=True, data_only=True)
+        rows = list(workbook.active.iter_rows(values_only=True))
+        if not rows:
+            raise HTTPException(status_code=400, detail="File Excel không có dữ liệu.")
+        headers = [str(value).strip().lower() if value is not None else "" for value in rows[0]]
+        required = {"sku", "company_code"}
+        if not required.issubset(headers):
+            raise HTTPException(status_code=400, detail="File cần có cột sku và company_code.")
+        products = {product.sku: product for product in db.scalars(select(Product)).all()}
+        companies = {company.code: company for company in db.scalars(select(Company)).all()}
+        existing = {(link.product_id, link.company_id) for link in db.scalars(select(ProductCompany)).all()}
+        added = 0
+        skipped = 0
+        errors: list[str] = []
+        for row_number, values in enumerate(rows[1:], start=2):
+            data = dict(zip(headers, values))
+            sku = str(data.get("sku") or "").strip().upper()
+            company_code = str(data.get("company_code") or "").strip()
+            role = str(data.get("role") or "MANAGER").strip().upper()
+            if not sku and not company_code:
+                continue
+            product = products.get(sku)
+            company = companies.get(company_code)
+            if not product or not company:
+                errors.append(f"Dòng {row_number}: không tìm thấy SKU {sku} hoặc công ty {company_code}.")
+                continue
+            key = (product.id, company.id)
+            if key in existing:
+                skipped += 1
+                continue
+            db.add(ProductCompany(product_id=product.id, company_id=company.id, role=role))
+            existing.add(key)
+            added += 1
+        if errors:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="; ".join(errors[:10]))
+        db.commit()
+        return {"added": added, "skipped": skipped}
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ValueError, TypeError, InvalidFileException, BadZipFile, OSError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Không thể đọc file Excel: {exc}") from exc
+
+
+@router.post("/products/companies/assign-all")
+def assign_companies_to_all_products(company_ids: list[int], db: Session = Depends(get_db)):
+    if not company_ids:
+        raise HTTPException(status_code=400, detail="Cần chọn ít nhất một công ty.")
+    companies = db.scalars(select(Company).where(Company.id.in_(set(company_ids)))).all()
+    if len(companies) != len(set(company_ids)):
+        raise HTTPException(status_code=400, detail="Một hoặc nhiều công ty không tồn tại.")
+    products = db.scalars(select(Product)).all()
+    existing = {(link.product_id, link.company_id) for link in db.scalars(select(ProductCompany)).all()}
+    added = 0
+    for product in products:
+        for company in companies:
+            if (product.id, company.id) not in existing:
+                db.add(ProductCompany(product_id=product.id, company_id=company.id, role="MANAGER"))
+                added += 1
+    db.commit()
+    return {"products": len(products), "companies": len(companies), "added": added}
 
 
 def _load_group(db: Session, group_id: int) -> ProductGroup:

@@ -1,9 +1,9 @@
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from typing import List, Optional
 
-from app.models.product import Product, PriceList, PriceListItem
+from app.models.product import Product, PriceList, PriceListItem, ProductGroup, ProductGroupItem
 from app.schemas.product import ProductCreate, PriceListCreate
 
 
@@ -15,7 +15,28 @@ def list_(db: Session, skip: int = 0, limit: int = 100, category_id: Optional[in
     stmt = select(Product).offset(skip).limit(limit)
     if category_id:
         stmt = stmt.where(Product.category_id == category_id)
-    return list(db.execute(stmt).scalars().all())
+    products = list(db.execute(stmt).scalars().all())
+
+    if not products:
+        return products
+
+    # Batch fetch representative SKU data with a single simple JOIN query.
+    # Note: no IN-clause filtering — product_group_items is small, and passing
+    # thousands of ids through text() params does not expand correctly and hangs.
+    rep_rows = db.execute(text(
+        "SELECT pgi.product_id, rp.sku AS rep_sku, rp.name AS rep_name "
+        "FROM product_group_items pgi "
+        "JOIN product_groups pg ON pg.id = pgi.product_group_id "
+        "JOIN products rp ON rp.id = pg.representative_product_id"
+    )).all()
+
+    rep_map = {row.product_id: (row.rep_sku, row.rep_name) for row in rep_rows}
+    for product in products:
+        rep = rep_map.get(product.id)
+        product._rep_sku_cache = rep[0] if rep else None
+        product._rep_name_cache = rep[1] if rep else None
+
+    return products
 
 
 def create(db: Session, obj_in: ProductCreate) -> Product:

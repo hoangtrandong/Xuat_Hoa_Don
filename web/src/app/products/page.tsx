@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Package, CheckCircle, FolderOpen, Truck, Plus, Download, Upload, Pencil, Trash2, GitMerge } from "lucide-react";
+import { Package, CheckCircle, FolderOpen, Truck, Plus, Download, Upload, Pencil, Trash2 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -31,13 +31,6 @@ type ProductRow = {
   representative_sku: string | null;
   representative_name: string | null;
 };
-type ProductGroupRow = {
-  id: number;
-  name: string;
-  representative_product_id: number;
-  items: { id: number; product_id: number; conversion_factor: number }[];
-};
-
 export default function ProductsPage() {
   const router = useRouter();
   const [products, setProducts] = useState<ProductRow[]>([]);
@@ -57,9 +50,6 @@ export default function ProductsPage() {
   const [unitOptions, setUnitOptions] = useState<UnitOption[]>([]);
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: number; name: string } | null>(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
-  const [groups, setGroups] = useState<ProductGroupRow[]>([]);
-  const [groupName, setGroupName] = useState("");
-  const [representativeId, setRepresentativeId] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   async function uploadProducts(file: File) {
     const body = new FormData();
@@ -69,11 +59,6 @@ export default function ProductsPage() {
     if (!response.ok) throw new Error(result.detail ?? "Không thể tải danh sách SKU.");
     setMessage(`Đã thêm ${result.imported ?? 0} SKU, cập nhật ${result.updated ?? 0} SKU và xử lý ${result.representative_updated ?? 0} liên kết đại diện.`);
     window.location.reload();
-  }
-  async function loadGroups() {
-    const response = await fetch(`${API_URL}/product-groups/`);
-    if (!response.ok) throw new Error("Không thể tải nhóm sản phẩm.");
-    setGroups(await response.json() as ProductGroupRow[]);
   }
   useEffect(() => {
     Promise.all([
@@ -107,39 +92,6 @@ export default function ProductsPage() {
       })));
     }).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Không thể tải dữ liệu."));
   }, []);
-  useEffect(() => {
-    loadGroups().catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Không thể tải nhóm sản phẩm."));
-  }, []);
-  async function createProductGroup() {
-    setError("");
-    const productIds = Array.from(selectedIds);
-    const selectedRepresentative = Number(representativeId) || productIds[0];
-    if (productIds.length < 2) { setError("Chọn ít nhất 2 SKU để tạo nhóm tương đương."); return; }
-    if (!groupName.trim()) { setError("Nhập tên nhóm sản phẩm."); return; }
-    try {
-      const response = await fetch(`${API_URL}/product-groups/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: groupName.trim(), representative_product_id: selectedRepresentative, product_ids: productIds }),
-      });
-      const result = await response.json() as { detail?: string };
-      if (!response.ok) throw new Error(result.detail ?? "Không thể tạo nhóm sản phẩm.");
-      setGroupName(""); setRepresentativeId(""); setSelectedIds(new Set());
-      setMessage("Đã tạo nhóm SKU tương đương.");
-      await loadGroups();
-    } catch (groupError) { setError(groupError instanceof Error ? groupError.message : "Không thể tạo nhóm sản phẩm."); }
-  }
-  async function changeGroupRepresentative(groupId: number, productId: number) {
-    try {
-      const response = await fetch(`${API_URL}/product-groups/${groupId}/representative`, {
-        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product_id: productId }),
-      });
-      const result = await response.json() as { detail?: string };
-      if (!response.ok) throw new Error(result.detail ?? "Không thể đổi SKU đại diện.");
-      await loadGroups();
-      setMessage("Đã cập nhật SKU đại diện.");
-    } catch (groupError) { setError(groupError instanceof Error ? groupError.message : "Không thể đổi SKU đại diện."); }
-  }
   async function createProduct() {
     setMessage(""); setError("");
     try {
@@ -277,14 +229,14 @@ export default function ProductsPage() {
       render: (_, row) => (
         <div className="flex items-center gap-1">
           <button
-            onClick={() => openEditDrawer(row)}
+            onClick={(e) => { e.stopPropagation(); openEditDrawer(row); }}
             className="p-1.5 text-gray-500 hover:text-sky-600 hover:bg-sky-50 rounded transition-colors"
             title="Sửa"
           >
             <Pencil size={14} />
           </button>
           <button
-            onClick={() => setDeleteConfirm({ id: row.id, name: row.name })}
+            onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ id: row.id, name: row.name }); }}
             className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
             title="Xóa"
           >
@@ -318,44 +270,6 @@ export default function ProductsPage() {
         <StatCard label="Danh mục" value={categories.length} icon={<FolderOpen size={20} />} color="bg-purple-50 text-purple-600" />
         <StatCard label="Nhà cung cấp" value={uniqueSuppliers} icon={<Truck size={20} />} color="bg-amber-50 text-amber-600" />
       </div>
-
-      <section className="rounded-xl border border-gray-100 bg-white p-4 shadow-sm space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-gray-900">Nhóm SKU tương đương</h2>
-            <p className="text-xs text-gray-500 mt-1">Chọn các SKU thực tế giống nhau và dùng một SKU hiện có làm đại diện.</p>
-          </div>
-          <span className="text-xs text-gray-500">{groups.length} nhóm</span>
-        </div>
-        {selectedIds.size >= 2 && (
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_auto]">
-            <input value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="Tên nhóm sản phẩm" className="rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-            <select value={representativeId} onChange={(event) => setRepresentativeId(event.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm">
-              <option value="">Chọn SKU đại diện (mặc định SKU đầu tiên)</option>
-              {products.filter((product) => selectedIds.has(product.id)).map((product) => <option key={product.id} value={product.id}>{product.code} - {product.name}</option>)}
-            </select>
-            <button onClick={createProductGroup} className="flex items-center justify-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600"><GitMerge size={16} />Tạo nhóm</button>
-          </div>
-        )}
-        {groups.length > 0 ? (
-          <div className="overflow-x-auto rounded-lg border border-gray-100">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-gray-50 text-xs uppercase text-gray-500"><tr><th className="px-3 py-2">Nhóm</th><th className="px-3 py-2">SKU đại diện</th><th className="px-3 py-2">SKU thành viên</th><th className="px-3 py-2">Đổi đại diện</th></tr></thead>
-              <tbody className="divide-y divide-gray-100">
-                {groups.map((group) => {
-                  const representative = products.find((product) => product.id === group.representative_product_id);
-                  return <tr key={group.id}>
-                    <td className="px-3 py-2 font-medium text-gray-900">{group.name}</td>
-                    <td className="px-3 py-2 text-emerald-700">{representative?.code ?? `#${group.representative_product_id}`}</td>
-                    <td className="px-3 py-2 text-gray-600">{group.items.map((item) => products.find((product) => product.id === item.product_id)?.code ?? `#${item.product_id}`).join(", ")}</td>
-                    <td className="px-3 py-2"><select value={String(group.representative_product_id)} onChange={(event) => changeGroupRepresentative(group.id, Number(event.target.value))} className="rounded border border-gray-200 px-2 py-1 text-xs">{group.items.map((item) => { const product = products.find((row) => row.id === item.product_id); return <option key={item.product_id} value={item.product_id}>{product?.code ?? item.product_id}</option>; })}</select></td>
-                  </tr>;
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : <p className="rounded-lg border border-dashed border-gray-200 px-3 py-4 text-center text-sm text-gray-400">Chưa có nhóm SKU tương đương.</p>}
-      </section>
 
       <DataTable
         data={filteredProducts}

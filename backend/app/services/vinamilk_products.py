@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from dotenv import dotenv_values
+from dotenv import dotenv_values, set_key
 from playwright.sync_api import sync_playwright
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -58,11 +58,24 @@ def _fetch_rows(page, cookie_header: str, page_number: int) -> dict[str, Any]:
     return payload
 
 
-def _load_product_pages() -> list[dict[str, Any]]:
-    cookie_header = _cookie_header()
+def _persist_cookie(cookie_header: str) -> None:
+    """Lưu cookie mới vào backend/.env.local để lần chạy sau không cần đăng nhập lại."""
     if not cookie_header:
-        cookie_header = login_and_get_cookie()
+        return
+    try:
+        env_path = Path(__file__).resolve().parents[2] / ".env.local"
+        set_key(str(env_path), "VINAMILK_SESSION_COOKIE", cookie_header, quote_mode="never")
+    except Exception:
+        pass
 
+
+def _fetch_all_pages(cookie_header: str) -> list[dict[str, Any]]:
+    """Mở 1 browser context riêng và tải toàn bộ trang sản phẩm.
+
+    Phải dùng context độc lập: không được gọi login_and_get_cookie() (sync_playwright khác)
+    khi đang ở trong một context playwright, nếu không sẽ lỗi
+    'Playwright Sync API inside the asyncio loop'.
+    """
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
         try:
@@ -71,14 +84,7 @@ def _load_product_pages() -> list[dict[str, Any]]:
             )
             context.add_cookies(_browser_cookies(cookie_header))
             page = context.new_page()
-            try:
-                first_payload = _fetch_rows(page, cookie_header, 1)
-            except PermissionError:
-                refreshed_cookie = login_and_get_cookie()
-                context.clear_cookies()
-                context.add_cookies(_browser_cookies(refreshed_cookie))
-                first_payload = _fetch_rows(page, refreshed_cookie, 1)
-
+            first_payload = _fetch_rows(page, cookie_header, 1)
             rows = list(first_payload["rows"])
             total = int(first_payload.get("total") or len(rows))
             for page_number in range(2, (total + PAGE_SIZE - 1) // PAGE_SIZE + 1):
@@ -86,6 +92,19 @@ def _load_product_pages() -> list[dict[str, Any]]:
             return rows
         finally:
             browser.close()
+
+
+def _load_product_pages() -> list[dict[str, Any]]:
+    cookie_header = _cookie_header()
+    if cookie_header:
+        try:
+            return _fetch_all_pages(cookie_header)
+        except PermissionError:
+            pass
+
+    cookie_header = login_and_get_cookie()
+    _persist_cookie(cookie_header)
+    return _fetch_all_pages(cookie_header)
 
 
 def _number(value: Any, default: float = 0) -> float:
@@ -117,6 +136,15 @@ def _get_or_create_category(db: Session, code: str, name: str | None, cache: dic
             db.flush()
         cache[normalized] = category
     return cache[normalized]
+
+
+def fetch_all_products() -> list[dict[str, Any]]:
+    """Tải toàn bộ sản phẩm từ Vinamilk DMS One (read-only, không ghi DB).
+
+    Mỗi bản ghi có các field cần dùng: productCode, productName, catCode,
+    uom1, convfact, barcode, status, price...
+    """
+    return _load_product_pages()
 
 
 def sync_new_products(db: Session) -> dict[str, int]:

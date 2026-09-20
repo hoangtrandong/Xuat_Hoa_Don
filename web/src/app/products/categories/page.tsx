@@ -18,7 +18,7 @@ export default function CategoriesPage() {
   useEffect(() => {
     Promise.all([
       fetch(`${API_URL}/products/categories/`),
-      fetch(`${API_URL}/products/`),
+      fetch(`${API_URL}/products/?limit=10000` ),
     ]).then(async ([categoryResponse, productResponse]) => {
       if (!categoryResponse.ok || !productResponse.ok) throw new Error("Không thể tải danh mục hàng hóa.");
       setCategories(await categoryResponse.json());

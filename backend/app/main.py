@@ -62,10 +62,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.get("/health", tags=["system"])
 def health():
     return {"status": "ok", "service": settings.PROJECT_NAME}
 
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+

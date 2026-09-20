@@ -59,11 +59,17 @@ class Product(Base):
 
     @property
     def representative_sku(self) -> str | None:
+        cached = getattr(self, '_rep_sku_cache', None)
+        if hasattr(self, '_rep_sku_cache'):
+            return cached
         product = self.representative_product
         return product.sku if product else None
 
     @property
     def representative_name(self) -> str | None:
+        cached = getattr(self, '_rep_name_cache', None)
+        if hasattr(self, '_rep_name_cache'):
+            return cached
         product = self.representative_product
         return product.name if product else None
 

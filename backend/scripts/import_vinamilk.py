@@ -17,13 +17,25 @@ from app.models import (
 )
 
 
-# Category mapping: Excel code -> Database category code
-CATEGORY_MAP = {
-    "A": "NGK",  # Nuoc giai khat
-    "B": "SUN",  # Sua & Thuc pham bo duong
-    "C": "BKS",  # Banh keo & Snack
-    "D": "MIA",  # Mi & Thuc pham an lien
-    "E": "HMP",  # Hoa my pham & Ve sinh
+# Mã ngành hàng Vinamilk (cột "Mã ngành hàng" trong file Excel) được dùng
+# trực tiếp làm mã danh mục trong DB.
+# LƯU Ý: trước đây script map sai sang NGK/SUN/BKS/MIA/HMP khiến danh mục bị lệch;
+# nếu DB đang có dữ liệu cũ, chạy `python -m scripts.reclassify_categories` để sửa.
+CATEGORY_CODES = {"A", "B", "C", "D", "E", "F", "G", "H", "S", "Z"}
+DEFAULT_CATEGORY_CODE = "Z"
+
+# Tên hiển thị của từng danh mục (API Vinamilk trả catName = null).
+CATEGORY_NAMES = {
+    "A": "A - Sữa Bột",
+    "B": "B - Sữa Đặc",
+    "C": "C - Sữa Tươi- Sữa chua uống- Sữa đậu nành",
+    "D": "D - Sữa chua - Pho mai",
+    "E": "E - Giải Khát ( Trà - Nước trái cây )",
+    "F": "F - F",
+    "G": "G - Kem",
+    "H": "H - H",
+    "S": "S - Đường",
+    "Z": "Z - KHÁC",
 }
 
 # Default unit for Vinamilk products (Thung)
@@ -93,11 +105,18 @@ def import_vinamilk(filepath: str):
                     except (ValueError, TypeError):
                         boxes_per_carton = 1
 
-                # Map category
-                db_cat_code = CATEGORY_MAP.get(str(cat_code).strip() if cat_code else "", "SUN")
+                # Map category: dùng trực tiếp mã ngành hàng A..Z (không map chéo nữa)
+                raw_cat_code = str(cat_code).strip().upper() if cat_code else ""
+                db_cat_code = raw_cat_code if raw_cat_code in CATEGORY_CODES else DEFAULT_CATEGORY_CODE
                 category = categories.get(db_cat_code)
                 if not category:
-                    category = list(categories.values())[0]  # Fallback
+                    category = ProductCategory(
+                        code=db_cat_code,
+                        name=CATEGORY_NAMES.get(db_cat_code, db_cat_code),
+                    )
+                    db.add(category)
+                    db.flush()
+                    categories[db_cat_code] = category
 
                 # Check if product exists (case-insensitive)
                 if sku in existing_skus:

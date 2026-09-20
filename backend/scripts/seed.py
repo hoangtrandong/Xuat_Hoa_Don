@@ -18,15 +18,22 @@ from app.models import (
 
 def seed() -> None:
     with SessionLocal() as db:
-        # --- Danh muc & don vi ---
-        categories = [
-            ProductCategory(code="NGK", name="Nước giải khát"),
-            ProductCategory(code="SUN", name="Sữa & Thực phẩm bổ dưỡng"),
-            ProductCategory(code="BKS", name="Bánh kẹo & Snack"),
-            ProductCategory(code="MIA", name="Mì & Thực phẩm ăn liền"),
-            ProductCategory(code="HMP", name="Hóa mỹ phẩm & Vệ sinh"),
+        # --- Danh muc (theo ma nganh hang Vinamilk A..Z) & don vi ---
+        # Ten danh muc phai khop voi scripts/reclassify_categories.py.
+        category_defs = [
+            ("A", "A - Sữa Bột"),
+            ("B", "B - Sữa Đặc"),
+            ("C", "C - Sữa Tươi- Sữa chua uống- Sữa đậu nành"),
+            ("D", "D - Sữa chua - Pho mai"),
+            ("E", "E - Giải Khát ( Trà - Nước trái cây )"),
+            ("F", "F - F"),
+            ("G", "G - Kem"),
+            ("H", "H - H"),
+            ("S", "S - Đường"),
+            ("Z", "Z - KHÁC"),
         ]
-        db.add_all(categories)
+        categories = {code: ProductCategory(code=code, name=name) for code, name in category_defs}
+        db.add_all(list(categories.values()))
         db.flush()
 
         units = [
@@ -43,12 +50,12 @@ def seed() -> None:
 
         # --- San pham ---
         products = [
-            Product(sku="SKU-001", name="Dau goi Clear 650ml", category_id=categories[4].id, unit_id=units[3].id, supplier="Unilever", base_price=165000, cost_price=115000),
-            Product(sku="SKU-002", name="Dau xa Sunsilk 320ml", category_id=categories[4].id, unit_id=units[3].id, supplier="Unilever", base_price=85000, cost_price=60000),
-            Product(sku="SKU-003", name="Omo Matic 3kg", category_id=categories[4].id, unit_id=units[5].id, supplier="Unilever", base_price=195000, cost_price=145000),
-            Product(sku="SKU-007", name="Banh quy Cosy 300g", category_id=categories[2].id, unit_id=units[2].id, supplier="Viet Dai", base_price=45000, cost_price=32000),
-            Product(sku="SKU-009", name="Mi Hao Hao Tom Chua Cay", category_id=categories[3].id, unit_id=units[1].id, supplier="Cau Do", base_price=110000, cost_price=90000),
-            Product(sku="SKU-011", name="Bia Heineken 330ml (Thung 24)", category_id=categories[0].id, unit_id=units[1].id, supplier="Hayat", base_price=420000, cost_price=380000),
+            Product(sku="SKU-001", name="Da uoi Clear 650ml", category_id=categories["Z"].id, unit_id=units[3].id, supplier="Unilever", base_price=165000, cost_price=115000),
+            Product(sku="SKU-002", name="Da xa Sunsilk 320ml", category_id=categories["Z"].id, unit_id=units[3].id, supplier="Unilever", base_price=85000, cost_price=60000),
+            Product(sku="SKU-003", name="Omo Matic 3kg", category_id=categories["Z"].id, unit_id=units[5].id, supplier="Unilever", base_price=195000, cost_price=145000),
+            Product(sku="SKU-007", name="Banh quy Cosy 300g", category_id=categories["Z"].id, unit_id=units[2].id, supplier="Viet Dai", base_price=45000, cost_price=32000),
+            Product(sku="SKU-009", name="Mi Hao Hao Tom Chua Cay", category_id=categories["Z"].id, unit_id=units[1].id, supplier="Cau Do", base_price=110000, cost_price=90000),
+            Product(sku="SKU-011", name="Bia Heineken 330ml (Thung 24)", category_id=categories["E"].id, unit_id=units[1].id, supplier="Hayat", base_price=420000, cost_price=380000),
         ]
         db.add_all(products)
         db.flush()

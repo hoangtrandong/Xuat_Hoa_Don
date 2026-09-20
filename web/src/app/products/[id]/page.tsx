@@ -2,9 +2,10 @@ import { notFound } from "next/navigation";
 import { Package, Tag, Boxes, CircleDollarSign, TriangleAlert } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import Badge from "@/components/ui/Badge";
-import { products, priceListItems } from "@/lib/mock-products";
+import { priceListItems } from "@/lib/mock-products";
 import { stockLevels, ledgerEntries, ledgerLabels, type LedgerType } from "@/lib/mock-inventory";
 import { formatVNDFull, formatDateTime, formatNumber } from "@/lib/format";
+import { API_URL } from "@/lib/api";
 
 function typeBadge(type: LedgerType) {
   if (type === "IN") return { label: ledgerLabels[type], cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" };
@@ -13,15 +14,44 @@ function typeBadge(type: LedgerType) {
   return { label: ledgerLabels[type], cls: "bg-purple-50 text-purple-700 ring-purple-200" };
 }
 
+interface CategoryOption { id: number; name: string }
+interface UnitOption { id: number; name: string }
+interface ApiProduct {
+  id: number;
+  sku: string;
+  name: string;
+  category_id: number;
+  unit_id: number;
+  supplier: string | null;
+  base_price: number;
+  cost_price: number;
+  boxes_per_carton: number;
+  status: string;
+  representative_sku: string | null;
+  representative_name: string | null;
+}
+
 export default async function ProductDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const product = products.find((p) => p.id === id);
-  if (!product) notFound();
 
-  const stock = stockLevels.find((s) => s.productCode === product.code);
-  const txHistory = ledgerEntries.filter((e) => e.productCode === product.code);
+  const [catRes, unitRes, prodRes] = await Promise.all([
+    fetch(`${API_URL}/products/categories/`),
+    fetch(`${API_URL}/products/units/`),
+    fetch(`${API_URL}/products/${id}`, { cache: "no-store" }),
+  ]);
+
+  if (!prodRes.ok) notFound();
+  const product = await prodRes.json() as ApiProduct;
+  const categories = (await catRes.json()) as CategoryOption[];
+  const units = (await unitRes.json()) as UnitOption[];
+
+  const category = categories.find((c) => c.id === product.category_id)?.name ?? "Chưa xác định";
+  const unit = units.find((u) => u.id === product.unit_id)?.name ?? "Chưa xác định";
+
+  const stock = stockLevels.find((s) => s.productCode === product.sku);
+  const txHistory = ledgerEntries.filter((e) => e.productCode === product.sku);
   const priceInLists = priceListItems.map((pl) => {
-    const item = pl.items.find((i) => i.productCode === product.code);
+    const item = pl.items.find((i) => i.productCode === product.sku);
     return item ? { list: pl.name, price: item.price } : null;
   }).filter(Boolean);
   const lowStock = stock ? stock.onHand <= stock.reorderPoint : false;
@@ -30,7 +60,7 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
     <div className="space-y-6">
       <PageHeader
         title="Chi tiết sản phẩm"
-        subtitle={`${product.code} · ${product.category}`}
+        subtitle={`${product.sku} · ${category}`}
         backHref="/products"
       />
 
@@ -46,22 +76,27 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
                 <h2 className="text-lg font-bold text-gray-900">{product.name}</h2>
                 {product.status === "active" ? <Badge variant="success">Đang bán</Badge> : <Badge variant="danger">Ngừng kinh doanh</Badge>}
               </div>
-              <p className="text-sm text-gray-500 mt-1">Mã SKU: <strong className="text-gray-800">{product.code}</strong></p>
+              <p className="text-sm text-gray-500 mt-1">Mã SKU: <strong className="text-gray-800">{product.sku}</strong></p>
               <div className="flex flex-wrap gap-2 mt-3">
-                <Badge variant="info">{product.category}</Badge>
-                <Badge variant="default">ĐVT: {product.unit}</Badge>
-                <Badge variant="purple">NCC: {product.supplier}</Badge>
+                <Badge variant="info">{category}</Badge>
+                <Badge variant="default">ĐVT: {unit}</Badge>
+                <Badge variant="purple">NCC: {product.supplier ?? "—"}</Badge>
               </div>
             </div>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
-            <MiniStat icon={<Tag size={16} />} value={formatVNDFull(product.price)} label="Giá bán lẻ" />
-            <MiniStat icon={<CircleDollarSign size={16} />} value={formatVNDFull(product.costPrice)} label="Giá vốn" />
-            <MiniStat icon={<Boxes size={16} />} value={`${formatNumber(stock?.onHand ?? 0)} ${product.unit}`} label="Tồn kho" />
+            <MiniStat icon={<Tag size={16} />} value={formatVNDFull(product.base_price)} label="Giá bán lẻ" />
+            <MiniStat icon={<CircleDollarSign size={16} />} value={formatVNDFull(product.cost_price)} label="Giá vốn" />
+            <MiniStat
+              icon={<Boxes size={16} />}
+              value={`${formatNumber(stock?.onHand ?? 0)} ${unit}`}
+              label="Tồn kho"
+              alert={lowStock}
+            />
             <MiniStat
               icon={<TriangleAlert size={16} />}
-              value={`${formatNumber(stock?.reorderPoint ?? 0)} ${product.unit}`}
+              value={`${formatNumber(stock?.reorderPoint ?? 0)} ${unit}`}
               label="Điểm đặt lại"
               alert={lowStock}
             />
@@ -74,24 +109,28 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
           )}
         </div>
 
-        {/* Giá theo bảng giá */}
+        {/* Bảng giá */}
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">Giá theo bảng giá</h3>
-          <div className="space-y-2">
-            {priceInLists.map((p) => (
-              <div key={p!.list} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2.5">
-                <span className="text-xs text-gray-500">{p!.list}</span>
-                <span className="text-sm font-bold text-gray-900">{formatVNDFull(p!.price)}</span>
-              </div>
-            ))}
-          </div>
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">Bảng giá</h3>
+          {priceInLists.length > 0 ? (
+            <div className="space-y-2">
+              {priceInLists.map((p) => (
+                <div key={p!.list} className="flex items-center justify-between">
+                  <span className="text-xs text-gray-500">{p!.list}</span>
+                  <span className="text-sm font-bold text-gray-900">{formatVNDFull(p!.price)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400">Chưa có bảng giá</p>
+          )}
         </div>
       </div>
 
       {/* Lịch sử giao dịch kho */}
       <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
         <div className="px-5 pt-5 pb-4">
-          <h3 className="text-sm font-semibold text-gray-700">Lịch sử giao dịch kho ({product.code})</h3>
+          <h3 className="text-sm font-semibold text-gray-700">Lịch sử giao dịch kho ({product.sku})</h3>
           <p className="text-xs text-gray-400 mt-0.5">Trích từ sổ nhật ký inventory_transactions</p>
         </div>
         <div className="overflow-x-auto">

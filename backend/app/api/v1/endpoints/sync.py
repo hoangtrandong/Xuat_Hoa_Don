@@ -5,15 +5,22 @@ from pathlib import Path
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
+from zipfile import BadZipFile
 from pydantic import BaseModel, Field
 from playwright.async_api import Browser, Error as PlaywrightError, async_playwright
 from dotenv import dotenv_values
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
+from app.models.customer import Company
 from app.models.vinamilk import VinamilkOrderSnapshot, VinamilkSyncRun
+from app.models.vinamilk_allocation import VinamilkOrderAllocation
 from scripts.vinamilk_login import login_and_get_cookie
 
 router = APIRouter()
@@ -41,6 +48,24 @@ class VinamilkSearchRequest(BaseModel):
     saleOrderType: str = "-1"
     page: int = Field(default=1, ge=1)
     rows: int = Field(default=500, ge=1, le=500)
+
+
+class AllocationUpdateRequest(BaseModel):
+    """Các trường cho phép chỉnh sửa trên một dòng cân đối upload thủ công."""
+
+    allocated_quantity: int | None = Field(default=None, ge=0)
+    company_code: str | None = None
+    distributor_sku: str | None = None
+    note: str | None = None
+
+
+class AllocationBulkDeleteRequest(BaseModel):
+    """Danh sách id dòng cân đối cần xóa (hỗ trợ chọn nhiều hoặc chọn tất cả)."""
+
+    allocation_ids: list[int] = Field(default_factory=list)
+    delete_all: bool = False
+    from_date: date | None = None
+    to_date: date | None = None
 
 
 def _date_value(value: str) -> date:
@@ -80,6 +105,37 @@ def _row_list(payload: Any) -> list[dict[str, Any]]:
 def _parse_optional_date(value: str | None) -> date | None:
     if not value:
         return None
+    try:
+        return _date_value(value)
+    except ValueError:
+        return None
+
+
+def _line_key(row: dict[str, Any]) -> str | None:
+    return _field(row, ("lineId", "itemId", "orderItemId", "detailId", "id"))
+
+
+def _quantity(value: Any) -> int:
+    try:
+        quantity = int(float(str(value).replace(",", "").strip()))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Số lượng không hợp lệ: {value}") from exc
+    if quantity < 0:
+        raise ValueError("Số lượng không được âm.")
+    return quantity
+
+
+def _parse_json_body(body: object) -> Any:
+    text = str(body or "").strip()
+    if not text:
+        raise RuntimeError("Vinamilk trả về response rỗng.")
+    if text.startswith("<"):
+        raise RuntimeError("Vinamilk trả về trang HTML, có thể phiên đăng nhập đã hết hạn.")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        preview = " ".join(text[:200].split())
+        raise RuntimeError(f"Vinamilk không trả về JSON hợp lệ: {preview}") from exc
     try:
         return _date_value(value)
     except ValueError:
@@ -210,7 +266,16 @@ async def trigger_sync(request: VinamilkSearchRequest, db: Session = Depends(get
             result = await fetch_vinamilk(session_cookie, form)
         if result["status"] >= 400:
             raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
-        payload = json.loads(str(result["body"]))
+        try:
+            payload = _parse_json_body(result["body"])
+        except RuntimeError:
+            # Vinamilk may return an empty body when the cookie expires without
+            # sending a 401/403. Refresh the session once before failing.
+            session_cookie = await refresh_cookie()
+            result = await fetch_vinamilk(session_cookie, form)
+            if result["status"] >= 400:
+                raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
+            payload = _parse_json_body(result["body"])
         row_count = _save_snapshot(db, payload, from_date, to_date)
         sync_run.status = "SUCCESS"
         sync_run.row_count = row_count
@@ -231,6 +296,7 @@ async def trigger_sync(request: VinamilkSearchRequest, db: Session = Depends(get
 def list_local_vinamilk_orders(
     from_date: date,
     to_date: date,
+    source: str = Query(default="manual", pattern="^(manual|sync)$"),
     search: str | None = Query(default=None),
     status: str | None = Query(default=None),
     skip: int = Query(default=0, ge=0),
@@ -258,11 +324,241 @@ def list_local_vinamilk_orders(
         VinamilkSyncRun.to_date >= from_date,
         VinamilkSyncRun.status == "SUCCESS",
     ).order_by(VinamilkSyncRun.finished_at.desc()))
+    output_rows: list[dict[str, Any]] = []
+    for row in rows:
+        base = {**row.raw_payload, "_local_id": row.id, "_synced_at": row.synced_at.isoformat(), "_allocation_id": None}
+        if source == "sync":
+            output_rows.append(base)
+            continue
+        allocations = db.scalars(select(VinamilkOrderAllocation).where(
+            VinamilkOrderAllocation.snapshot_id == row.id
+        ).order_by(VinamilkOrderAllocation.id)).all()
+        if not allocations:
+            output_rows.append({**base, "_allocation_status": "UNALLOCATED", "_company_code": None, "_company_name": None, "_allocated_quantity": None, "_distributor_sku": None, "_uploaded_at": None, "_uploaded_by": None, "_note": None})
+            continue
+        for allocation in allocations:
+            output_rows.append({
+                **base,
+                "_allocation_id": allocation.id,
+                "_allocation_status": allocation.status,
+                "_allocation_method": allocation.allocation_method,
+                "_company_code": allocation.company_code,
+                "_company_name": allocation.company_name,
+                "_distributor_sku": allocation.distributor_sku,
+                "_allocated_quantity": allocation.allocated_quantity,
+                "_uploaded_at": allocation.uploaded_at.isoformat(),
+                "_uploaded_by": allocation.uploaded_by,
+                "_note": allocation.note,
+            })
     return {
-        "rows": [
-            {**row.raw_payload, "_local_id": row.id, "_synced_at": row.synced_at.isoformat()}
-            for row in rows
-        ],
-        "total": len(rows),
+        "rows": output_rows,
+        "total": len(output_rows),
+        "source": source,
         "last_synced_at": latest.finished_at.isoformat() if latest and latest.finished_at else None,
     }
+
+
+@router.get("/vinamilk-orders/allocations/template")
+def download_allocation_template():
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Can doi don hang"
+    sheet.append(["order_number", "line_key", "product_code", "quantity", "company_code", "distributor_sku"])
+    sheet.append(["DH-001", "", "02HD14", 10, "001", "123456"])
+    output = BytesIO()
+    workbook.save(output)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="mau-can-doi-don-hang.xlsx"'},
+    )
+
+
+@router.post("/vinamilk-orders/allocations/upload")
+def upload_order_allocations(
+    file: UploadFile = File(...),
+    uploaded_by: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Vui lòng tải file Excel .xlsx hoặc .xlsm.")
+    try:
+        workbook = load_workbook(BytesIO(file.file.read()), read_only=True, data_only=True)
+        rows = list(workbook.active.iter_rows(values_only=True))
+        if not rows:
+            raise ValueError("File Excel không có dữ liệu.")
+        headers = [str(value).strip().lower() if value is not None else "" for value in rows[0]]
+        required = {"order_number", "product_code", "quantity", "company_code"}
+        if not required.issubset(headers):
+            raise ValueError("File cần có order_number, product_code, quantity và company_code.")
+        companies = {company.code.casefold(): company for company in db.scalars(select(Company)).all()}
+        snapshots = db.scalars(select(VinamilkOrderSnapshot)).all()
+        by_key: dict[tuple[str, str, str | None], VinamilkOrderSnapshot] = {}
+        by_order_product: dict[tuple[str, str], list[VinamilkOrderSnapshot]] = {}
+        for snapshot in snapshots:
+            order = (snapshot.order_number or "").strip().casefold()
+            product = (snapshot.product_code or "").strip().casefold()
+            key = (order, product, _line_key(snapshot.raw_payload))
+            by_key[key] = snapshot
+            by_order_product.setdefault((order, product), []).append(snapshot)
+        parsed: list[tuple[VinamilkOrderSnapshot, dict[str, Any]]] = []
+        errors: list[str] = []
+        totals: dict[int, int] = {}
+        for row_number, values in enumerate(rows[1:], start=2):
+            data = dict(zip(headers, values))
+            if not any(value is not None and str(value).strip() for value in values):
+                continue
+            order_number = str(data.get("order_number") or "").strip()
+            product_code = str(data.get("product_code") or "").strip().upper()
+            line_key = str(data.get("line_key") or "").strip() or None
+            company_code = str(data.get("company_code") or "").strip().casefold()
+            snapshot = by_key.get((order_number.casefold(), product_code.casefold(), line_key)) if line_key else None
+            candidates = by_order_product.get((order_number.casefold(), product_code.casefold()), [])
+            if snapshot is None and not line_key and len(candidates) == 1:
+                snapshot = candidates[0]
+            if not snapshot:
+                errors.append(f"Dòng {row_number}: không tìm thấy dòng đơn {order_number}/{product_code}.")
+                continue
+            company = companies.get(company_code)
+            if not company:
+                errors.append(f"Dòng {row_number}: không tìm thấy công ty {data.get('company_code')}.")
+                continue
+            try:
+                quantity = _quantity(data.get("quantity"))
+            except ValueError as exc:
+                errors.append(f"Dòng {row_number}: {exc}")
+                continue
+            parsed.append((snapshot, {"order_number": order_number, "line_key": line_key, "product_code": product_code, "quantity": quantity, "company": company, "distributor_sku": str(data.get("distributor_sku") or "").strip() or None}))
+            totals[snapshot.id] = totals.get(snapshot.id, 0) + quantity
+        for snapshot_id, total in totals.items():
+            snapshot = db.get(VinamilkOrderSnapshot, snapshot_id)
+            expected = _quantity(_field(snapshot.raw_payload, ("quantity", "qty")) or 0)
+            if total != expected:
+                errors.append(f"Đơn {snapshot.order_number}, SKU {snapshot.product_code}: phân bổ {total}, số lượng gốc {expected}.")
+        if errors:
+            raise ValueError("; ".join(errors[:20]))
+        affected = {snapshot.id for snapshot, _ in parsed}
+        if affected:
+            db.query(VinamilkOrderAllocation).filter(VinamilkOrderAllocation.snapshot_id.in_(affected)).delete(synchronize_session=False)
+        for snapshot, item in parsed:
+            company = item["company"]
+            db.add(VinamilkOrderAllocation(
+                snapshot_id=snapshot.id,
+                order_number=item["order_number"],
+                line_key=item["line_key"],
+                product_code=item["product_code"],
+                allocated_quantity=item["quantity"],
+                company_id=company.id,
+                company_code=company.code,
+                company_name=company.name,
+                distributor_sku=item["distributor_sku"],
+                source_file=file.filename,
+                uploaded_by=uploaded_by,
+            ))
+        db.commit()
+        return {"uploaded": len(parsed), "orders": len(affected), "replaced": len(affected)}
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ValueError, TypeError, InvalidFileException, BadZipFile, OSError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/vinamilk-orders/allocations/bulk-delete")
+def bulk_delete_order_allocations(
+    payload: AllocationBulkDeleteRequest,
+    db: Session = Depends(get_db),
+):
+    """Xóa các dòng cân đối upload thủ công.
+
+    Hỗ trợ hai chế độ:
+    - Chọn nhiều dòng: truyền ``allocation_ids``.
+    - Chọn tất cả: đặt ``delete_all=True`` kèm ``from_date``/``to_date`` để xóa
+      toàn bộ dòng cân đối thuộc khoảng ngày đang xem.
+    """
+    try:
+        if payload.delete_all:
+            if not payload.from_date or not payload.to_date:
+                raise HTTPException(status_code=400, detail="Cần có from_date và to_date khi xóa toàn bộ.")
+            snapshot_ids = select(VinamilkOrderSnapshot.id).where(
+                VinamilkOrderSnapshot.order_created_date >= payload.from_date,
+                VinamilkOrderSnapshot.order_created_date <= payload.to_date,
+            )
+            deleted = db.query(VinamilkOrderAllocation).filter(
+                VinamilkOrderAllocation.snapshot_id.in_(snapshot_ids)
+            ).delete(synchronize_session=False)
+        else:
+            allocation_ids = sorted({int(item) for item in payload.allocation_ids if item})
+            if not allocation_ids:
+                raise HTTPException(status_code=400, detail="Chưa chọn dòng cân đối nào để xóa.")
+            deleted = db.query(VinamilkOrderAllocation).filter(
+                VinamilkOrderAllocation.id.in_(allocation_ids)
+            ).delete(synchronize_session=False)
+        db.commit()
+        return {"deleted": deleted, "delete_all": payload.delete_all}
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ValueError, TypeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/vinamilk-orders/allocations/{allocation_id}")
+def update_order_allocation(
+    allocation_id: int,
+    payload: AllocationUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """Chỉnh sửa một dòng cân đối upload thủ công (số lượng, công ty, SKU NPP, ghi chú)."""
+    allocation = db.get(VinamilkOrderAllocation, allocation_id)
+    if not allocation:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dòng cân đối cần chỉnh sửa.")
+    try:
+        if payload.company_code is not None:
+            company_code = payload.company_code.strip()
+            if not company_code:
+                raise ValueError("Mã công ty không được để trống.")
+            company = db.scalar(select(Company).where(func.lower(Company.code) == company_code.casefold()))
+            if not company:
+                raise ValueError(f"Không tìm thấy công ty {company_code}.")
+            allocation.company_id = company.id
+            allocation.company_code = company.code
+            allocation.company_name = company.name
+        if payload.allocated_quantity is not None:
+            allocation.allocated_quantity = _quantity(payload.allocated_quantity)
+        if payload.distributor_sku is not None:
+            allocation.distributor_sku = payload.distributor_sku.strip() or None
+        if payload.note is not None:
+            allocation.note = payload.note.strip() or None
+        db.commit()
+        db.refresh(allocation)
+        snapshot = db.get(VinamilkOrderSnapshot, allocation.snapshot_id)
+        expected_quantity = _quantity(_field(snapshot.raw_payload, ("quantity", "qty")) or 0) if snapshot else None
+        allocated_total = db.scalar(select(func.coalesce(func.sum(VinamilkOrderAllocation.allocated_quantity), 0)).where(
+            VinamilkOrderAllocation.snapshot_id == allocation.snapshot_id
+        ))
+        return {
+            "id": allocation.id,
+            "snapshot_id": allocation.snapshot_id,
+            "order_number": allocation.order_number,
+            "product_code": allocation.product_code,
+            "allocated_quantity": allocation.allocated_quantity,
+            "company_code": allocation.company_code,
+            "company_name": allocation.company_name,
+            "distributor_sku": allocation.distributor_sku,
+            "note": allocation.note,
+            "status": allocation.status,
+            "expected_quantity": expected_quantity,
+            "allocated_total": int(allocated_total or 0),
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ValueError, TypeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+

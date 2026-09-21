@@ -10,6 +10,7 @@ import Drawer from "@/components/ui/Drawer";
 import { ledgerLabels, type LedgerEntry, type StockLevel } from "@/lib/mock-inventory";
 import { formatNumber, formatDateTime } from "@/lib/format";
 import { API_URL } from "@/lib/api";
+import { downloadExcel } from "@/lib/excel";
 
 interface ApiStockLevel {
   product_id: number;
@@ -127,6 +128,21 @@ export default function ExportPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const outEntries = ledgerEntries.filter((e) => e.type === "OUT" || (e.type === "ADJUST" && e.quantity < 0));
+
+  function exportOutEntries() {
+    downloadExcel(outEntries.map((entry) => ({
+      "Mã phiếu xuất": entry.code,
+      "Thời gian": entry.createdAt,
+      "Loại": ledgerLabels[entry.type as "OUT"],
+      "Mã SKU": entry.productCode,
+      "Sản phẩm": entry.productName,
+      "Kho": entry.warehouse,
+      "Số lượng xuất": Math.abs(entry.quantity),
+      "Mã đơn bán": entry.refCode,
+      "Người xuất": entry.createdBy,
+      "Ghi chú": entry.note,
+    })), `phieu-xuat-kho-${new Date().toISOString().slice(0, 10)}`, "Phiếu xuất");
+  }
 
   const qtyOut = outEntries.reduce((s, e) => s + Math.abs(e.quantity), 0);
   const soCount = new Set(outEntries.filter((e) => e.type === "OUT").map((e) => e.refCode)).size;
@@ -268,6 +284,7 @@ export default function ExportPage() {
         columns={columns}
         searchKeys={["code", "productName", "productCode", "refCode", "createdBy"]}
         searchPlaceholder="Tìm phiếu xuất, sản phẩm, đơn bán..."
+        toolbar={<button onClick={exportOutEntries} disabled={!outEntries.length} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600 disabled:opacity-50"><FileText size={15} />Tải Excel</button>}
       />
 
       <Drawer open={exportOpen} onClose={() => setExportOpen(false)} title="Tạo phiếu xuất kho" subtitle="Ghi nhận xuất hàng và cập nhật tồn kho">

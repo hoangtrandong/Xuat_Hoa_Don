@@ -52,6 +52,7 @@ async def add_cors_headers(request: Request, call_next):
     response.headers["Access-Control-Allow-Credentials"] = "true"
     response.headers["Access-Control-Allow-Methods"] = "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
     response.headers["Access-Control-Allow-Headers"] = "*"
+
     return response
 
 app.add_middleware(
@@ -65,7 +66,6 @@ app.add_middleware(
 @app.get("/health", tags=["system"])
 def health():
     return {"status": "ok", "service": settings.PROJECT_NAME}
-
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 

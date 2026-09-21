@@ -13,6 +13,7 @@ import type { Customer } from "@/lib/mock-customers";
 import { formatVND, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL } from "@/lib/api";
+import { downloadExcel } from "@/lib/excel";
 const customerTypes = ["Đại lý", "Cửa hàng", "Nhà phân phối", "HORECA"];
 
 function typeVariant(type: string) {
@@ -170,6 +171,24 @@ export default function CustomersPage() {
     return true;
   });
 
+  function exportCustomers() {
+    downloadExcel(filtered.map((customer) => ({
+      "Mã KH": customer.code,
+      "Tên khách hàng": customer.name,
+      "Loại": customer.type,
+      "Hạng": customer.tier,
+      "Số điện thoại": customer.phone,
+      "CCCD": customer.citizenId ?? "",
+      "Mã số thuế": customer.taxCode ?? "",
+      "Cửa hàng": customer.storeName,
+      "Mã cửa hàng": customer.storeCode,
+      "Công ty quản lý": customer.companyName,
+      "Mã công ty": customer.companyCode,
+      "Công nợ": customer.debitBalance,
+      "Trạng thái": customer.status === "active" ? "Hoạt động" : "Ngưng giao",
+    })), `khach-hang-${new Date().toISOString().slice(0, 10)}`, "Khách hàng");
+  }
+
   const columns: Column<Customer>[] = [
     { key: "code", title: "Mã KH", sortable: true },
     {
@@ -265,6 +284,7 @@ export default function CustomersPage() {
           <div className="flex gap-2">
           <a href={`${API_URL}/customers/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
           <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
+          <button onClick={exportCustomers} disabled={filtered.length === 0} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50"><Download size={16} />Tải Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadCustomers(file).catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
           <button onClick={() => { setEditingId(null); setForm({ code: "", name: "", type: "RETAIL", tier: "B", phone: "", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", company_id: "" }); setCreateError(""); setCreateOpen(true); }}  className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
             <Plus size={16} />

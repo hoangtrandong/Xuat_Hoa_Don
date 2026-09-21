@@ -11,6 +11,7 @@ import Drawer from "@/components/ui/Drawer";
 import { formatVND } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL } from "@/lib/api";
+import { downloadExcel } from "@/lib/excel";
 
 type CategoryOption = { id: number; name: string };
 type UnitOption = { id: number; name: string };
@@ -176,6 +177,20 @@ export default function ProductsPage() {
     return true;
   });
 
+  function exportProducts() {
+    downloadExcel(filteredProducts.map((product) => ({
+      "Mã SKU": product.code,
+      "Tên sản phẩm": product.name,
+      "Danh mục": product.category,
+      "ĐVT": product.unit,
+      "Nhà cung cấp": product.supplier,
+      "Số hộp/thùng": product.boxes_per_carton,
+      "Giá bán": product.price,
+      "Giá vốn": product.cost_price,
+      "Trạng thái": product.status === "active" ? "Hoạt động" : "Ngừng kinh doanh",
+    })), `hang-hoa-${new Date().toISOString().slice(0, 10)}`, "Hàng hóa");
+  }
+
   const columns: Column<typeof products[0]>[] = [
     {
       key: "id",
@@ -248,6 +263,7 @@ export default function ProductsPage() {
           <div className="flex gap-2">
           <a href={`${API_URL}/products/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
           <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
+          <button onClick={exportProducts} disabled={filteredProducts.length === 0} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50"><Download size={16} />Tải Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadProducts(file).catch((uploadError: unknown) => setError(uploadError instanceof Error ? uploadError.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
           <button onClick={() => { setError(""); setMessage(""); setCreateOpen(true); }} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
             <Plus size={16} />

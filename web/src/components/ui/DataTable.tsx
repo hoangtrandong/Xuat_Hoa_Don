@@ -1,6 +1,6 @@
 "use client";
 // src/components/ui/DataTable.tsx
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Search, ChevronUp, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +23,11 @@ interface DataTableProps<T> {
   onRowClick?: (row: T) => void;
   emptyMessage?: string;
   toolbar?: React.ReactNode;
+  selectable?: boolean;
+  selectedKeys?: Set<string>;
+  onSelectedKeysChange?: (keys: Set<string>) => void;
+  getRowKey?: (row: T, index: number) => string;
+  isRowSelectable?: (row: T) => boolean;
 }
 
 function getByKey<T>(row: T, key: string): unknown {
@@ -39,11 +44,17 @@ export default function DataTable<T>({
   onRowClick,
   emptyMessage = "Không có dữ liệu",
   toolbar,
+  selectable = false,
+  selectedKeys,
+  onSelectedKeysChange,
+  getRowKey,
+  isRowSelectable,
 }: DataTableProps<T>) {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const headerCheckboxRef = useRef<HTMLInputElement>(null);
 
   const filtered = data.filter((row) => {
     if (!search) return true;
@@ -67,6 +78,40 @@ export default function DataTable<T>({
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
   const paginated = sorted.slice((page - 1) * pageSize, page * pageSize);
+
+  const selection = selectedKeys ?? new Set<string>();
+  const keyForRow = (row: T, index: number) => (getRowKey ? getRowKey(row, index) : String(index));
+  const canSelect = (row: T) => (isRowSelectable ? isRowSelectable(row) : true);
+  const pageKeys = paginated
+    .map((row, index) => ({ row, key: keyForRow(row, (page - 1) * pageSize + index) }))
+    .filter(({ row }) => canSelect(row))
+    .map(({ key }) => key);
+  const allPageSelected = pageKeys.length > 0 && pageKeys.every((key) => selection.has(key));
+  const somePageSelected = pageKeys.some((key) => selection.has(key));
+
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = somePageSelected && !allPageSelected;
+    }
+  }, [somePageSelected, allPageSelected]);
+
+  const toggleRowSelection = (key: string, checked: boolean) => {
+    if (!onSelectedKeysChange) return;
+    const next = new Set(selection);
+    if (checked) next.add(key);
+    else next.delete(key);
+    onSelectedKeysChange(next);
+  };
+
+  const togglePageSelection = (checked: boolean) => {
+    if (!onSelectedKeysChange) return;
+    const next = new Set(selection);
+    pageKeys.forEach((key) => {
+      if (checked) next.add(key);
+      else next.delete(key);
+    });
+    onSelectedKeysChange(next);
+  };
 
   const handleSort = (key: string) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -95,6 +140,18 @@ export default function DataTable<T>({
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-100 bg-gray-50">
+              {selectable && (
+                <th className="w-10 px-4 py-3" scope="col">
+                  <input
+                    ref={headerCheckboxRef}
+                    type="checkbox"
+                    checked={allPageSelected}
+                    onChange={(event) => togglePageSelection(event.target.checked)}
+                    className="h-4 w-4 cursor-pointer rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                    aria-label="Chọn tất cả dòng trên trang"
+                  />
+                </th>
+              )}
               {columns.map((col, colIndex) => (
                 <th
                   key={`${col.key}-${colIndex}`}
@@ -119,35 +176,52 @@ export default function DataTable<T>({
           <tbody className="divide-y divide-gray-50">
             {paginated.length === 0 ? (
               <tr>
-                <td colSpan={columns.length} className="px-4 py-12 text-center text-gray-400 text-sm">
+                <td colSpan={columns.length + (selectable ? 1 : 0)} className="px-4 py-12 text-center text-gray-400 text-sm">
                   {emptyMessage}
                 </td>
               </tr>
             ) : (
-              paginated.map((row, i) => (
-                <tr
-                  key={i}
-                  onClick={() => onRowClick?.(row)}
-                  className={cn(
-                    "hover:bg-gray-50 transition-colors",
-                    onRowClick && "cursor-pointer"
-                  )}
-                >
-                  {columns.map((col, colIndex) => (
-                    <td
-                      key={`${col.key}-${colIndex}`}
-                      className={cn(
-                        "px-4 py-3 text-gray-700",
-                        col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left"
-                      )}
-                    >
-                      {col.render
-                        ? col.render(getByKey(row, col.key), row)
-                        : String(getByKey(row, col.key) ?? "")}
-                    </td>
-                  ))}
-                </tr>
-              ))
+              paginated.map((row, i) => {
+                const globalIndex = (page - 1) * pageSize + i;
+                const rowKey = keyForRow(row, globalIndex);
+                return (
+                  <tr
+                    key={rowKey}
+                    onClick={() => onRowClick?.(row)}
+                    className={cn(
+                      "hover:bg-gray-50 transition-colors",
+                      onRowClick && "cursor-pointer",
+                      selectable && selection.has(rowKey) && "bg-sky-50/60"
+                    )}
+                  >
+                    {selectable && (
+                      <td className="w-10 px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selection.has(rowKey)}
+                          disabled={!canSelect(row)}
+                          onChange={(event) => toggleRowSelection(rowKey, event.target.checked)}
+                          className="h-4 w-4 cursor-pointer rounded border-gray-300 text-sky-600 focus:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
+                          aria-label="Chọn dòng"
+                        />
+                      </td>
+                    )}
+                    {columns.map((col, colIndex) => (
+                      <td
+                        key={`${col.key}-${colIndex}`}
+                        className={cn(
+                          "px-4 py-3 text-gray-700",
+                          col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left"
+                        )}
+                      >
+                        {col.render
+                          ? col.render(getByKey(row, col.key), row)
+                          : String(getByKey(row, col.key) ?? "")}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>

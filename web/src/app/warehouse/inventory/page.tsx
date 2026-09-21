@@ -1,7 +1,7 @@
 "use client";
 // src/app/warehouse/inventory/page.tsx
 import { useEffect, useState } from "react";
-import { Boxes, CircleDollarSign, TriangleAlert, ArrowDownUp, Warehouse as WarehouseIcon, SlidersHorizontal } from "lucide-react";
+import { Boxes, CircleDollarSign, TriangleAlert, ArrowDownUp, Warehouse as WarehouseIcon, SlidersHorizontal, Download } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -12,6 +12,7 @@ import { ledgerLabels, type StockLevel, type LedgerEntry, type LedgerType } from
 import { formatVND, formatDateTime, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL } from "@/lib/api";
+import { downloadExcel } from "@/lib/excel";
 
 interface ApiStockLevel {
   product_id: number;
@@ -356,6 +357,55 @@ export default function WarehouseInventoryPage() {
   ];
   const filteredStock = stockLevels.filter((s) => categoryFilter === "Tất cả" || s.category === categoryFilter);
   const filteredLedger = ledgerEntriesState.filter((e) => typeFilter === "Tất cả" || e.type === typeFilter);
+  const filteredLotDetails = lotDetails
+    .filter((lot) => lotProductFilter === "Tất cả" || lot.product_code === lotProductFilter)
+    .filter((lot) => !lotWarehouseFilter || lot.warehouse_id === lotWarehouseFilter);
+
+  function exportStock() {
+    downloadExcel(filteredStock.map((stock) => ({
+      "Mã SKU": stock.productCode,
+      "Sản phẩm": stock.productName,
+      "ĐVT": stock.unit,
+      "Tồn kho": stock.onHand,
+      "Đã giữ": stock.reserved,
+      "Khả dụng": stock.available,
+      "Vị trí kho": stock.locations ?? "",
+      "Hạn sử dụng gần nhất": stock.earliestExpiry ?? "",
+      "Số lô": stock.lotCount,
+      "Điểm đặt lại": stock.reorderPoint,
+    })), `ton-kho-${new Date().toISOString().slice(0, 10)}`, "Tồn kho");
+  }
+
+  function exportLedger() {
+    downloadExcel(filteredLedger.map((entry) => ({
+      "Mã giao dịch": entry.code,
+      "Thời gian": entry.createdAt,
+      "Loại": ledgerLabels[entry.type],
+      "Mã SKU": entry.productCode,
+      "Sản phẩm": entry.productName,
+      "Kho": entry.warehouse,
+      "Số lượng": entry.quantity,
+      "Loại chứng từ": entry.refType,
+      "Mã chứng từ": entry.refCode,
+      "Người tạo": entry.createdBy,
+      "Ghi chú": entry.note,
+    })), `so-nhat-ky-kho-${new Date().toISOString().slice(0, 10)}`, "Ledger");
+  }
+
+  function exportLots() {
+    downloadExcel(filteredLotDetails.map((lot) => ({
+      "Mã SKU": lot.product_code,
+      "Sản phẩm": lot.product_name,
+      "ĐVT": lot.unit,
+      "Kho": lot.warehouse_id,
+      "Vị trí": lot.location_code ?? "",
+      "Lot": lot.lot_number ?? "",
+      "Hạn sử dụng": lot.expiry_date ?? "",
+      "Tồn": lot.quantity_on_hand,
+      "Đã giữ": lot.reserved_quantity,
+      "Khả dụng": lot.available_quantity,
+    })), `vi-tri-lot-${new Date().toISOString().slice(0, 10)}`, "Vị trí Lot");
+  }
 
   function openAdjust() {
     setAdjError("");
@@ -467,16 +517,7 @@ export default function WarehouseInventoryPage() {
           searchKeys={["productCode", "productName", "category", "locations", "earliestExpiry"]}
           searchPlaceholder="Tìm SKU, tên sản phẩm, vị trí..."
           toolbar={
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value)}
-              className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-            >
-              <option value="Tất cả">Tất cả danh mục</option>
-              {categories.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
+            <div className="flex flex-wrap gap-2"><select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"><option value="Tất cả">Tất cả danh mục</option>{categories.map((c) => <option key={c} value={c}>{c}</option>)}</select><button onClick={exportStock} disabled={!filteredStock.length} className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 disabled:opacity-50"><Download size={15} />Tải Excel</button></div>
           }
         />
       ) : tab === "ledger" ? (
@@ -486,24 +527,12 @@ export default function WarehouseInventoryPage() {
           searchKeys={["code", "productName", "productCode", "refCode", "createdBy"]}
           searchPlaceholder="Tìm mã giao dịch, sản phẩm, chứng từ..."
           toolbar={
-            <select
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
-              className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-            >
-              <option value="Tất cả">Tất cả loại</option>
-              <option value="OPENING">Tồn đầu kỳ</option>
-              <option value="IN">Nhập kho</option>
-              <option value="OUT">Xuất kho</option>
-              <option value="ADJUST">Điều chỉnh</option>
-            </select>
+            <div className="flex flex-wrap gap-2"><select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"><option value="Tất cả">Tất cả loại</option><option value="OPENING">Tồn đầu kỳ</option><option value="IN">Nhập kho</option><option value="OUT">Xuất kho</option><option value="ADJUST">Điều chỉnh</option></select><button onClick={exportLedger} disabled={!filteredLedger.length} className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 disabled:opacity-50"><Download size={15} />Tải Excel</button></div>
           }
         />
       ) : (
         <DataTable
-          data={lotDetails
-            .filter((lot) => lotProductFilter === "Tất cả" || lot.product_code === lotProductFilter)
-            .filter((lot) => !lotWarehouseFilter || lot.warehouse_id === lotWarehouseFilter)}
+          data={filteredLotDetails}
           columns={[
             { key: "product_code", title: "Mã SKU", sortable: true },
             {
@@ -548,6 +577,7 @@ export default function WarehouseInventoryPage() {
                 <option value="">Tất cả kho</option>
                 {warehouseOptions.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
               </select>
+              <button onClick={exportLots} disabled={!filteredLotDetails.length} className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 disabled:opacity-50"><Download size={15} />Tải Excel</button>
               <select
                 value={lotProductFilter}
                 onChange={(event) => setLotProductFilter(event.target.value)}

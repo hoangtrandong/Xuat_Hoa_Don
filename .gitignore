@@ -40,3 +40,4 @@ Thumbs.db
 *.db
 *.log
 *_log.txt
+uvicorn_*.txt

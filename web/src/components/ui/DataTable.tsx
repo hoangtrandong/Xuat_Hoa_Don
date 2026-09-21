@@ -146,8 +146,9 @@ export default function DataTable<T>({
                     ref={headerCheckboxRef}
                     type="checkbox"
                     checked={allPageSelected}
+                    disabled={pageKeys.length === 0}
                     onChange={(event) => togglePageSelection(event.target.checked)}
-                    className="h-4 w-4 cursor-pointer rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                    className="h-4 w-4 cursor-pointer rounded border-gray-300 text-sky-600 focus:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
                     aria-label="Chọn tất cả dòng trên trang"
                   />
                 </th>

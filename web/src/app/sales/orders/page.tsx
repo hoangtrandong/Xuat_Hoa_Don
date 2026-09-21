@@ -505,6 +505,13 @@ export default function SalesOrdersPage() {
           </div>
         </div>
         {remoteOrders.length > 0 && <p className="text-sm text-gray-500">Đang hiển thị {filteredRemoteOrders.length}/{remoteOrders.length} bản ghi sau lọc. Chế độ: {source === "manual" ? "Cân đối thủ công" : "Dữ liệu đồng bộ"}.{lastSyncedAt && ` Cập nhật gần nhất: ${formatVinamilkDate(lastSyncedAt, true)}`}</p>}
+        {source === "manual" && remoteOrders.length > 0 && selectableAllocationKeys.length === 0 && (
+          <div className="flex items-center gap-2 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
+            <AlertTriangle size={16} />
+            <span>Chưa có dòng cân đối nào để chọn. Hãy bấm “Upload cân đối” để tải file Excel phân bổ lên trước, sau đó bạn có thể chọn nhiều dòng hoặc tất cả để chỉnh sửa / xóa.</span>
+          </div>
+        )}
+
         {remoteError && <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700"><AlertTriangle size={16} />{remoteError}</div>}
       </section>
 

@@ -209,7 +209,7 @@ export default function SalesOrdersPage() {
   useEffect(() => {
     setSelectedRowKeys(new Set());
     setSelectAllRange(false);
-  }, [source, fromDate, toDate]);
+  }, [source, fromDate, toDate, orderFilter, customerFilter, staffFilter, productFilter, statusFilter]);
 
   const loadLocalOrders = useCallback(async () => {
     const response = await fetch(`${API_URL}/sync/vinamilk-orders?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&source=${source}`);
@@ -262,6 +262,7 @@ export default function SalesOrdersPage() {
       const result = await response.json() as { uploaded?: number; orders?: number; detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể upload dữ liệu cân đối.");
       setSource("manual");
+      clearSelection();
       await loadLocalOrders();
       setToast(`Đã lưu ${result.uploaded ?? 0} dòng cân đối cho ${result.orders ?? 0} dòng đơn.`);
     } catch (error) {

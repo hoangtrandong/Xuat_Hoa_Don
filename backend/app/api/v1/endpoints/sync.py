@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from collections import defaultdict
 from pathlib import Path
 from datetime import date, datetime
 from typing import Any
@@ -21,6 +22,7 @@ from app.core.database import get_db
 from app.models.customer import Company
 from app.models.vinamilk import VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
+from app.services.vinamilk_dates import iter_inclusive_dates
 from scripts.vinamilk_login import login_and_get_cookie
 
 router = APIRouter()
@@ -313,46 +315,87 @@ async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str,
     except Exception as exc:
         raise RuntimeError(f"Playwright không thể gọi Vinamilk: {exc}") from exc
 
+
+async def _fetch_vinamilk_payload(session_cookie: str, form: dict[str, str]) -> tuple[str, Any]:
+    if not session_cookie:
+        session_cookie = await refresh_cookie()
+    result = await fetch_vinamilk(session_cookie, form)
+    if result["status"] in (401, 403):
+        session_cookie = await refresh_cookie()
+        result = await fetch_vinamilk(session_cookie, form)
+    if result["status"] >= 400:
+        raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
+    try:
+        payload = _parse_json_body(result["body"])
+    except RuntimeError:
+        session_cookie = await refresh_cookie()
+        result = await fetch_vinamilk(session_cookie, form)
+        if result["status"] >= 400:
+            raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
+        payload = _parse_json_body(result["body"])
+    return session_cookie, payload
+
+
 @router.post("/vinamilk")
 async def trigger_sync(request: VinamilkSearchRequest, db: Session = Depends(get_db)):
-    session_cookie = read_cookie()
-
     form = request.model_dump()
     form["page"] = str(form["page"])
     form["rows"] = str(form["rows"])
     from_date = _date_value(request.fromDate)
     to_date = _date_value(request.toDate)
+    try:
+        days = list(iter_inclusive_dates(from_date, to_date))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     sync_run = VinamilkSyncRun(from_date=from_date, to_date=to_date, status="RUNNING")
     db.add(sync_run)
     db.commit()
+
+    session_cookie = read_cookie()
+    day_results: list[dict[str, Any]] = []
+    saved_total = 0
     try:
-        if not session_cookie:
-            session_cookie = await refresh_cookie()
-        result = await fetch_vinamilk(session_cookie, form)
-        if result["status"] in (401, 403):
-            session_cookie = await refresh_cookie()
-            result = await fetch_vinamilk(session_cookie, form)
-        if result["status"] >= 400:
-            raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
-        try:
-            payload = _parse_json_body(result["body"])
-        except RuntimeError:
-            # Vinamilk may return an empty body when the cookie expires without
-            # sending a 401/403. Refresh the session once before failing.
-            session_cookie = await refresh_cookie()
-            result = await fetch_vinamilk(session_cookie, form)
-            if result["status"] >= 400:
-                raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
-            payload = _parse_json_body(result["body"])
-        row_count = _save_snapshot(db, payload, from_date, to_date)
-        sync_run.status = "SUCCESS"
-        sync_run.row_count = row_count
+        for day in days:
+            day_form = {**form, "fromDate": day.strftime("%d/%m/%Y"), "toDate": day.strftime("%d/%m/%Y")}
+            try:
+                session_cookie, payload = await _fetch_vinamilk_payload(session_cookie, day_form)
+                row_count = _save_snapshot(db, payload, day, day)
+                db.commit()
+                saved_total += row_count
+                day_results.append({"date": day.isoformat(), "status": "SUCCESS", "row_count": row_count})
+            except (RuntimeError, ValueError) as day_exc:
+                db.rollback()
+                day_results.append({"date": day.isoformat(), "status": "FAILED", "row_count": 0, "error": str(day_exc)})
+
+        failed_days = [item for item in day_results if item["status"] == "FAILED"]
+        succeeded_days = [item for item in day_results if item["status"] == "SUCCESS"]
+        if not succeeded_days:
+            raise RuntimeError(
+                failed_days[0]["error"] if len(failed_days) == 1 else
+                "Không đồng bộ được ngày nào: " + "; ".join(f"{item['date']}: {item['error']}" for item in failed_days)
+            )
+        sync_run.status = "PARTIAL" if failed_days else "SUCCESS"
+        sync_run.row_count = saved_total
         sync_run.finished_at = datetime.utcnow()
+        sync_run.error_message = (
+            "; ".join(f"{item['date']}: {item['error']}" for item in failed_days) if failed_days else None
+        )
+        db.add(sync_run)
         db.commit()
-        return {"rows": _row_list(payload), "row_count": row_count, "synced_at": sync_run.finished_at.isoformat()}
+        return {
+            "rows": [],
+            "row_count": saved_total,
+            "days_total": len(days),
+            "days_succeeded": len(succeeded_days),
+            "days_failed": [item["date"] for item in failed_days],
+            "day_results": day_results,
+            "status": sync_run.status,
+            "synced_at": sync_run.finished_at.isoformat(),
+        }
     except (RuntimeError, ValueError) as exc:
         db.rollback()
         sync_run.status = "FAILED"
+        sync_run.row_count = saved_total
         sync_run.error_message = str(exc)
         sync_run.finished_at = datetime.utcnow()
         db.add(sync_run)
@@ -368,16 +411,16 @@ def list_local_vinamilk_orders(
     search: str | None = Query(default=None),
     status: str | None = Query(default=None),
     skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=500, ge=1, le=2000),
+    limit: int = Query(default=2000, ge=1, le=2000),
     db: Session = Depends(get_db),
 ):
-    stmt = select(VinamilkOrderSnapshot).where(
+    filters = [
         VinamilkOrderSnapshot.order_created_date >= from_date,
         VinamilkOrderSnapshot.order_created_date <= to_date,
-    )
+    ]
     if search and search.strip():
         term = f"%{search.strip()}%"
-        stmt = stmt.where(or_(
+        filters.append(or_(
             VinamilkOrderSnapshot.order_number.ilike(term),
             VinamilkOrderSnapshot.customer_code.ilike(term),
             VinamilkOrderSnapshot.customer_name.ilike(term),
@@ -385,22 +428,36 @@ def list_local_vinamilk_orders(
             VinamilkOrderSnapshot.product_name.ilike(term),
         ))
     if status:
-        stmt = stmt.where(VinamilkOrderSnapshot.status == status)
-    rows = db.scalars(stmt.order_by(VinamilkOrderSnapshot.order_created_date.desc(), VinamilkOrderSnapshot.id.desc()).offset(skip).limit(limit)).all()
+        filters.append(VinamilkOrderSnapshot.status == status)
+    snapshot_total = db.scalar(select(func.count()).select_from(VinamilkOrderSnapshot).where(*filters)) or 0
+    rows = db.scalars(
+        select(VinamilkOrderSnapshot)
+        .where(*filters)
+        .order_by(VinamilkOrderSnapshot.order_created_date.desc(), VinamilkOrderSnapshot.id.desc())
+        .offset(skip)
+        .limit(limit)
+    ).all()
     latest = db.scalar(select(VinamilkSyncRun).where(
         VinamilkSyncRun.from_date <= to_date,
         VinamilkSyncRun.to_date >= from_date,
-        VinamilkSyncRun.status == "SUCCESS",
+        VinamilkSyncRun.status.in_(("SUCCESS", "PARTIAL")),
     ).order_by(VinamilkSyncRun.finished_at.desc()))
+    allocations_by_snapshot: dict[int, list[VinamilkOrderAllocation]] = defaultdict(list)
+    if source != "sync" and rows:
+        allocations = db.scalars(
+            select(VinamilkOrderAllocation)
+            .where(VinamilkOrderAllocation.snapshot_id.in_([row.id for row in rows]))
+            .order_by(VinamilkOrderAllocation.id)
+        ).all()
+        for allocation in allocations:
+            allocations_by_snapshot[allocation.snapshot_id].append(allocation)
     output_rows: list[dict[str, Any]] = []
     for row in rows:
         base = {**row.raw_payload, "_local_id": row.id, "_synced_at": row.synced_at.isoformat(), "_allocation_id": None}
         if source == "sync":
             output_rows.append(base)
             continue
-        allocations = db.scalars(select(VinamilkOrderAllocation).where(
-            VinamilkOrderAllocation.snapshot_id == row.id
-        ).order_by(VinamilkOrderAllocation.id)).all()
+        allocations = allocations_by_snapshot.get(row.id, [])
         if not allocations:
             output_rows.append({**base, "_allocation_status": "UNALLOCATED", "_company_code": None, "_company_name": None, "_allocated_quantity": None, "_distributor_sku": None, "_uploaded_at": None, "_uploaded_by": None, "_note": None})
             continue
@@ -420,7 +477,12 @@ def list_local_vinamilk_orders(
             })
     return {
         "rows": output_rows,
-        "total": len(output_rows),
+        "total": snapshot_total,
+        "snapshot_total": snapshot_total,
+        "snapshot_count": len(rows),
+        "row_count": len(output_rows),
+        "skip": skip,
+        "limit": limit,
         "source": source,
         "last_synced_at": latest.finished_at.isoformat() if latest and latest.finished_at else None,
     }

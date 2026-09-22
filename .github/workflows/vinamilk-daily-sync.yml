@@ -46,9 +46,6 @@ jobs:
       - name: Apply database migrations
         run: python -m alembic upgrade head
 
-      - name: Sync recent Vinamilk orders
-        run: python -m scripts.sync_vinamilk_orders
-
       - name: Sync new Vinamilk products
         run: python -m scripts.sync_vinamilk_products
 

@@ -34,6 +34,22 @@ function getDefaultDateRange() {
   };
 }
 
+const LONG_SYNC_DAYS = 31;
+const LOCAL_PAGE_SIZE = 2000;
+
+function eachInclusiveInputDate(from: string, to: string) {
+  const [fromYear, fromMonth, fromDay] = from.split("-").map(Number);
+  const [toYear, toMonth, toDay] = to.split("-").map(Number);
+  const cursor = new Date(fromYear, fromMonth - 1, fromDay);
+  const end = new Date(toYear, toMonth - 1, toDay);
+  const days: string[] = [];
+  while (cursor <= end) {
+    days.push(toInputDate(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return days;
+}
+
 type RemoteOrder = Record<string, unknown>;
 
 type CompanyOption = { code: string; name: string };
@@ -65,51 +81,51 @@ function allocationIdFromKey(key: string): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-const remoteColumnDefinitions = [
-  { title: "Số đơn hàng gốc", keys: ["fromSaleOrderNumber", "originalOrderNumber", "fromSaleOrderCode", "originalOrderId", "Số đơn hàng gốc"] },
-  { title: "Số đơn hàng", keys: ["orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"] },
-  { title: "Mã CTKM", keys: ["promotionCode", "campaignCode", "ctkmCode", "promotionId", "Mã CTKM"] },
-  { title: "Tên CTKM", keys: ["promotionName", "campaignName", "Tên CTKM"] },
-  { title: "Ngày tạo", keys: ["createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày"] },
-  { title: "Ngày giao", keys: ["deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao"] },
-  { title: "Mã NVBH", keys: ["staffCode", "salesStaffCode", "Mã NVBH"] },
-  { title: "Tên NVBH", keys: ["staffName", "salesStaffName", "Tên NVBH"] },
-  { title: "Mã KH", keys: ["customerCode", "shopCode", "Mã KH"] },
-  { title: "Tên KH", keys: ["customerName", "shopName", "Tên KH"] },
-  { title: "Địa chỉ", keys: ["address", "customerAddress", "shipTo", "Địa chỉ"] },
-  { title: "Mã sản phẩm", keys: ["productCode", "itemCode", "sku", "Mã sản phẩm"] },
-  { title: "Sản phẩm", keys: ["productName", "itemName", "product", "Sản phẩm"] },
-  { title: "ĐVT", keys: ["unit", "unitName", "ĐVT"] },
-  { title: "Số lượng", keys: ["quantity", "qty", "Số lượng"] },
-  { title: "Số lượng KM", keys: ["promotionQuantity", "freeQuantity", "giftQuantity", "Số lượng KM"] },
-  { title: "Giá trị", keys: ["totalValue", "total", "amount", "Giá trị"] },
-  { title: "Tỉ lệ CK", keys: ["discountRate", "saleOrderDiscount", "discountPercent", "Tỉ lệ CK"] },
-  { title: "Số tiền CK", keys: ["totalDiscount", "discountAmount", "Số tiền CK"] },
-  { title: "Đơn giá", keys: ["unitPrice", "price", "Đơn giá"] },
-  { title: "Giảm giá voucher", keys: ["voucherAmount", "voucherDiscount", "Giảm giá voucher"] },
-  { title: "Thời gian xác nhận giao hàng", keys: ["deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate"] },
-  { title: "Ngày đơn hàng gốc", keys: ["initialOrderDate", "originalOrderDate", "Ngày đơn hàng gốc"] },
-  { title: "Công ty quản lý", keys: ["_company_name"] },
-  { title: "Mã công ty", keys: ["_company_code"] },
-  { title: "Mã NPP nội bộ", keys: ["_distributor_sku"] },
-  { title: "Trạng thái cân đối", keys: ["_allocation_status"] },
-  { title: "Số lượng phân bổ", keys: ["_allocated_quantity"] },
-] as const;
+type RemoteColumnAlign = "left" | "center" | "right";
 
-function extractRemoteRows(payload: unknown): RemoteOrder[] {
-  if (Array.isArray(payload)) return payload.filter((row): row is RemoteOrder => typeof row === "object" && row !== null);
-  if (!payload || typeof payload !== "object") return [];
-  const record = payload as Record<string, unknown>;
-  for (const key of ["rows", "list", "items", "content", "data"]) {
-    const value = record[key];
-    if (Array.isArray(value)) return value.filter((row): row is RemoteOrder => typeof row === "object" && row !== null);
-    if (value && typeof value === "object") {
-      const nested = extractRemoteRows(value);
-      if (nested.length > 0) return nested;
-    }
-  }
-  return [record];
-}
+const remoteColumnDefinitions: {
+  title: string;
+  keys: string[];
+  width: string;
+  align?: RemoteColumnAlign;
+  truncate?: boolean;
+}[] = [
+  { title: "Số đơn hàng gốc", keys: ["fromSaleOrderNumber", "originalOrderNumber", "fromSaleOrderCode", "originalOrderId", "Số đơn hàng gốc"], width: "18rem" },
+  { title: "Số đơn hàng", keys: ["orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"], width: "7.5rem" },
+  { title: "Mã CTKM", keys: ["promotionCode", "campaignCode", "ctkmCode", "promotionId", "Mã CTKM"], width: "11rem", truncate: true },
+  { title: "Tên CTKM", keys: ["promotionName", "campaignName", "Tên CTKM"], width: "16rem", truncate: true },
+  { title: "Ngày tạo", keys: ["createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày"], width: "10.5rem" },
+  { title: "Ngày giao", keys: ["deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao"], width: "7.5rem" },
+  { title: "Mã NVBH", keys: ["staffCode", "salesStaffCode", "Mã NVBH"], width: "7.5rem" },
+  { title: "Tên NVBH", keys: ["staffName", "salesStaffName", "Tên NVBH"], width: "10rem", truncate: true },
+  { title: "Mã KH", keys: ["customerCode", "shopCode", "Mã KH"], width: "8rem" },
+  { title: "Tên KH", keys: ["customerName", "shopName", "Tên KH"], width: "12rem", truncate: true },
+  { title: "Địa chỉ", keys: ["address", "customerAddress", "shipTo", "Địa chỉ"], width: "14rem", truncate: true },
+  { title: "Mã sản phẩm", keys: ["productCode", "itemCode", "sku", "Mã sản phẩm"], width: "7.5rem" },
+  { title: "Sản phẩm", keys: ["productName", "itemName", "product", "Sản phẩm"], width: "16rem", truncate: true },
+  { title: "ĐVT", keys: ["unit", "unitName", "ĐVT"], width: "4.5rem" },
+  { title: "Số lượng", keys: ["quantity", "qty", "Số lượng"], width: "6.5rem", align: "right" },
+  { title: "Số lượng KM", keys: ["promotionQuantity", "freeQuantity", "giftQuantity", "Số lượng KM"], width: "7.5rem", align: "right" },
+  { title: "Giá trị", keys: ["totalValue", "total", "amount", "Giá trị"], width: "8rem", align: "right" },
+  { title: "Tỉ lệ CK", keys: ["discountRate", "saleOrderDiscount", "discountPercent", "Tỉ lệ CK"], width: "6.5rem", align: "right" },
+  { title: "Số tiền CK", keys: ["totalDiscount", "discountAmount", "Số tiền CK"], width: "8rem", align: "right" },
+  { title: "Đơn giá", keys: ["unitPrice", "price", "Đơn giá"], width: "7.5rem", align: "right" },
+  { title: "Giảm giá voucher", keys: ["voucherAmount", "voucherDiscount", "Giảm giá voucher"], width: "9rem", align: "right" },
+  { title: "Thời gian xác nhận giao hàng", keys: ["deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate"], width: "14rem" },
+  { title: "Ngày đơn hàng gốc", keys: ["initialOrderDate", "originalOrderDate", "Ngày đơn hàng gốc"], width: "10.5rem" },
+  { title: "Công ty quản lý", keys: ["_company_name"], width: "12rem", truncate: true },
+  { title: "Mã công ty", keys: ["_company_code"], width: "7.5rem" },
+  { title: "Mã NPP nội bộ", keys: ["_distributor_sku"], width: "9rem" },
+  { title: "Trạng thái cân đối", keys: ["_allocation_status"], width: "9.5rem" },
+  { title: "Số lượng phân bổ", keys: ["_allocated_quantity"], width: "8.5rem", align: "right" },
+];
+
+type SyncDayPayload = {
+  row_count?: number;
+  days_failed?: string[];
+  status?: string;
+  detail?: string;
+};
 
 function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
   const normalized = Object.fromEntries(
@@ -212,12 +228,33 @@ export default function SalesOrdersPage() {
   }, [source, fromDate, toDate, orderFilter, customerFilter, staffFilter, productFilter, statusFilter]);
 
   const loadLocalOrders = useCallback(async () => {
-    const response = await fetch(`${API_URL}/sync/vinamilk-orders?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&source=${source}`);
-    const payload = await response.json() as { rows?: unknown; last_synced_at?: string | null; detail?: string };
-    if (!response.ok) throw new Error(payload.detail ?? "Không thể tải dữ liệu đơn hàng đã đồng bộ.");
-    const rows = Array.isArray(payload.rows) ? payload.rows : [];
-    setRemoteOrders(rows.filter((row): row is RemoteOrder => typeof row === "object" && row !== null).map(normalizeRemoteOrder));
-    setLastSyncedAt(payload.last_synced_at ?? null);
+    const allRows: RemoteOrder[] = [];
+    let skip = 0;
+    let lastSynced: string | null = null;
+    while (true) {
+      const response = await fetch(
+        `${API_URL}/sync/vinamilk-orders?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&source=${source}&skip=${skip}&limit=${LOCAL_PAGE_SIZE}`
+      );
+      const payload = await response.json() as {
+        rows?: unknown;
+        snapshot_total?: number;
+        snapshot_count?: number;
+        last_synced_at?: string | null;
+        detail?: string;
+      };
+      if (!response.ok) throw new Error(payload.detail ?? "Không thể tải dữ liệu đơn hàng đã đồng bộ.");
+      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      allRows.push(...rows.filter((row): row is RemoteOrder => typeof row === "object" && row !== null));
+      lastSynced = payload.last_synced_at ?? lastSynced;
+      const snapshotCount = payload.snapshot_count ?? rows.length;
+      const snapshotTotal = payload.snapshot_total;
+      skip += snapshotCount;
+      if (snapshotCount === 0) break;
+      if (snapshotTotal != null && skip >= snapshotTotal) break;
+      if (snapshotCount < LOCAL_PAGE_SIZE) break;
+    }
+    setRemoteOrders(allRows.map(normalizeRemoteOrder));
+    setLastSyncedAt(lastSynced);
   }, [fromDate, source, toDate]);
 
   useEffect(() => {
@@ -225,25 +262,55 @@ export default function SalesOrdersPage() {
   }, [loadLocalOrders]);
 
   const handleSyncVinamilk = async () => {
+    const days = eachInclusiveInputDate(fromDate, toDate);
+    if (days.length === 0) {
+      setRemoteError("Khoảng ngày không hợp lệ. Ngày kết thúc phải lớn hơn hoặc bằng ngày bắt đầu.");
+      return;
+    }
+    if (days.length > LONG_SYNC_DAYS && !window.confirm(`Khoảng ${days.length} ngày sẽ được đồng bộ lần lượt từng ngày để tránh quá tải Vinamilk. Tiếp tục?`)) {
+      return;
+    }
     setIsSyncing(true);
     setRemoteError("");
-    setToast("Đang lấy dữ liệu từ Vinamilk DMS...");
+    setToast(`Đang đồng bộ ngày 1/${days.length} (${toVinamilkDate(days[0])})...`);
+    let savedTotal = 0;
+    const failedDays: string[] = [];
     try {
-      const res = await fetch(`${API_URL}/sync/vinamilk`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fromDate: toVinamilkDate(fromDate), toDate: toVinamilkDate(toDate), orderSource: "0", priorityCode: "-1", orderType: "IN", saleOrderType: "-1", page: 1, rows: 500 }),
-      });
-      const payload: unknown = await res.json();
-      if (!res.ok) {
-        const message = payload && typeof payload === "object" && "detail" in payload ? String(payload.detail) : "Không lấy được dữ liệu.";
-        throw new Error(message);
+      for (let index = 0; index < days.length; index += 1) {
+        const day = days[index];
+        setToast(`Đang đồng bộ ngày ${index + 1}/${days.length} (${toVinamilkDate(day)})...`);
+        try {
+          const res = await fetch(`${API_URL}/sync/vinamilk`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              fromDate: toVinamilkDate(day),
+              toDate: toVinamilkDate(day),
+              orderSource: "0",
+              priorityCode: "-1",
+              orderType: "IN",
+              saleOrderType: "-1",
+              page: 1,
+              rows: 500,
+            }),
+          });
+          const payload = await res.json() as SyncDayPayload;
+          if (!res.ok) throw new Error(payload.detail ?? "Không lấy được dữ liệu.");
+          savedTotal += payload.row_count ?? 0;
+          if (payload.days_failed?.length) failedDays.push(...payload.days_failed);
+        } catch (error) {
+          failedDays.push(day);
+          console.error(error);
+        }
       }
-      const rows = extractRemoteRows(payload);
       await loadLocalOrders();
-      setToast(`Đã đồng bộ ${rows.length} bản ghi vào database.`);
+      if (failedDays.length === days.length) {
+        throw new Error("Không đồng bộ được ngày nào trong khoảng đã chọn.");
+      }
+      setToast(failedDays.length > 0
+        ? `Đã lưu ${savedTotal} bản ghi. Lỗi ${failedDays.length}/${days.length} ngày: ${failedDays.map(toVinamilkDate).join(", ")}.`
+        : `Đã đồng bộ ${savedTotal} bản ghi (${days.length} ngày) vào database.`);
     } catch (error) {
-      setRemoteOrders([]);
       setRemoteError(error instanceof Error ? error.message : "Lỗi kết nối tới Server.");
       setToast("");
     } finally {
@@ -275,11 +342,16 @@ export default function SalesOrdersPage() {
 
   const remoteColumns = remoteColumnDefinitions
     .filter(({ title }) => remoteOrders.some((order) => hasRemoteValue(order[title])))
-    .map(({ title }): Column<RemoteOrder> => ({
+    .map(({ title, width, align }): Column<RemoteOrder> => ({
       key: title,
       title,
       sortable: true,
-      render: (value) => formatRemoteColumnValue(title, value),
+      width,
+      align,
+      render: (value) => {
+        const text = formatRemoteColumnValue(title, value);
+        return <span className="block truncate" title={text || undefined}>{text}</span>;
+      },
     }));
 
   const remoteStatuses = Array.from(
@@ -492,10 +564,10 @@ export default function SalesOrdersPage() {
           </button>
         </div>
         <div className="grid grid-cols-1 gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-5">
-          <input value={orderFilter} onChange={(event) => setOrderFilter(event.target.value)} placeholder="Lọc số đơn hàng" className="rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)} placeholder="Lọc mã/tên khách hàng" className="rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={staffFilter} onChange={(event) => setStaffFilter(event.target.value)} placeholder="Lọc mã/tên NVBH" className="rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={productFilter} onChange={(event) => setProductFilter(event.target.value)} placeholder="Lọc mã/tên sản phẩm" className="rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <input value={orderFilter} onChange={(event) => setOrderFilter(event.target.value)} placeholder="Lọc số đơn hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <input value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)} placeholder="Lọc mã/tên khách hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <input value={staffFilter} onChange={(event) => setStaffFilter(event.target.value)} placeholder="Lọc mã/tên NVBH" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <input value={productFilter} onChange={(event) => setProductFilter(event.target.value)} placeholder="Lọc mã/tên sản phẩm" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
           <div className="flex gap-2">
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm">
               <option value="Tất cả">Tất cả trạng thái</option>
@@ -528,6 +600,7 @@ export default function SalesOrdersPage() {
           onSelectedKeysChange={handleSelectionChange}
           getRowKey={(order, index) => allocationRowKey(order, index)}
           isRowSelectable={isAllocationRow}
+          fitColumns
         />
       ) : (
         <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-12 text-center text-sm text-gray-400">

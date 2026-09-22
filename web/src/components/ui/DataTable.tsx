@@ -9,6 +9,7 @@ export interface Column<T> {
   title: string;
   render?: (value: unknown, row: T) => React.ReactNode;
   sortable?: boolean;
+  /** CSS size such as `8rem` or `140px`, applied as min/width so columns stay consistent. */
   width?: string;
   align?: "left" | "center" | "right";
 }
@@ -28,6 +29,8 @@ interface DataTableProps<T> {
   onSelectedKeysChange?: (keys: Set<string>) => void;
   getRowKey?: (row: T, index: number) => string;
   isRowSelectable?: (row: T) => boolean;
+  /** Size columns to content, keep cells on one line, and scroll horizontally. */
+  fitColumns?: boolean;
 }
 
 function getByKey<T>(row: T, key: string): unknown {
@@ -49,6 +52,7 @@ export default function DataTable<T>({
   onSelectedKeysChange,
   getRowKey,
   isRowSelectable,
+  fitColumns = false,
 }: DataTableProps<T>) {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -137,11 +141,11 @@ export default function DataTable<T>({
         </div>
       )}
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className={cn("text-sm", fitColumns ? "w-max table-fixed" : "w-full")}>
           <thead>
             <tr className="border-b border-gray-100 bg-gray-50">
               {selectable && (
-                <th className="w-10 px-4 py-3" scope="col">
+                <th className="w-10 min-w-10 px-4 py-3" scope="col">
                   <input
                     ref={headerCheckboxRef}
                     type="checkbox"
@@ -156,11 +160,12 @@ export default function DataTable<T>({
               {columns.map((col, colIndex) => (
                 <th
                   key={`${col.key}-${colIndex}`}
+                  style={col.width ? { width: col.width, minWidth: col.width, maxWidth: col.width } : undefined}
                   className={cn(
-                    "px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide",
+                    "px-4 py-3 text-xs font-semibold text-gray-500 uppercase align-middle",
+                    fitColumns ? "whitespace-nowrap overflow-hidden text-ellipsis tracking-normal" : "tracking-wide",
                     col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left",
-                    col.sortable && "cursor-pointer hover:text-gray-700 select-none",
-                    col.width
+                    col.sortable && "cursor-pointer hover:text-gray-700 select-none"
                   )}
                   onClick={() => col.sortable && handleSort(col.key)}
                 >
@@ -196,7 +201,7 @@ export default function DataTable<T>({
                     )}
                   >
                     {selectable && (
-                      <td className="w-10 px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                      <td className="w-10 min-w-10 px-4 py-3 align-middle" onClick={(event) => event.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={selection.has(rowKey)}
@@ -210,8 +215,11 @@ export default function DataTable<T>({
                     {columns.map((col, colIndex) => (
                       <td
                         key={`${col.key}-${colIndex}`}
+                        style={col.width ? { width: col.width, minWidth: col.width, maxWidth: col.width } : undefined}
                         className={cn(
-                          "px-4 py-3 text-gray-700",
+                          "px-4 py-3 text-gray-700 align-middle",
+                          fitColumns && "whitespace-nowrap overflow-hidden text-ellipsis",
+                          col.align === "right" && "tabular-nums",
                           col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left"
                         )}
                       >

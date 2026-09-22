@@ -144,19 +144,41 @@ def _parse_json_body(body: object) -> Any:
 
 def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) -> int:
     rows = _row_list(payload)
-    saved = 0
+    if not rows:
+        return 0
+        
+    row_data_list = []
+    keys_to_fetch = []
+    
     for row in rows:
         order_number = _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
         product_code = _field(row, ("productCode", "itemCode", "sku", "Mã sản phẩm"))
         line_id = _field(row, ("lineId", "itemId", "orderItemId", "detailId", "id"))
         identity = "|".join((order_number or "", product_code or "", line_id or ""))
         if not identity.strip("|"):
+            import json
             identity = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+        import hashlib
         remote_key = hashlib.sha256(identity.encode()).hexdigest()
-        snapshot = db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.remote_key == remote_key))
+        keys_to_fetch.append(remote_key)
+        row_data_list.append((remote_key, row, order_number, product_code))
+
+    existing_snapshots = {}
+    chunk_size = 500
+    for i in range(0, len(keys_to_fetch), chunk_size):
+        chunk_keys = keys_to_fetch[i:i+chunk_size]
+        found = db.scalars(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.remote_key.in_(chunk_keys))).all()
+        for s in found:
+            existing_snapshots[s.remote_key] = s
+
+    saved = 0
+    for remote_key, row, order_number, product_code in row_data_list:
+        snapshot = existing_snapshots.get(remote_key)
         if snapshot is None:
             snapshot = VinamilkOrderSnapshot(remote_key=remote_key, raw_payload={})
             db.add(snapshot)
+            existing_snapshots[remote_key] = snapshot
+            
         snapshot.order_number = order_number
         snapshot.original_order_number = _field(row, ("fromSaleOrderNumber", "originalOrderNumber", "fromSaleOrderCode", "originalOrderId"))
         snapshot.customer_code = _field(row, ("customerCode", "shopCode", "Mã KH"))

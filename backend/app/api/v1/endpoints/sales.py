@@ -19,6 +19,21 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
     return crud.create(db, payload)
 
 
+from datetime import datetime
+from app.schemas.sales import CustomerProductSummary
+
+@router.get("/reports/product-summary", response_model=List[CustomerProductSummary])
+def product_summary_by_customer(
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Thống kê tổng hợp danh sách sản phẩm (số lượng, thành tiền) theo từng khách hàng.
+    """
+    return crud.get_product_summary_by_customer(db, from_date=from_date, to_date=to_date)
+
+
 @router.get("/{order_id}", response_model=SalesOrder)
 def get_order(order_id: int, db: Session = Depends(get_db)):
     obj = crud.get(db, order_id)

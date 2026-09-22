@@ -146,8 +146,8 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
     rows = _row_list(payload)
     saved = 0
     for row in rows:
-        order_number = _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode"))
-        product_code = _field(row, ("productCode", "itemCode", "sku"))
+        order_number = _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
+        product_code = _field(row, ("productCode", "itemCode", "sku", "Mã sản phẩm"))
         line_id = _field(row, ("lineId", "itemId", "orderItemId", "detailId", "id"))
         identity = "|".join((order_number or "", product_code or "", line_id or ""))
         if not identity.strip("|"):
@@ -159,13 +159,13 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
             db.add(snapshot)
         snapshot.order_number = order_number
         snapshot.original_order_number = _field(row, ("fromSaleOrderNumber", "originalOrderNumber", "fromSaleOrderCode", "originalOrderId"))
-        snapshot.customer_code = _field(row, ("customerCode", "shopCode"))
-        snapshot.customer_name = _field(row, ("customerName", "shopName"))
+        snapshot.customer_code = _field(row, ("customerCode", "shopCode", "Mã KH"))
+        snapshot.customer_name = _field(row, ("customerName", "shopName", "Tên KH"))
         snapshot.product_code = product_code
-        snapshot.product_name = _field(row, ("productName", "itemName", "product"))
+        snapshot.product_name = _field(row, ("productName", "itemName", "product", "Sản phẩm"))
         snapshot.status = _field(row, ("orderStatus", "status"))
-        snapshot.order_created_date = _parse_optional_date(_field(row, ("createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate")))
-        snapshot.delivery_date = _parse_optional_date(_field(row, ("deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate")))
+        snapshot.order_created_date = _parse_optional_date(_field(row, ("createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày")))
+        snapshot.delivery_date = _parse_optional_date(_field(row, ("deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày")))
         snapshot.synced_from = from_date
         snapshot.synced_to = to_date
         snapshot.synced_at = datetime.utcnow()
@@ -192,8 +192,39 @@ async def refresh_cookie() -> str:
 
 
 async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str, object]:
-    form["page"] = str(form["page"])
-    form["rows"] = str(form["rows"])
+    import tempfile
+    import openpyxl
+    form["page"] = str(form.get("page", "1"))
+    form["rows"] = str(form.get("rows", "2000"))
+    
+    # format date
+    from_date = form.get("fromDate", "")
+    to_date = form.get("toDate", "")
+    if "-" in from_date:
+        from_date = "/".join(reversed(from_date.split("-")))
+    if "-" in to_date:
+        to_date = "/".join(reversed(to_date.split("-")))
+        
+    export_form = {
+        "orderNumber": "",
+        "refOrderNumber": "",
+        "fromDate": from_date,
+        "toDate": to_date,
+        "deliveryDate": "",
+        "customerCode": "",
+        "customerName": "",
+        "orderSource": "0",
+        "priorityCode": "-1",
+        "csvStatus": "",
+        "xmlStatus": "",
+        "saleStaff": "",
+        "deliveryStaff": "",
+        "orderType": "IN",
+        "saleOrderType": "-1",
+        "reportCode": "1790085269000",
+        "reportFormId": ""
+    }
+        
     cookies: list[dict[str, str]] = [
         {"name": part.split("=", 1)[0].strip(), "value": part.split("=", 1)[1].strip(),
          "domain": "vinamilk.dmsone.vn", "path": "/"}
@@ -202,48 +233,63 @@ async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str,
     ]
 
     try:
+        from playwright.async_api import async_playwright
+        import json
         async with async_playwright() as playwright:
-            browser: Browser = await playwright.chromium.launch(headless=True)
+            browser = await playwright.chromium.launch(headless=True)
             try:
                 context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
                     locale="en-US",
                 )
                 await context.add_cookies(cookies)
-                page = await context.new_page()
-                await page.goto(
-                    "https://vinamilk.dmsone.vn/sale-product/search-sale/info",
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
+                
+                resp = await context.request.post(
+                    "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel",
+                    form=export_form,
+                    headers={
+                        "accept": "application/json, text/javascript, */*; q=0.01",
+                        "x-requested-with": "XMLHttpRequest",
+                        "referer": "https://vinamilk.dmsone.vn/sale-product/search-sale/info"
+                    }
                 )
-                result = await page.evaluate(
-                    """async ({ url, form }) => {
-                      const response = await fetch(url, {
-                        method: "POST",
-                        headers: {
-                          "accept": "application/json, text/javascript, */*; q=0.01",
-                          "accept-language": "en-US,en;q=0.9,vi;q=0.8,en-ID;q=0.7",
-                          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                          "x-requested-with": "XMLHttpRequest"
-                        },
-                        body: new URLSearchParams(form).toString()
-                      });
-                      return { status: response.status, body: await response.text() };
-                    }""",
-                    {"url": VINAMILK_URL, "form": form},
-                )
+                
+                if resp.status in (401, 403):
+                    return {"status": resp.status, "body": ""}
+                    
+                data = await resp.json()
+                if not data or not data.get("path"):
+                    raise RuntimeError(f"Failed to export excel: {data}")
+                    
+                excel_resp = await context.request.get(data["path"])
+                excel_bytes = await excel_resp.body()
+                
+                # read excel
+                import os
+                fd, temp_path = tempfile.mkstemp(suffix=".xlsx")
+                with os.fdopen(fd, 'wb') as f:
+                    f.write(excel_bytes)
+                
+                wb = openpyxl.load_workbook(temp_path, data_only=True)
+                sheet = wb.active
+                headers = [cell.value for cell in sheet[1]]
+                rows = []
+                for row in sheet.iter_rows(min_row=2, values_only=True):
+                    row_dict = dict(zip(headers, row))
+                    if row_dict.get("Số đơn hàng") and str(row_dict.get("Số đơn hàng")) != "None":
+                        # Convert datetime objects to string for JSON serialization
+                        for k, v in row_dict.items():
+                            if hasattr(v, "isoformat"):
+                                row_dict[k] = v.isoformat()
+                        rows.append(row_dict)
+                        
+                os.remove(temp_path)
+                return {"status": 200, "body": json.dumps(rows)}
+                
             finally:
                 await browser.close()
-    except PlaywrightError as exc:
+    except Exception as exc:
         raise RuntimeError(f"Playwright không thể gọi Vinamilk: {exc}") from exc
-
-    if result["status"] in (401, 403):
-        return result
-    if result["status"] >= 400:
-        raise RuntimeError(f"Vinamilk trả về HTTP {result['status']}.")
-    return result
-
 
 @router.post("/vinamilk")
 async def trigger_sync(request: VinamilkSearchRequest, db: Session = Depends(get_db)):

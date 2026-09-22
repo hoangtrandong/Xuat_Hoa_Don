@@ -45,3 +45,13 @@ class SalesOrder(SalesOrderBase):
     delivery_date: Optional[datetime]
     created_at: datetime
     items: List[SalesOrderItem] = []
+
+class CustomerProductSummary(BaseModel):
+    customer_id: int
+    customer_code: Optional[str] = None
+    customer_name: Optional[str] = None
+    product_id: int
+    product_sku: Optional[str] = None
+    product_name: Optional[str] = None
+    total_quantity: int
+    total_amount: float

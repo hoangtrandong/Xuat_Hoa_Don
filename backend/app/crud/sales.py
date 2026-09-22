@@ -66,3 +66,37 @@ class SalesOrderCRUD:
 
 
 sales_order = SalesOrderCRUD()
+
+def get_product_summary_by_customer(db: Session, from_date: Optional[datetime] = None, to_date: Optional[datetime] = None):
+    from sqlalchemy import func
+    from app.models.customer import Customer
+    from app.models.product import Product
+
+    stmt = select(
+        Customer.id.label("customer_id"),
+        Customer.code.label("customer_code"),
+        Customer.name.label("customer_name"),
+        Product.id.label("product_id"),
+        Product.sku.label("product_sku"),
+        Product.name.label("product_name"),
+        func.sum(SalesOrderItem.quantity).label("total_quantity"),
+        func.sum(SalesOrderItem.line_total).label("total_amount")
+    ).select_from(SalesOrderItem) \
+     .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id) \
+     .join(Customer, Customer.id == SalesOrder.customer_id) \
+     .join(Product, Product.id == SalesOrderItem.product_id)
+
+    if from_date:
+        stmt = stmt.where(SalesOrder.created_at >= from_date)
+    if to_date:
+        stmt = stmt.where(SalesOrder.created_at <= to_date)
+
+    stmt = stmt.group_by(
+        Customer.id, Customer.code, Customer.name,
+        Product.id, Product.sku, Product.name
+    ).order_by(Customer.code, Product.sku)
+
+    result = db.execute(stmt).all()
+    return result
+
+SalesOrderCRUD.get_product_summary_by_customer = staticmethod(get_product_summary_by_customer)

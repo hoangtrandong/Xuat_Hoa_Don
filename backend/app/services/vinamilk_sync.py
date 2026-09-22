@@ -168,3 +168,98 @@ def sync_from_excel(db: Session, file_path: str):
         
     db.commit()
     return len(orders_dict)
+
+
+import tempfile
+from playwright.sync_api import sync_playwright
+
+def download_and_sync_vinamilk_orders(db: Session, from_date: str, to_date: str) -> int:
+    """
+    Tự động xuất Excel danh sách chi tiết đơn hàng từ Vinamilk và đồng bộ vào DB.
+    from_date, to_date có định dạng 'dd/mm/yyyy'.
+    """
+    from app.services.vinamilk_customer_report import _cookie_header, _browser_cookies
+    from scripts.vinamilk_login import login_and_get_cookie
+
+    cookie_header = _cookie_header() or login_and_get_cookie()
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
+        context = browser.new_context()
+        context.add_cookies(_browser_cookies(cookie_header))
+        
+        # 1. Gọi API export-excel
+        form_data = {
+            "orderNumber": "",
+            "refOrderNumber": "",
+            "fromDate": from_date,
+            "toDate": to_date,
+            "deliveryDate": "",
+            "customerCode": "",
+            "customerName": "",
+            "orderSource": "0",
+            "priorityCode": "-1",
+            "csvStatus": "",
+            "xmlStatus": "",
+            "saleStaff": "",
+            "deliveryStaff": "",
+            "orderType": "IN",
+            "saleOrderType": "-1",
+            "reportCode": "1790085269000",
+            "reportFormId": ""
+        }
+        
+        headers = {
+            "accept": "application/json, text/javascript, */*; q=0.01",
+            "x-requested-with": "XMLHttpRequest",
+            "referer": "https://vinamilk.dmsone.vn/sale-product/search-sale/info"
+        }
+        
+        response = context.request.post(
+            "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel",
+            form=form_data,
+            headers=headers
+        )
+        
+        if response.status in (401, 403):
+            cookie_header = login_and_get_cookie()
+            context.clear_cookies()
+            context.add_cookies(_browser_cookies(cookie_header))
+            response = context.request.post(
+                "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel",
+                form=form_data,
+                headers=headers
+            )
+            
+        data = response.json()
+        if not data or data.get("error") or not data.get("path"):
+            raise RuntimeError(f"Lỗi khi gọi API export-excel: {data}")
+            
+        excel_url = data["path"]
+        
+        # 2. Tải file excel về
+        file_resp = context.request.get(
+            excel_url,
+            headers={"referer": "https://vinamilk.dmsone.vn/sale-product/search-sale/info"}
+        )
+        
+        if not file_resp.ok:
+            raise RuntimeError(f"Lỗi khi tải file excel: {file_resp.status}")
+            
+        excel_bytes = file_resp.body()
+        
+        # Lưu file tạm để gọi hàm sync_from_excel
+        fd, temp_path = tempfile.mkstemp(suffix=".xlsx")
+        import os
+        with os.fdopen(fd, 'wb') as f:
+            f.write(excel_bytes)
+            
+        browser.close()
+        
+    # 3. Đồng bộ vào DB
+    try:
+        count = sync_from_excel(db, temp_path)
+        return count
+    finally:
+        os.remove(temp_path)
+

@@ -6,6 +6,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dotenv import dotenv_values
 from playwright.sync_api import sync_playwright
@@ -17,6 +18,7 @@ from scripts.vinamilk_login import login_and_get_cookie
 
 VINAMILK_CUSTOMER_URL = "https://vinamilk.dmsone.vn/catalog-customer-manager/searchCustomerVO"
 PAGE_SIZE = 500
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def _cookie_header() -> str:
@@ -131,7 +133,7 @@ def build_customer_report() -> str:
 
     lines = [
         "BÁO CÁO ĐỐI SOÁT KHÁCH HÀNG VINAMILK",
-        f"Thời gian: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+        f"Thời gian: {datetime.now(VN_TZ).strftime('%d/%m/%Y %H:%M:%S')} (giờ VN)",
         f"Shop DMS: {os.getenv('VINAMILK_LIST_SHOP_ID', '10060330')}",
         "",
         f"Tổng khách hàng DMS: {len(remote_rows)}",
@@ -160,7 +162,7 @@ def send_report(report: str) -> None:
         raise RuntimeError("Thiếu SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD hoặc REPORT_EMAIL_TO.")
 
     message = EmailMessage()
-    message["Subject"] = f"Báo cáo đối soát KH Vinamilk {datetime.now():%d/%m/%Y}"
+    message["Subject"] = f"Báo cáo đối soát KH Vinamilk {datetime.now(VN_TZ):%d/%m/%Y}"
     message["From"] = sender
     message["To"] = ", ".join(recipients)
     message.set_content(report)

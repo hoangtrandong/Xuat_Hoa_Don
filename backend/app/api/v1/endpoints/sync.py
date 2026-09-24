@@ -3,7 +3,7 @@ import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -30,6 +30,13 @@ _cookie_refresh_lock = asyncio.Lock()
 _runtime_cookie = ""
 
 VINAMILK_URL = "https://vinamilk.dmsone.vn/sale-product/search-sale/search"
+
+
+def _iso_utc(value: datetime | None) -> str | None:
+    """Mốc thời gian trong DB lưu UTC naive -> gắn +00:00 để client quy đổi đúng giờ VN."""
+    if value is None:
+        return None
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
 
 
 class VinamilkSearchRequest(BaseModel):
@@ -390,7 +397,7 @@ async def trigger_sync(request: VinamilkSearchRequest, db: Session = Depends(get
             "days_failed": [item["date"] for item in failed_days],
             "day_results": day_results,
             "status": sync_run.status,
-            "synced_at": sync_run.finished_at.isoformat(),
+            "synced_at": _iso_utc(sync_run.finished_at),
         }
     except (RuntimeError, ValueError) as exc:
         db.rollback()
@@ -453,7 +460,7 @@ def list_local_vinamilk_orders(
             allocations_by_snapshot[allocation.snapshot_id].append(allocation)
     output_rows: list[dict[str, Any]] = []
     for row in rows:
-        base = {**row.raw_payload, "_local_id": row.id, "_synced_at": row.synced_at.isoformat(), "_allocation_id": None}
+        base = {**row.raw_payload, "_local_id": row.id, "_synced_at": _iso_utc(row.synced_at), "_allocation_id": None}
         if source == "sync":
             output_rows.append(base)
             continue
@@ -471,7 +478,7 @@ def list_local_vinamilk_orders(
                 "_company_name": allocation.company_name,
                 "_distributor_sku": allocation.distributor_sku,
                 "_allocated_quantity": allocation.allocated_quantity,
-                "_uploaded_at": allocation.uploaded_at.isoformat(),
+                "_uploaded_at": _iso_utc(allocation.uploaded_at),
                 "_uploaded_by": allocation.uploaded_by,
                 "_note": allocation.note,
             })
@@ -484,7 +491,7 @@ def list_local_vinamilk_orders(
         "skip": skip,
         "limit": limit,
         "source": source,
-        "last_synced_at": latest.finished_at.isoformat() if latest and latest.finished_at else None,
+        "last_synced_at": _iso_utc(latest.finished_at) if latest else None,
     }
 
 

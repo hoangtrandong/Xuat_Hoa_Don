@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.auth import hash_password
 from app.models.employee import Employee
@@ -9,14 +9,33 @@ from app.models.user import Role, User
 from app.schemas.user import UserCreate, UserUpdate
 
 
+def _load_options():
+    return (selectinload(User.roles), joinedload(User.employee))
+
+
+def user_response(user: User) -> dict:
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "is_active": user.is_active,
+        "employee_id": user.employee_id,
+        "employee_code": user.employee.code if user.employee else None,
+        "employee_name": user.employee.name if user.employee else None,
+        "created_at": user.created_at,
+        "roles": user.roles,
+    }
+
+
 def list_users(db: Session) -> List[User]:
-    stmt = select(User).options(selectinload(User.roles)).order_by(User.username)
+    stmt = select(User).options(*_load_options()).order_by(User.username)
     return list(db.scalars(stmt).unique().all())
 
 
 def get_user(db: Session, user_id: int) -> Optional[User]:
     return db.scalar(
-        select(User).options(selectinload(User.roles)).where(User.id == user_id)
+        select(User).options(*_load_options()).where(User.id == user_id)
     )
 
 

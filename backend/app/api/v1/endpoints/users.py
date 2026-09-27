@@ -12,15 +12,16 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 @router.get("/", response_model=List[UserResponse])
 def list_users(db: Session = Depends(get_db)):
-    return crud.list_users(db)
+    return [crud.user_response(user) for user in crud.list_users(db)]
 
 
 @router.post("/", response_model=UserResponse, status_code=201)
 def create_user(payload: UserCreate, db: Session = Depends(get_db)):
     try:
-        return crud.create_user(db, payload)
+        user = crud.create_user(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return crud.user_response(crud.get_user(db, user.id))
 
 
 @router.patch("/{user_id}", response_model=UserResponse)
@@ -31,7 +32,7 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not user:
         raise HTTPException(status_code=404, detail="Không tìm thấy người dùng.")
-    return user
+    return crud.user_response(crud.get_user(db, user_id))
 
 
 @router.get("/roles/", response_model=List[RoleResponse])

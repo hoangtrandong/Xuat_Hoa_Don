@@ -12,8 +12,10 @@ import { API_URL, apiFetch } from "@/lib/api";
 interface RoleOption { id: number; name: string; description: string | null }
 interface AppUser {
   id: number; username: string; email: string; full_name: string; is_active: boolean;
-  employee_id: number | null; created_at: string; roles: RoleOption[];
+  employee_id: number | null; employee_code: string | null; employee_name: string | null;
+  created_at: string; roles: RoleOption[];
 }
+interface EmployeeOption { id: number; code: string; name: string; position: string }
 
 const ROLE_LABELS: Record<string, string> = { admin: "Quản trị viên", staff: "Nhân viên" };
 
@@ -24,18 +26,20 @@ function roleLabel(role: RoleOption) {
 export default function SystemUsersPage() {
   const [users, setUsers] = useState<AppUser[]>([]);
   const [roles, setRoles] = useState<RoleOption[]>([]);
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ username: "", email: "", full_name: "", password: "", role_ids: [] as number[] });
+  const [form, setForm] = useState({ username: "", email: "", full_name: "", password: "", role_ids: [] as number[], employee_id: null as number | null });
 
   async function load() {
     setError("");
     try {
-      const [usersResponse, rolesResponse] = await Promise.all([
+      const [usersResponse, rolesResponse, employeesResponse] = await Promise.all([
         apiFetch(`${API_URL}/users/`),
         apiFetch(`${API_URL}/users/roles/`),
+        apiFetch(`${API_URL}/employees/`),
       ]);
       if (!usersResponse.ok || !rolesResponse.ok) {
         const failed = !usersResponse.ok ? usersResponse : rolesResponse;
@@ -44,6 +48,7 @@ export default function SystemUsersPage() {
       }
       setUsers(await usersResponse.json() as AppUser[]);
       setRoles(await rolesResponse.json() as RoleOption[]);
+      if (employeesResponse.ok) setEmployees(await employeesResponse.json() as EmployeeOption[]);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Không thể tải danh sách người dùng.");
     }
@@ -78,11 +83,24 @@ export default function SystemUsersPage() {
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo tài khoản.");
       setSuccess(`Đã tạo tài khoản "${form.username}". Hãy gửi tên đăng nhập và mật khẩu này cho nhân viên qua kênh an toàn.`);
       setCreateOpen(false);
-      setForm({ username: "", email: "", full_name: "", password: "", role_ids: [] });
+      setForm({ username: "", email: "", full_name: "", password: "", role_ids: [], employee_id: null });
       await load();
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Không thể tạo tài khoản.");
     } finally { setCreating(false); }
+  }
+
+  function applyEmployee(employeeId: string) {
+    if (!employeeId) {
+      setForm((current) => ({ ...current, employee_id: null }));
+      return;
+    }
+    const employee = employees.find((candidate) => String(candidate.id) === employeeId);
+    setForm((current) => ({
+      ...current,
+      employee_id: employee ? employee.id : null,
+      full_name: employee ? employee.name : current.full_name,
+    }));
   }
 
   async function toggleActive(user: AppUser) {
@@ -125,6 +143,7 @@ export default function SystemUsersPage() {
           <tr>
             <th className="px-4 py-3 text-left">Tên đăng nhập</th>
             <th className="px-4 py-3 text-left">Họ tên</th>
+            <th className="px-4 py-3 text-left">Nhân viên</th>
             <th className="px-4 py-3 text-left">Email</th>
             <th className="px-4 py-3 text-left">Vai trò</th>
             <th className="px-4 py-3 text-left">Ngày tạo</th>
@@ -136,6 +155,9 @@ export default function SystemUsersPage() {
           {users.map((user) => <tr key={user.id} className="border-t">
             <td className="px-4 py-3 font-medium">{user.username}</td>
             <td className="px-4 py-3">{user.full_name}</td>
+            <td className="px-4 py-3 text-gray-500">
+              {user.employee_name ? `${user.employee_code ? `${user.employee_code} — ` : ""}${user.employee_name}` : <span className="text-xs text-gray-400">Chưa gắn hồ sơ</span>}
+            </td>
             <td className="px-4 py-3 text-gray-500">{user.email}</td>
             <td className="px-4 py-3">
               <div className="flex flex-wrap gap-1">
@@ -158,6 +180,13 @@ export default function SystemUsersPage() {
     </div>
     <Drawer open={createOpen} onClose={() => setCreateOpen(false)} title="Tạo tài khoản nhân viên" subtitle="Chỉ quản trị viên mới có thể tạo tài khoản đăng nhập mới">
       <div className="p-5 space-y-4">
+        <label className="block"><span className="text-xs text-gray-500">Gắn với hồ sơ nhân viên (tùy chọn)</span>
+          <select value={form.employee_id ?? ""} onChange={(event) => applyEmployee(event.target.value)} className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg">
+            <option value="">— Không gắn hồ sơ nhân viên —</option>
+            {employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.code} — {employee.name} ({employee.position})</option>)}
+          </select>
+          <span className="text-xs text-gray-400">Chọn để tự điền họ tên từ trang Quản lý nhân viên, tránh nhập trùng dữ liệu.</span>
+        </label>
         <label className="block"><span className="text-xs text-gray-500">Tên đăng nhập</span><input value={form.username} onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))} placeholder="vd: nvkd01" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg" /></label>
         <label className="block"><span className="text-xs text-gray-500">Email</span><input type="email" value={form.email} onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))} placeholder="vd: nvkd01@congty.vn" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg" /></label>
         <label className="block"><span className="text-xs text-gray-500">Họ tên</span><input value={form.full_name} onChange={(event) => setForm((current) => ({ ...current, full_name: event.target.value }))} className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg" /></label>

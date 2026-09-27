@@ -41,6 +41,8 @@ class UserResponse(BaseModel):
     full_name: str
     is_active: bool
     employee_id: Optional[int]
+    employee_code: Optional[str] = None
+    employee_name: Optional[str] = None
     created_at: datetime
     roles: List[RoleResponse]
 

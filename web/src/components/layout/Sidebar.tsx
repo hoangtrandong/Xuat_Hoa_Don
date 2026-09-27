@@ -7,7 +7,7 @@ import {
   LayoutDashboard, Package, Users, ShoppingCart, Warehouse, Gift, Map,
   UserCheck, CreditCard, Target, BarChart2, Settings, List, FolderOpen,
   Tag, MapPin, FileText, Receipt, RotateCcw, Boxes, PackagePlus,
-  PackageMinus, ClipboardList, ShieldCheck, ChevronDown, ChevronRight, X, Menu as MenuIcon,
+  PackageMinus, ClipboardList, ClipboardCheck, ShieldCheck, ChevronDown, ChevronRight, X, Menu as MenuIcon,
   Store, Building2,
 } from "lucide-react";
 import { menuItems, MenuItem } from "@/lib/menu";
@@ -17,7 +17,7 @@ const iconMap: Record<string, React.ElementType> = {
   LayoutDashboard, Package, Users, ShoppingCart, Warehouse, Gift, Map,
   UserCheck, CreditCard, Target, BarChart2, Settings, List, FolderOpen,
   Tag, MapPin, FileText, Receipt, RotateCcw, BoxesIcon: Boxes, PackagePlus,
-  PackageMinus, ClipboardList, ShieldCheck, Store, Building2,
+  PackageMinus, ClipboardList, ClipboardCheck, ShieldCheck, Store, Building2,
 };
 
 function NavIcon({ name }: { name: string }) {

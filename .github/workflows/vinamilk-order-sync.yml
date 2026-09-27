@@ -40,7 +40,19 @@ jobs:
         run: python -m playwright install --with-deps chromium
 
       - name: Apply database migrations
-        run: python -m alembic upgrade head
+        run: |
+          set +e
+          output=$(python -m alembic upgrade head 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          if [ "$status" -ne 0 ]; then
+            if echo "$output" | grep -q "Can't locate revision identified by"; then
+              echo "Skipping migrations because database revision is newer than repository migrations."
+            else
+              exit "$status"
+            fi
+          fi
 
       - name: Sync recent Vinamilk orders
         run: python -m scripts.sync_vinamilk_orders

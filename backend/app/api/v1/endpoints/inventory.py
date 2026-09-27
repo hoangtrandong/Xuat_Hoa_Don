@@ -283,8 +283,8 @@ def list_supplier_discrepancies(
 ):
     if discrepancy_type and discrepancy_type.upper() not in {"SHORTAGE", "EXCESS"}:
         raise HTTPException(status_code=400, detail="Loại chênh lệch phải là SHORTAGE hoặc EXCESS.")
-    if status and status.upper() not in {"OPEN", "RESOLVED"}:
-        raise HTTPException(status_code=400, detail="Trạng thái phải là OPEN hoặc RESOLVED.")
+    if status and status.upper() not in {"OPEN", "PARTIAL", "RESOLVED"}:
+        raise HTTPException(status_code=400, detail="Trạng thái phải là OPEN, PARTIAL hoặc RESOLVED.")
     return discrepancy_crud.list_discrepancies(
         db, warehouse_id, product_id, discrepancy_type, status
     )

@@ -189,6 +189,8 @@ class SupplierGoodsDiscrepancyOffsetResponse(BaseModel):
     note: Optional[str]
     created_by: Optional[str]
     created_at: datetime
+    shortage_invoice_number: Optional[str] = None
+    excess_invoice_number: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

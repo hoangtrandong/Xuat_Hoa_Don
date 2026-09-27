@@ -14,6 +14,15 @@ interface Discrepancy {
   created_at: string; status: "OPEN" | "PARTIAL" | "RESOLVED";
 }
 interface Suggestion extends Discrepancy { suggested_quantity: number }
+interface DiscrepancyHistory {
+  discrepancy: Discrepancy;
+  sources: Array<{ id: number; lot_id: number; quantity: number; released_quantity: number }>;
+  offsets: Array<{
+    id: number; shortage_id: number; excess_id: number; quantity: number; note: string | null;
+    created_by: string | null; created_at: string;
+    shortage_invoice_number: string | null; excess_invoice_number: string | null;
+  }>;
+}
 interface Product { id: number; sku: string; name: string; supplier?: string | null }
 interface Warehouse { id: number; name: string }
 
@@ -31,13 +40,14 @@ export default function SupplierDiscrepanciesPage() {
   const [toDate, setToDate] = useState("");
   const [selected, setSelected] = useState<Discrepancy | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [history, setHistory] = useState<DiscrepancyHistory | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const productMap = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
   const warehouseMap = useMemo(() => new Map(warehouses.map((warehouse) => [warehouse.id, warehouse])), [warehouses]);
   const visibleRows = useMemo(() => rows.filter((row) => {
-    const date = row.document_date ?? row.created_at;
-    return (!fromDate || date >= fromDate) && (!toDate || date.slice(0, 10) <= toDate);
+    const date = (row.document_date ?? row.created_at).slice(0, 10);
+    return (!fromDate || date >= fromDate) && (!toDate || date <= toDate);
   }), [rows, fromDate, toDate]);
 
   const load = useCallback(async () => {
@@ -68,7 +78,10 @@ export default function SupplierDiscrepanciesPage() {
   }, [load]);
 
   async function openSuggestions(row: Discrepancy) {
-    setSelected(row); setSuggestions([]); setError("");
+    setSelected(row); setSuggestions([]); setHistory(null); setError("");
+    const historyResponse = await fetch(`${API_URL}/inventory/supplier-discrepancies/${row.id}/history`);
+    if (!historyResponse.ok) { setError("Không thể tải lịch sử đối soát."); return; }
+    setHistory(await historyResponse.json() as DiscrepancyHistory);
     if (row.status === "RESOLVED") return;
     const response = await fetch(`${API_URL}/inventory/supplier-discrepancies/${row.id}/offset-suggestions`);
     if (!response.ok) { setError("Không thể tải gợi ý bù trừ."); return; }
@@ -95,10 +108,10 @@ export default function SupplierDiscrepanciesPage() {
 
   function exportCsv() {
     const header = ["Ngày", "Kho", "SKU", "Loại", "SL chứng từ", "SL thực nhận", "SL gốc", "Đã bù trừ", "Còn nợ", "Hóa đơn", "Trạng thái"];
-    const lines = rows.map((row) => [
-      formatDateTime(row.created_at), warehouseMap.get(row.warehouse_id)?.name ?? row.warehouse_id,
+    const lines = visibleRows.map((row) => [
+      formatDateTime(row.document_date ?? row.created_at), warehouseMap.get(row.warehouse_id)?.name ?? row.warehouse_id,
       productMap.get(row.product_id)?.sku ?? row.product_id, row.type, row.document_quantity,
-      row.actual_quantity, row.quantity - row.remaining_quantity, row.remaining_quantity,
+      row.actual_quantity, row.quantity, row.quantity - row.remaining_quantity,
       row.remaining_quantity, row.invoice_number ?? "", statusLabels[row.status],
     ].map((value) => `"${String(value).replaceAll("\"", "\"\"")}"`).join(","));
     const blob = new Blob(["\ufeff" + [header.join(","), ...lines].join("\r\n")], { type: "text/csv;charset=utf-8" });
@@ -117,7 +130,14 @@ export default function SupplierDiscrepanciesPage() {
       <input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} className="border rounded-lg px-3 py-2 text-sm" aria-label="Từ ngày" />
       <input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} className="border rounded-lg px-3 py-2 text-sm" aria-label="Đến ngày" />
     </div>
-    <div className="overflow-x-auto rounded-xl border bg-white"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-4 py-3 text-left">Ngày</th><th className="px-4 py-3 text-left">Hóa đơn</th><th className="px-4 py-3 text-left">NCC / SKU</th><th className="px-4 py-3 text-left">Loại</th><th className="px-4 py-3 text-right">SL gốc</th><th className="px-4 py-3 text-right">Đã bù</th><th className="px-4 py-3 text-right">Còn nợ</th><th className="px-4 py-3">Trạng thái</th><th /></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.id} className="border-t"><td className="px-4 py-3">{formatDateTime(row.document_date ?? row.created_at)}</td><td className="px-4 py-3">{row.invoice_number ?? "—"}</td><td className="px-4 py-3">{productMap.get(row.product_id)?.supplier ?? "—"}<div className="font-medium">{productMap.get(row.product_id)?.sku ?? `#${row.product_id}`}</div><div className="text-xs text-gray-400">{warehouseMap.get(row.warehouse_id)?.name}</div></td><td className="px-4 py-3"><Badge variant={row.type === "SHORTAGE" ? "danger" : "warning"}>{row.type === "SHORTAGE" ? "Thiếu" : "Thừa"}</Badge></td><td className="px-4 py-3 text-right">{formatNumber(row.quantity)}</td><td className="px-4 py-3 text-right">{formatNumber(row.quantity - row.remaining_quantity)}</td><td className="px-4 py-3 text-right font-semibold">{formatNumber(row.remaining_quantity)}</td><td className="px-4 py-3"><Badge variant={row.status === "RESOLVED" ? "success" : row.status === "PARTIAL" ? "warning" : "default"}>{statusLabels[row.status]}</Badge></td><td className="px-4 py-3 text-right"><button onClick={() => void openSuggestions(row)} className="text-sky-600 hover:underline text-xs">Gợi ý bù trừ</button></td></tr>)}</tbody></table>{visibleRows.length === 0 && <p className="p-8 text-center text-gray-500">Chưa có khoản nợ NCC.</p>}</div>
-    {selected && <div className="rounded-xl border border-sky-100 bg-sky-50 p-4"><div className="flex items-center justify-between"><div><h2 className="font-semibold">Gợi ý bù trừ</h2><p className="text-xs text-gray-600 mt-1">Cùng SKU và cùng kho, ưu tiên khoản cũ hơn.</p></div><button onClick={() => setSelected(null)} className="text-sm text-gray-500">Đóng</button></div>{suggestions.length === 0 ? <p className="mt-3 text-sm text-gray-600">Chưa có khoản đối ứng phù hợp.</p> : <div className="mt-3 space-y-2">{suggestions.map((candidate) => <div key={candidate.id} className="flex items-center justify-between rounded-lg bg-white p-3 text-sm"><span>{candidate.type === "SHORTAGE" ? "Thiếu" : "Thừa"} · HĐ {candidate.invoice_number ?? "—"} · còn {candidate.remaining_quantity} hộp</span><button disabled={busy} onClick={() => void confirmOffset(candidate)} className="flex items-center gap-1 rounded-lg bg-sky-500 px-3 py-1.5 text-white disabled:opacity-50"><CheckCircle2 size={14} /> Bù {candidate.suggested_quantity}</button></div>)}</div>}</div>}
+    <div className="overflow-x-auto rounded-xl border bg-white"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-4 py-3 text-left">Ngày</th><th className="px-4 py-3 text-left">Hóa đơn</th><th className="px-4 py-3 text-left">NCC / SKU</th><th className="px-4 py-3 text-left">Loại</th><th className="px-4 py-3 text-right">SL chênh lệch</th><th className="px-4 py-3 text-right">Đã bù</th><th className="px-4 py-3 text-right">Còn nợ</th><th className="px-4 py-3">Trạng thái</th><th /></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.id} className="border-t"><td className="px-4 py-3">{formatDateTime(row.document_date ?? row.created_at)}</td><td className="px-4 py-3">{row.invoice_number ?? "—"}</td><td className="px-4 py-3">{productMap.get(row.product_id)?.supplier ?? "—"}<div className="font-medium">{productMap.get(row.product_id)?.sku ?? `#${row.product_id}`}</div><div className="text-xs text-gray-400">{warehouseMap.get(row.warehouse_id)?.name}</div></td><td className="px-4 py-3"><Badge variant={row.type === "SHORTAGE" ? "danger" : "warning"}>{row.type === "SHORTAGE" ? "Thiếu" : "Thừa"}</Badge></td><td className="px-4 py-3 text-right">{formatNumber(row.quantity)}</td><td className="px-4 py-3 text-right">{formatNumber(row.quantity - row.remaining_quantity)}</td><td className="px-4 py-3 text-right font-semibold">{formatNumber(row.remaining_quantity)}</td><td className="px-4 py-3"><Badge variant={row.status === "RESOLVED" ? "success" : row.status === "PARTIAL" ? "warning" : "default"}>{statusLabels[row.status]}</Badge></td><td className="px-4 py-3 text-right flex gap-2 justify-end"><button onClick={() => void openSuggestions(row)} className="text-sky-600 hover:underline text-xs">Lịch sử / bù trừ</button></td></tr>)}</tbody></table>{visibleRows.length === 0 && <p className="p-8 text-center text-gray-500">Chưa có khoản nợ NCC.</p>}</div>
+    {selected && <div className="rounded-xl border border-sky-100 bg-sky-50 p-4 space-y-4">
+      <div className="flex items-center justify-between"><div><h2 className="font-semibold">Lịch sử đối soát</h2><p className="text-xs text-gray-600 mt-1">Hóa đơn {selected.invoice_number ?? "—"} · {selected.type === "SHORTAGE" ? "Thiếu" : "Thừa"}</p></div><button onClick={() => setSelected(null)} className="text-sm text-gray-500">Đóng</button></div>
+      {history && <>
+        {history.offsets.length > 0 ? <div className="overflow-x-auto rounded-lg border bg-white"><table className="w-full text-sm"><thead className="bg-gray-100 text-gray-500"><tr><th className="px-3 py-2 text-left">Thời gian</th><th className="px-3 py-2 text-left">Hóa đơn thiếu</th><th className="px-3 py-2 text-left">Hóa đơn thừa</th><th className="px-3 py-2 text-right">SL bù</th><th className="px-3 py-2 text-left">Người xác nhận</th><th className="px-3 py-2 text-left">Ghi chú</th></tr></thead><tbody>{history.offsets.map((offset) => <tr key={offset.id} className="border-t"><td className="px-3 py-2">{formatDateTime(offset.created_at)}</td><td className="px-3 py-2">#{offset.shortage_id} · {offset.shortage_invoice_number ?? "—"}</td><td className="px-3 py-2">#{offset.excess_id} · {offset.excess_invoice_number ?? "—"}</td><td className="px-3 py-2 text-right">{formatNumber(offset.quantity)}</td><td className="px-3 py-2">{offset.created_by ?? "—"}</td><td className="px-3 py-2">{offset.note ?? "—"}</td></tr>)}</tbody></table></div> : <p className="text-sm text-gray-600">Chưa có bù trừ nào được ghi nhận.</p>}
+        {history.sources.length > 0 && <div><h3 className="text-sm font-semibold mb-2">Hàng thừa đang khóa</h3><div className="space-y-1">{history.sources.map((source) => <p key={source.id} className="text-xs text-gray-700">Lot #{source.lot_id}: đã khóa {formatNumber(source.quantity)}, đã mở {formatNumber(source.released_quantity)}, còn khóa {formatNumber(source.quantity - source.released_quantity)}</p>)}</div></div>}
+      </>}
+      {selected.status !== "RESOLVED" && <div><h3 className="text-sm font-semibold">Gợi ý bù trừ</h3>{suggestions.length === 0 ? <p className="mt-2 text-sm text-gray-600">Chưa có khoản đối ứng phù hợp.</p> : <div className="mt-2 space-y-2">{suggestions.map((candidate) => <div key={candidate.id} className="flex items-center justify-between rounded-lg bg-white p-3 text-sm"><span>{candidate.type === "SHORTAGE" ? "Thiếu" : "Thừa"} · HĐ {candidate.invoice_number ?? "—"} · còn {candidate.remaining_quantity} hộp</span><button disabled={busy} onClick={() => void confirmOffset(candidate)} className="flex items-center gap-1 rounded-lg bg-sky-500 px-3 py-1.5 text-white disabled:opacity-50"><CheckCircle2 size={14} /> Bù {candidate.suggested_quantity}</button></div>)}</div>}</div>}
+    </div>}
   </div>;
 }

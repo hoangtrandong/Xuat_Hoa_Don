@@ -198,13 +198,45 @@ def test_offset_suggestions_confirmation_and_history_release_locked_excess(db):
                 json={
                     "shortage_id": shortage.id,
                     "excess_id": excess.id,
-                    "quantity": 3,
+                    "quantity": 1,
                     "created_by": "tester",
                 },
             )
             assert offset_response.status_code == 201
             offset = offset_response.json()
-            assert offset["quantity"] == 3
+            assert offset["quantity"] == 1
+            session.refresh(shortage)
+            session.refresh(excess)
+            assert shortage.status == "PARTIAL"
+            assert excess.status == "PARTIAL"
+
+            partial_list_response = client.get(
+                "/api/v1/inventory/supplier-discrepancies/",
+                params={"status": "PARTIAL"},
+            )
+            assert partial_list_response.status_code == 200
+            assert {row["id"] for row in partial_list_response.json()} == {shortage.id, excess.id}
+
+            remaining_suggestions = client.get(
+                f"/api/v1/inventory/supplier-discrepancies/{shortage.id}/offset-suggestions"
+            )
+            assert remaining_suggestions.status_code == 200
+            assert remaining_suggestions.json()[0]["suggested_quantity"] == 2
+
+            completed_offset = client.post(
+                "/api/v1/inventory/supplier-discrepancies/offsets/confirm",
+                json={
+                    "shortage_id": shortage.id,
+                    "excess_id": excess.id,
+                    "quantity": 2,
+                    "created_by": "tester",
+                },
+            )
+            assert completed_offset.status_code == 201
+            session.refresh(shortage)
+            session.refresh(excess)
+            assert shortage.status == "RESOLVED"
+            assert excess.status == "RESOLVED"
 
             history_response = client.get(
                 f"/api/v1/inventory/supplier-discrepancies/{excess.id}/history"
@@ -213,7 +245,10 @@ def test_offset_suggestions_confirmation_and_history_release_locked_excess(db):
             history = history_response.json()
             assert len(history["sources"]) == 1
             assert history["sources"][0]["released_quantity"] == 3
-            assert len(history["offsets"]) == 1
+            assert len(history["offsets"]) == 2
+            assert history["offsets"][0]["created_by"] == "tester"
+            assert history["offsets"][0]["shortage_invoice_number"] == "INV-10-7"
+            assert history["offsets"][0]["excess_invoice_number"] == "INV-5-8"
             list_response = client.get(
                 "/api/v1/inventory/supplier-discrepancies/",
                 params={"status": "RESOLVED"},
@@ -229,6 +264,7 @@ def test_offset_suggestions_confirmation_and_history_release_locked_excess(db):
     assert discrepancy_crud.remaining_quantity(session, excess) == 0
     excess_lot = session.scalar(select(InventoryLot).where(InventoryLot.lot_number == "LOT-5-8"))
     assert excess_lot.locked_quantity == 0
-    assert session.scalars(select(SupplierGoodsDiscrepancyOffset)).all()[0].quantity == 3
+    offsets = session.scalars(select(SupplierGoodsDiscrepancyOffset)).all()
+    assert [offset.quantity for offset in offsets] == [1, 2]
     from app.crud.delivery_request import available_for_product
     assert available_for_product(session, warehouse.id, product.id) == 15

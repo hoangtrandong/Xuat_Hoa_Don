@@ -63,6 +63,16 @@ function displayNumber(value: number | null | undefined, fallback = "-") {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : fallback;
 }
 
+function formatAllocationQty(totalBoxes: number, boxesPerCarton: number) {
+  const perCarton = Math.max(1, Math.floor(boxesPerCarton) || 1);
+  const cartons = Math.floor(totalBoxes / perCarton);
+  const loose = totalBoxes % perCarton;
+  if (perCarton <= 1 || totalBoxes <= 0) return `${Math.max(0, totalBoxes)} hộp`;
+  if (cartons === 0) return `${loose} hộp`;
+  if (loose === 0) return `${cartons} thùng`;
+  return `${cartons} thùng + ${loose} hộp`;
+}
+
 function normalizeImportItem(item: ImportItem): ImportItem {
   const boxesPerCarton = Number.isFinite(item.boxes_per_carton) && item.boxes_per_carton > 0
     ? item.boxes_per_carton
@@ -134,7 +144,7 @@ export default function ImportPage() {
   const [receiptItems, setReceiptItems] = useState<ImportItem[]>([]);
   const [receiptWarehouseId, setReceiptWarehouseId] = useState<number | "">("");
   const [receiptLocations, setReceiptLocations] = useState<ApiLocation[]>([]);
-  const [receiptDrafts, setReceiptDrafts] = useState<Record<number, { locationId: number | ""; quantity: number }>>({});
+  const [receiptDrafts, setReceiptDrafts] = useState<Record<number, { locationId: number | ""; cartons: number; looseBoxes: number }>>({});
   const [receiptUploading, setReceiptUploading] = useState(false);
   const [receiptConfirming, setReceiptConfirming] = useState(false);
   const [receiptDiscrepancies, setReceiptDiscrepancies] = useState<SupplierDiscrepancy[]>([]);
@@ -173,12 +183,21 @@ export default function ImportPage() {
   }
 
   function addReceiptAllocation(index: number) {
+    const item = receiptItems[index];
     const draft = receiptDrafts[index];
-    if (!draft?.locationId || draft.quantity < 1) { setError("Chọn vị trí và nhập số lượng hộp hợp lệ."); return; }
-    setReceiptItems((items) => items.map((item, itemIndex) => itemIndex === index
-      ? { ...item, allocations: [...item.allocations, { location_id: Number(draft.locationId), quantity: draft.quantity }] }
-      : item));
-    setReceiptDrafts((drafts) => ({ ...drafts, [index]: { locationId: "", quantity: 1 } }));
+    const boxesPerCarton = Math.max(1, item?.boxes_per_carton ?? 1);
+    const allocated = (item?.allocations ?? []).reduce((sum, allocation) => sum + allocation.quantity, 0);
+    const remaining = (item?.actual_qty ?? item?.quantity ?? 0) - allocated;
+    const cartons = Math.max(0, Math.floor(Number(draft?.cartons) || 0));
+    const looseBoxes = Math.max(0, Math.floor(Number(draft?.looseBoxes) || 0));
+    const total = cartons * boxesPerCarton + looseBoxes;
+    if (!item || !draft?.locationId) { setError("Vui lòng chọn vị trí kho."); return; }
+    if (total < 1) { setError("Nhập số thùng hoặc số hộp lẻ lớn hơn 0."); return; }
+    if (total > remaining) { setError(`Vượt quá số còn lại: còn ${remaining} hộp chưa xếp.`); return; }
+    setReceiptItems((items) => items.map((current, itemIndex) => itemIndex === index
+      ? { ...current, allocations: [...current.allocations, { location_id: Number(draft.locationId), quantity: total }] }
+      : current));
+    setReceiptDrafts((drafts) => ({ ...drafts, [index]: { locationId: "", cartons: 0, looseBoxes: 0 } }));
     setError("");
   }
 
@@ -346,7 +365,101 @@ export default function ImportPage() {
             ))}
           </div>
         </div>
-        <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-4 py-3 text-left">Mã hàng</th><th className="px-4 py-3 text-left">ĐVT</th><th className="px-4 py-3 text-left">Lot</th><th className="px-4 py-3 text-left">HSD</th><th className="px-4 py-3 text-right">SL chứng từ</th><th className="px-4 py-3 text-right">SL thực nhận</th><th className="px-4 py-3 text-right">Chênh lệch</th><th className="px-4 py-3 text-left">Phân bổ vị trí</th><th className="px-4 py-3 text-left">Thêm vị trí</th></tr></thead><tbody>{receiptItems.map((item, index) => { const actual = item.actual_qty ?? item.quantity; const difference = actual - item.quantity; const allocated = item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0); const draft = receiptDrafts[index] ?? { locationId: "", quantity: Math.max(1, actual - allocated) }; return <tr key={`${item.sku}-${item.lot_number}`} className="border-t border-gray-50 align-top"><td className="px-4 py-3"><b>{item.sku}</b><div className="text-xs text-gray-500">{item.product_name}</div><div className="text-xs text-gray-400">Hóa đơn: {item.invoice_number || "-"}</div>{item.note && <div className="text-xs text-gray-400">Ghi chú: {item.note}</div>}</td><td className="px-4 py-3">{item.unit || "-"}</td><td className="px-4 py-3">{item.lot_number}</td><td className="px-4 py-3">{new Date(item.expiry_date).toLocaleDateString("vi-VN")}</td><td className="px-4 py-3 text-right font-medium">{displayNumber(item.quantity, "0")}</td><td className="px-4 py-3 text-right font-medium">{displayNumber(actual, "0")}<div className={`text-xs ${difference === 0 ? "text-gray-500" : difference < 0 ? "text-red-600" : "text-amber-600"}`}>{difference === 0 ? "Khớp" : difference < 0 ? `Thiếu ${Math.abs(difference)}` : `Thừa ${difference}`}</div></td><td className="px-4 py-3 text-right font-medium">{difference === 0 ? <Badge variant="default">Khớp</Badge> : <Badge variant={difference < 0 ? "danger" : "warning"}>{difference > 0 ? `+${difference}` : difference}</Badge>}</td><td className="px-4 py-3">{item.allocations.length === 0 ? <span className="text-gray-400">Chưa phân bổ</span> : item.allocations.map((allocation, allocationIndex) => <div key={`${allocation.location_id}-${allocationIndex}`} className="flex items-center gap-1 text-xs mb-1"><MapPin size={12} />{receiptLocations.find((location) => location.id === allocation.location_id)?.code ?? allocation.location_id}: {allocation.quantity} hộp</div>)}</td><td className="px-4 py-3"><div className="flex gap-1"><select value={draft.locationId} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, locationId: Number(event.target.value) || "" } }))} className="border rounded px-2 py-1 text-xs"><option value="">Vị trí</option>{receiptLocations.filter((location) => location.is_active).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select><input type="number" min={1} max={Math.max(1, actual - allocated)} value={draft.quantity} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, quantity: Number(event.target.value) || 1 } }))} className="w-20 border rounded px-2 py-1 text-xs" /><button onClick={() => addReceiptAllocation(index)} className="bg-sky-500 text-white rounded px-2 text-xs">+</button></div></td></tr>; })}</tbody></table></div>      </div>}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 text-gray-500">
+              <tr>
+                <th className="px-4 py-3 text-left">Mã hàng</th>
+                <th className="px-4 py-3 text-left">ĐVT</th>
+                <th className="px-4 py-3 text-left">Lot</th>
+                <th className="px-4 py-3 text-left">HSD</th>
+                <th className="px-4 py-3 text-right">SL chứng từ</th>
+                <th className="px-4 py-3 text-right">SL thực nhận</th>
+                <th className="px-4 py-3 text-right">Chênh lệch</th>
+                <th className="px-4 py-3 text-left">Phân bổ vị trí</th>
+                <th className="px-4 py-3 text-left">Thêm vị trí</th>
+              </tr>
+            </thead>
+            <tbody>
+              {receiptItems.map((item, index) => {
+                const actual = item.actual_qty ?? item.quantity;
+                const difference = actual - item.quantity;
+                const allocated = item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0);
+                const remainingForDraft = Math.max(0, actual - allocated);
+                const defaultCartons = Math.floor(remainingForDraft / Math.max(1, item.boxes_per_carton));
+                const defaultLoose = remainingForDraft % Math.max(1, item.boxes_per_carton);
+                const draft = receiptDrafts[index] ?? {
+                  locationId: "",
+                  cartons: defaultCartons,
+                  looseBoxes: defaultLoose,
+                };
+                return (
+                  <tr key={`${item.sku}-${item.lot_number}`} className="border-t border-gray-50 align-top">
+                    <td className="px-4 py-3">
+                      <b>{item.sku}</b>
+                      <div className="text-xs text-gray-500">{item.product_name}</div>
+                      <div className="text-xs text-gray-400">Hóa đơn: {item.invoice_number || "-"}</div>
+                      {item.note && <div className="text-xs text-gray-400">Ghi chú: {item.note}</div>}
+                    </td>
+                    <td className="px-4 py-3">{item.unit || "-"}</td>
+                    <td className="px-4 py-3">{item.lot_number}</td>
+                    <td className="px-4 py-3">{new Date(item.expiry_date).toLocaleDateString("vi-VN")}</td>
+                    <td className="px-4 py-3 text-right font-medium">{displayNumber(item.quantity, "0")}</td>
+                    <td className="px-4 py-3 text-right font-medium">
+                      {displayNumber(actual, "0")}
+                      <div className={`text-xs ${difference === 0 ? "text-gray-500" : difference < 0 ? "text-red-600" : "text-amber-600"}`}>
+                        {difference === 0 ? "Khớp" : difference < 0 ? `Thiếu ${Math.abs(difference)}` : `Thừa ${difference}`}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-right font-medium">
+                      {difference === 0
+                        ? <Badge variant="default">Khớp</Badge>
+                        : <Badge variant={difference < 0 ? "danger" : "warning"}>{difference > 0 ? `+${difference}` : difference}</Badge>}
+                    </td>
+                    <td className="px-4 py-3">
+                      {item.allocations.length === 0
+                        ? <span className="text-gray-400">Chưa phân bổ</span>
+                        : item.allocations.map((allocation, allocationIndex) => (
+                          <div key={`${allocation.location_id}-${allocationIndex}`} className="flex items-center gap-1 text-xs mb-1">
+                            <MapPin size={12} />
+                            {receiptLocations.find((location) => location.id === allocation.location_id)?.code ?? allocation.location_id}:
+                            {" "}{formatAllocationQty(allocation.quantity, item.boxes_per_carton)}
+                          </div>
+                        ))}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-1">
+                        <select value={draft.locationId} onChange={(event) => setReceiptDrafts((drafts) => ({
+                          ...drafts,
+                          [index]: { ...draft, locationId: Number(event.target.value) || "" },
+                        }))} className="border rounded px-2 py-1 text-xs">
+                          <option value="">Vị trí</option>
+                          {receiptLocations.filter((location) => location.is_active).map((location) => (
+                            <option key={location.id} value={location.id}>{location.code}</option>
+                          ))}
+                        </select>
+                        <input type="number" min={0} max={Math.floor(remainingForDraft / Math.max(1, item.boxes_per_carton))} value={draft.cartons} onChange={(event) => setReceiptDrafts((drafts) => ({
+                          ...drafts,
+                          [index]: { ...draft, cartons: Math.max(0, Math.floor(Number(event.target.value) || 0)) },
+                        }))} className="w-14 border rounded px-2 py-1 text-xs text-right" placeholder="Thùng" />
+                        <span className="text-xs text-gray-400 self-center">th +</span>
+                        <input type="number" min={0} max={remainingForDraft} value={draft.looseBoxes} onChange={(event) => setReceiptDrafts((drafts) => ({
+                          ...drafts,
+                          [index]: { ...draft, looseBoxes: Math.max(0, Math.floor(Number(event.target.value) || 0)) },
+                        }))} className="w-14 border rounded px-2 py-1 text-xs text-right" placeholder="Lẻ" />
+                        <span className="text-xs text-gray-500 self-center whitespace-nowrap">
+                          = {draft.cartons * Math.max(1, item.boxes_per_carton) + draft.looseBoxes} hộp
+                        </span>
+                        <button onClick={() => addReceiptAllocation(index)} className="bg-sky-500 text-white rounded px-2 text-xs">+</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>}
       <DataTable data={inEntries} columns={columns} searchKeys={["code", "productName", "productCode", "refCode", "createdBy"]} searchPlaceholder="Tìm phiếu nhập, sản phẩm, PO..." />
       <Drawer open={importOpen} onClose={() => setImportOpen(false)} title="Tạo phiếu nhập kho" subtitle="Ghi nhận nhập hàng và cập nhật tồn kho">
         <div className="p-5 space-y-4">

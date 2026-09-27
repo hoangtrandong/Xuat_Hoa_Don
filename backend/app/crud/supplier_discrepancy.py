@@ -28,6 +28,16 @@ def remaining_quantity(db: Session, discrepancy: SupplierGoodsDiscrepancy) -> in
     return discrepancy.quantity - int(offset_quantity or 0)
 
 
+def _update_status(db: Session, discrepancy: SupplierGoodsDiscrepancy) -> None:
+    remaining = remaining_quantity(db, discrepancy)
+    if remaining <= 0:
+        discrepancy.status = "RESOLVED"
+    elif remaining < discrepancy.quantity:
+        discrepancy.status = "PARTIAL"
+    else:
+        discrepancy.status = "OPEN"
+
+
 def discrepancy_response(db: Session, discrepancy: SupplierGoodsDiscrepancy) -> dict:
     return {
         "id": discrepancy.id,
@@ -86,10 +96,25 @@ def discrepancy_history(db: Session, discrepancy_id: int) -> dict | None:
     ).order_by(
         SupplierGoodsDiscrepancyOffset.created_at, SupplierGoodsDiscrepancyOffset.id
     )).all()
+    offset_history = []
+    for offset in offsets:
+        shortage = db.get(SupplierGoodsDiscrepancy, offset.shortage_id)
+        excess = db.get(SupplierGoodsDiscrepancy, offset.excess_id)
+        offset_history.append({
+            "id": offset.id,
+            "shortage_id": offset.shortage_id,
+            "excess_id": offset.excess_id,
+            "quantity": offset.quantity,
+            "note": offset.note,
+            "created_by": offset.created_by,
+            "created_at": offset.created_at,
+            "shortage_invoice_number": shortage.invoice_number if shortage else None,
+            "excess_invoice_number": excess.invoice_number if excess else None,
+        })
     return {
         "discrepancy": discrepancy_response(db, discrepancy),
         "sources": sources,
-        "offsets": offsets,
+        "offsets": offset_history,
     }
 
 
@@ -106,7 +131,7 @@ def suggest_offsets(db: Session, discrepancy_id: int) -> list[dict]:
         SupplierGoodsDiscrepancy.warehouse_id == discrepancy.warehouse_id,
         SupplierGoodsDiscrepancy.product_id == discrepancy.product_id,
         SupplierGoodsDiscrepancy.type == opposite_type,
-        SupplierGoodsDiscrepancy.status == "OPEN",
+        SupplierGoodsDiscrepancy.status.in_(("OPEN", "PARTIAL")),
     ).order_by(SupplierGoodsDiscrepancy.created_at, SupplierGoodsDiscrepancy.id)).all()
     suggestions = []
     for candidate in candidates:
@@ -133,8 +158,8 @@ def confirm_offset(db: Session, payload) -> SupplierGoodsDiscrepancyOffset:
         raise ValueError("Không tìm thấy chênh lệch cần cân trừ.")
     if shortage.type != "SHORTAGE" or excess.type != "EXCESS":
         raise ValueError("Cần chọn một chênh lệch thiếu và một chênh lệch thừa.")
-    if shortage.status != "OPEN" or excess.status != "OPEN":
-        raise ValueError("Chỉ có thể cân trừ chênh lệch đang mở.")
+    if remaining_quantity(db, shortage) <= 0 or remaining_quantity(db, excess) <= 0:
+        raise ValueError("Chỉ có thể cân trừ chênh lệch còn số lượng.")
     if (shortage.product_id, shortage.warehouse_id) != (excess.product_id, excess.warehouse_id):
         raise ValueError("Chỉ có thể cân trừ cùng sản phẩm trong cùng kho.")
     if payload.quantity > min(remaining_quantity(db, shortage), remaining_quantity(db, excess)):
@@ -174,10 +199,8 @@ def confirm_offset(db: Session, payload) -> SupplierGoodsDiscrepancyOffset:
     )
     db.add(offset)
     db.flush()
-    if remaining_quantity(db, shortage) == 0:
-        shortage.status = "RESOLVED"
-    if remaining_quantity(db, excess) == 0:
-        excess.status = "RESOLVED"
+    _update_status(db, shortage)
+    _update_status(db, excess)
     db.commit()
     db.refresh(offset)
     return offset

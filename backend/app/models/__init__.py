@@ -1,4 +1,4 @@
-from app.models.user import User, Role, Permission
+from app.models.user import User, Role, Permission, AuditLog
 from app.models.customer import Customer, CustomerAddress, CustomerContact, Store, Company
 from app.models.product import (
     Product, ProductCategory, ProductUnit, PriceList, PriceListItem,
@@ -17,7 +17,7 @@ from app.models.vinamilk import VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 
 __all__ = [
-    "User", "Role", "Permission",
+    "User", "Role", "Permission", "AuditLog",
     "Customer", "CustomerAddress", "CustomerContact", "Store", "Company",
     "Product", "ProductCategory", "ProductUnit", "PriceList", "PriceListItem",
     "ProductGroup", "ProductGroupItem", "ProductCompany", "ProductGroupCompany",

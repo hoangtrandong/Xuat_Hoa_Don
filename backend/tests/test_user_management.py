@@ -38,6 +38,7 @@ def user_management_client(monkeypatch):
         full_name="Administrator",
         hashed_password=hash_password("a-strong-password"),
         is_active=True,
+        must_change_password=False,
         roles=[admin_role],
     )
     db.add(admin)
@@ -158,6 +159,7 @@ def test_staff_role_cannot_manage_users(user_management_client):
         full_name="Staffer",
         hashed_password=hash_password("a-strong-password"),
         is_active=True,
+        must_change_password=False,
         roles=[staff_role],
     )
     db.add(staffer)

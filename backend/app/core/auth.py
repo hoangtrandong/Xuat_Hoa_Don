@@ -17,11 +17,21 @@ from app.models.user import Role, User
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 _PASSWORD_ITERATIONS = 310_000
 _JWT_ALGORITHM = "HS256"
+_MAX_FAILED_LOGIN_ATTEMPTS = 5
+_LOGIN_LOCKOUT_MINUTES = 15
 _RESOURCE_CODES = {
     "customers", "stores", "companies", "products", "product-groups",
     "sales-orders", "inventory", "employees", "payments", "debt",
     "delivery-requests", "sync", "users",
 }
+
+
+class AccountLockedError(Exception):
+    """Raised when a user tries to log in while their account is temporarily locked."""
+
+    def __init__(self, retry_after_minutes: int):
+        self.retry_after_minutes = retry_after_minutes
+        super().__init__(f"Account locked for {retry_after_minutes} more minute(s).")
 
 
 def _signing_key() -> str:
@@ -86,11 +96,24 @@ def create_access_token(user: User) -> str:
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
     user = db.scalar(select(User).where(User.username == username))
-    if not user or not user.is_active or not verify_password(password, user.hashed_password):
+    if not user:
+        return None
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if user.locked_until and user.locked_until > now:
+        remaining_seconds = (user.locked_until - now).total_seconds()
+        raise AccountLockedError(max(1, int(remaining_seconds // 60) + 1))
+    if not user.is_active or not verify_password(password, user.hashed_password):
+        if user.is_active:
+            user.failed_login_attempts += 1
+            if user.failed_login_attempts >= _MAX_FAILED_LOGIN_ATTEMPTS:
+                user.locked_until = now + timedelta(minutes=_LOGIN_LOCKOUT_MINUTES)
+            db.commit()
         return None
     if user.hashed_password.startswith(("$2a$", "$2b$", "$2y$")):
         user.hashed_password = hash_password(password)
-        db.commit()
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    db.commit()
     return user
 
 
@@ -125,6 +148,12 @@ def require_endpoint_permission(
     request: Request,
     user: User = Depends(get_current_user),
 ) -> User:
+    request.state.user = user
+    if user.must_change_password:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail="PASSWORD_CHANGE_REQUIRED: Vui lòng đổi mật khẩu trước khi tiếp tục sử dụng hệ thống.",
+        )
     permission_code = permission_for_endpoint(request.url.path, request.method)
     check_permission(user, permission_code)
     return user

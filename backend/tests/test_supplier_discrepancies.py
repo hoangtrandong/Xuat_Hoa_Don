@@ -196,6 +196,7 @@ def test_offset_suggestions_confirmation_and_history_release_locked_excess(
         full_name="Inventory Tester",
         hashed_password=hash_password("a-strong-password"),
         is_active=True,
+        must_change_password=False,
         roles=[inventory_role],
     ))
     session.commit()

@@ -35,6 +35,7 @@ def auth_client(monkeypatch):
         full_name="Viewer",
         hashed_password=hash_password("a-strong-password"),
         is_active=True,
+        must_change_password=False,
         roles=[role],
     )
     db.add(viewer)

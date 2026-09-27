@@ -14,6 +14,7 @@ if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 from app.core.config import settings
 from app.core.auth import require_endpoint_permission
+from app.core.audit import record_audit_log
 from app.core.admin_bootstrap import bootstrap_administrator_from_environment, sync_default_roles
 from app.api.v1.router import api_router
 from app.api.v1.endpoints.auth import router as auth_router
@@ -77,6 +78,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Ghi audit log cho các thao tác write dưới /api/v1 (trừ /auth, do login được ghi log riêng).
+@app.middleware("http")
+async def audit_log_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    api_prefix = f"{settings.API_V1_PREFIX}/"
+    if path.startswith(api_prefix) and not path.startswith(f"{settings.API_V1_PREFIX}/auth"):
+        actor = getattr(request.state, "user", None)
+        ip_address = request.client.host if request.client else None
+        record_audit_log(
+            actor=actor,
+            method=request.method,
+            path=path,
+            api_prefix=settings.API_V1_PREFIX,
+            status_code=response.status_code,
+            ip_address=ip_address,
+        )
+    return response
 
 @app.get("/health", tags=["system"])
 def health():

@@ -50,10 +50,12 @@ jobs:
             set +e
             current_revision=$(python -c "exec(\"import os\\nfrom sqlalchemy import create_engine, text\\nengine = create_engine(os.environ['DATABASE_URL'])\\nwith engine.connect() as connection:\\n    current = connection.execute(text('SELECT version_num FROM alembic_version LIMIT 1')).scalar()\\nprint(current or '')\")")
             current_status=$?
+            missing_revision=$(python -c "import re, sys; output = sys.stdin.read(); patterns = [r\"Can't locate revision identified by '([^']+)'\", r'No such revision or branch \"([^\"]+)\"', r'No such revision \"([^\"]+)\"']; match = next((m for pattern in patterns for m in [re.search(pattern, output, re.IGNORECASE)] if m), None); print(match.group(1) if match else '')" <<< "$output")
             set -e
-            if echo "$output" | grep -Eiq "can't locate revision|no such revision|unknown revision" \
+            if [ -n "$missing_revision" ] \
               && [ "$current_status" -eq 0 ] \
               && [ -n "$current_revision" ] \
+              && [ "$missing_revision" = "$current_revision" ] \
               && ! python -m alembic show "$current_revision" >/dev/null 2>&1; then
               echo "Skipping migrations because database is already on unknown revision $current_revision."
             else

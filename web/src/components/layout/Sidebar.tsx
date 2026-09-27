@@ -33,17 +33,18 @@ function NavItem({
   collapsed: boolean;
 }) {
   const pathname = usePathname();
-  const [open, setOpen] = useState(false);
   const hasChildren = item.children && item.children.length > 0;
   const isActive =
     pathname === item.href ||
     (hasChildren && item.children!.some((c) => pathname.startsWith(c.href)));
+  const [openOverride, setOpenOverride] = useState<boolean | null>(null);
+  const open = openOverride ?? Boolean(isActive);
 
   if (hasChildren) {
     return (
       <div>
         <button
-          onClick={() => setOpen(!open)}
+          onClick={() => setOpenOverride(!open)}
           className={cn(
             "flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm font-medium transition-colors",
             isActive

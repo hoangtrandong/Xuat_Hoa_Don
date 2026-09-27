@@ -153,7 +153,11 @@ class InventoryImportConfirm(BaseModel):
 class SupplierGoodsDiscrepancyResponse(BaseModel):
     id: int
     warehouse_id: int
+    warehouse_name: Optional[str] = None
     product_id: int
+    product_sku: Optional[str] = None
+    product_name: Optional[str] = None
+    supplier: Optional[str] = None
     type: str
     document_quantity: int
     actual_quantity: int

@@ -54,7 +54,8 @@ interface ImportItem {
 }
 interface ApiLocation { id: number; warehouse_id: number; code: string; is_active: boolean }
 interface SupplierDiscrepancy {
-  id: number; warehouse_id: number; product_id: number; type: "SHORTAGE" | "EXCESS";
+  id: number; warehouse_id: number; product_id: number; product_sku?: string | null; product_name?: string | null;
+  type: "SHORTAGE" | "EXCESS";
   document_quantity: number; actual_quantity: number; quantity: number; remaining_quantity: number;
   lot_number: string | null; invoice_number: string | null; document_date: string | null; status: string;
 }
@@ -359,7 +360,7 @@ export default function ImportPage() {
         {receiptDiscrepancies.length > 0 && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
           <div className="flex items-center gap-2 text-sm font-semibold"><AlertTriangle size={16} /> Có nợ NCC cũ cần đối chiếu</div>
           <div className="mt-2 space-y-1 text-xs">{receiptDiscrepancies.map((item) => <div key={item.id}>
-            {item.type === "SHORTAGE" ? "Thiếu" : "Thừa"} · SP #{item.product_id} · còn {item.remaining_quantity} hộp · hóa đơn {item.invoice_number || "—"}
+            {item.type === "SHORTAGE" ? "Thiếu" : "Thừa"} · {item.product_sku ?? `SP #${item.product_id}`}{item.product_name ? ` - ${item.product_name}` : ""} · còn {item.remaining_quantity} hộp · hóa đơn {item.invoice_number || "—"}
           </div>)}</div>
           <p className="mt-2 text-xs">Sau khi xác nhận nhập, mở “Theo dõi nợ NCC” để xem gợi ý và xác nhận bù trừ.</p>
         </div>}

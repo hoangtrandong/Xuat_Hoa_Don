@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.inventory import (
     InventoryLot,
@@ -42,7 +42,11 @@ def discrepancy_response(db: Session, discrepancy: SupplierGoodsDiscrepancy) -> 
     return {
         "id": discrepancy.id,
         "warehouse_id": discrepancy.warehouse_id,
+        "warehouse_name": discrepancy.warehouse.name if discrepancy.warehouse else None,
         "product_id": discrepancy.product_id,
+        "product_sku": discrepancy.product.sku if discrepancy.product else None,
+        "product_name": discrepancy.product.name if discrepancy.product else None,
+        "supplier": discrepancy.product.supplier if discrepancy.product else None,
         "type": discrepancy.type,
         "document_quantity": discrepancy.document_quantity,
         "actual_quantity": discrepancy.actual_quantity,
@@ -67,7 +71,10 @@ def list_discrepancies(
     discrepancy_type: str | None = None,
     status: str | None = None,
 ) -> list[dict]:
-    stmt = select(SupplierGoodsDiscrepancy).order_by(
+    stmt = select(SupplierGoodsDiscrepancy).options(
+        joinedload(SupplierGoodsDiscrepancy.product),
+        joinedload(SupplierGoodsDiscrepancy.warehouse),
+    ).order_by(
         SupplierGoodsDiscrepancy.created_at.desc(), SupplierGoodsDiscrepancy.id.desc()
     )
     if warehouse_id is not None:
@@ -78,7 +85,8 @@ def list_discrepancies(
         stmt = stmt.where(SupplierGoodsDiscrepancy.type == discrepancy_type.upper())
     if status is not None:
         stmt = stmt.where(SupplierGoodsDiscrepancy.status == status.upper())
-    return [discrepancy_response(db, row) for row in db.scalars(stmt).all()]
+    return [discrepancy_response(db, row) for row in db.scalars(stmt).unique().all()]
+
 
 
 def discrepancy_history(db: Session, discrepancy_id: int) -> dict | None:

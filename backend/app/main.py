@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 import traceback
 import asyncio
+from contextlib import asynccontextmanager
 
 from alembic import command
 from alembic.config import Config
@@ -13,6 +14,7 @@ if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 from app.core.config import settings
 from app.core.auth import require_endpoint_permission
+from app.core.admin_bootstrap import bootstrap_administrator_from_environment
 from app.api.v1.router import api_router
 from app.api.v1.endpoints.auth import router as auth_router
 
@@ -30,11 +32,20 @@ def run_database_migrations() -> None:
         raise
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    status = bootstrap_administrator_from_environment()
+    logger.info("Initial administrator bootstrap: %s.", status)
+    yield
+
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version="0.1.0",
     openapi_url=f"{settings.API_V1_PREFIX}/openapi.json",
+    lifespan=lifespan,
 )
+
 
 # Custom middleware to add CORS headers to ALL responses (including errors)
 @app.middleware("http")

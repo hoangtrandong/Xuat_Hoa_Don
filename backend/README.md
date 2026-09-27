@@ -80,6 +80,9 @@ Render Free không có Shell, nên `render.yaml` chạy
 admin nếu username chưa tồn tại và không in mật khẩu ra log. Sau khi deploy
 thành công, xóa cả bốn biến `INITIAL_ADMIN_*` rồi deploy lại. Các deploy sau đó
 sẽ bỏ qua bootstrap, nên mật khẩu khởi tạo không còn được giữ trong môi trường.
+Backend cũng kiểm tra các biến này khi khởi động, để service Render tạo thủ công
+vẫn bootstrap được dù chưa đồng bộ `preDeployCommand` từ `render.yaml`. Trong
+runtime log, tìm `Initial administrator bootstrap: created.`.
 
 ## API Endpoints
 

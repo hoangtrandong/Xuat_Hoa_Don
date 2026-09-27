@@ -1,13 +1,23 @@
+import os
+from collections.abc import Mapping
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.auth import hash_password
+from app.core.database import SessionLocal
 from app.models.user import Permission, Role, User
 
 RESOURCES = (
     "customers", "stores", "companies", "products", "product-groups",
     "sales-orders", "inventory", "employees", "payments", "debt",
     "delivery-requests", "sync",
+)
+ENVIRONMENT_VARIABLES = (
+    "INITIAL_ADMIN_USERNAME",
+    "INITIAL_ADMIN_EMAIL",
+    "INITIAL_ADMIN_FULL_NAME",
+    "INITIAL_ADMIN_PASSWORD",
 )
 
 
@@ -56,3 +66,37 @@ def create_administrator(
     db.add(user)
     db.flush()
     return user
+
+
+def bootstrap_administrator_from_environment(
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    environment = os.environ if environment is None else environment
+    values = {
+        key: environment.get(key, "").strip()
+        if key != "INITIAL_ADMIN_PASSWORD"
+        else environment.get(key, "")
+        for key in ENVIRONMENT_VARIABLES
+    }
+    configured = [key for key, value in values.items() if value]
+    if not configured:
+        return "not configured; skipping"
+    missing = [key for key, value in values.items() if not value]
+    if missing:
+        raise ValueError(
+            "Initial administrator bootstrap requires: "
+            + ", ".join(ENVIRONMENT_VARIABLES)
+        )
+
+    with SessionLocal.begin() as db:
+        username = values["INITIAL_ADMIN_USERNAME"]
+        if db.scalar(select(User.id).where(User.username == username)):
+            return "already exists; skipping"
+        create_administrator(
+            db,
+            username=username,
+            email=values["INITIAL_ADMIN_EMAIL"],
+            full_name=values["INITIAL_ADMIN_FULL_NAME"],
+            password=values["INITIAL_ADMIN_PASSWORD"],
+        )
+    return "created"

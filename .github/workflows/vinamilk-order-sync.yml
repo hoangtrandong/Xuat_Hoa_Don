@@ -48,7 +48,7 @@ jobs:
           echo "$output"
           if [ "$status" -ne 0 ]; then
             set +e
-            current_revision=$(python -c "exec(\"import os\\nfrom sqlalchemy import create_engine, text\\nengine = create_engine(os.environ['DATABASE_URL'])\\nwith engine.connect() as connection:\\n    current = connection.execute(text('SELECT version_num FROM alembic_version LIMIT 1')).scalar()\\nprint(current or '')\")")
+            current_revision=$(python -c "exec(\"import os\\nfrom sqlalchemy import create_engine, text\\nengine = create_engine(os.environ['DATABASE_URL'])\\nwith engine.connect() as connection:\\n    try:\\n        current = connection.execute(text('SELECT version_num FROM alembic_version LIMIT 1')).scalar()\\n    except Exception:\\n        current = ''\\nprint(current or '')\")")
             current_status=$?
             missing_revision=$(python -c "import re, sys; output = sys.stdin.read(); patterns = [r\"Can't locate revision identified by '([^']+)'\", r'No such revision or branch \"([^\"]+)\"', r'No such revision \"([^\"]+)\"']; match = next((m for pattern in patterns for m in [re.search(pattern, output, re.IGNORECASE)] if m), None); print(match.group(1) if match else '')" <<< "$output")
             set -e

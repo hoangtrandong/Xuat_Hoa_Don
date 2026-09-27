@@ -34,6 +34,7 @@ def run_database_migrations() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    run_database_migrations()
     status = bootstrap_administrator_from_environment()
     logger.info("Initial administrator bootstrap: %s.", status)
     yield

@@ -15,9 +15,7 @@ branch_labels = None
 depends_on = None
 
 
-def upgrade() -> None:
-    # The default Alembic version column is VARCHAR(32), shorter than this
-    # revision ID. Widen it before Alembic writes the new version after upgrade.
+def _widen_alembic_version_column() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
         with op.batch_alter_table("alembic_version") as batch_op:
@@ -35,6 +33,10 @@ def upgrade() -> None:
             type_=sa.String(length=128),
             existing_nullable=False,
         )
+
+
+def upgrade() -> None:
+    _widen_alembic_version_column()
 
     # Postgres tự xóa FK constraint nằm trên chính cột bị drop.
     op.drop_column("customers", "route_id")

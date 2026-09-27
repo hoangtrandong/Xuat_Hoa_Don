@@ -11,7 +11,7 @@ import Drawer from "@/components/ui/Drawer";
 import { ledgerLabels, type StockLevel, type LedgerEntry, type LedgerType } from "@/lib/mock-inventory";
 import { formatVND, formatDateTime, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
 
 interface ApiStockLevel {
@@ -157,12 +157,12 @@ export default function WarehouseInventoryPage() {
     async function loadInventory() {
       try {
         const [stockResponse, transactionResponse, warehouseResponse, locationResponse, lotResponse, lotDetailResponse] = await Promise.all([
-          fetch(`${API_URL}/inventory/stock-levels/`),
-          fetch(`${API_URL}/inventory/transactions/`),
-          fetch(`${API_URL}/inventory/warehouses/`),
-          fetch(`${API_URL}/inventory/locations/`),
-          fetch(`${API_URL}/inventory/lots/`),
-          fetch(`${API_URL}/inventory/lot-details/`),
+          apiFetch(`${API_URL}/inventory/stock-levels/`),
+          apiFetch(`${API_URL}/inventory/transactions/`),
+          apiFetch(`${API_URL}/inventory/warehouses/`),
+          apiFetch(`${API_URL}/inventory/locations/`),
+          apiFetch(`${API_URL}/inventory/lots/`),
+          apiFetch(`${API_URL}/inventory/lot-details/`),
         ]);
         if (!stockResponse.ok || !transactionResponse.ok || !warehouseResponse.ok || !locationResponse.ok || !lotResponse.ok || !lotDetailResponse.ok) {
           throw new Error("Không thể tải dữ liệu tồn kho từ API.");
@@ -433,7 +433,7 @@ export default function WarehouseInventoryPage() {
     }
     if (!adjWarehouseId) { setAdjError("Vui lòng chọn kho."); return; }
     try {
-      const response = await fetch(`${API_URL}/inventory/adjust/`, {
+      const response = await apiFetch(`${API_URL}/inventory/adjust/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

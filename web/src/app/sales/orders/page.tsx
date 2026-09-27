@@ -5,11 +5,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ShoppingCart, CircleCheck, Clock3, Ban, Plus, CheckCircle2, RefreshCw, AlertTriangle, Download, Upload, Trash2, PencilLine, Save } from "lucide-react";
 import Link from "next/link";
 import PageHeader from "@/components/ui/PageHeader";
+import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
 import { formatVND } from "@/lib/format";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import * as XLSX from "xlsx";
 
 function toInputDate(date: Date) {
@@ -211,7 +212,7 @@ export default function SalesOrdersPage() {
   }, []);
 
   useEffect(() => {
-    fetch(`${API_URL}/companies/`)
+    apiFetch(`${API_URL}/companies/`)
       .then((response) => (response.ok ? response.json() : []))
       .then((payload) => {
         if (!Array.isArray(payload)) return;
@@ -232,7 +233,7 @@ export default function SalesOrdersPage() {
     let skip = 0;
     let lastSynced: string | null = null;
     while (true) {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_URL}/sync/vinamilk-orders?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&source=${source}&skip=${skip}&limit=${LOCAL_PAGE_SIZE}`
       );
       const payload = await response.json() as {
@@ -280,7 +281,7 @@ export default function SalesOrdersPage() {
         const day = days[index];
         setToast(`Đang đồng bộ ngày ${index + 1}/${days.length} (${toVinamilkDate(day)})...`);
         try {
-          const res = await fetch(`${API_URL}/sync/vinamilk`, {
+          const res = await apiFetch(`${API_URL}/sync/vinamilk`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -325,7 +326,7 @@ export default function SalesOrdersPage() {
     try {
       const body = new FormData();
       body.append("file", file);
-      const response = await fetch(`${API_URL}/sync/vinamilk-orders/allocations/upload`, { method: "POST", body });
+      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/allocations/upload`, { method: "POST", body });
       const result = await response.json() as { uploaded?: number; orders?: number; detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể upload dữ liệu cân đối.");
       setSource("manual");
@@ -412,7 +413,7 @@ export default function SalesOrdersPage() {
     setRemoteError("");
     setToast("Đang xóa dữ liệu cân đối...");
     try {
-      const response = await fetch(`${API_URL}/sync/vinamilk-orders/allocations/bulk-delete`, {
+      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/allocations/bulk-delete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(selectAllRange
@@ -457,7 +458,7 @@ export default function SalesOrdersPage() {
     setIsSavingAllocation(true);
     setRemoteError("");
     try {
-      const response = await fetch(`${API_URL}/sync/vinamilk-orders/allocations/${editingAllocation.allocationId}`, {
+      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/allocations/${editingAllocation.allocationId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -535,7 +536,7 @@ export default function SalesOrdersPage() {
             <button onClick={() => setSource("manual")} className={`rounded-md px-3 py-2 text-sm font-medium ${source === "manual" ? "bg-white text-sky-700 shadow-sm" : "text-gray-500"}`}>Cân đối thủ công</button>
             <button onClick={() => setSource("sync")} className={`rounded-md px-3 py-2 text-sm font-medium ${source === "sync" ? "bg-white text-sky-700 shadow-sm" : "text-gray-500"}`}>Dữ liệu đồng bộ</button>
           </div>
-          <a href={`${API_URL}/sync/vinamilk-orders/allocations/template`} className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600"><Download size={16} />Tải mẫu cân đối</a>
+          <AuthenticatedDownloadLink href={`${API_URL}/sync/vinamilk-orders/allocations/template`} className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600"><Download size={16} />Tải mẫu cân đối</AuthenticatedDownloadLink>
           <button onClick={() => allocationFileInput.current?.click()} disabled={isUploading} className="flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 disabled:opacity-50"><Upload size={16} />{isUploading ? "Đang upload..." : "Upload cân đối"}</button>
           <input ref={allocationFileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadAllocations(file); event.target.value = ""; }} />
           {source === "manual" && (

@@ -1,12 +1,14 @@
 "use client";
 
-import { Bell, Search, Menu as MenuIcon, ChevronDown } from "lucide-react";
+import { Bell, Search, Menu as MenuIcon, LogOut } from "lucide-react";
 
 interface HeaderProps {
   onMobileMenuOpen: () => void;
+  onLogout: () => void;
+  username: string;
 }
 
-export default function Header({ onMobileMenuOpen }: HeaderProps) {
+export default function Header({ onMobileMenuOpen, onLogout, username }: HeaderProps) {
   return (
     <header className="sticky top-0 z-30 h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 lg:px-6">
       {/* Left: Mobile menu + Search */}
@@ -37,16 +39,26 @@ export default function Header({ onMobileMenuOpen }: HeaderProps) {
           <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />
         </button>
 
-        <button className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors">
+        <div className="flex items-center gap-2 pl-2">
           <div className="w-8 h-8 rounded-full bg-sky-500 flex items-center justify-center">
-            <span className="text-white text-sm font-semibold">NA</span>
+            <span className="text-white text-sm font-semibold">
+              {username.slice(0, 2).toUpperCase()}
+            </span>
           </div>
           <div className="hidden sm:block text-left">
-            <p className="text-sm font-medium text-gray-800 leading-none">Nguyễn Admin</p>
-            <p className="text-xs text-gray-400 mt-0.5">Admin</p>
+            <p className="text-sm font-medium text-gray-800 leading-none">{username}</p>
+            <p className="text-xs text-gray-400 mt-0.5">Đã đăng nhập</p>
           </div>
-          <ChevronDown size={14} className="text-gray-400 hidden sm:block" />
-        </button>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="ml-1 rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-800"
+            aria-label="Đăng xuất"
+            title="Đăng xuất"
+          >
+            <LogOut size={17} />
+          </button>
+        </div>
       </div>
     </header>
   );

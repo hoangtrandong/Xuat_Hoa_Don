@@ -35,7 +35,7 @@ def create_location_transfer(db: Session, payload, created_by: str = "system") -
         raise ValueError("Phiếu điều chuyển phải có ít nhất một dòng.")
     transfer = InventoryTransfer(
         code=f"LTR-{datetime.utcnow():%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
-        warehouse_id=payload.warehouse_id, note=payload.note, created_by=payload.created_by or created_by,
+        warehouse_id=payload.warehouse_id, note=payload.note, created_by=created_by,
     )
     for item in payload.items:
         source = db.get(WarehouseLocation, item.source_location_id)

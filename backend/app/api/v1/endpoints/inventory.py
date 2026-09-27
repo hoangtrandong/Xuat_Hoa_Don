@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 from typing import Any, List
 from zipfile import BadZipFile
 from app.core.database import get_db
+from app.core.auth import get_current_user
+from app.models.user import User
 from app.schemas.inventory import (
     InventoryImportConfirm, InventoryImportItem, InventoryTransaction, StockLevel,
     StockAdjust, Warehouse, WarehouseLocation, InventoryLot, InventoryLotDetail,
@@ -192,7 +194,12 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
 
 
 @router.post("/import/confirm", response_model=List[InventoryTransaction], status_code=201)
-def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depends(get_db)):
+def confirm_inventory_import(
+    payload: InventoryImportConfirm,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    actor = getattr(current_user, "username", None) or payload.created_by
     if not db.get(WarehouseModel, payload.warehouse_id):
         raise HTTPException(status_code=400, detail="Không tìm thấy kho.")
     transaction_time = datetime.utcnow()
@@ -240,7 +247,7 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                         f"{item.sku} - {item.lot_number}" +
                         (f" - {item.note}" if item.note else "")
                     ),
-                    created_by=payload.created_by,
+                    created_by=actor,
                     created_at=transaction_time,
                     document_date=payload.document_date,
                 )
@@ -258,7 +265,7 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                 ref_code=payload.ref_code,
                 document_date=payload.document_date or item.document_date,
                 note=item.note or payload.note,
-                created_by=payload.created_by,
+                created_by=actor,
                 allocated_lots=allocated_lots,
             )
         db.commit()
@@ -322,9 +329,13 @@ def supplier_discrepancy_offset_suggestions(
 def confirm_supplier_discrepancy_offset(
     payload: SupplierGoodsDiscrepancyOffsetConfirm,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
-        return discrepancy_crud.confirm_offset(db, payload)
+        actor = getattr(current_user, "username", None) or payload.created_by
+        return discrepancy_crud.confirm_offset(
+            db, payload.model_copy(update={"created_by": actor})
+        )
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -435,17 +446,30 @@ def stock_levels(warehouse_id: int | None = None, db: Session = Depends(get_db))
 
 
 @router.post("/adjust/", response_model=InventoryTransaction, status_code=201)
-def adjust_stock(payload: StockAdjust, db: Session = Depends(get_db)):
+def adjust_stock(
+    payload: StockAdjust,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return crud.adjust_stock(db, payload)
+        return crud.adjust_stock(
+            db, payload, created_by=getattr(current_user, "username", None) or "system"
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/transfers/", response_model=InventoryTransferResponse, status_code=201)
-def create_location_transfer(payload: InventoryTransferCreate, db: Session = Depends(get_db)):
+def create_location_transfer(
+    payload: InventoryTransferCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return crud.create_location_transfer(db, payload)
+        return crud.create_location_transfer(
+            db, payload,
+            created_by=getattr(current_user, "username", None) or payload.created_by or "system",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

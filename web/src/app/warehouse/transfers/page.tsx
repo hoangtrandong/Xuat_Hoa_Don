@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowRight, CheckCircle2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import Badge from "@/components/ui/Badge";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import { formatDateTime, formatNumber } from "@/lib/format";
 
 interface Warehouse { id: number; name: string }
@@ -47,11 +47,11 @@ export default function LocationTransferPage() {
     setLoading(true);
     try {
       const responses = await Promise.all([
-        fetch(`${API_URL}/inventory/warehouses/`),
-        fetch(`${API_URL}/inventory/locations/`),
-        fetch(`${API_URL}/products/`),
-        fetch(`${API_URL}/inventory/lots/`),
-        fetch(`${API_URL}/inventory/transfers/`),
+        apiFetch(`${API_URL}/inventory/warehouses/`),
+        apiFetch(`${API_URL}/inventory/locations/`),
+        apiFetch(`${API_URL}/products/`),
+        apiFetch(`${API_URL}/inventory/lots/`),
+        apiFetch(`${API_URL}/inventory/transfers/`),
       ]);
       if (responses.some((response) => !response.ok)) throw new Error("Không thể tải dữ liệu điều chuyển.");
       const [warehouseData, locationData, productData, lotData, transferData] = await Promise.all(
@@ -103,7 +103,7 @@ export default function LocationTransferPage() {
     if (invalid) { setError("Số lượng chuyển vượt tồn tại vị trí nguồn hoặc vị trí nguồn trùng vị trí đích."); return; }
     setSaving(true);
     try {
-      const createResponse = await fetch(`${API_URL}/inventory/transfers/`, {
+      const createResponse = await apiFetch(`${API_URL}/inventory/transfers/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           warehouse_id: warehouseId,
@@ -119,7 +119,7 @@ export default function LocationTransferPage() {
       });
       const created = await createResponse.json() as Transfer & { detail?: string };
       if (!createResponse.ok) throw new Error(created.detail ?? "Không thể tạo phiếu điều chuyển.");
-      const confirmResponse = await fetch(`${API_URL}/inventory/transfers/${created.id}/confirm`, { method: "POST" });
+      const confirmResponse = await apiFetch(`${API_URL}/inventory/transfers/${created.id}/confirm`, { method: "POST" });
       const confirmed = await confirmResponse.json() as Transfer & { detail?: string };
       if (!confirmResponse.ok) throw new Error(confirmed.detail ?? "Không thể xác nhận phiếu điều chuyển.");
       setRows([]); setNote(""); setSuccess(`Đã xác nhận ${confirmed.code}. Lot đã được hệ thống tự phân bổ theo FEFO.`); await loadData();

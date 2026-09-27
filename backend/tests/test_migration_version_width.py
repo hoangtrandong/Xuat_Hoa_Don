@@ -45,11 +45,12 @@ def test_customer_removal_migration_widens_alembic_version_column():
         )
         assert version_column["type"].length == 128
 
-        long_revision = "20260927_drop_customer_route_visit"
         connection.execute(
             text("UPDATE alembic_version SET version_num = :revision"),
-            {"revision": long_revision},
+            {"revision": migration.revision},
         )
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == long_revision
+        assert connection.scalar(
+            text("SELECT version_num FROM alembic_version")
+        ) == migration.revision
 
     engine.dispose()

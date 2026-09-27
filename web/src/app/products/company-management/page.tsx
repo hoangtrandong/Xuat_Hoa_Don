@@ -3,9 +3,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Building2, Link2, Trash2, Download, Upload, UsersRound } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
+import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 
 type CompanyAssignment = { id: number; company_id: number; company_name: string; role: string; status: string; distributor_sku?: string | null; distributor_name?: string | null };
 type ProductCompanyRow = { product_group_id: number; group_name: string; representative_sku: string; representative_name: string; member_skus: string[]; member_names: string[]; companies: CompanyAssignment[] };
@@ -27,8 +28,8 @@ export default function ProductCompanyManagementPage() {
 
   async function load(): Promise<ProductCompanyRow[]> {
     const [productsResponse, companiesResponse] = await Promise.all([
-      fetch(`${API_URL}/product-groups/products/company-links`),
-      fetch(`${API_URL}/companies/?limit=5000`),
+      apiFetch(`${API_URL}/product-groups/products/company-links`),
+      apiFetch(`${API_URL}/companies/?limit=5000`),
     ]);
     if (!productsResponse.ok || !companiesResponse.ok) throw new Error("Không thể tải dữ liệu quản lý mã NPP nội bộ.");
     const loadedRows = await productsResponse.json() as Partial<ProductCompanyRow>[];
@@ -59,7 +60,7 @@ export default function ProductCompanyManagementPage() {
     if (!selected || !companyId) return;
     setError(""); setMessage("");
     try {
-      const response = await fetch(`${API_URL}/product-groups/${selected.product_group_id}/companies`, {
+      const response = await apiFetch(`${API_URL}/product-groups/${selected.product_group_id}/companies`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ company_id: Number(companyId), role, distributor_sku: distributorSku, distributor_name: distributorName }),
       });
       const result = await response.json() as { detail?: string };
@@ -73,7 +74,7 @@ export default function ProductCompanyManagementPage() {
 
   async function removeCompany(link: CompanyAssignment) {
     if (!selected || !window.confirm(`Gỡ ${link.company_name} khỏi SKU dùng chung ${selected.group_name}?`)) return;
-    const response = await fetch(`${API_URL}/product-groups/${selected.product_group_id}/companies/${link.company_id}`, { method: "DELETE" });
+    const response = await apiFetch(`${API_URL}/product-groups/${selected.product_group_id}/companies/${link.company_id}`, { method: "DELETE" });
     const result = await response.json().catch(() => ({})) as { detail?: string };
     if (!response.ok) { setError(result.detail ?? "Không thể gỡ công ty."); return; }
     await load();
@@ -85,7 +86,7 @@ export default function ProductCompanyManagementPage() {
     setBusy(true); setError(""); setMessage("");
     try {
       const body = new FormData(); body.append("file", file);
-      const response = await fetch(`${API_URL}/product-groups/products/companies/upload`, { method: "POST", body });
+      const response = await apiFetch(`${API_URL}/product-groups/products/companies/upload`, { method: "POST", body });
       const result = await response.json() as { added?: number; skipped?: number; detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể nhập file Excel.");
       await load();
@@ -100,7 +101,7 @@ export default function ProductCompanyManagementPage() {
     if (!window.confirm(`Gán ${targets.map((company) => company.name).join(" và ")} cho toàn bộ ${rows.length} SKU hiện tại?`)) return;
     setBusy(true); setError(""); setMessage("");
     try {
-      const response = await fetch(`${API_URL}/product-groups/companies/assign-all`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(targets.map((company) => company.id)) });
+      const response = await apiFetch(`${API_URL}/product-groups/companies/assign-all`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(targets.map((company) => company.id)) });
       const result = await response.json() as { added?: number; products?: number; detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể gán công ty cho toàn bộ SKU.");
       await load();
@@ -121,7 +122,7 @@ export default function ProductCompanyManagementPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Quản lý mã NPP nội bộ" subtitle="Quản lý mã NPP theo công ty cho các SKU dùng chung." actions={<div className="flex flex-wrap gap-2"><a href={`${API_URL}/product-groups/products/companies/template`} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700"><Download size={16} />Tải mẫu Excel</a><button onClick={() => fileInput.current?.click()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"><Upload size={16} />Upload Excel</button><input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadAssignments(file); event.target.value = ""; }} /><button onClick={assignAllToTwoCompanies} disabled={busy || rows.length === 0} className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"><UsersRound size={16} />Gán công ty</button></div>} />
+      <PageHeader title="Quản lý mã NPP nội bộ" subtitle="Quản lý mã NPP theo công ty cho các SKU dùng chung." actions={<div className="flex flex-wrap gap-2"><AuthenticatedDownloadLink href={`${API_URL}/product-groups/products/companies/template`} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700"><Download size={16} />Tải mẫu Excel</AuthenticatedDownloadLink><button onClick={() => fileInput.current?.click()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"><Upload size={16} />Upload Excel</button><input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadAssignments(file); event.target.value = ""; }} /><button onClick={assignAllToTwoCompanies} disabled={busy || rows.length === 0} className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"><UsersRound size={16} />Gán công ty</button></div>} />
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
       {message && <div className="rounded-lg bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">

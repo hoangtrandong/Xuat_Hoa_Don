@@ -9,7 +9,7 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { ledgerLabels, type LedgerEntry, type StockLevel } from "@/lib/mock-inventory";
 import { formatNumber, formatDateTime } from "@/lib/format";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
 
 interface ApiStockLevel {
@@ -88,9 +88,9 @@ function useInventoryData(version: number, warehouseId: number | "") {
     async function load() {
       try {
         const [stockResponse, transactionResponse, warehouseResponse] = await Promise.all([
-          fetch(`${API_URL}/inventory/stock-levels/${warehouseId ? `?warehouse_id=${warehouseId}` : ""}`),
-          fetch(`${API_URL}/inventory/transactions/?txn_type=OUT`),
-          fetch(`${API_URL}/inventory/warehouses/`),
+          apiFetch(`${API_URL}/inventory/stock-levels/${warehouseId ? `?warehouse_id=${warehouseId}` : ""}`),
+          apiFetch(`${API_URL}/inventory/transactions/?txn_type=OUT`),
+          apiFetch(`${API_URL}/inventory/warehouses/`),
         ]);
         if (!stockResponse.ok || !transactionResponse.ok || !warehouseResponse.ok) {
           throw new Error("Không thể tải dữ liệu kho từ API.");
@@ -188,7 +188,7 @@ export default function ExportPage() {
       return;
     }
     try {
-      const response = await fetch(`${API_URL}/inventory/adjust/`, {
+      const response = await apiFetch(`${API_URL}/inventory/adjust/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

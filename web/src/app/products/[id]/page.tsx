@@ -5,7 +5,7 @@ import Badge from "@/components/ui/Badge";
 import { priceListItems } from "@/lib/mock-products";
 import { stockLevels, ledgerEntries, ledgerLabels, type LedgerType } from "@/lib/mock-inventory";
 import { formatVNDFull, formatDateTime, formatNumber } from "@/lib/format";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 
 function typeBadge(type: LedgerType) {
   if (type === "IN") return { label: ledgerLabels[type], cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" };
@@ -35,9 +35,9 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
   const { id } = await params;
 
   const [catRes, unitRes, prodRes] = await Promise.all([
-    fetch(`${API_URL}/products/categories/`),
-    fetch(`${API_URL}/products/units/`),
-    fetch(`${API_URL}/products/${id}`, { cache: "no-store" }),
+    apiFetch(`${API_URL}/products/categories/`),
+    apiFetch(`${API_URL}/products/units/`),
+    apiFetch(`${API_URL}/products/${id}`, { cache: "no-store" }),
   ]);
 
   if (!prodRes.ok) notFound();

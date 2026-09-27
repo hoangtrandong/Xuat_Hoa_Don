@@ -11,7 +11,7 @@ import ProgressBar from "@/components/ui/ProgressBar";
 import { employees as defaultEmployees, type Employee } from "@/lib/mock-employees";
 import { formatVND, formatDate, getInitials } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 
 const avatarColors = ["bg-sky-500", "bg-purple-500", "bg-amber-500", "bg-emerald-500", "bg-rose-500", "bg-indigo-500"];
 
@@ -38,7 +38,7 @@ export default function EmployeesPage() {
   async function createEmployee() {
     setCreateError(""); setCreateMessage("");
     try {
-      const response = await fetch(`${API_URL}/employees/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+      const response = await apiFetch(`${API_URL}/employees/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
       const result = await response.json() as { detail?: string; id?: number; code?: string; name?: string; position?: string; phone?: string; email?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo nhân viên.");
       // Thêm nhân viên mới vào state local để hiển thị ngay lập tức

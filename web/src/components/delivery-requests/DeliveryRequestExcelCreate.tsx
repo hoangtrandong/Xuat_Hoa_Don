@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardList, Download, MapPin, Upload } from "lucide-react";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
+import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 
 type Warehouse = { id: number; name: string };
 type ProductOption = { id: number; sku: string; name: string };
@@ -69,8 +70,8 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
 
   async function load() {
     const [warehouseResponse, productResponse] = await Promise.all([
-      fetch(`${API_URL}/inventory/warehouses/`),
-      fetch(`${API_URL}/products/?limit=10000`),
+      apiFetch(`${API_URL}/inventory/warehouses/`),
+      apiFetch(`${API_URL}/products/?limit=10000`),
     ]);
     if (!warehouseResponse.ok || !productResponse.ok) throw new Error("Không thể tải dữ liệu kho và sản phẩm.");
     setWarehouses(await warehouseResponse.json());
@@ -92,7 +93,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       const body = new FormData();
       body.append("file", file);
       body.append("warehouse_id", warehouseId);
-      const response = await fetch(`${API_URL}/delivery-requests/upload?warehouse_id=${encodeURIComponent(warehouseId)}`, { method: "POST", body });
+      const response = await apiFetch(`${API_URL}/delivery-requests/upload?warehouse_id=${encodeURIComponent(warehouseId)}`, { method: "POST", body });
         const result = await response.json() as PreviewItem[] | { detail?: string };
       if (!response.ok) throw new Error("detail" in result ? result.detail ?? "Không thể upload yêu cầu giao hàng." : "Không thể upload yêu cầu giao hàng.");
         setPreview(result as PreviewItem[]);
@@ -134,14 +135,14 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         })),
       };
     });
-    const response = await fetch(`${API_URL}/delivery-requests/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: Number(warehouseId), items }) });
+    const response = await apiFetch(`${API_URL}/delivery-requests/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: Number(warehouseId), items }) });
     const result = await response.json() as { detail?: string; id?: number; code?: string; status?: string };
     if (!response.ok) { setError(result.detail ?? "Không thể tạo yêu cầu."); return; }
     // Tự động submit sau khi kế hoạch FEFO đã được lưu cùng yêu cầu.
     // để thủ kho thấy trong "Hàng đợi xuất kho".
     let submitNote = "";
     if (result.id) {
-      const submitResponse = await fetch(`${API_URL}/delivery-requests/${result.id}/submit`, { method: "POST" });
+      const submitResponse = await apiFetch(`${API_URL}/delivery-requests/${result.id}/submit`, { method: "POST" });
       const submitResult = await submitResponse.json().catch(() => ({})) as { detail?: string };
       if (!submitResponse.ok) {
         submitNote = ` Tuy nhiên gửi xác nhận thất bại: ${submitResult.detail ?? "lỗi không xác định"}.`;
@@ -158,7 +159,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
 
   async function checkStock() {
     setPlan(null);
-    const response = await fetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${encodeURIComponent(warehouseId)}`);
+    const response = await apiFetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${encodeURIComponent(warehouseId)}`);
     if (!response.ok) throw new Error("Không thể kiểm tra tồn kho.");
     const stocks = await response.json() as Array<{ product_id: number; available: number; reserved?: number }>;
     const availableByProduct = new Map(stocks.map((stock) => [stock.product_id, stock.available]));
@@ -188,7 +189,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         }
         return { product_id: productId, quantity: item.quantity };
       });
-      const response = await fetch(`${API_URL}/delivery-requests/plan`, {
+      const response = await apiFetch(`${API_URL}/delivery-requests/plan`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ warehouse_id: Number(warehouseId), items }),
@@ -208,7 +209,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
 
   async function replacePreviewSku(index: number, sku: string) {
     setPlan(null);
-    const stockResponse = await fetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${encodeURIComponent(warehouseId)}`);
+    const stockResponse = await apiFetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${encodeURIComponent(warehouseId)}`);
     const stocks = await stockResponse.json() as Array<{ product_id: number; available: number }>;
     const availableByProduct = new Map(stocks.map((stock) => [stock.product_id, stock.available]));
     const product = productOptionsBySku.get(sku.trim().toUpperCase());
@@ -248,7 +249,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
               <option value="">Chọn kho xuất</option>
               {warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
             </select>
-            <a href={`${API_URL}/delivery-requests/template`} className="flex items-center gap-2 border border-gray-200 bg-white px-3 py-2 rounded-lg text-sm"><Download size={16} />Tải mẫu</a>
+            <AuthenticatedDownloadLink href={`${API_URL}/delivery-requests/template`} className="flex items-center gap-2 border border-gray-200 bg-white px-3 py-2 rounded-lg text-sm"><Download size={16} />Tải mẫu</AuthenticatedDownloadLink>
             <button disabled={!warehouseId || uploading} onClick={() => fileInput.current?.click()} className="flex items-center gap-2 bg-sky-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50"><Upload size={16} />Upload Excel</button>
             <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) upload(file); event.target.value = ""; }} />
           </div>
@@ -265,7 +266,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
             <option value="">Chọn kho xuất</option>
             {warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
           </select>
-          <a href={`${API_URL}/delivery-requests/template`} className="flex items-center gap-2 border border-gray-200 bg-white px-3 py-2 rounded-lg text-sm"><Download size={16} />Tải mẫu</a>
+          <AuthenticatedDownloadLink href={`${API_URL}/delivery-requests/template`} className="flex items-center gap-2 border border-gray-200 bg-white px-3 py-2 rounded-lg text-sm"><Download size={16} />Tải mẫu</AuthenticatedDownloadLink>
           <button disabled={!warehouseId || uploading} onClick={() => fileInput.current?.click()} className="flex items-center gap-2 bg-sky-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50"><Upload size={16} />Upload Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) upload(file); event.target.value = ""; }} />
         </div>

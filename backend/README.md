@@ -70,6 +70,17 @@ tác GET cần `read`; các method còn lại cần `write`. Script bootstrap c�
 đủ quyền cho role `admin`, không tạo credential mặc định. Các role khác có thể
 được gán permission qua quản trị cơ sở dữ liệu theo chính sách triển khai.
 
+### Render Free: tạo admin khi deploy
+
+Render Free không có Shell, nên `render.yaml` chạy
+`scripts.bootstrap_admin_from_env` sau migration. Trên Render Dashboard, thêm
+`SECRET_KEY` (ít nhất 32 ký tự) cùng bốn biến secret:
+`INITIAL_ADMIN_USERNAME`, `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_FULL_NAME` và
+`INITIAL_ADMIN_PASSWORD` (tối thiểu 12 ký tự). Deploy một lần; script chỉ tạo
+admin nếu username chưa tồn tại và không in mật khẩu ra log. Sau khi deploy
+thành công, xóa cả bốn biến `INITIAL_ADMIN_*` rồi deploy lại. Các deploy sau đó
+sẽ bỏ qua bootstrap, nên mật khẩu khởi tạo không còn được giữ trong môi trường.
+
 ## API Endpoints
 
 | Method | Endpoint | Mô tả |

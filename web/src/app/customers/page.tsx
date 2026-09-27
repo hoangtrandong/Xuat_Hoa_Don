@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Users, CheckCircle2, Wallet, AlertTriangle, Plus, Download, Upload } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
+import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
@@ -12,7 +13,7 @@ import CustomerDetail from "@/components/customers/CustomerDetail";
 import type { Customer } from "@/lib/mock-customers";
 import { formatVND } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
 const customerTypes = ["Đại lý", "Cửa hàng", "Nhà phân phối", "HORECA"];
 
@@ -38,7 +39,7 @@ export default function CustomersPage() {
   const [storeOptions, setStoreOptions] = useState<Array<{ id: string; code: string; name: string }>>([]);
   const [companyOptions, setCompanyOptions] = useState<Array<{ id: string; code: string; name: string }>>([]);
   useEffect(() => {
-    fetch(`${API_URL}/customers/?limit=5000`)
+    apiFetch(`${API_URL}/customers/?limit=5000`)
       .then(async (response) => {
         if (!response.ok) throw new Error("Không thể tải danh sách khách hàng.");
         return response.json() as Promise<Array<Record<string, unknown>>>;
@@ -59,12 +60,12 @@ export default function CustomersPage() {
         companyName: String(row.company_name ?? ""),
       }))))
       .catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể tải khách hàng."));
-    fetch(`${API_URL}/stores/?limit=5000`)
+    apiFetch(`${API_URL}/stores/?limit=5000`)
       .then((r) => (r.ok ? r.json() : []))
       .then((rows: Array<Record<string, unknown>>) => setStoreOptions(rows.map((row) => ({
         id: String(row.id), code: String(row.code ?? ""), name: String(row.name ?? ""),
       }))));
-    fetch(`${API_URL}/companies/?limit=5000`)
+    apiFetch(`${API_URL}/companies/?limit=5000`)
       .then((r) => (r.ok ? r.json() : []))
       .then((rows: Array<Record<string, unknown>>) => setCompanyOptions(rows.map((row) => ({
         id: String(row.id), code: String(row.code ?? ""), name: String(row.name ?? ""),
@@ -73,7 +74,7 @@ export default function CustomersPage() {
   async function uploadCustomers(file: File) {
     const body = new FormData();
     body.append("file", file);
-    const response = await fetch(`${API_URL}/customers/upload`, { method: "POST", body });
+    const response = await apiFetch(`${API_URL}/customers/upload`, { method: "POST", body });
     const result = await response.json() as { imported?: number; detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể tải danh sách khách hàng.");
     setCreateMessage(`Đã nhập ${result.imported ?? 0} khách hàng vào PostgreSQL.`);
@@ -82,7 +83,7 @@ export default function CustomersPage() {
   async function createCustomer() {
     setCreateError(""); setCreateMessage("");
     try {
-      const response = await fetch(`${API_URL}/customers/${editingId ? editingId : ""}`, { method: editingId ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, store_id: form.store_id ? Number(form.store_id) : null, company_id: form.company_id ? Number(form.company_id) : null }) });
+      const response = await apiFetch(`${API_URL}/customers/${editingId ? editingId : ""}`, { method: editingId ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, store_id: form.store_id ? Number(form.store_id) : null, company_id: form.company_id ? Number(form.company_id) : null }) });
       const result = await response.json() as {
         detail?: string;
         id: number;
@@ -145,7 +146,7 @@ export default function CustomersPage() {
   }
   async function deleteCustomer(customer: Customer) {
     if (!window.confirm(`Xóa khách hàng ${customer.name}?`)) return;
-    const response = await fetch(`${API_URL}/customers/${customer.id}`, { method: "DELETE" });
+    const response = await apiFetch(`${API_URL}/customers/${customer.id}`, { method: "DELETE" });
     const result = await response.json().catch(() => ({})) as { detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể xóa khách hàng.");
     setCustomerRows((current) => current.filter((item) => item.id !== customer.id));
@@ -256,7 +257,7 @@ export default function CustomersPage() {
         subtitle="Quản lý khách hàng, cửa hàng, đại lý trên toàn hệ thống"
         actions={
           <div className="flex gap-2">
-          <a href={`${API_URL}/customers/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
+          <AuthenticatedDownloadLink href={`${API_URL}/customers/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</AuthenticatedDownloadLink>
           <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
           <button onClick={exportCustomers} disabled={filtered.length === 0} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50"><Download size={16} />Tải Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadCustomers(file).catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể tải file Excel.")); event.target.value = ""; }} />

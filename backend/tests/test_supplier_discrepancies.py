@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.core.database import Base, get_db
+from app.core.auth import hash_password
+from app.core.config import settings
 from app.api.v1.endpoints.inventory import confirm_inventory_import, upload_inventory_import
 from app.crud import supplier_discrepancy as discrepancy_crud
 from app.models.inventory import (
@@ -22,6 +24,7 @@ from app.models.inventory import (
 )
 from app.models.product import Product, ProductCategory, ProductUnit
 from app.models.inventory import Warehouse, WarehouseLocation
+from app.models.user import Permission, Role, User
 from starlette.datastructures import UploadFile
 from app.schemas.inventory import (
     InventoryImportAllocation,
@@ -170,13 +173,32 @@ def test_import_preview_reads_and_validates_actual_qty_column(db):
     assert error.value.status_code == 400
 
 
-def test_offset_suggestions_confirmation_and_history_release_locked_excess(db):
+def test_offset_suggestions_confirmation_and_history_release_locked_excess(
+    db, monkeypatch
+):
     session, warehouse, product, location = db
     confirm_import(session, warehouse, product, location, 10, 7)
     confirm_import(session, warehouse, product, location, 5, 8)
     shortage, excess = session.scalars(
         select(SupplierGoodsDiscrepancy).order_by(SupplierGoodsDiscrepancy.id)
     ).all()
+    monkeypatch.setattr(settings, "SECRET_KEY", "test-discrepancy-auth-key-long-enough")
+    inventory_role = Role(
+        name="inventory-test",
+        permissions=[
+            Permission(code="inventory:read", description="Read inventory"),
+            Permission(code="inventory:write", description="Write inventory"),
+        ],
+    )
+    session.add(User(
+        username="inventory-tester",
+        email="inventory-tester@example.test",
+        full_name="Inventory Tester",
+        hashed_password=hash_password("a-strong-password"),
+        is_active=True,
+        roles=[inventory_role],
+    ))
+    session.commit()
 
     def override_db():
         yield session
@@ -184,8 +206,17 @@ def test_offset_suggestions_confirmation_and_history_release_locked_excess(db):
     app.dependency_overrides[get_db] = override_db
     try:
         with TestClient(app) as client:
+            login_response = client.post(
+                "/api/v1/auth/login",
+                json={"username": "inventory-tester", "password": "a-strong-password"},
+            )
+            assert login_response.status_code == 200
+            headers = {
+                "Authorization": f"Bearer {login_response.json()['access_token']}"
+            }
             suggestions_response = client.get(
-                f"/api/v1/inventory/supplier-discrepancies/{shortage.id}/offset-suggestions"
+                f"/api/v1/inventory/supplier-discrepancies/{shortage.id}/offset-suggestions",
+                headers=headers,
             )
             assert suggestions_response.status_code == 200
             suggestions = suggestions_response.json()
@@ -201,13 +232,15 @@ def test_offset_suggestions_confirmation_and_history_release_locked_excess(db):
                     "quantity": 3,
                     "created_by": "tester",
                 },
+                headers=headers,
             )
             assert offset_response.status_code == 201
             offset = offset_response.json()
             assert offset["quantity"] == 3
 
             history_response = client.get(
-                f"/api/v1/inventory/supplier-discrepancies/{excess.id}/history"
+                f"/api/v1/inventory/supplier-discrepancies/{excess.id}/history",
+                headers=headers,
             )
             assert history_response.status_code == 200
             history = history_response.json()
@@ -217,6 +250,7 @@ def test_offset_suggestions_confirmation_and_history_release_locked_excess(db):
             list_response = client.get(
                 "/api/v1/inventory/supplier-discrepancies/",
                 params={"status": "RESOLVED"},
+                headers=headers,
             )
             assert list_response.status_code == 200
             assert {row["id"] for row in list_response.json()} == {shortage.id, excess.id}

@@ -9,7 +9,7 @@ import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 
 type DeliveryRequest = {
   id: number;
@@ -89,7 +89,7 @@ export default function DeliveryQueuePage() {
 
   async function load() {
     try {
-      const response = await fetch(`${API_URL}/delivery-requests/`);
+      const response = await apiFetch(`${API_URL}/delivery-requests/`);
       if (!response.ok) throw new Error("Không thể tải hàng đợi yêu cầu.");
       const data: DeliveryRequest[] = await response.json();
       const sorted = data.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
@@ -106,7 +106,7 @@ export default function DeliveryQueuePage() {
   async function transition(id: number, action: "receive" | "complete" | "cancel") {
     setError(""); setMessage(""); setLoading(true);
     try {
-      const response = await fetch(`${API_URL}/delivery-requests/${id}/${action}`, { method: "POST" });
+      const response = await apiFetch(`${API_URL}/delivery-requests/${id}/${action}`, { method: "POST" });
       const result = await response.json().catch(() => ({})) as { detail?: string };
       if (!response.ok) {
         const actionStr = action === "receive" ? "nhận" : action === "complete" ? "hoàn thành" : "hủy";
@@ -133,8 +133,8 @@ export default function DeliveryQueuePage() {
       setDetailLoading(true);
       try {
         const [detailResponse, locationsResponse] = await Promise.all([
-          fetch(`${API_URL}/delivery-requests/${request.id}`),
-          fetch(`${API_URL}/inventory/locations/?warehouse_id=${request.warehouse_id}`),
+          apiFetch(`${API_URL}/delivery-requests/${request.id}`),
+          apiFetch(`${API_URL}/inventory/locations/?warehouse_id=${request.warehouse_id}`),
         ]);
         if (!detailResponse.ok || !locationsResponse.ok) throw new Error("Không thể tải chi tiết yêu cầu.");
         const locations = await locationsResponse.json() as Array<{ id: number; code: string }>;

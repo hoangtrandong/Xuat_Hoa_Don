@@ -5,14 +5,16 @@ import asyncio
 
 from alembic import command
 from alembic.config import Config
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 from app.core.config import settings
+from app.core.auth import require_endpoint_permission
 from app.api.v1.router import api_router
+from app.api.v1.endpoints.auth import router as auth_router
 
 logger = logging.getLogger(__name__)
 
@@ -67,5 +69,9 @@ app.add_middleware(
 def health():
     return {"status": "ok", "service": settings.PROJECT_NAME}
 
-app.include_router(api_router, prefix=settings.API_V1_PREFIX)
-
+app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
+app.include_router(
+    api_router,
+    prefix=settings.API_V1_PREFIX,
+    dependencies=[Depends(require_endpoint_permission)],
+)

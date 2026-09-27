@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, RefreshCw, CheckCircle2 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import Badge from "@/components/ui/Badge";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import { formatDateTime, formatNumber } from "@/lib/format";
 
 interface Discrepancy {
@@ -49,9 +49,9 @@ export default function SupplierDiscrepanciesPage() {
     if (productId) query.set("product_id", productId);
     try {
       const [discrepancyResponse, productResponse, warehouseResponse] = await Promise.all([
-        fetch(`${API_URL}/inventory/supplier-discrepancies/?${query}`),
-        fetch(`${API_URL}/products/`),
-        fetch(`${API_URL}/inventory/warehouses/`),
+        apiFetch(`${API_URL}/inventory/supplier-discrepancies/?${query}`),
+        apiFetch(`${API_URL}/products/`),
+        apiFetch(`${API_URL}/inventory/warehouses/`),
       ]);
       if (!discrepancyResponse.ok || !productResponse.ok || !warehouseResponse.ok) throw new Error("Không thể tải sổ nợ NCC.");
       setRows(await discrepancyResponse.json() as Discrepancy[]);
@@ -70,7 +70,7 @@ export default function SupplierDiscrepanciesPage() {
   async function openSuggestions(row: Discrepancy) {
     setSelected(row); setSuggestions([]); setError("");
     if (row.status === "RESOLVED") return;
-    const response = await fetch(`${API_URL}/inventory/supplier-discrepancies/${row.id}/offset-suggestions`);
+    const response = await apiFetch(`${API_URL}/inventory/supplier-discrepancies/${row.id}/offset-suggestions`);
     if (!response.ok) { setError("Không thể tải gợi ý bù trừ."); return; }
     setSuggestions(await response.json() as Suggestion[]);
   }
@@ -81,7 +81,7 @@ export default function SupplierDiscrepanciesPage() {
     try {
       const shortageId = selected.type === "SHORTAGE" ? selected.id : candidate.id;
       const excessId = selected.type === "EXCESS" ? selected.id : candidate.id;
-      const response = await fetch(`${API_URL}/inventory/supplier-discrepancies/offsets/confirm`, {
+      const response = await apiFetch(`${API_URL}/inventory/supplier-discrepancies/offsets/confirm`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ shortage_id: shortageId, excess_id: excessId, quantity: candidate.suggested_quantity, created_by: "admin" }),
       });

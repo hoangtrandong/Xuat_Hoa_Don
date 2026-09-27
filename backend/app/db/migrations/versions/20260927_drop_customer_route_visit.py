@@ -15,7 +15,29 @@ branch_labels = None
 depends_on = None
 
 
+def _widen_alembic_version_column() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("alembic_version") as batch_op:
+            batch_op.alter_column(
+                "version_num",
+                existing_type=sa.String(length=32),
+                type_=sa.String(length=128),
+                existing_nullable=False,
+            )
+    else:
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=128),
+            existing_nullable=False,
+        )
+
+
 def upgrade() -> None:
+    _widen_alembic_version_column()
+
     # Postgres tự xóa FK constraint nằm trên chính cột bị drop.
     op.drop_column("customers", "route_id")
     op.drop_column("customers", "assigned_employee_id")

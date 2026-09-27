@@ -6,11 +6,12 @@ import {
   Phone, MapPin, Hash, CreditCard,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
+import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import { getInitials } from "@/lib/format";
 
 interface CompanyRow {
@@ -39,7 +40,7 @@ export default function CompaniesPage() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   function load() {
-    fetch(`${API_URL}/companies/?limit=5000`)
+    apiFetch(`${API_URL}/companies/?limit=5000`)
       .then((r) => (r.ok ? r.json() : []))
       .then((list: Array<Record<string, unknown>>) => {
         const base: Array<Omit<CompanyRow, "shared">> = list.map((row) => ({
@@ -62,7 +63,7 @@ export default function CompaniesPage() {
   async function uploadCompanies(file: File) {
     const body = new FormData();
     body.append("file", file);
-    const response = await fetch(`${API_URL}/companies/upload`, { method: "POST", body });
+    const response = await apiFetch(`${API_URL}/companies/upload`, { method: "POST", body });
     const result = await response.json() as { imported?: number; detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể nhập file công ty.");
     setMessage(`Đã nhập ${result.imported ?? 0} công ty.`);
@@ -72,7 +73,7 @@ export default function CompaniesPage() {
   async function saveCompany() {
     setError(""); setMessage("");
     try {
-      const response = await fetch(`${API_URL}/companies/${editingId ? editingId : ""}`, {
+      const response = await apiFetch(`${API_URL}/companies/${editingId ? editingId : ""}`, {
         method: editingId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...form, status: form.status || "active" }),
@@ -89,7 +90,7 @@ export default function CompaniesPage() {
 
   async function deleteCompany(company: CompanyRow) {
     if (!window.confirm(`Xóa công ty ${company.name}? Các mã khách hàng sẽ không bị xóa.`)) return;
-    const response = await fetch(`${API_URL}/companies/${company.id}`, { method: "DELETE" });
+    const response = await apiFetch(`${API_URL}/companies/${company.id}`, { method: "DELETE" });
     const result = await response.json().catch(() => ({})) as { detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể xóa công ty.");
     setRows((current) => current.filter((item) => item.id !== company.id));
@@ -148,7 +149,7 @@ const columns: Column<CompanyRow>[] = [
         subtitle="Công ty xuất hóa đơn, công ty con của đơn vị phân phối — nhiều công ty có thể dùng chung một mã số thuế"
         actions={
           <div className="flex gap-2">
-            <a href={`${API_URL}/companies/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
+            <AuthenticatedDownloadLink href={`${API_URL}/companies/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</AuthenticatedDownloadLink>
             <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
             <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadCompanies(file).catch((e: unknown) => setError(e instanceof Error ? e.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
             <button

@@ -8,7 +8,7 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { formatVND, formatDateTime } from "@/lib/format";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 
 interface DebtCustomer {
   customer_id: number;
@@ -66,7 +66,7 @@ export default function DebtPage() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/debt/summary`);
+      const response = await apiFetch(`${API_URL}/debt/summary`);
       if (!response.ok) throw new Error("Không thể tải dữ liệu công nợ.");
       const data = await response.json() as DebtSummary;
       setSummary(data);
@@ -93,7 +93,7 @@ export default function DebtPage() {
     setSubmitting(true);
     setError("");
     try {
-      const response = await fetch(`${API_URL}/payments/`, {
+      const response = await apiFetch(`${API_URL}/payments/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

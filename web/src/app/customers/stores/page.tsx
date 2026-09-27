@@ -6,11 +6,12 @@ import {
   Phone, MapPin, User,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
+import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import { getInitials } from "@/lib/format";
 
 interface StoreRow {
@@ -43,7 +44,7 @@ export default function StoresPage() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    fetch(`${API_URL}/stores/?limit=5000`)
+    apiFetch(`${API_URL}/stores/?limit=5000`)
       .then((r) => (r.ok ? r.json() : []))
       .then((list: Array<Record<string, unknown>>) => setRows(list.map((row) => ({
         id: String(row.id), code: String(row.code ?? ""), name: String(row.name ?? ""),
@@ -54,14 +55,14 @@ export default function StoresPage() {
         created_at: String(row.created_at ?? ""),
       }))))
       .catch(() => setError("Không thể tải danh sách cửa hàng."));
-    fetch(`${API_URL}/companies/?limit=5000`)
+    apiFetch(`${API_URL}/companies/?limit=5000`)
       .then((r) => (r.ok ? r.json() : []))
       .then((list: Array<Record<string, unknown>>) => setCompanyCount(list.length));
   }, []);
 
   async function openDetail(store: StoreRow) {
     try {
-      const response = await fetch(`${API_URL}/stores/${store.id}`);
+      const response = await apiFetch(`${API_URL}/stores/${store.id}`);
       if (!response.ok) throw new Error("Không thể tải chi tiết cửa hàng.");
       setDetail(await response.json() as StoreRow);
     } catch (e) {
@@ -72,7 +73,7 @@ export default function StoresPage() {
   async function uploadStores(file: File) {
     const body = new FormData();
     body.append("file", file);
-    const response = await fetch(`${API_URL}/stores/upload`, { method: "POST", body });
+    const response = await apiFetch(`${API_URL}/stores/upload`, { method: "POST", body });
     const result = await response.json() as { imported?: number; detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể nhập file cửa hàng.");
     setMessage(`Đã nhập ${result.imported ?? 0} cửa hàng.`);
@@ -82,7 +83,7 @@ export default function StoresPage() {
   async function saveStore() {
     setError(""); setMessage("");
     try {
-      const response = await fetch(`${API_URL}/stores/${editingId ? editingId : ""}`, {
+      const response = await apiFetch(`${API_URL}/stores/${editingId ? editingId : ""}`, {
         method: editingId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...form, status: form.status || "active" }),
@@ -91,7 +92,7 @@ export default function StoresPage() {
       if (!response.ok) throw new Error(result.detail ?? "Không thể lưu cửa hàng.");
       setMessage(editingId ? "Đã cập nhật cửa hàng." : `Đã tạo cửa hàng ${result.code}.`);
       setCreateOpen(false); setEditingId(null); setDetail(null);
-      const updated = await fetch(`${API_URL}/stores/?limit=5000`);
+      const updated = await apiFetch(`${API_URL}/stores/?limit=5000`);
       if (updated.ok) {
         setRows((await updated.json() as Array<Record<string, unknown>>).map((row) => ({
           id: String(row.id), code: String(row.code ?? ""), name: String(row.name ?? ""),
@@ -109,7 +110,7 @@ export default function StoresPage() {
 
   async function deleteStore(store: StoreRow) {
     if (!window.confirm(`Xóa cửa hàng ${store.name}?`)) return;
-    const response = await fetch(`${API_URL}/stores/${store.id}`, { method: "DELETE" });
+    const response = await apiFetch(`${API_URL}/stores/${store.id}`, { method: "DELETE" });
     const result = await response.json().catch(() => ({})) as { detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể xóa cửa hàng.");
     setRows((current) => current.filter((item) => item.id !== store.id));
@@ -158,7 +159,7 @@ return (
         subtitle="Thông tin điểm bán / cửa hàng"
         actions={
           <div className="flex gap-2">
-            <a href={`${API_URL}/stores/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
+            <AuthenticatedDownloadLink href={`${API_URL}/stores/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</AuthenticatedDownloadLink>
             <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
             <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadStores(file).catch((e: unknown) => setError(e instanceof Error ? e.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
             <button

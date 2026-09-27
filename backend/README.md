@@ -42,12 +42,33 @@ createdb dms
 # 5. Chạy migration
 alembic upgrade head
 
-# 6. Seed dữ liệu mẫu
+# 6. Cấu hình SECRET_KEY duy nhất trước khi chạy API
+# Tạo giá trị bằng: python -c "import secrets; print(secrets.token_urlsafe(48))"
+# Đặt giá trị trong .env (không dùng giá trị mẫu/để trống).
+
+# 7. Khởi tạo tài khoản quản trị đầu tiên bằng prompt tương tác
+python -m scripts.bootstrap_admin
+
+# 8. Seed dữ liệu mẫu (không tạo tài khoản hoặc mật khẩu quản trị)
 python -m scripts.seed
 
-# 7. Khởi động server
+# 9. Khởi động server
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+## Authentication và quyền truy cập
+
+Các API dưới `/api/v1` (ngoại trừ `/auth/login`) yêu cầu bearer access token.
+Đăng nhập tại `POST /api/v1/auth/login` với `username` và `password`; token
+được ký HS256 và hết hạn theo `ACCESS_TOKEN_EXPIRE_MINUTES`. Mật khẩu lưu dưới
+dạng PBKDF2-SHA256 hash. Không đặt secret mặc định trong production; nếu
+`SECRET_KEY` chưa được cấu hình đủ mạnh, các thao tác auth bị từ chối.
+
+RBAC dùng permission code `<resource>:read` và `<resource>:write`, với quyền
+được gán cho Role trong bảng hiện có `permissions`/`role_permissions`. Các thao
+tác GET cần `read`; các method còn lại cần `write`. Script bootstrap cấp đầy
+đủ quyền cho role `admin`, không tạo credential mặc định. Các role khác có thể
+được gán permission qua quản trị cơ sở dữ liệu theo chính sách triển khai.
 
 ## API Endpoints
 

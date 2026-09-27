@@ -4,13 +4,14 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Package, CheckCircle, FolderOpen, Truck, Plus, Download, Upload, Pencil, Trash2 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
+import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { formatVND } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
 
 type CategoryOption = { id: number; name: string };
@@ -53,7 +54,7 @@ export default function ProductsPage() {
   async function uploadProducts(file: File) {
     const body = new FormData();
     body.append("file", file);
-    const response = await fetch(`${API_URL}/products/upload`, { method: "POST", body });
+    const response = await apiFetch(`${API_URL}/products/upload`, { method: "POST", body });
     const result = await response.json() as { imported?: number; updated?: number; representative_updated?: number; detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể tải danh sách SKU.");
     setMessage(`Đã thêm ${result.imported ?? 0} SKU, cập nhật ${result.updated ?? 0} SKU và xử lý ${result.representative_updated ?? 0} liên kết đại diện.`);
@@ -61,9 +62,9 @@ export default function ProductsPage() {
   }
   useEffect(() => {
     Promise.all([
-      fetch(`${API_URL}/products/categories/`),
-      fetch(`${API_URL}/products/units/`),
-      fetch(`${API_URL}/products/?limit=10000`),
+      apiFetch(`${API_URL}/products/categories/`),
+      apiFetch(`${API_URL}/products/units/`),
+      apiFetch(`${API_URL}/products/?limit=10000`),
     ]).then(async ([categoryResponse, unitResponse, productResponse]) => {
       if (!categoryResponse.ok || !unitResponse.ok || !productResponse.ok) throw new Error("Không thể tải danh mục, đơn vị và SKU.");
       const loadedCategories = await categoryResponse.json() as CategoryOption[];
@@ -92,7 +93,7 @@ export default function ProductsPage() {
   async function createProduct() {
     setMessage(""); setError("");
     try {
-      const response = await fetch(`${API_URL}/products/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, category_id: Number(form.category_id), unit_id: Number(form.unit_id), base_price: Number(form.base_price), cost_price: Number(form.cost_price), boxes_per_carton: Number(form.boxes_per_carton) }) });
+      const response = await apiFetch(`${API_URL}/products/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, category_id: Number(form.category_id), unit_id: Number(form.unit_id), base_price: Number(form.base_price), cost_price: Number(form.cost_price), boxes_per_carton: Number(form.boxes_per_carton) }) });
       const result = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo SKU.");
       setMessage("Đã tạo SKU thành công trong PostgreSQL."); setCreateOpen(false);
@@ -103,7 +104,7 @@ export default function ProductsPage() {
     setMessage(""); setError("");
     if (!editingProduct) return;
     try {
-      const response = await fetch(`${API_URL}/products/${editingProduct.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...editForm, category_id: Number(editForm.category_id), unit_id: Number(editForm.unit_id), base_price: Number(editForm.base_price), cost_price: Number(editForm.cost_price), boxes_per_carton: Number(editForm.boxes_per_carton) }) });
+      const response = await apiFetch(`${API_URL}/products/${editingProduct.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...editForm, category_id: Number(editForm.category_id), unit_id: Number(editForm.unit_id), base_price: Number(editForm.base_price), cost_price: Number(editForm.cost_price), boxes_per_carton: Number(editForm.boxes_per_carton) }) });
       const result = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể cập nhật SKU.");
       setMessage("Đã cập nhật SKU thành công."); setEditOpen(false); setEditingProduct(null);
@@ -114,7 +115,7 @@ export default function ProductsPage() {
   async function deleteProduct(productId: number) {
     setMessage(""); setError("");
     try {
-      const response = await fetch(`${API_URL}/products/${productId}`, { method: "DELETE" });
+      const response = await apiFetch(`${API_URL}/products/${productId}`, { method: "DELETE" });
       const result = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể xóa SKU.");
       setMessage("Đã xóa SKU thành công."); setDeleteConfirm(null);
@@ -126,7 +127,7 @@ export default function ProductsPage() {
     setMessage(""); setError("");
     if (selectedIds.size === 0) return;
     try {
-      const response = await fetch(`${API_URL}/products/bulk-delete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Array.from(selectedIds)) });
+      const response = await apiFetch(`${API_URL}/products/bulk-delete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Array.from(selectedIds)) });
       const result = await response.json() as { deleted?: number; detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể xóa SKU.");
       setMessage(`Đã xóa SKU thành công.`); setBulkDeleteConfirm(false); setSelectedIds(new Set());
@@ -261,7 +262,7 @@ export default function ProductsPage() {
         title="Danh sách Hàng hóa"
         actions={
           <div className="flex gap-2">
-          <a href={`${API_URL}/products/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
+          <AuthenticatedDownloadLink href={`${API_URL}/products/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</AuthenticatedDownloadLink>
           <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
           <button onClick={exportProducts} disabled={filteredProducts.length === 0} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50"><Download size={16} />Tải Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadProducts(file).catch((uploadError: unknown) => setError(uploadError instanceof Error ? uploadError.message : "Không thể tải file Excel.")); event.target.value = ""; }} />

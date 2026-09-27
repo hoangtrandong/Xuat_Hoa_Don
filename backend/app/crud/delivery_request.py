@@ -218,7 +218,9 @@ def _allocate(db: Session, request: DeliveryRequest, item: DeliveryRequestItem) 
         ))
 
 
-def create(db: Session, payload: DeliveryRequestCreate) -> DeliveryRequest:
+def create(
+    db: Session, payload: DeliveryRequestCreate, created_by: str | None = None
+) -> DeliveryRequest:
     if not db.get(Warehouse, payload.warehouse_id):
         raise ValueError("Không tìm thấy kho.")
     merged = {}
@@ -243,8 +245,12 @@ def create(db: Session, payload: DeliveryRequestCreate) -> DeliveryRequest:
                     target[employee] = target.get(employee, 0) + int(allocation)
         if row.planned_allocations:
             planned_allocations.setdefault(row.product_id, []).extend(row.planned_allocations)
-    request = DeliveryRequest(code=_code(), warehouse_id=payload.warehouse_id,
-                              note=payload.note, created_by=payload.created_by)
+    request = DeliveryRequest(
+        code=_code(),
+        warehouse_id=payload.warehouse_id,
+        note=payload.note,
+        created_by=created_by if created_by is not None else payload.created_by,
+    )
     try:
         db.add(request)
         db.flush()

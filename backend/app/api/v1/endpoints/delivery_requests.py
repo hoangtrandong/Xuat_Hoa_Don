@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 from zipfile import BadZipFile
 
 from app.core.database import get_db
+from app.core.auth import get_current_user
 from app.crud import delivery_request as crud
+from app.models.user import User
 from app.schemas.delivery_request import DeliveryRequest, DeliveryRequestList, DeliveryRequestCreate, DeliveryPreviewItem, FefoPlanItem
 
 router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
@@ -82,9 +84,16 @@ def list_requests(status: str | None = None, db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=DeliveryRequest, status_code=201)
-def create_request(payload: DeliveryRequestCreate, db: Session = Depends(get_db)):
+def create_request(
+    payload: DeliveryRequestCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
-        return crud.create(db, payload)
+        return crud.create(
+            db, payload,
+            created_by=getattr(current_user, "username", None) or payload.created_by,
+        )
     except ValueError as exc:
         return _error(db, exc)
 
@@ -99,7 +108,7 @@ def plan_request(payload: DeliveryRequestCreate, db: Session = Depends(get_db)):
 
 @router.post("/upload", response_model=List[DeliveryPreviewItem])
 def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | None = None,
-                   created_by: str | None = None, db: Session = Depends(get_db)):
+                   db: Session = Depends(get_db)):
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
     try:

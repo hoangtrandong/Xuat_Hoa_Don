@@ -7,7 +7,7 @@ import Drawer from "@/components/ui/Drawer";
 import StatCard from "@/components/ui/StatCard";
 import DeliveryRequestExcelCreate from "@/components/delivery-requests/DeliveryRequestExcelCreate";
 import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload } from "lucide-react";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 
 type Item = { id: number; product_id: number; sku: string; product_name: string; quantity: number; requested_quantity_raw: string | null; };
 type StockPick = { lot_id: number | null; location_code: string | null; location_id: number | null; lot_number: string | null; expiry_date: string | null; quantity: number; allocation_strategy: string; };
@@ -53,7 +53,7 @@ export default function AdminDeliveryRequestsPage() {
 
   async function load() {
     try {
-      const r = await fetch(`${API_URL}/delivery-requests/`);
+      const r = await apiFetch(`${API_URL}/delivery-requests/`);
       if (!r.ok) throw new Error("Không thể tải danh sách yêu cầu.");
       const data: DeliveryRequest[] = await r.json();
       setRows(data.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
@@ -74,12 +74,12 @@ export default function AdminDeliveryRequestsPage() {
     setLoading(true); setError(""); setMessage("");
     try {
       const items = editItems.map((item) => ({ product_id: item.product_id, quantity: parseInt(item.quantity) || 0, requested_quantity_raw: item.quantity }));
-      const res = await fetch(`${API_URL}/delivery-requests/${selected.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: selected.warehouse_id, note: editNote, items }) });
+      const res = await apiFetch(`${API_URL}/delivery-requests/${selected.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: selected.warehouse_id, note: editNote, items }) });
       const result = await res.json().catch(() => ({})) as { detail?: string };
       if (!res.ok) throw new Error(result.detail ?? "Không thể cập nhật yêu cầu.");
       setMessage("Đã cập nhật yêu cầu thành công."); setEditing(false); setStockPlan(null);
       await load();
-      const updated = await fetch(`${API_URL}/delivery-requests/${selected.id}`);
+      const updated = await apiFetch(`${API_URL}/delivery-requests/${selected.id}`);
       if (updated.ok) setSelected(await updated.json());
     } catch (e) { setError(e instanceof Error ? e.message : "Lỗi khi lưu."); } finally { setLoading(false); }
   }
@@ -89,7 +89,7 @@ export default function AdminDeliveryRequestsPage() {
     setCheckingStock(true); setError(""); setStockPlan(null);
     try {
       const items = selected.items.map((item) => ({ product_id: item.product_id, quantity: item.quantity }));
-      const res = await fetch(`${API_URL}/delivery-requests/plan`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: selected.warehouse_id, items }) });
+      const res = await apiFetch(`${API_URL}/delivery-requests/plan`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: selected.warehouse_id, items }) });
       const result = await res.json().catch(() => ({})) as StockPlanItem[] | { detail?: string };
       if (!res.ok) throw new Error((result as { detail?: string }).detail ?? "Không thể kiểm tra tồn kho.");
       setStockPlan(result as StockPlanItem[]);
@@ -101,7 +101,7 @@ export default function AdminDeliveryRequestsPage() {
     if (!confirm(`Bạn có chắc muốn hủy yêu cầu ${selected.code}?`)) return;
     setLoading(true); setError(""); setMessage("");
     try {
-      const res = await fetch(`${API_URL}/delivery-requests/${selected.id}/cancel`, { method: "POST" });
+      const res = await apiFetch(`${API_URL}/delivery-requests/${selected.id}/cancel`, { method: "POST" });
       const result = await res.json().catch(() => ({})) as { detail?: string };
       if (!res.ok) throw new Error(result.detail ?? "Không thể hủy yêu cầu.");
       setMessage("Đã hủy yêu cầu thành công."); setSelected(null); setEditing(false); setStockPlan(null);
@@ -132,7 +132,7 @@ export default function AdminDeliveryRequestsPage() {
             })),
           };
         });
-        const planResponse = await fetch(`${API_URL}/delivery-requests/${selected.id}`, {
+        const planResponse = await apiFetch(`${API_URL}/delivery-requests/${selected.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ warehouse_id: selected.warehouse_id, note: selected.note, items }),
@@ -140,12 +140,12 @@ export default function AdminDeliveryRequestsPage() {
         const planResult = await planResponse.json().catch(() => ({})) as { detail?: string };
         if (!planResponse.ok) throw new Error(planResult.detail ?? "Không thể lưu vị trí lấy hàng.");
       }
-      const res = await fetch(`${API_URL}/delivery-requests/${selected.id}/${action}`, { method: "POST" });
+      const res = await apiFetch(`${API_URL}/delivery-requests/${selected.id}/${action}`, { method: "POST" });
       const result = await res.json().catch(() => ({})) as { detail?: string };
       if (!res.ok) throw new Error(result.detail ?? "Thao tác thất bại.");
       setMessage(successMap[action]); setStockPlan(null); setEditing(false);
       await load();
-      const updated = await fetch(`${API_URL}/delivery-requests/${selected.id}`);
+      const updated = await apiFetch(`${API_URL}/delivery-requests/${selected.id}`);
       if (updated.ok) setSelected(await updated.json());
     } catch (e) { setError(e instanceof Error ? e.message : "Thao tác thất bại."); } finally { setLoading(false); }
   }

@@ -9,7 +9,7 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { ledgerLabels, type LedgerEntry, type StockLevel } from "@/lib/mock-inventory";
 import { formatNumber, formatDateTime } from "@/lib/format";
-import { API_URL } from "@/lib/api";
+import { API_URL, apiFetch } from "@/lib/api";
 
 interface ApiStockLevel {
   product_id: number;
@@ -141,7 +141,7 @@ export default function ImportPage() {
 
   async function loadReceiptLocations(warehouse: number | "") {
     if (!warehouse) { setReceiptLocations([]); return; }
-    const response = await fetch(`${API_URL}/inventory/locations/?warehouse_id=${warehouse}`);
+    const response = await apiFetch(`${API_URL}/inventory/locations/?warehouse_id=${warehouse}`);
     if (!response.ok) throw new Error("Không thể tải vị trí kho.");
     setReceiptLocations(await response.json() as ApiLocation[]);
   }
@@ -152,13 +152,13 @@ export default function ImportPage() {
     try {
       const body = new FormData();
       body.append("file", file);
-      const response = await fetch(`${API_URL}/inventory/import/upload?warehouse_id=${receiptWarehouseId}`, { method: "POST", body });
+      const response = await apiFetch(`${API_URL}/inventory/import/upload?warehouse_id=${receiptWarehouseId}`, { method: "POST", body });
       const result = await response.json() as ImportItem[] | { detail?: string };
       if (!response.ok) throw new Error("detail" in result ? result.detail ?? "Không thể đọc file nhập kho." : "Không thể đọc file nhập kho.");
       const items = (result as ImportItem[]).map(normalizeImportItem);
       setReceiptItems(items);
       setReceiptDrafts({});
-      const discrepancyResponse = await fetch(`${API_URL}/inventory/supplier-discrepancies/?warehouse_id=${receiptWarehouseId}&status=OPEN`);
+      const discrepancyResponse = await apiFetch(`${API_URL}/inventory/supplier-discrepancies/?warehouse_id=${receiptWarehouseId}&status=OPEN`);
       if (discrepancyResponse.ok) {
         const discrepancies = await discrepancyResponse.json() as SupplierDiscrepancy[];
         const productIds = new Set(items.map((item) => item.product_id));
@@ -189,7 +189,7 @@ export default function ImportPage() {
     if (incomplete) { setError(`${incomplete.sku} / ${incomplete.lot_number} chưa được phân bổ đủ số hộp thực nhận.`); return; }
     setReceiptConfirming(true);
     try {
-      const response = await fetch(`${API_URL}/inventory/import/confirm`, {
+      const response = await apiFetch(`${API_URL}/inventory/import/confirm`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           warehouse_id: receiptWarehouseId,
@@ -214,9 +214,9 @@ export default function ImportPage() {
     async function load() {
       try {
         const [stockResponse, transactionResponse, warehouseResponse] = await Promise.all([
-          fetch(`${API_URL}/inventory/stock-levels/`),
-          fetch(`${API_URL}/inventory/transactions/`),
-          fetch(`${API_URL}/inventory/warehouses/`),
+          apiFetch(`${API_URL}/inventory/stock-levels/`),
+          apiFetch(`${API_URL}/inventory/transactions/`),
+          apiFetch(`${API_URL}/inventory/warehouses/`),
         ]);
         if (!stockResponse.ok || !transactionResponse.ok || !warehouseResponse.ok) {
           throw new Error("Không thể tải dữ liệu kho từ API.");
@@ -262,7 +262,7 @@ export default function ImportPage() {
     if (!warehouseId) { setError("Vui lòng chọn kho nhập."); return; }
     if (quantity < 1) { setError("Số lượng phải lớn hơn 0."); return; }
     try {
-      const response = await fetch(`${API_URL}/inventory/adjust/`, {
+      const response = await apiFetch(`${API_URL}/inventory/adjust/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

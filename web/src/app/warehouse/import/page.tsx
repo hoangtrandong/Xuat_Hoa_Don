@@ -182,6 +182,19 @@ export default function ImportPage() {
     } finally { setReceiptUploading(false); }
   }
 
+  function updateReceiptActualQty(index: number, rawValue: number) {
+    const value = Math.max(0, Math.floor(Number(rawValue) || 0));
+    setReceiptItems((items) => items.map((current, itemIndex) => itemIndex === index
+      ? { ...current, actual_qty: value, allocations: [] }
+      : current));
+    setReceiptDrafts((drafts) => {
+      const next = { ...drafts };
+      delete next[index];
+      return next;
+    });
+    setError("");
+  }
+
   function addReceiptAllocation(index: number) {
     const item = receiptItems[index];
     const draft = receiptDrafts[index];
@@ -406,7 +419,13 @@ export default function ImportPage() {
                     <td className="px-4 py-3">{new Date(item.expiry_date).toLocaleDateString("vi-VN")}</td>
                     <td className="px-4 py-3 text-right font-medium">{displayNumber(item.quantity, "0")}</td>
                     <td className="px-4 py-3 text-right font-medium">
-                      {displayNumber(actual, "0")}
+                      <input
+                        type="number"
+                        min={0}
+                        value={actual}
+                        onChange={(event) => updateReceiptActualQty(index, Number(event.target.value))}
+                        className="w-20 border rounded px-2 py-1 text-xs text-right"
+                      />
                       <div className={`text-xs ${difference === 0 ? "text-gray-500" : difference < 0 ? "text-red-600" : "text-amber-600"}`}>
                         {difference === 0 ? "Khớp" : difference < 0 ? `Thiếu ${Math.abs(difference)}` : `Thừa ${difference}`}
                       </div>

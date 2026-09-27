@@ -30,7 +30,6 @@ export const menuItems: MenuItem[] = [
       { key: "customers-stores", label: "Cửa hàng", icon: "Store", href: "/customers/stores" },
       { key: "customers-list", label: "Khách hàng", icon: "List", href: "/customers" },
       { key: "customers-companies", label: "Công ty quản lý", icon: "Building2", href: "/customers/companies" },
-      { key: "customers-routes", label: "Tuyến bán hàng", icon: "MapPin", href: "/customers/routes" },
     ],
   },
   {
@@ -40,7 +39,6 @@ export const menuItems: MenuItem[] = [
     href: "/sales",
     children: [
       { key: "sales-orders", label: "Đơn hàng", icon: "FileText", href: "/sales/orders" },
-      { key: "sales-invoices", label: "Phiếu bán", icon: "Receipt", href: "/sales/invoices" },
       { key: "sales-returns", label: "Trả hàng", icon: "RotateCcw", href: "/sales/returns" },
     ],
   },

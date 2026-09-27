@@ -1,7 +1,7 @@
 "use client";
 // src/components/orders/OrderDetail.tsx
 import {
-  User, Phone, MapPin, Truck, Globe, PackageCheck, Percent, CreditCard,
+  MapPin, Truck, Globe, PackageCheck, Percent, CreditCard,
 } from "lucide-react";
 import type { SalesOrder } from "@/lib/mock-orders";
 import Badge from "@/components/ui/Badge";
@@ -45,8 +45,6 @@ export default function OrderDetail({ order }: OrderDetailProps) {
             <p className="text-xs text-gray-400">{order.customerType} · {order.customerCode}</p>
           </div>
         </div>
-        <InfoRow icon={<User size={13} />} value={order.salesRep} />
-        <InfoRow icon={<Phone size={13} />} value={order.phone} />
         <InfoRow icon={<MapPin size={13} />} value={`${order.address}, ${order.district}`} />
       </div>
 

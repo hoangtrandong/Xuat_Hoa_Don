@@ -65,7 +65,7 @@ def sync_from_excel(db: Session, file_path: str):
         if cust_code and cust_code != 'None':
             customer = cust_cache.get(cust_code)
             if not customer:
-                customer = Customer(code=cust_code, name=cust_name, phone="0000000000", type="RETAIL")
+                customer = Customer(code=cust_code, name=cust_name, type="RETAIL")
                 db.add(customer)
                 db.flush()
                 cust_cache[cust_code] = customer

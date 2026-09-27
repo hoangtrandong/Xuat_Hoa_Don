@@ -73,11 +73,8 @@ export function createOrder(input: NewOrderInput): SalesOrder {
     customerCode: input.customer.code,
     customerName: input.customer.name,
     customerType: input.customer.type,
-    phone: input.customer.phone,
     address: input.customer.address,
     district: input.customer.district,
-    routeCode: input.customer.routeCode,
-    salesRep: input.customer.salesRep,
     status:
       paymentStatus === "Đã thanh toán"
         ? "Hoàn thành"

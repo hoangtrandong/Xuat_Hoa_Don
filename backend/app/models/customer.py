@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Integer, Float, Text
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Float, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import List
 
@@ -14,17 +14,13 @@ class Customer(Base):
     name: Mapped[str] = mapped_column(String(160), index=True)
     type: Mapped[str] = mapped_column(String(20))  # DISTRIBUTOR | WHOLESALE | RETAIL | HORECA
     tier: Mapped[str] = mapped_column(String(5), default="B")  # A | B | C
-    phone: Mapped[str] = mapped_column(String(20))
     email: Mapped[str | None] = mapped_column(String(120))
     citizen_id: Mapped[str | None] = mapped_column(String(20))
     tax_code: Mapped[str | None] = mapped_column(String(30))
     credit_limit: Mapped[float] = mapped_column(Float, default=0)
     current_debt: Mapped[float] = mapped_column(Float, default=0)
-    visit_frequency: Mapped[int] = mapped_column(Integer, default=2)
     status: Mapped[str] = mapped_column(String(15), default="active")
     territory_id: Mapped[int | None] = mapped_column(ForeignKey("sales_territories.id"))
-    route_id: Mapped[int | None] = mapped_column(ForeignKey("routes.id"))
-    assigned_employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
     # Phát sinh Phase 2: 1 cửa hàng → nhiều mã KH; mã KH quản lý bởi 1 công ty xuất hóa đơn.
     store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), index=True)
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), index=True)
@@ -33,7 +29,6 @@ class Customer(Base):
     addresses: Mapped[List["CustomerAddress"]] = relationship(back_populates="customer", cascade="all, delete-orphan")
     contacts: Mapped[List["CustomerContact"]] = relationship(back_populates="customer", cascade="all, delete-orphan")
     territory: Mapped["SalesTerritory | None"] = relationship(back_populates="customers")
-    route: Mapped["Route | None"] = relationship(back_populates="customers")
     sales_orders: Mapped[List["SalesOrder"]] = relationship(back_populates="customer")
     store: Mapped["Store | None"] = relationship(back_populates="customers")
     company: Mapped["Company | None"] = relationship(back_populates="customers")
@@ -74,10 +69,6 @@ class Store(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     customers: Mapped[List["Customer"]] = relationship(back_populates="store")
-
-    @property
-    def customer_count(self) -> int:
-        return len(self.customers)
 
 
 class Company(Base):

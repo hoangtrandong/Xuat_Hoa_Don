@@ -1,10 +1,9 @@
 "use client";
 // src/app/customers/stores/page.tsx
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
-  Store as StoreIcon, CheckCircle2, Users, Building2, Plus, Download, Upload,
-  Phone, MapPin, User, ClipboardList,
+  Store as StoreIcon, CheckCircle2, Building2, Plus, Download, Upload,
+  Phone, MapPin, User,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
@@ -24,23 +23,7 @@ interface StoreRow {
   district: string;
   city: string;
   status: "active" | "inactive";
-  customer_count: number;
   created_at: string;
-}
-
-interface StoreCustomer {
-  id: string;
-  code: string;
-  name: string;
-  type: string;
-  status: string;
-  current_debt: number;
-  company_code: string | null;
-  company_name: string | null;
-}
-
-interface StoreDetail extends StoreRow {
-  customers: StoreCustomer[];
 }
 
 const emptyForm = {
@@ -49,9 +32,8 @@ const emptyForm = {
 };
 
 export default function StoresPage() {
-  const router = useRouter();
   const [rows, setRows] = useState<StoreRow[]>([]);
-  const [detail, setDetail] = useState<StoreDetail | null>(null);
+  const [detail, setDetail] = useState<StoreRow | null>(null);
   const [companyCount, setCompanyCount] = useState(0);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -69,7 +51,6 @@ export default function StoresPage() {
         address: String(row.address ?? ""),
         district: String(row.district ?? ""), city: String(row.city ?? ""),
         status: row.status === "inactive" ? "inactive" : "active",
-        customer_count: Number(row.customer_count ?? 0),
         created_at: String(row.created_at ?? ""),
       }))))
       .catch(() => setError("Không thể tải danh sách cửa hàng."));
@@ -82,7 +63,7 @@ export default function StoresPage() {
     try {
       const response = await fetch(`${API_URL}/stores/${store.id}`);
       if (!response.ok) throw new Error("Không thể tải chi tiết cửa hàng.");
-      setDetail(await response.json() as StoreDetail);
+      setDetail(await response.json() as StoreRow);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không thể tải chi tiết cửa hàng.");
     }
@@ -118,7 +99,6 @@ export default function StoresPage() {
           tax_code: String(row.tax_code ?? ""), address: String(row.address ?? ""),
           district: String(row.district ?? ""), city: String(row.city ?? ""),
           status: row.status === "inactive" ? "inactive" : "active",
-          customer_count: Number(row.customer_count ?? 0),
           created_at: String(row.created_at ?? ""),
         })));
       }
@@ -128,7 +108,7 @@ export default function StoresPage() {
   }
 
   async function deleteStore(store: StoreRow) {
-    if (!window.confirm(`Xóa cửa hàng ${store.name}? Các mã khách hàng sẽ không bị xóa.`)) return;
+    if (!window.confirm(`Xóa cửa hàng ${store.name}?`)) return;
     const response = await fetch(`${API_URL}/stores/${store.id}`, { method: "DELETE" });
     const result = await response.json().catch(() => ({})) as { detail?: string };
     if (!response.ok) throw new Error(result.detail ?? "Không thể xóa cửa hàng.");
@@ -148,7 +128,6 @@ export default function StoresPage() {
   }
 
   const activeCount = rows.filter((s) => s.status === "active").length;
-  const totalCustomerCodesInStores = rows.reduce((sum, s) => sum + (s.customer_count || 0), 0);
 
   const columns: Column<StoreRow>[] = [
     { key: "code", title: "Mã cửa hàng", sortable: true },
@@ -165,12 +144,6 @@ export default function StoresPage() {
     },
     { key: "phone", title: "Điện thoại" },
     {
-      key: "customer_count",
-      title: "Mã KH trực thuộc",
-      align: "center",
-      render: (val) => <Badge variant={(val as number) > 0 ? "info" : "default"}>{String(val)}</Badge>,
-    },
-    {
       key: "status",
       title: "Trạng thái",
       sortable: true,
@@ -182,7 +155,7 @@ return (
     <div className="space-y-6">
       <PageHeader
         title="Cửa hàng & điểm bán"
-        subtitle="1 cửa hàng có thể sở hữu nhiều mã khách hàng"
+        subtitle="Thông tin điểm bán / cửa hàng"
         actions={
           <div className="flex gap-2">
             <a href={`${API_URL}/stores/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</a>
@@ -201,10 +174,9 @@ return (
       {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">{error}</div>}
       {message && <div className="bg-emerald-50 text-emerald-700 rounded-lg px-4 py-3 text-sm">{message}</div>}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
         <StatCard label="Tổng cửa hàng" value={rows.length} icon={<StoreIcon size={20} />} color="bg-sky-50 text-sky-600" />
         <StatCard label="Đang hoạt động" value={activeCount} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
-        <StatCard label="Mã KH trong cửa hàng" value={totalCustomerCodesInStores} icon={<Users size={20} />} color="bg-purple-50 text-purple-600" />
         <StatCard label="Công ty quản lý" value={companyCount} icon={<Building2 size={20} />} color="bg-amber-50 text-amber-600" />
       </div>
 
@@ -256,34 +228,6 @@ return (
               <InfoRow icon={<Phone size={14} />} label="Điện thoại" value={detail.phone || "—"} />
               <InfoRow icon={<User size={14} />} label="Chủ hộ" value={detail.owner_name || "—"} />
               <InfoRow icon={<MapPin size={14} />} label="Địa chỉ" value={[detail.address, detail.district, detail.city].filter(Boolean).join(", ") || "—"} />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <h4 className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
-                  <ClipboardList size={14} className="text-gray-400" />
-                  Mã khách hàng ({detail.customer_count})
-                </h4>
-                <button onClick={() => { setDetail(null); router.push("/customers"); }} className="text-xs text-sky-600 hover:text-sky-700 font-medium">Gán / xem mã KH →</button>
-              </div>
-              {detail.customers.length === 0 ? (
-                <p className="text-xs text-gray-400 py-4 text-center bg-gray-50 rounded-xl">Chưa có mã khách hàng nào. Bạn có thể gán sau.</p>
-              ) : (
-                <div className="space-y-2">
-                  {detail.customers.map((c) => (
-                    <div key={c.id} className="flex items-center justify-between rounded-xl bg-gray-50 px-3 py-2.5">
-                      <div>
-                        <p className="text-xs font-semibold text-gray-800">{c.code} · {c.name}</p>
-                        <p className="text-[11px] text-gray-400 mt-0.5">
-                          {c.company_name ? `Công ty: ${c.company_name}` : "Chưa gán công ty"}
-                          {c.current_debt > 0 ? ` · Nợ ${Number(c.current_debt).toLocaleString("vi-VN")}đ` : ""}
-                        </p>
-                      </div>
-                      <Badge variant={c.status === "active" ? "success" : "danger"}>{c.status === "active" ? "Hoạt động" : "Ngưng"}</Badge>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
 
             <div className="grid grid-cols-2 gap-2">

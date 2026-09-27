@@ -23,11 +23,8 @@ export interface SalesOrder {
   customerCode: string;
   customerName: string;
   customerType: string;
-  phone: string;
   address: string;
   district: string;
-  routeCode: string;
-  salesRep: string;
   status: OrderStatus;
   paymentStatus: PaymentStatus;
   items: OrderItem[];
@@ -83,11 +80,8 @@ function buildOrder(input: BuildOrderInput): SalesOrder {
     customerCode: c.code,
     customerName: c.name,
     customerType: c.type,
-    phone: c.phone,
     address: c.address,
     district: c.district,
-    routeCode: c.routeCode,
-    salesRep: c.salesRep,
     status: input.status,
     paymentStatus: paymentType,
     items,

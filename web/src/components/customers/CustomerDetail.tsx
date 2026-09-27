@@ -2,7 +2,7 @@
 // src/components/customers/CustomerDetail.tsx
 import Link from "next/link";
 import {
-  Phone, Mail, MapPin, User, Route as RouteIcon, CreditCard, ShoppingBag,
+  Mail, MapPin, User, CreditCard, ShoppingBag,
   CalendarDays, Truck,
 } from "lucide-react";
 import type { Customer } from "@/lib/mock-customers";
@@ -45,21 +45,18 @@ export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDele
 
       <div className="flex items-center gap-2">
         <span className="text-xs font-semibold text-gray-400 bg-gray-100 px-2 py-0.5 rounded">Tier {customer.tier}</span>
-        <span className="text-xs font-semibold text-gray-400 bg-gray-100 px-2 py-0.5 rounded">{customer.routeCode}</span>
       </div>
 
       {/* Thông tin liên hệ */}
       <div className="rounded-xl border border-gray-100 divide-y divide-gray-50">
         <InfoRow icon={<User size={14} />} label="Người liên hệ" value={customer.contactName} />
-        <InfoRow icon={<Phone size={14} />} label="Điện thoại" value={customer.phone} />
         <InfoRow icon={<Mail size={14} />} label="Email" value={customer.email} />
         <InfoRow icon={<MapPin size={14} />} label="Địa chỉ" value={`${customer.address}, ${customer.district}`} />
-        <InfoRow icon={<RouteIcon size={14} />} label="Tuyến bán" value={`${customer.routeName} (${customer.routeCode}) - ${customer.salesRep}`} />
         <InfoRow icon={<Truck size={14} />} label="Ngày tạo" value={formatDate(customer.createdAt)} />
       </div>
 
       {/* Thống kê */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 gap-3">
         <div className="rounded-xl bg-sky-50 p-3 text-center">
           <p className="text-lg font-bold text-sky-600">{formatVND(customer.totalSpend)}</p>
           <p className="text-xs text-gray-400 mt-0.5">Tổng chi tiêu / 12 tháng</p>
@@ -69,10 +66,6 @@ export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDele
             {customer.debitBalance > 0 ? formatVND(customer.debitBalance) : "0"}
           </p>
           <p className="text-xs text-gray-400 mt-0.5">Công nợ hiện tại</p>
-        </div>
-        <div className="rounded-xl bg-emerald-50 p-3 text-center">
-          <p className="text-lg font-bold text-emerald-600">{customer.visitCount}</p>
-          <p className="text-xs text-gray-400 mt-0.5">Lượt ghé tháng này</p>
         </div>
       </div>
 

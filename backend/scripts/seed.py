@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.core.database import SessionLocal, init_db
 from app.models import (
     ProductCategory, ProductUnit, Product,
-    Warehouse, Customer, Employee, SalesTerritory, Route,
+    Warehouse, Customer, Employee, SalesTerritory,
     PriceList, PriceListItem, SalesOrder, SalesOrderItem,
     InventoryTransaction,
 )
@@ -74,12 +74,9 @@ def seed() -> None:
                 ref_code="OPEN-20260901", note="Ton dau ky thang 09", created_by="system",
             ))
 
-        # --- Khu vuc & tuyen ---
+        # --- Khu vuc ---
         territory = SalesTerritory(name="KV HCM", region="NAM")
         db.add(territory)
-        db.flush()
-        route = Route(code="TX.01", name="Tuyen 1", territory_id=territory.id, visit_target=18)
-        db.add(route)
         db.flush()
 
         # --- Nhan vien ---
@@ -89,9 +86,9 @@ def seed() -> None:
 
         # --- Khach hang ---
         customers = [
-            Customer(code="KH-0001", name="Dai ly Phu Phong", type="DISTRIBUTOR", tier="A", phone="0901234567", credit_limit=200_000_000, territory_id=territory.id, route_id=route.id, assigned_employee_id=emp.id),
-            Customer(code="KH-0002", name="Cua hang An Khang 24h", type="RETAIL", tier="B", phone="0912345678", territory_id=territory.id, route_id=route.id, assigned_employee_id=emp.id),
-            Customer(code="KH-0003", name="Nha phan phoi Minh Chau", type="DISTRIBUTOR", tier="A", phone="0933456789", credit_limit=300_000_000, territory_id=territory.id, route_id=route.id, assigned_employee_id=emp.id),
+            Customer(code="KH-0001", name="Dai ly Phu Phong", type="DISTRIBUTOR", tier="A", credit_limit=200_000_000, territory_id=territory.id),
+            Customer(code="KH-0002", name="Cua hang An Khang 24h", type="RETAIL", tier="B", territory_id=territory.id),
+            Customer(code="KH-0003", name="Nha phan phoi Minh Chau", type="DISTRIBUTOR", tier="A", credit_limit=300_000_000, territory_id=territory.id),
         ]
         db.add_all(customers)
         db.flush()

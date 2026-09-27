@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 
 
@@ -32,22 +32,3 @@ class Store(StoreBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
     created_at: datetime
-    customer_count: int = 0
-
-
-class StoreDetail(Store):
-    """Cửa hàng kèm các mã khách hàng thuộc về nó."""
-    customer_count: int = 0
-    customers: list["CustomerBrief"] = Field(default_factory=list)
-
-
-class CustomerBrief(BaseModel):
-    id: int
-    code: str
-    name: str
-    type: str = "RETAIL"
-    status: str = "active"
-    current_debt: float = 0
-    store_id: Optional[int] = None
-    company_code: Optional[str] = None
-    company_name: Optional[str] = None

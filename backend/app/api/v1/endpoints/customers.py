@@ -22,12 +22,10 @@ CUSTOMER_HEADER_ALIASES = {
     "Tên khách hàng": "name",
     "Loại": "type",
     "Hạng": "tier",
-    "Số điện thoại": "phone",
     "Email": "email",
     "CCCD": "citizen_id",
     "Mã số thuế": "tax_code",
     "Hạn mức công nợ": "credit_limit",
-    "Tần suất viếng thăm": "visit_frequency",
     "Trạng thái": "status",
     "Mã cửa hàng": "store_code",
     "Mã CH": "store_code",
@@ -54,17 +52,15 @@ def download_customer_template():
         "Mã KH",
         "Tên khách hàng",
         "Loại",
-        "Số điện thoại",
         "Email",
         "CCCD",
         "Mã số thuế",
         "Hạn mức công nợ",
-        "Tần suất viếng thăm",
         "Trạng thái",
         "Mã cửa hàng",
         "Mã công ty quản lý",
     ])
-    sheet.append(["KH-0004", "Tên khách hàng", "RETAIL", "0900000000", "", "", "", 0, 2, "active", "CH-0001", "CT001"])
+    sheet.append(["KH-0004", "Tên khách hàng", "RETAIL", "", "", "", 0, "active", "CH-0001", "CT001"])
     output = BytesIO()
     workbook.save(output)
     return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="mau-khach-hang.xlsx"'})
@@ -130,11 +126,10 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
                 code=code, name=str(data["name"]).strip(),
                 type=str(data.get("type") or "RETAIL").strip().upper(),
                 tier=str(data.get("tier") or "B").strip().upper(),
-                phone=str(data.get("phone") or "").strip(),
                 email=str(data.get("email") or "").strip() or None,
                 citizen_id=str(data.get("citizen_id") or "").strip() or None,
                 tax_code=str(data.get("tax_code") or "").strip() or None,
-                credit_limit=float(data.get("credit_limit") or 0), visit_frequency=int(data.get("visit_frequency") or 2),
+                credit_limit=float(data.get("credit_limit") or 0),
                 status=str(data.get("status") or "active").strip(),
                 store_id=store_id,
                 company_id=company_id,

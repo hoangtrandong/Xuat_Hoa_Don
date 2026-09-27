@@ -1,7 +1,7 @@
 "use client";
 // src/app/employees/page.tsx
 import { useState } from "react";
-import { UsersRound, Users, Target, Phone as PhoneIcon, MapPin, CalendarDays, Route as RouteIcon, TrendingUp, Mail } from "lucide-react";
+import { UsersRound, Users, Target, Phone as PhoneIcon, MapPin, CalendarDays, TrendingUp, Mail } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -108,17 +108,6 @@ export default function EmployeesPage() {
       render: (val) => <Badge variant={positionVariant(String(val))}>{String(val)}</Badge>,
     },
     { key: "territory", title: "Khu vực", sortable: true },
-    {
-      key: "routes",
-      title: "Tuyến phụ trách",
-      render: (val) => (
-        <div className="flex gap-1">
-          {(val as string[]).map((r) => (
-            <Badge key={r} variant="default">{r}</Badge>
-          ))}
-        </div>
-      ),
-    },
     {
       key: "target",
       title: "Mục tiêu tháng",
@@ -252,7 +241,6 @@ function EmployeeProfile({ employee }: { employee: Employee }) {
         <InfoRow icon={<PhoneIcon size={14} />} text={employee.phone} />
         <InfoRow icon={<Mail size={14} />} text={employee.email} />
         <InfoRow icon={<MapPin size={14} />} text={employee.territory} />
-        <InfoRow icon={<RouteIcon size={14} />} text={employee.routes.join(", ")} />
         <InfoRow icon={<CalendarDays size={14} />} text={formatDate(employee.joinDate)} />
       </div>
 

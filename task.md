@@ -24,12 +24,10 @@ Trạng thái hiện tại: **UI mock (web + mobile)** + **PostgreSQL schema / F
 ## Khách hàng
 - [x] Danh sách khách hàng (`/customers`)
 - [x] Chi tiết khách hàng (drawer `CustomerDetail`)
-- [x] Tuyến bán hàng (`/customers/routes`)
 
 ## Bán hàng
 - [x] Danh sách đơn hàng (`/sales/orders`)
 - [x] Tạo đơn hàng (`/sales/create`) — client store, trừ tồn khi đặt
-- [x] Phiếu bán (`/sales/invoices`)
 - [x] Trả hàng (`/sales/returns`)
 
 ## Kho

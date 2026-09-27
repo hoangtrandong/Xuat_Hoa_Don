@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Integer, Float, Numeric
+from sqlalchemy import String, DateTime, ForeignKey, Numeric
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import List
 
@@ -15,19 +15,6 @@ class SalesTerritory(Base):
 
     customers: Mapped[List["Customer"]] = relationship(back_populates="territory")
     employees: Mapped[List["Employee"]] = relationship(back_populates="territory")
-
-
-class Route(Base):
-    __tablename__ = "routes"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(10), unique=True)
-    name: Mapped[str] = mapped_column(String(120))
-    territory_id: Mapped[int | None] = mapped_column(ForeignKey("sales_territories.id"))
-    visit_target: Mapped[int] = mapped_column(Integer, default=15)
-
-    customers: Mapped[List["Customer"]] = relationship(back_populates="route")
-    visits: Mapped[List["Visit"]] = relationship(back_populates="route")
 
 
 class Employee(Base):
@@ -47,21 +34,3 @@ class Employee(Base):
     territory: Mapped["SalesTerritory | None"] = relationship(back_populates="employees")
     user: Mapped["User | None"] = relationship(back_populates="employee")
     sales_orders: Mapped[List["SalesOrder"]] = relationship(back_populates="employee")
-    visits: Mapped[List["Visit"]] = relationship(back_populates="employee")
-
-
-class Visit(Base):
-    __tablename__ = "visits"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"))
-    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"))
-    route_id: Mapped[int | None] = mapped_column(ForeignKey("routes.id"))
-    visit_date: Mapped[datetime] = mapped_column(DateTime)
-    checkin_lat: Mapped[float | None] = mapped_column(Float)
-    checkin_lng: Mapped[float | None] = mapped_column(Float)
-    has_order: Mapped[bool] = mapped_column(Boolean, default=False)
-    note: Mapped[str | None] = mapped_column(String(255))
-
-    employee: Mapped["Employee"] = relationship(back_populates="visits")
-    route: Mapped["Route | None"] = relationship(back_populates="visits")

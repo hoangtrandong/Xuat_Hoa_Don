@@ -14,7 +14,6 @@ interface DebtCustomer {
   customer_id: number;
   customer_code: string;
   customer_name: string;
-  phone: string;
   credit_limit: number;
   current_debt: number;
   open_receivables: number;
@@ -118,7 +117,6 @@ export default function DebtPage() {
   const customerColumns: Column<DebtCustomer>[] = [
     { key: "customer_code", title: "Mã KH", sortable: true },
     { key: "customer_name", title: "Khách hàng", sortable: true },
-    { key: "phone", title: "Điện thoại" },
     {
       key: "open_receivables",
       title: "Số khoản nợ",
@@ -190,7 +188,7 @@ export default function DebtPage() {
       <DataTable
         data={summary?.customers ?? []}
         columns={customerColumns}
-        searchKeys={["customer_code", "customer_name", "phone"]}
+        searchKeys={["customer_code", "customer_name"]}
         searchPlaceholder="Tìm khách hàng đang nợ..."
         onRowClick={(row) => {
           setSelected(row);

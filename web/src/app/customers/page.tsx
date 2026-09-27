@@ -10,7 +10,7 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import CustomerDetail from "@/components/customers/CustomerDetail";
 import type { Customer } from "@/lib/mock-customers";
-import { formatVND, formatDate } from "@/lib/format";
+import { formatVND } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
@@ -27,11 +27,10 @@ export default function CustomersPage() {
   const router = useRouter();
   const [typeFilter, setTypeFilter] = useState("Tất cả");
   const [statusFilter, setStatusFilter] = useState("Tất cả");
-  const [routeFilter, setRouteFilter] = useState("Tất cả");
   const [selected, setSelected] = useState<Customer | null>(null);
   const [customerRows, setCustomerRows] = useState<Customer[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ code: "", name: "", type: "RETAIL", tier: "B", phone: "", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", company_id: "" });
+  const [form, setForm] = useState({ code: "", name: "", type: "RETAIL", tier: "B", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", company_id: "" });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [createError, setCreateError] = useState("");
   const [createMessage, setCreateMessage] = useState("");
@@ -47,10 +46,10 @@ export default function CustomersPage() {
       .then((rows) => setCustomerRows(rows.map((row) => ({
         id: String(row.id), code: String(row.code ?? ""), name: String(row.name ?? ""),
         type: row.type === "DISTRIBUTOR" ? "Nhà phân phối" : row.type === "WHOLESALE" ? "Đại lý" : row.type === "HORECA" ? "HORECA" : "Cửa hàng",
-        tier: (String(row.tier ?? "B") as Customer["tier"]), phone: String(row.phone ?? ""),
+        tier: (String(row.tier ?? "B") as Customer["tier"]),
         contactName: "", email: String(row.email ?? ""), address: "", district: "",
-        routeCode: "", routeName: "", salesRep: "", status: row.status === "inactive" ? "inactive" : "active",
-        debitBalance: Number(row.current_debt ?? 0), totalSpend: 0, lastVisit: "", visitCount: 0,
+        status: row.status === "inactive" ? "inactive" : "active",
+        debitBalance: Number(row.current_debt ?? 0), totalSpend: 0,
         createdAt: String(row.created_at ?? ""),
         storeId: row.store_id != null ? String(row.store_id) : "",
         companyId: row.company_id != null ? String(row.company_id) : "",
@@ -91,7 +90,6 @@ export default function CustomersPage() {
         name: string;
         type: string;
         tier: "A" | "B" | "C";
-        phone: string;
         email: string | null;
         citizen_id: string | null;
         tax_code: string | null;
@@ -119,21 +117,15 @@ export default function CustomersPage() {
         name: result.name,
         type: typeLabel,
         tier: result.tier,
-        phone: result.phone,
         contactName: "",
         email: result.email ?? "",
         citizenId: result.citizen_id ?? "",
         taxCode: result.tax_code ?? "",
         address: "",
         district: "",
-        routeCode: "",
-        routeName: "",
-        salesRep: "",
         status: result.status,
         debitBalance: result.current_debt,
         totalSpend: 0,
-        lastVisit: "",
-        visitCount: 0,
         createdAt: result.created_at,
         storeId: result.store_id != null ? String(result.store_id) : "",
         companyId: result.company_id != null ? String(result.company_id) : "",
@@ -148,7 +140,7 @@ export default function CustomersPage() {
   }
   function openEdit(customer: Customer) {
     setEditingId(customer.id);
-    setForm({ code: customer.code, name: customer.name, type: customer.type === "Cửa hàng" ? "RETAIL" : customer.type === "Đại lý" ? "WHOLESALE" : customer.type === "Nhà phân phối" ? "DISTRIBUTOR" : "HORECA", tier: customer.tier, phone: customer.phone, email: customer.email, citizen_id: customer.citizenId ?? "", tax_code: customer.taxCode ?? "", status: customer.status, store_id: customer.storeId ?? "", company_id: customer.companyId ?? "" });
+    setForm({ code: customer.code, name: customer.name, type: customer.type === "Cửa hàng" ? "RETAIL" : customer.type === "Đại lý" ? "WHOLESALE" : customer.type === "Nhà phân phối" ? "DISTRIBUTOR" : "HORECA", tier: customer.tier, email: customer.email, citizen_id: customer.citizenId ?? "", tax_code: customer.taxCode ?? "", status: customer.status, store_id: customer.storeId ?? "", company_id: customer.companyId ?? "" });
     setSelected(null); setCreateError(""); setCreateOpen(true);
   }
   async function deleteCustomer(customer: Customer) {
@@ -167,7 +159,6 @@ export default function CustomersPage() {
   const filtered = customerRows.filter((c) => {
     if (typeFilter !== "Tất cả" && c.type !== typeFilter) return false;
     if (statusFilter !== "Tất cả" && c.status !== statusFilter) return false;
-    if (routeFilter !== "Tất cả" && c.routeCode !== routeFilter) return false;
     return true;
   });
 
@@ -177,7 +168,6 @@ export default function CustomersPage() {
       "Tên khách hàng": customer.name,
       "Loại": customer.type,
       "Hạng": customer.tier,
-      "Số điện thoại": customer.phone,
       "CCCD": customer.citizenId ?? "",
       "Mã số thuế": customer.taxCode ?? "",
       "Cửa hàng": customer.storeName,
@@ -208,7 +198,6 @@ export default function CustomersPage() {
       sortable: true,
       render: (val) => <Badge variant={typeVariant(String(val))}>{String(val)}</Badge>,
     },
-    { key: "phone", title: "Số điện thoại" },
     { key: "citizenId", title: "CCCD" },
     { key: "taxCode", title: "Mã số thuế" },
     {
@@ -237,13 +226,6 @@ export default function CustomersPage() {
         ),
     },
     {
-      key: "routeCode",
-      title: "Tuyến",
-      sortable: true,
-      render: (val) => <Badge variant="default">{String(val)}</Badge>,
-    },
-    { key: "salesRep", title: "NVKD", sortable: true },
-    {
       key: "debitBalance",
       title: "Công nợ",
       sortable: true,
@@ -252,14 +234,6 @@ export default function CustomersPage() {
         <span className={cn((val as number) > 0 ? "text-red-600 font-semibold" : "text-gray-400")}>
           {formatVND(val as number)}
         </span>
-      ),
-    },
-    {
-      key: "lastVisit",
-      title: "Ghé thăm gần nhất",
-      sortable: true,
-      render: (val) => (
-        <span className="text-gray-600">{val ? formatDate(String(val)) : "Chưa ghé"}</span>
       ),
     },
     {
@@ -286,7 +260,7 @@ export default function CustomersPage() {
           <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
           <button onClick={exportCustomers} disabled={filtered.length === 0} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50"><Download size={16} />Tải Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadCustomers(file).catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
-          <button onClick={() => { setEditingId(null); setForm({ code: "", name: "", type: "RETAIL", tier: "B", phone: "", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", company_id: "" }); setCreateError(""); setCreateOpen(true); }}  className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+          <button onClick={() => { setEditingId(null); setForm({ code: "", name: "", type: "RETAIL", tier: "B", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", company_id: "" }); setCreateError(""); setCreateOpen(true); }}  className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
             <Plus size={16} />
             Thêm khách hàng
           </button>
@@ -306,8 +280,8 @@ export default function CustomersPage() {
       <DataTable
         data={filtered}
         columns={columns}
-        searchKeys={["code", "name", "phone", "district", "salesRep", "storeCode", "storeName", "companyName"]}
-        searchPlaceholder="Tìm mã, tên, điện thoại..."
+        searchKeys={["code", "name", "district", "storeCode", "storeName", "companyName"]}
+        searchPlaceholder="Tìm mã, tên khách hàng..."
         onRowClick={(row) => setSelected(row)}
         emptyMessage="Không có khách hàng phù hợp"
         toolbar={
@@ -320,16 +294,6 @@ export default function CustomersPage() {
               <option value="Tất cả">Tất cả loại</option>
               {customerTypes.map((t) => (
                 <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-            <select
-              value={routeFilter}
-              onChange={(e) => setRouteFilter(e.target.value)}
-              className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-            >
-              <option value="Tất cả">Tất cả tuyến</option>
-              {["TX.01", "TX.02", "TX.03", "TX.04", "TX.05"].map((r) => (
-                <option key={r} value={r}>{r}</option>
               ))}
             </select>
             <select
@@ -360,7 +324,6 @@ export default function CustomersPage() {
             <option value="">— Chọn công ty quản lý (tùy chọn) —</option>
             {companyOptions.map((c) => <option key={c.id} value={c.id}>{c.code} · {c.name}</option>)}
           </select>
-          <input placeholder="Số điện thoại" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="CCCD (tùy chọn)" value={form.citizen_id} onChange={(e) => setForm({ ...form, citizen_id: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Mã số thuế (tùy chọn)" value={form.tax_code} onChange={(e) => setForm({ ...form, tax_code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Email (tùy chọn)" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />

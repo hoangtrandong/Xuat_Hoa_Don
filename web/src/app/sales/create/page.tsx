@@ -62,7 +62,7 @@ export default function CreateOrderPage() {
     const q = customerQuery.trim().toLowerCase();
     if (!q) return customers.slice(0, 8);
     return customers
-      .filter((c) => c.name.toLowerCase().includes(q) || c.code.toLowerCase().includes(q) || c.phone.includes(q))
+      .filter((c) => c.name.toLowerCase().includes(q) || c.code.toLowerCase().includes(q))
       .slice(0, 8);
   }, [customerQuery]);
 

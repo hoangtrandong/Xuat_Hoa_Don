@@ -139,7 +139,6 @@ def list_customer_debt_summary(db: Session) -> list[dict]:
             "customer_id": customer.id,
             "customer_code": customer.code,
             "customer_name": customer.name,
-            "phone": customer.phone,
             "credit_limit": _as_float(customer.credit_limit),
             "current_debt": _as_float(customer.current_debt),
             "open_receivables": int(open_count),

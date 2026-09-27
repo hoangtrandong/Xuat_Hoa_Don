@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.core.database import get_db
-from app.schemas.store import Store, StoreCreate, StoreUpdate, StoreDetail, CustomerBrief
+from app.schemas.store import Store, StoreCreate, StoreUpdate
 from app.crud import store as store_crud
 from app.models.customer import Store as StoreModel
 
@@ -127,23 +127,6 @@ def upload_stores(file: UploadFile = File(...), db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Không thể đọc file Excel: {exc}") from exc
 
 
-def _to_detail(store: StoreModel, customers: List[CustomerBrief]) -> StoreDetail:
-    return StoreDetail(
-        id=store.id,
-        code=store.code,
-        name=store.name,
-        phone=store.phone,
-        owner_name=store.owner_name,
-        address=store.address,
-        district=store.district,
-        city=store.city,
-        status=store.status,
-        created_at=store.created_at,
-        customer_count=len(customers),
-        customers=customers,
-    )
-
-
 @router.get("/", response_model=List[Store])
 def list_stores(skip: int = 0, limit: int = 1000, status: str | None = None, db: Session = Depends(get_db)):
     return store_crud.list_(db, skip=skip, limit=limit, status=status)
@@ -157,48 +140,12 @@ def create_store(payload: StoreCreate, db: Session = Depends(get_db)):
     return store_crud.create(db, payload)
 
 
-@router.get("/{store_id}", response_model=StoreDetail)
+@router.get("/{store_id}", response_model=Store)
 def get_store(store_id: int, db: Session = Depends(get_db)):
     store = store_crud.get(db, store_id)
     if not store:
         raise HTTPException(status_code=404, detail="Cửa hàng không tồn tại.")
-    customers = store_crud.customers_of_store(db, store_id)
-    briefs = [
-        CustomerBrief(
-            id=c.id,
-            code=c.code,
-            name=c.name,
-            type=c.type,
-            status=c.status,
-            current_debt=c.current_debt,
-            store_id=c.store_id,
-            company_code=c.company.code if c.company else None,
-            company_name=c.company.name if c.company else None,
-        )
-        for c in customers
-    ]
-    return _to_detail(store, briefs)
-
-
-@router.get("/{store_id}/customers", response_model=List[CustomerBrief])
-def get_store_customers(store_id: int, db: Session = Depends(get_db)):
-    if not store_crud.get(db, store_id):
-        raise HTTPException(status_code=404, detail="Cửa hàng không tồn tại.")
-    customers = store_crud.customers_of_store(db, store_id)
-    return [
-        CustomerBrief(
-            id=c.id,
-            code=c.code,
-            name=c.name,
-            type=c.type,
-            status=c.status,
-            current_debt=c.current_debt,
-            store_id=c.store_id,
-            company_code=c.company.code if c.company else None,
-            company_name=c.company.name if c.company else None,
-        )
-        for c in customers
-    ]
+    return store
 
 
 @router.patch("/{store_id}", response_model=Store)

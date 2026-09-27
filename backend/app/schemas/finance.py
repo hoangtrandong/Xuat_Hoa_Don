@@ -41,7 +41,6 @@ class CustomerDebtSummary(BaseModel):
     customer_id: int
     customer_code: str
     customer_name: str
-    phone: str
     credit_limit: float
     current_debt: float
     open_receivables: int

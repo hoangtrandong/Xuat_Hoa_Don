@@ -10,7 +10,7 @@ from app.models.inventory import (
 )
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
-from app.models.employee import Employee, SalesTerritory, Route, Visit
+from app.models.employee import Employee, SalesTerritory
 from app.models.finance import Payment, Receivable
 from app.models.vinamilk import VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
@@ -24,7 +24,7 @@ __all__ = [
     "DeliveryAllocation", "InventoryTransfer", "InventoryTransferItem",
     "SalesOrder", "SalesOrderItem",
     "Promotion", "PromotionRule", "PromotionItem",
-    "Employee", "SalesTerritory", "Route", "Visit",
+    "Employee", "SalesTerritory",
     "Payment", "Receivable",
     "VinamilkOrderSnapshot", "VinamilkSyncRun",
     "VinamilkOrderAllocation",

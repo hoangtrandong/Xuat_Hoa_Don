@@ -1,9 +1,8 @@
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app.models.customer import Store
-from app.models.customer import Customer
 from app.schemas.store import StoreCreate, StoreUpdate
 
 
@@ -18,7 +17,6 @@ def get_by_code(db: Session, code: str) -> Optional[Store]:
 def list_(db: Session, skip: int = 0, limit: int = 1000, status: Optional[str] = None) -> List[Store]:
     stmt = (
         select(Store)
-        .options(selectinload(Store.customers))
         .order_by(Store.code)
         .offset(skip)
         .limit(limit)
@@ -26,11 +24,6 @@ def list_(db: Session, skip: int = 0, limit: int = 1000, status: Optional[str] =
     if status:
         stmt = stmt.where(Store.status == status)
     return list(db.execute(stmt).scalars().all())
-
-
-def stats(db: Session, store: Store) -> int:
-    """Số mã khách hàng thuộc cửa hàng."""
-    return len(store.customers)
 
 
 def create(db: Session, obj_in: StoreCreate) -> Store:
@@ -55,26 +48,13 @@ def delete(db: Session, store: Store) -> None:
     db.commit()
 
 
-def customers_of_store(db: Session, store_id: int) -> List[Customer]:
-    return list(
-        db.execute(
-            select(Customer)
-            .options(selectinload(Customer.company))
-            .where(Customer.store_id == store_id)
-            .order_by(Customer.code)
-        ).scalars().all()
-    )
-
-
 class StoreCRUD:
     get = staticmethod(get)
     get_by_code = staticmethod(get_by_code)
     list_ = staticmethod(list_)
-    stats = staticmethod(stats)
     create = staticmethod(create)
     update = staticmethod(update)
     delete = staticmethod(delete)
-    customers_of_store = staticmethod(customers_of_store)
 
 
 store = StoreCRUD()

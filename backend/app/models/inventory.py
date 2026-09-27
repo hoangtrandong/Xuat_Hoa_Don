@@ -64,6 +64,10 @@ class InventoryLot(Base):
     __tablename__ = "inventory_lots"
     __table_args__ = (
         CheckConstraint("quantity_on_hand >= 0", name="ck_inventory_lot_qty_nonnegative"),
+        CheckConstraint(
+            "locked_quantity >= 0 AND locked_quantity <= quantity_on_hand",
+            name="ck_inventory_lot_locked_qty",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -74,12 +78,106 @@ class InventoryLot(Base):
     lot_number: Mapped[str | None] = mapped_column(String(80), nullable=True)
     expiry_date: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     quantity_on_hand: Mapped[int] = mapped_column(Integer, default=0)
+    locked_quantity: Mapped[int] = mapped_column(Integer, default=0)
     unit_cost: Mapped[float | None] = mapped_column(Float)
 
     warehouse: Mapped["Warehouse"] = relationship()
     location: Mapped["WarehouseLocation | None"] = relationship(back_populates="lots")
     product: Mapped["Product"] = relationship()
     transactions: Mapped[List["InventoryTransaction"]] = relationship(back_populates="lot")
+
+
+class SupplierGoodsDiscrepancy(Base):
+    __tablename__ = "supplier_goods_discrepancies"
+    __table_args__ = (
+        CheckConstraint("document_quantity > 0", name="ck_supplier_discrepancy_document_qty"),
+        CheckConstraint("actual_quantity >= 0", name="ck_supplier_discrepancy_actual_qty"),
+        CheckConstraint("quantity > 0", name="ck_supplier_discrepancy_qty"),
+        CheckConstraint("type IN ('SHORTAGE', 'EXCESS')", name="ck_supplier_discrepancy_type"),
+        CheckConstraint(
+            "(type = 'SHORTAGE' AND actual_quantity < document_quantity "
+            "AND quantity = document_quantity - actual_quantity) OR "
+            "(type = 'EXCESS' AND actual_quantity > document_quantity "
+            "AND quantity = actual_quantity - document_quantity)",
+            name="ck_supplier_discrepancy_difference",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    type: Mapped[str] = mapped_column(String(10), index=True)
+    document_quantity: Mapped[int] = mapped_column(Integer)
+    actual_quantity: Mapped[int] = mapped_column(Integer)
+    quantity: Mapped[int] = mapped_column(Integer)
+    lot_number: Mapped[str | None] = mapped_column(String(80))
+    expiry_date: Mapped[datetime | None] = mapped_column(DateTime)
+    invoice_number: Mapped[str | None] = mapped_column(String(120), index=True)
+    ref_code: Mapped[str | None] = mapped_column(String(40))
+    document_date: Mapped[datetime | None] = mapped_column(DateTime)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    status: Mapped[str] = mapped_column(String(15), default="OPEN", index=True)
+
+    warehouse: Mapped["Warehouse"] = relationship()
+    product: Mapped["Product"] = relationship()
+    sources: Mapped[List["SupplierGoodsDiscrepancySource"]] = relationship(
+        back_populates="discrepancy", cascade="all, delete-orphan"
+    )
+    shortage_offsets: Mapped[List["SupplierGoodsDiscrepancyOffset"]] = relationship(
+        back_populates="shortage", foreign_keys="SupplierGoodsDiscrepancyOffset.shortage_id"
+    )
+    excess_offsets: Mapped[List["SupplierGoodsDiscrepancyOffset"]] = relationship(
+        back_populates="excess", foreign_keys="SupplierGoodsDiscrepancyOffset.excess_id"
+    )
+
+
+class SupplierGoodsDiscrepancySource(Base):
+    __tablename__ = "supplier_goods_discrepancy_sources"
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="ck_supplier_discrepancy_source_qty"),
+        CheckConstraint("released_quantity >= 0 AND released_quantity <= quantity",
+                        name="ck_supplier_discrepancy_source_released_qty"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    discrepancy_id: Mapped[int] = mapped_column(
+        ForeignKey("supplier_goods_discrepancies.id", ondelete="CASCADE"), index=True
+    )
+    lot_id: Mapped[int] = mapped_column(ForeignKey("inventory_lots.id"))
+    quantity: Mapped[int] = mapped_column(Integer)
+    released_quantity: Mapped[int] = mapped_column(Integer, default=0)
+
+    discrepancy: Mapped["SupplierGoodsDiscrepancy"] = relationship(back_populates="sources")
+    lot: Mapped["InventoryLot"] = relationship()
+
+
+class SupplierGoodsDiscrepancyOffset(Base):
+    __tablename__ = "supplier_goods_discrepancy_offsets"
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="ck_supplier_discrepancy_offset_qty"),
+        CheckConstraint("shortage_id != excess_id", name="ck_supplier_discrepancy_offset_distinct"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shortage_id: Mapped[int] = mapped_column(
+        ForeignKey("supplier_goods_discrepancies.id", ondelete="CASCADE"), index=True
+    )
+    excess_id: Mapped[int] = mapped_column(
+        ForeignKey("supplier_goods_discrepancies.id", ondelete="CASCADE"), index=True
+    )
+    quantity: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    shortage: Mapped["SupplierGoodsDiscrepancy"] = relationship(
+        back_populates="shortage_offsets", foreign_keys=[shortage_id]
+    )
+    excess: Mapped["SupplierGoodsDiscrepancy"] = relationship(
+        back_populates="excess_offsets", foreign_keys=[excess_id]
+    )
 
 
 class InventoryTransfer(Base):

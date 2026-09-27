@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowRight, CheckCircle2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import Badge from "@/components/ui/Badge";
@@ -43,7 +43,7 @@ export default function LocationTransferPage() {
   const activeLocations = locations.filter((location) => location.is_active && location.warehouse_id === warehouseId);
   const warehouseLots = lots.filter((lot) => lot.warehouse_id === warehouseId && lot.quantity_on_hand > 0 && lot.location_id !== null);
 
-  async function loadData() {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const responses = await Promise.all([
@@ -64,9 +64,14 @@ export default function LocationTransferPage() {
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Không thể tải dữ liệu điều chuyển.");
     } finally { setLoading(false); }
-  }
+  }, []);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void loadData();
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [loadData]);
 
   function addRow() {
     setRows((current) => [...current, { product_id: 0, product_query: "", source_location_id: "", destination_location_id: "", quantity: 1 }]);
@@ -100,7 +105,17 @@ export default function LocationTransferPage() {
     try {
       const createResponse = await fetch(`${API_URL}/inventory/transfers/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ warehouse_id: warehouseId, items: rows.map(({ product_query: _productQuery, ...row }) => row), note: note.trim() || null, created_by: "admin" }),
+        body: JSON.stringify({
+          warehouse_id: warehouseId,
+          items: rows.map((row) => ({
+            product_id: row.product_id,
+            source_location_id: row.source_location_id,
+            destination_location_id: row.destination_location_id,
+            quantity: row.quantity,
+          })),
+          note: note.trim() || null,
+          created_by: "admin",
+        }),
       });
       const created = await createResponse.json() as Transfer & { detail?: string };
       if (!createResponse.ok) throw new Error(created.detail ?? "Không thể tạo phiếu điều chuyển.");

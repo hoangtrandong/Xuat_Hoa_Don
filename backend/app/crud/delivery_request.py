@@ -67,7 +67,9 @@ def _available_at_location(
     Inventory lots are used as the current position balance, but lot identity is
     intentionally ignored. Legacy transactions without a lot remain supported.
     """
-    lot_stock = db.scalar(select(func.coalesce(func.sum(InventoryLot.quantity_on_hand), 0)).where(
+    lot_stock = db.scalar(select(func.coalesce(func.sum(
+        InventoryLot.quantity_on_hand - InventoryLot.locked_quantity
+    ), 0)).where(
         InventoryLot.warehouse_id == warehouse_id,
         InventoryLot.product_id == product_id,
         InventoryLot.location_id == location_id,
@@ -102,7 +104,9 @@ def _reserved_for_lot(db: Session, lot_id: int, exclude_request_id: int | None =
 
 
 def available_for_product(db: Session, warehouse_id: int, product_id: int) -> int:
-    lot_stock = db.scalar(select(func.coalesce(func.sum(InventoryLot.quantity_on_hand), 0)).where(
+    lot_stock = db.scalar(select(func.coalesce(func.sum(
+        InventoryLot.quantity_on_hand - InventoryLot.locked_quantity
+    ), 0)).where(
         InventoryLot.warehouse_id == warehouse_id, InventoryLot.product_id == product_id,
     )) or 0
     return int(lot_stock) + _legacy_available(db, warehouse_id, product_id)
@@ -130,6 +134,7 @@ def _fefo_picks(
         InventoryLot.warehouse_id == warehouse_id,
         InventoryLot.product_id == product_id,
         InventoryLot.quantity_on_hand > 0,
+        InventoryLot.quantity_on_hand > InventoryLot.locked_quantity,
     ).order_by(
         InventoryLot.expiry_date.is_(None),
         InventoryLot.expiry_date,
@@ -147,11 +152,14 @@ def _fefo_picks(
         reserved = _reserved_for_position(
             db, warehouse_id, product_id, location_id, expiry_date, exclude_request_id
         )
-        free = max(0, sum(lot.quantity_on_hand for lot in position_lots) - reserved)
+        free = max(
+            0,
+            sum(lot.quantity_on_hand - lot.locked_quantity for lot in position_lots) - reserved,
+        )
         for lot in position_lots:
             if free <= 0 or remaining <= 0:
                 break
-            take = min(remaining, lot.quantity_on_hand, free)
+            take = min(remaining, lot.quantity_on_hand - lot.locked_quantity, free)
             if take <= 0:
                 continue
             picks.append((location_id, lot.id, expiry_date, take, "FEFO"))
@@ -181,7 +189,8 @@ def _allocate(db: Session, request: DeliveryRequest, item: DeliveryRequestItem) 
             lot = db.get(InventoryLot, lot_id)
             if not lot or lot.warehouse_id != request.warehouse_id or lot.product_id != item.product_id or lot.location_id != location_id:
                 raise ValueError(f"Lô được chỉ định của sản phẩm {item.sku} không hợp lệ.")
-            if lot.quantity_on_hand - _reserved_for_lot(db, lot.id, request.id) < quantity:
+            if (lot.quantity_on_hand - lot.locked_quantity
+                    - _reserved_for_lot(db, lot.id, request.id) < quantity):
                 raise ValueError(f"Lô của sản phẩm {item.sku} tại vị trí {location.code} không còn đủ tồn.")
         elif _available_at_location(db, request.warehouse_id, item.product_id, location_id, request.id) < quantity:
             raise ValueError(f"Sản phẩm {item.sku} tại vị trí {location.code} không còn đủ tồn.")
@@ -334,7 +343,9 @@ def _with_stock(db: Session, request: DeliveryRequest | None):
         return None
     for item in request.items:
         available = _legacy_available(db, request.warehouse_id, item.product_id, request.id)
-        lot_stock = db.scalar(select(func.coalesce(func.sum(InventoryLot.quantity_on_hand), 0)).where(
+        lot_stock = db.scalar(select(func.coalesce(func.sum(
+            InventoryLot.quantity_on_hand - InventoryLot.locked_quantity
+        ), 0)).where(
             InventoryLot.warehouse_id == request.warehouse_id,
             InventoryLot.product_id == item.product_id,
         )) or 0
@@ -374,7 +385,7 @@ def transition(db: Session, request_id: int, action: str):
                     if allocation.lot_id:
                         lot = db.scalar(select(InventoryLot).where(
                             InventoryLot.id == allocation.lot_id).with_for_update())
-                        if not lot or lot.quantity_on_hand < qty:
+                        if not lot or lot.quantity_on_hand - lot.locked_quantity < qty:
                             raise ValueError("Tồn kho lô không đủ để hoàn tất yêu cầu.")
                         lot.quantity_on_hand -= qty
                     db.add(InventoryTransaction(

@@ -61,7 +61,7 @@ def create_location_transfer(db: Session, payload, created_by: str = "system") -
         for lot in lots:
             if remaining <= 0:
                 break
-            allocated = min(remaining, lot.quantity_on_hand)
+            allocated = min(remaining, lot.quantity_on_hand - lot.locked_quantity)
             transfer.items.append(InventoryTransferItem(
                 product_id=item.product_id, lot_id=lot.id,
                 source_location_id=item.source_location_id,
@@ -89,7 +89,7 @@ def confirm_location_transfer(db: Session, transfer_id: int) -> InventoryTransfe
             InventoryLot.id == item.lot_id,
             InventoryLot.location_id == item.source_location_id,
         ).with_for_update())
-        if not source_lot or source_lot.quantity_on_hand < item.quantity:
+        if not source_lot or source_lot.quantity_on_hand - source_lot.locked_quantity < item.quantity:
             raise ValueError("Tồn tại vị trí nguồn không đủ để điều chuyển.")
         destination_lot = db.scalar(select(InventoryLot).where(
             InventoryLot.warehouse_id == transfer.warehouse_id,
@@ -162,8 +162,8 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
             db.flush()
         if obj_in.expiry_date is not None:
             lot.expiry_date = obj_in.expiry_date
-        if qty < 0 and lot.quantity_on_hand < obj_in.quantity:
-            raise ValueError("Số lượng xuất vượt quá tồn lô.")
+        if qty < 0 and lot.quantity_on_hand - lot.locked_quantity < obj_in.quantity:
+            raise ValueError("Số lượng xuất vượt quá tồn khả dụng của lô.")
         lot.quantity_on_hand += qty
     if obj_in.type in ("OUT", "ADJUST"):
         current_stock = db.scalar(
@@ -173,7 +173,13 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
                 InventoryTransaction.warehouse_id == obj_in.warehouse_id,
             )
         )
-        if obj_in.quantity > int(current_stock or 0):
+        locked_stock = db.scalar(
+            select(func.coalesce(func.sum(InventoryLot.locked_quantity), 0)).where(
+                InventoryLot.product_id == obj_in.product_id,
+                InventoryLot.warehouse_id == obj_in.warehouse_id,
+            )
+        )
+        if obj_in.quantity > int(current_stock or 0) - int(locked_stock or 0):
             raise ValueError("Số lượng xuất vượt quá tồn kho.")
     ref_type = obj_in.ref_type or ("SO" if obj_in.type == "OUT" else "ADJ")
     txn = InventoryTransaction(
@@ -206,6 +212,7 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
         select(
             InventoryLot.product_id,
             func.coalesce(func.sum(InventoryLot.quantity_on_hand), 0).label("lot_qty"),
+            func.coalesce(func.sum(InventoryLot.locked_quantity), 0).label("locked_qty"),
             func.count(InventoryLot.id).label("lot_count"),
             func.min(InventoryLot.expiry_date).label("earliest_expiry"),
         )
@@ -257,6 +264,7 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             ProductUnit.name.label("unit"),
             Product.reorder_level,
             func.coalesce(lot_subquery.c.lot_qty, 0).label("on_hand"),
+            func.coalesce(lot_subquery.c.locked_qty, 0).label("locked_qty"),
             func.coalesce(reserved_subquery.c.reserved_qty, 0).label("reserved_qty"),
             func.coalesce(lot_subquery.c.lot_count, 0).label("lot_count"),
             lot_subquery.c.earliest_expiry,
@@ -272,8 +280,9 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
     levels = []
     for row in result.all():
         on_hand = int(row.on_hand or 0)
+        locked = int(row.locked_qty or 0)
         reserved = int(row.reserved_qty or 0)
-        available = max(0, on_hand - reserved)
+        available = max(0, on_hand - locked - reserved)
         levels.append(StockLevel(
             product_id=row.product_id,
             product_code=row.product_code,
@@ -282,6 +291,7 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             on_hand=on_hand,
             reserved=reserved,
             available=available,
+            locked_quantity=locked,
             reorder_level=row.reorder_level or 20,
             lot_count=int(row.lot_count or 0),
             earliest_expiry=row.earliest_expiry,

@@ -1,4 +1,5 @@
 from datetime import datetime, date, time, timedelta
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 import re
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -13,6 +14,9 @@ from app.schemas.inventory import (
     InventoryImportConfirm, InventoryImportItem, InventoryTransaction, StockLevel,
     StockAdjust, Warehouse, WarehouseLocation, InventoryLot, InventoryLotDetail,
     InventoryTransferCreate, InventoryTransferResponse,
+    SupplierGoodsDiscrepancyResponse, SupplierGoodsDiscrepancyHistory,
+    SupplierGoodsDiscrepancySuggestion, SupplierGoodsDiscrepancyOffsetConfirm,
+    SupplierGoodsDiscrepancyOffsetResponse,
 )
 from app.models.inventory import (
     InventoryLot as LotModel, InventoryTransaction as TransactionModel,
@@ -22,6 +26,7 @@ from app.models.inventory import (
 )
 from app.models.product import Product, ProductUnit
 from app.crud import inventory as crud
+from app.crud import supplier_discrepancy as discrepancy_crud
 from uuid import uuid4
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -84,6 +89,23 @@ def _parse_import_datetime(value: Any) -> datetime | None:
     raise ValueError(f"Ô H6 có thời gian không hợp lệ: '{text}'.")
 
 
+def _parse_actual_quantity(value: Any, document_quantity: int, row_number: int) -> int:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return document_quantity
+    if isinstance(value, bool):
+        raise ValueError(f"Dòng {row_number}: S.Lượng thực nhận phải là số hộp.")
+    try:
+        decimal_quantity = Decimal(str(value))
+        if not decimal_quantity.is_finite() or decimal_quantity != decimal_quantity.to_integral_value():
+            raise ValueError
+        quantity = int(decimal_quantity)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"Dòng {row_number}: S.Lượng thực nhận phải là số hộp.") from exc
+    if quantity < 0:
+        raise ValueError(f"Dòng {row_number}: S.Lượng thực nhận không được âm.")
+    return quantity
+
+
 @router.post("/import/upload", response_model=List[InventoryImportItem])
 def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not db.get(WarehouseModel, warehouse_id):
@@ -101,6 +123,14 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
         if not required.issubset(headers):
             raise ValueError("File phải có các cột Tên Sản Phẩm, Lot, Hạn sử dụng và Số Lượng ở dòng 15.")
         indexes = {name: headers.index(name) for name in required}
+        actual_quantity_headers = (
+            "actual_qty", "số lượng thực nhận", "sl thực nhận",
+            "s.lượng thực nhận", "thực nhận", "số lượng thực tế",
+        )
+        actual_quantity_index = next(
+            (headers.index(name) for name in actual_quantity_headers if name in headers),
+            None,
+        )
         unit_index = headers.index("đvt") if "đvt" in headers else None
         price_index = headers.index("đơn giá") if "đơn giá" in headers else None
         amount_index = headers.index("thành tiền") if "thành tiền" in headers else None
@@ -109,7 +139,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
         invoice_number = invoice_number or None
         document_date = _parse_import_datetime(rows[7][7] if len(rows) > 7 and len(rows[7]) > 7 else None)
         products = {product.sku.upper(): product for product in db.scalars(select(Product)).all()}
-        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        grouped: dict[tuple[str, str, datetime], dict[str, Any]] = {}
         for row_number, values in enumerate(rows[15:], 16):
             if not any(value is not None and str(value).strip() for value in values):
                 continue
@@ -126,6 +156,13 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 raise ValueError(f"Dòng {row_number}: S.Lượng phải là số hộp.") from exc
             if quantity <= 0:
                 raise ValueError(f"Dòng {row_number}: S.Lượng phải lớn hơn 0.")
+            actual_quantity = _parse_actual_quantity(
+                values[actual_quantity_index]
+                if actual_quantity_index is not None and actual_quantity_index < len(values)
+                else None,
+                quantity,
+                row_number,
+            )
             expiry_date = _parse_expiry(values[indexes["hạn sử dụng"]], lot_number)
             key = (sku, lot_number, expiry_date)
             item = grouped.setdefault(key, {
@@ -133,7 +170,8 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 "unit": values[unit_index] if unit_index is not None and unit_index < len(values) else None,
                 "lot_number": lot_number, "expiry_date": expiry_date,
                 "boxes_per_carton": max(1, int(product.boxes_per_carton or 1)),
-                "cartons": 0, "loose_boxes": 0, "quantity": 0, "allocations": [],
+                "cartons": 0, "loose_boxes": 0, "quantity": 0, "actual_qty": 0,
+                "allocations": [],
                 "delivery_references": None, "po_references": None,
                 "document_date": document_date,
                 "invoice_number": invoice_number,
@@ -142,6 +180,7 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 "note": str(values[note_index]).strip() if note_index is not None and note_index < len(values) and values[note_index] is not None else None,
             })
             item["quantity"] += quantity
+            item["actual_qty"] += actual_quantity
             item["cartons"], item["loose_boxes"] = divmod(
                 item["quantity"], item["boxes_per_carton"],
             )
@@ -162,9 +201,13 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
         for item in payload.items:
             if not db.get(Product, item.product_id):
                 raise ValueError(f"Không tìm thấy sản phẩm {item.sku}.")
+            actual_quantity = item.actual_qty if item.actual_qty is not None else item.quantity
             total_allocated = sum(allocation.quantity for allocation in item.allocations)
-            if total_allocated != item.quantity:
-                raise ValueError(f"{item.sku} / {item.lot_number}: phân bổ {total_allocated}/{item.quantity} hộp.")
+            if total_allocated != actual_quantity:
+                raise ValueError(
+                    f"{item.sku} / {item.lot_number}: phân bổ {total_allocated}/{actual_quantity} hộp thực nhận."
+                )
+            allocated_lots = []
             for allocation in item.allocations:
                 location = db.get(LocationModel, allocation.location_id)
                 if not location or location.warehouse_id != payload.warehouse_id or not location.is_active:
@@ -185,6 +228,7 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                     db.add(lot)
                     db.flush()
                 lot.quantity_on_hand += allocation.quantity
+                allocated_lots.append((lot, allocation.quantity))
                 transaction = TransactionModel(
                     code=f"ITT-{transaction_time:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
                     type="IN", warehouse_id=payload.warehouse_id, product_id=item.product_id,
@@ -202,11 +246,86 @@ def confirm_inventory_import(payload: InventoryImportConfirm, db: Session = Depe
                 )
                 db.add(transaction)
                 created.append(transaction)
+            discrepancy_crud.create_import_discrepancy(
+                db,
+                warehouse_id=payload.warehouse_id,
+                product_id=item.product_id,
+                document_quantity=item.quantity,
+                actual_quantity=actual_quantity,
+                lot_number=item.lot_number,
+                expiry_date=item.expiry_date,
+                invoice_number=payload.invoice_number or item.invoice_number,
+                ref_code=payload.ref_code,
+                document_date=payload.document_date or item.document_date,
+                note=item.note or payload.note,
+                created_by=payload.created_by,
+                allocated_lots=allocated_lots,
+            )
         db.commit()
         for transaction in created:
             db.refresh(transaction)
         return created
     except (ValueError, TypeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/supplier-discrepancies/",
+    response_model=List[SupplierGoodsDiscrepancyResponse],
+)
+def list_supplier_discrepancies(
+    warehouse_id: int | None = None,
+    product_id: int | None = None,
+    discrepancy_type: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    if discrepancy_type and discrepancy_type.upper() not in {"SHORTAGE", "EXCESS"}:
+        raise HTTPException(status_code=400, detail="Loại chênh lệch phải là SHORTAGE hoặc EXCESS.")
+    if status and status.upper() not in {"OPEN", "RESOLVED"}:
+        raise HTTPException(status_code=400, detail="Trạng thái phải là OPEN hoặc RESOLVED.")
+    return discrepancy_crud.list_discrepancies(
+        db, warehouse_id, product_id, discrepancy_type, status
+    )
+
+
+@router.get(
+    "/supplier-discrepancies/{discrepancy_id}/history",
+    response_model=SupplierGoodsDiscrepancyHistory,
+)
+def supplier_discrepancy_history(discrepancy_id: int, db: Session = Depends(get_db)):
+    history = discrepancy_crud.discrepancy_history(db, discrepancy_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy chênh lệch hàng nhà cung cấp.")
+    return history
+
+
+@router.get(
+    "/supplier-discrepancies/{discrepancy_id}/offset-suggestions",
+    response_model=List[SupplierGoodsDiscrepancySuggestion],
+)
+def supplier_discrepancy_offset_suggestions(
+    discrepancy_id: int, db: Session = Depends(get_db)
+):
+    try:
+        return discrepancy_crud.suggest_offsets(db, discrepancy_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/supplier-discrepancies/offsets/confirm",
+    response_model=SupplierGoodsDiscrepancyOffsetResponse,
+    status_code=201,
+)
+def confirm_supplier_discrepancy_offset(
+    payload: SupplierGoodsDiscrepancyOffsetConfirm,
+    db: Session = Depends(get_db),
+):
+    try:
+        return discrepancy_crud.confirm_offset(db, payload)
+    except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -299,8 +418,11 @@ def list_lot_details(
             lot_number=lot.lot_number,
             expiry_date=lot.expiry_date,
             quantity_on_hand=lot.quantity_on_hand,
+            locked_quantity=lot.locked_quantity,
             reserved_quantity=reserved_by_lot.get(lot.id, 0),
-            available_quantity=max(0, lot.quantity_on_hand - reserved_by_lot.get(lot.id, 0)),
+            available_quantity=max(
+                0, lot.quantity_on_hand - lot.locked_quantity - reserved_by_lot.get(lot.id, 0)
+            ),
             unit_cost=lot.unit_cost,
         )
         for lot in lots

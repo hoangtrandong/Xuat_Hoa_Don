@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { PackagePlus, Truck, PackageCheck, ClipboardList, Upload, MapPin } from "lucide-react";
+import { PackagePlus, Truck, PackageCheck, ClipboardList, Upload, MapPin, AlertTriangle } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -47,11 +47,17 @@ interface ImportItem {
   product_id: number; sku: string; product_name: string; unit?: string | null;
   lot_number: string; expiry_date: string; source_location_code?: string | null;
   boxes_per_carton: number; cartons: number; loose_boxes: number; quantity: number; allocations: ImportAllocation[];
+  actual_qty?: number | null;
   delivery_references?: string | null; po_references?: string | null;
   document_date?: string | null;
   invoice_number?: string | null; unit_price?: number | null; amount?: number | null; note?: string | null;
 }
 interface ApiLocation { id: number; warehouse_id: number; code: string; is_active: boolean }
+interface SupplierDiscrepancy {
+  id: number; warehouse_id: number; product_id: number; type: "SHORTAGE" | "EXCESS";
+  document_quantity: number; actual_quantity: number; quantity: number; remaining_quantity: number;
+  lot_number: string | null; invoice_number: string | null; document_date: string | null; status: string;
+}
 
 function displayNumber(value: number | null | undefined, fallback = "-") {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : fallback;
@@ -131,6 +137,7 @@ export default function ImportPage() {
   const [receiptDrafts, setReceiptDrafts] = useState<Record<number, { locationId: number | ""; quantity: number }>>({});
   const [receiptUploading, setReceiptUploading] = useState(false);
   const [receiptConfirming, setReceiptConfirming] = useState(false);
+  const [receiptDiscrepancies, setReceiptDiscrepancies] = useState<SupplierDiscrepancy[]>([]);
 
   async function loadReceiptLocations(warehouse: number | "") {
     if (!warehouse) { setReceiptLocations([]); return; }
@@ -151,6 +158,14 @@ export default function ImportPage() {
       const items = (result as ImportItem[]).map(normalizeImportItem);
       setReceiptItems(items);
       setReceiptDrafts({});
+      const discrepancyResponse = await fetch(`${API_URL}/inventory/supplier-discrepancies/?warehouse_id=${receiptWarehouseId}&status=OPEN`);
+      if (discrepancyResponse.ok) {
+        const discrepancies = await discrepancyResponse.json() as SupplierDiscrepancy[];
+        const productIds = new Set(items.map((item) => item.product_id));
+        setReceiptDiscrepancies(discrepancies.filter((item) => productIds.has(item.product_id)));
+      } else {
+        setReceiptDiscrepancies([]);
+      }
       setSuccess(`Đã đọc ${items.length} dòng mã hàng + lot. Hãy phân bổ vị trí.`);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Không thể đọc file nhập kho.");
@@ -170,8 +185,8 @@ export default function ImportPage() {
   async function confirmReceiptImport() {
     setError(""); setSuccess("");
     if (!receiptWarehouseId || receiptItems.length === 0) { setError("Chưa có dữ liệu nhập kho."); return; }
-    const incomplete = receiptItems.find((item) => item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0) !== item.quantity);
-    if (incomplete) { setError(`${incomplete.sku} / ${incomplete.lot_number} chưa được phân bổ đủ số hộp.`); return; }
+    const incomplete = receiptItems.find((item) => item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0) !== (item.actual_qty ?? item.quantity));
+    if (incomplete) { setError(`${incomplete.sku} / ${incomplete.lot_number} chưa được phân bổ đủ số hộp thực nhận.`); return; }
     setReceiptConfirming(true);
     try {
       const response = await fetch(`${API_URL}/inventory/import/confirm`, {
@@ -187,7 +202,7 @@ export default function ImportPage() {
       });
       const result = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể xác nhận nhập kho.");
-      setReceiptItems([]); setSuccess("Đã xác nhận nhập kho và cập nhật tồn theo từng vị trí.");
+      setReceiptItems([]); setReceiptDiscrepancies([]); setSuccess("Đã xác nhận nhập kho và cập nhật tồn theo từng vị trí.");
       setVersion((current) => current + 1);
     } catch (confirmError) {
       setError(confirmError instanceof Error ? confirmError.message : "Không thể xác nhận nhập kho.");
@@ -308,7 +323,14 @@ export default function ImportPage() {
           <button disabled={receiptConfirming} onClick={() => confirmReceiptImport()} className="bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50">{receiptConfirming ? "Đang ghi…" : "Xác nhận nhập kho"}</button>
         </div>
         <div className="px-5 py-3 bg-sky-50 border-b border-sky-100 space-y-2">
-          <p className="text-xs text-sky-700">Số lượng cần nhập được quy đổi từ tổng số hộp trong file. Thủ kho sẽ phân bổ chi tiết số thùng và hộp theo từng vị trí.</p>
+        <p className="text-xs text-sky-700">Số lượng chứng từ và thực nhận được đối chiếu riêng. Thủ kho chỉ phân bổ số hộp thực nhận.</p>
+        {receiptDiscrepancies.length > 0 && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
+          <div className="flex items-center gap-2 text-sm font-semibold"><AlertTriangle size={16} /> Có nợ NCC cũ cần đối chiếu</div>
+          <div className="mt-2 space-y-1 text-xs">{receiptDiscrepancies.map((item) => <div key={item.id}>
+            {item.type === "SHORTAGE" ? "Thiếu" : "Thừa"} · SP #{item.product_id} · còn {item.remaining_quantity} hộp · hóa đơn {item.invoice_number || "—"}
+          </div>)}</div>
+          <p className="mt-2 text-xs">Sau khi xác nhận nhập, mở “Theo dõi nợ NCC” để xem gợi ý và xác nhận bù trừ.</p>
+        </div>}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
             {receiptItems.map((item) => (
               <div key={`${item.sku}-${item.lot_number}-summary`} className="rounded-lg bg-white border border-sky-100 px-3 py-2 text-sm">
@@ -316,14 +338,15 @@ export default function ImportPage() {
                 <div className="mt-1 grid grid-cols-3 gap-2 text-xs">
                   <span><b className="block text-gray-900">{displayNumber(item.cartons, "0")}</b>Tổng thùng</span>
                   <span><b className="block text-gray-900">{displayNumber(item.loose_boxes, "0")}</b>Hộp lẻ</span>
-                  <span><b className="block text-gray-900">{displayNumber(item.quantity, "0")}</b>Tổng hộp</span>
+                  <span><b className="block text-gray-900">{displayNumber(item.quantity, "0")}</b>SL chứng từ</span>
+                  <span><b className="block text-gray-900">{displayNumber(item.actual_qty ?? item.quantity, "0")}</b>SL thực nhận</span>
                 </div>
                 <div className="mt-1 text-[11px] text-gray-500">Quy đổi: {displayNumber(item.boxes_per_carton, "1")} hộp/thùng</div>
               </div>
             ))}
           </div>
         </div>
-        <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-4 py-3 text-left">Mã hàng</th><th className="px-4 py-3 text-left">ĐVT</th><th className="px-4 py-3 text-left">Lot</th><th className="px-4 py-3 text-left">HSD</th><th className="px-4 py-3 text-right">Tổng thùng</th><th className="px-4 py-3 text-right">Tổng hộp (lẻ)</th><th className="px-4 py-3 text-right">Số lượng (hộp)</th><th className="px-4 py-3 text-right">Đơn giá</th><th className="px-4 py-3 text-left">Phân bổ vị trí</th><th className="px-4 py-3 text-left">Thêm vị trí</th></tr></thead><tbody>{receiptItems.map((item, index) => { const allocated = item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0); const draft = receiptDrafts[index] ?? { locationId: "", quantity: Math.max(1, item.quantity - allocated) }; return <tr key={`${item.sku}-${item.lot_number}`} className="border-t border-gray-50 align-top"><td className="px-4 py-3"><b>{item.sku}</b><div className="text-xs text-gray-500">{item.product_name}</div><div className="text-xs text-gray-400">Hóa đơn: {item.invoice_number || "-"}</div>{item.note && <div className="text-xs text-gray-400">Ghi chú: {item.note}</div>}</td><td className="px-4 py-3">{item.unit || "-"}</td><td className="px-4 py-3">{item.lot_number}</td><td className="px-4 py-3">{new Date(item.expiry_date).toLocaleDateString("vi-VN")}</td><td className="px-4 py-3 text-right font-medium">{displayNumber(item.cartons, "0")}<div className="text-xs text-gray-400">{displayNumber(item.boxes_per_carton, "1")} hộp/thùng</div></td><td className="px-4 py-3 text-right font-medium">{displayNumber(item.loose_boxes, "0")}</td><td className="px-4 py-3 text-right font-medium">{displayNumber(item.quantity, "0")}<div className={`text-xs ${allocated === item.quantity ? "text-emerald-600" : "text-amber-600"}`}>{allocated}/{item.quantity} hộp đã xếp</div></td><td className="px-4 py-3">{item.allocations.length === 0 ? <span className="text-gray-400">Chưa phân bổ</span> : item.allocations.map((allocation, allocationIndex) => <div key={`${allocation.location_id}-${allocationIndex}`} className="flex items-center gap-1 text-xs mb-1"><MapPin size={12} />{receiptLocations.find((location) => location.id === allocation.location_id)?.code ?? allocation.location_id}: {allocation.quantity} hộp</div>)}</td><td className="px-4 py-3"><div className="flex gap-1"><select value={draft.locationId} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, locationId: Number(event.target.value) || "" } }))} className="border rounded px-2 py-1 text-xs"><option value="">Vị trí</option>{receiptLocations.filter((location) => location.is_active).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select><input type="number" min={1} max={item.quantity - allocated} value={draft.quantity} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, quantity: Number(event.target.value) || 1 } }))} className="w-20 border rounded px-2 py-1 text-xs" /><button onClick={() => addReceiptAllocation(index)} className="bg-sky-500 text-white rounded px-2 text-xs">+</button></div></td></tr>; })}</tbody></table></div>      </div>}
+        <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-4 py-3 text-left">Mã hàng</th><th className="px-4 py-3 text-left">ĐVT</th><th className="px-4 py-3 text-left">Lot</th><th className="px-4 py-3 text-left">HSD</th><th className="px-4 py-3 text-right">SL chứng từ</th><th className="px-4 py-3 text-right">SL thực nhận</th><th className="px-4 py-3 text-right">Chênh lệch</th><th className="px-4 py-3 text-left">Phân bổ vị trí</th><th className="px-4 py-3 text-left">Thêm vị trí</th></tr></thead><tbody>{receiptItems.map((item, index) => { const actual = item.actual_qty ?? item.quantity; const difference = actual - item.quantity; const allocated = item.allocations.reduce((sum, allocation) => sum + allocation.quantity, 0); const draft = receiptDrafts[index] ?? { locationId: "", quantity: Math.max(1, actual - allocated) }; return <tr key={`${item.sku}-${item.lot_number}`} className="border-t border-gray-50 align-top"><td className="px-4 py-3"><b>{item.sku}</b><div className="text-xs text-gray-500">{item.product_name}</div><div className="text-xs text-gray-400">Hóa đơn: {item.invoice_number || "-"}</div>{item.note && <div className="text-xs text-gray-400">Ghi chú: {item.note}</div>}</td><td className="px-4 py-3">{item.unit || "-"}</td><td className="px-4 py-3">{item.lot_number}</td><td className="px-4 py-3">{new Date(item.expiry_date).toLocaleDateString("vi-VN")}</td><td className="px-4 py-3 text-right font-medium">{displayNumber(item.quantity, "0")}</td><td className="px-4 py-3 text-right font-medium">{displayNumber(actual, "0")}<div className={`text-xs ${difference === 0 ? "text-gray-500" : difference < 0 ? "text-red-600" : "text-amber-600"}`}>{difference === 0 ? "Khớp" : difference < 0 ? `Thiếu ${Math.abs(difference)}` : `Thừa ${difference}`}</div></td><td className="px-4 py-3 text-right font-medium">{difference === 0 ? <Badge variant="default">Khớp</Badge> : <Badge variant={difference < 0 ? "danger" : "warning"}>{difference > 0 ? `+${difference}` : difference}</Badge>}</td><td className="px-4 py-3">{item.allocations.length === 0 ? <span className="text-gray-400">Chưa phân bổ</span> : item.allocations.map((allocation, allocationIndex) => <div key={`${allocation.location_id}-${allocationIndex}`} className="flex items-center gap-1 text-xs mb-1"><MapPin size={12} />{receiptLocations.find((location) => location.id === allocation.location_id)?.code ?? allocation.location_id}: {allocation.quantity} hộp</div>)}</td><td className="px-4 py-3"><div className="flex gap-1"><select value={draft.locationId} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, locationId: Number(event.target.value) || "" } }))} className="border rounded px-2 py-1 text-xs"><option value="">Vị trí</option>{receiptLocations.filter((location) => location.is_active).map((location) => <option key={location.id} value={location.id}>{location.code}</option>)}</select><input type="number" min={1} max={Math.max(1, actual - allocated)} value={draft.quantity} onChange={(event) => setReceiptDrafts((drafts) => ({ ...drafts, [index]: { ...draft, quantity: Number(event.target.value) || 1 } }))} className="w-20 border rounded px-2 py-1 text-xs" /><button onClick={() => addReceiptAllocation(index)} className="bg-sky-500 text-white rounded px-2 text-xs">+</button></div></td></tr>; })}</tbody></table></div>      </div>}
       <DataTable data={inEntries} columns={columns} searchKeys={["code", "productName", "productCode", "refCode", "createdBy"]} searchPlaceholder="Tìm phiếu nhập, sản phẩm, PO..." />
       <Drawer open={importOpen} onClose={() => setImportOpen(false)} title="Tạo phiếu nhập kho" subtitle="Ghi nhận nhập hàng và cập nhật tồn kho">
         <div className="p-5 space-y-4">

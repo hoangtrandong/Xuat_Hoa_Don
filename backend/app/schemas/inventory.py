@@ -1,6 +1,6 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict
-from typing import Optional, List
+from pydantic import BaseModel, ConfigDict, field_validator
+from typing import Any, Optional, List
 from pydantic import Field
 
 
@@ -32,6 +32,7 @@ class StockLevel(BaseModel):
     on_hand: int
     reserved: int
     available: int
+    locked_quantity: int = 0
     reorder_level: int
     lot_count: int = 0  # Số lô đang có hàng
     earliest_expiry: Optional[datetime] = None  # Hạn sử dụng gần nhất
@@ -79,6 +80,7 @@ class InventoryLot(BaseModel):
     lot_number: Optional[str] = None
     expiry_date: Optional[datetime] = None
     quantity_on_hand: int
+    locked_quantity: int = 0
     unit_cost: Optional[float] = None
 
 
@@ -96,6 +98,7 @@ class InventoryLotDetail(BaseModel):
     lot_number: Optional[str] = None
     expiry_date: Optional[datetime] = None
     quantity_on_hand: int
+    locked_quantity: int = 0
     reserved_quantity: int = 0
     available_quantity: int = 0
     unit_cost: Optional[float] = None
@@ -113,7 +116,7 @@ class InventoryImportItem(BaseModel):
     cartons: int = 0
     loose_boxes: int = 0
     quantity: int = Field(gt=0)
-    boxes_per_carton: int = Field(default=1, ge=1)
+    actual_qty: Optional[int] = Field(default=None, ge=0)
     allocations: List["InventoryImportAllocation"] = Field(default_factory=list)
     delivery_references: Optional[str] = None
     po_references: Optional[str] = None
@@ -122,6 +125,13 @@ class InventoryImportItem(BaseModel):
     unit_price: Optional[float] = None
     amount: Optional[float] = None
     note: Optional[str] = None
+
+    @field_validator("actual_qty", mode="before")
+    @classmethod
+    def actual_quantity_must_not_be_boolean(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("actual_qty must be a non-negative integer.")
+        return value
 
 
 class InventoryImportAllocation(BaseModel):
@@ -136,6 +146,67 @@ class InventoryImportConfirm(BaseModel):
     invoice_number: Optional[str] = None
     delivery_references: Optional[str] = None
     document_date: Optional[datetime] = None
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class SupplierGoodsDiscrepancyResponse(BaseModel):
+    id: int
+    warehouse_id: int
+    product_id: int
+    type: str
+    document_quantity: int
+    actual_quantity: int
+    quantity: int
+    remaining_quantity: int
+    lot_number: Optional[str]
+    expiry_date: Optional[datetime]
+    invoice_number: Optional[str]
+    ref_code: Optional[str]
+    document_date: Optional[datetime]
+    note: Optional[str]
+    created_by: Optional[str]
+    created_at: datetime
+    status: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SupplierGoodsDiscrepancySourceResponse(BaseModel):
+    id: int
+    lot_id: int
+    quantity: int
+    released_quantity: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SupplierGoodsDiscrepancyOffsetResponse(BaseModel):
+    id: int
+    shortage_id: int
+    excess_id: int
+    quantity: int
+    note: Optional[str]
+    created_by: Optional[str]
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SupplierGoodsDiscrepancyHistory(BaseModel):
+    discrepancy: SupplierGoodsDiscrepancyResponse
+    sources: List[SupplierGoodsDiscrepancySourceResponse] = Field(default_factory=list)
+    offsets: List[SupplierGoodsDiscrepancyOffsetResponse] = Field(default_factory=list)
+
+
+class SupplierGoodsDiscrepancySuggestion(SupplierGoodsDiscrepancyResponse):
+    suggested_quantity: int
+
+
+class SupplierGoodsDiscrepancyOffsetConfirm(BaseModel):
+    shortage_id: int
+    excess_id: int
+    quantity: int = Field(gt=0)
     note: Optional[str] = None
     created_by: Optional[str] = None
 

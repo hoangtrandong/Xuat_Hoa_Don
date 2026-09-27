@@ -70,6 +70,25 @@ tác GET cần `read`; các method còn lại cần `write`. Script bootstrap c�
 đủ quyền cho role `admin`, không tạo credential mặc định. Các role khác có thể
 được gán permission qua quản trị cơ sở dữ liệu theo chính sách triển khai.
 
+### Tạo tài khoản cho nhân viên khác
+
+Mỗi lần khởi động, backend tự đồng bộ hai role mặc định qua
+`sync_default_roles()` (gọi trong `lifespan`, không cần chạy tay):
+
+- `admin`: toàn quyền `read`/`write` trên mọi resource, kể cả `users` (quản lý
+  tài khoản).
+- `staff`: chỉ quyền `read` trên các resource nghiệp vụ (không có quyền truy
+  cập `users`), phù hợp làm role mặc định cho nhân viên vận hành.
+
+Sau khi đăng nhập bằng tài khoản `admin`, vào trang **Hệ thống** trên frontend
+(`/system`) để tạo tài khoản mới cho nhân viên khác: nhập tên đăng nhập, email,
+họ tên, mật khẩu tạm (tối thiểu 12 ký tự) và chọn role (`staff` cho nhân viên
+thường, `admin` nếu cần thêm quản trị viên), sau đó gửi thông tin đăng nhập cho
+nhân viên qua kênh an toàn. Có thể khóa/mở khóa tài khoản (is_active) từ cùng
+trang. API tương ứng: `GET/POST /api/v1/users/`, `PATCH /api/v1/users/{id}`,
+`GET /api/v1/users/roles/` — chỉ tài khoản có quyền `users:read`/`users:write`
+(mặc định là `admin`) mới truy cập được.
+
 ### Render Free: tạo admin khi deploy
 
 Render Free không có Shell, nên `render.yaml` chạy

@@ -20,7 +20,7 @@ _JWT_ALGORITHM = "HS256"
 _RESOURCE_CODES = {
     "customers", "stores", "companies", "products", "product-groups",
     "sales-orders", "inventory", "employees", "payments", "debt",
-    "delivery-requests", "sync",
+    "delivery-requests", "sync", "users",
 }
 
 

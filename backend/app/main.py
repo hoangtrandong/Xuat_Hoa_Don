@@ -14,7 +14,7 @@ if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 from app.core.config import settings
 from app.core.auth import require_endpoint_permission
-from app.core.admin_bootstrap import bootstrap_administrator_from_environment
+from app.core.admin_bootstrap import bootstrap_administrator_from_environment, sync_default_roles
 from app.api.v1.router import api_router
 from app.api.v1.endpoints.auth import router as auth_router
 
@@ -35,6 +35,7 @@ def run_database_migrations() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     run_database_migrations()
+    sync_default_roles()
     status = bootstrap_administrator_from_environment()
     logger.info("Initial administrator bootstrap: %s.", status)
     yield

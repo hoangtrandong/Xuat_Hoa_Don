@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from app.api.v1.endpoints import customers, products, sales, inventory, employees, payments, delivery_requests, debt
-from app.api.v1.endpoints import stores, companies, sync, product_groups
+from app.api.v1.endpoints import stores, companies, sync, product_groups, users
 
 api_router = APIRouter()
 api_router.include_router(customers.router)
@@ -15,3 +15,4 @@ api_router.include_router(delivery_requests.router)
 api_router.include_router(debt.router)
 api_router.include_router(sync.router, prefix="/sync", tags=["Sync"])
 api_router.include_router(product_groups.router)
+api_router.include_router(users.router)

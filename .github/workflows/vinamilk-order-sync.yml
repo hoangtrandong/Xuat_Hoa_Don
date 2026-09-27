@@ -51,7 +51,10 @@ jobs:
             current_revision=$(python -c "import os; from sqlalchemy import create_engine, text; engine = create_engine(os.environ['DATABASE_URL']); connection = engine.connect(); current = connection.execute(text('SELECT version_num FROM alembic_version LIMIT 1')).scalar(); connection.close(); print(current or '')")
             current_status=$?
             set -e
-            if [ "$current_status" -eq 0 ] && [ -n "$current_revision" ] && ! python -m alembic show "$current_revision" >/dev/null 2>&1; then
+            if echo "$output" | grep -Eiq "can't locate revision|no such revision|unknown revision" \
+              && [ "$current_status" -eq 0 ] \
+              && [ -n "$current_revision" ] \
+              && ! python -m alembic show "$current_revision" >/dev/null 2>&1; then
               echo "Skipping migrations because database is already on unknown revision $current_revision."
             else
               exit "$status"

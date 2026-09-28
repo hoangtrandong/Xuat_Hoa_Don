@@ -81,7 +81,7 @@ export default function SupplierDiscrepanciesPage() {
 
   async function openSuggestions(row: Discrepancy) {
     setSelected(row); setSuggestions([]); setHistory(null); setError("");
-    const historyResponse = await fetch(`${API_URL}/inventory/supplier-discrepancies/${row.id}/history`);
+    const historyResponse = await apiFetch(`${API_URL}/inventory/supplier-discrepancies/${row.id}/history`);
     if (!historyResponse.ok) { setError("Không thể tải lịch sử đối soát."); return; }
     setHistory(await historyResponse.json() as DiscrepancyHistory);
     if (row.status === "RESOLVED") return;
@@ -134,7 +134,55 @@ export default function SupplierDiscrepanciesPage() {
       <input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} className="border rounded-lg px-3 py-2 text-sm" aria-label="Từ ngày" />
       <input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} className="border rounded-lg px-3 py-2 text-sm" aria-label="Đến ngày" />
     </div>
-    <div className="overflow-x-auto rounded-xl border bg-white"><table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="px-4 py-3 text-left">Ngày</th><th className="px-4 py-3 text-left">Hóa đơn</th><th className="px-4 py-3 text-left">NCC / SKU</th><th className="px-4 py-3 text-left">Loại</th><th className="px-4 py-3 text-right">SL chênh lệch</th><th className="px-4 py-3 text-right">Đã bù</th><th className="px-4 py-3 text-right">Còn nợ</th><th className="px-4 py-3">Trạng thái</th><th /></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.id} className="border-t"><td className="px-4 py-3">{formatDateTime(row.document_date ?? row.created_at)}</td><td className="px-4 py-3">{row.invoice_number ?? "—"}</td><td className="px-4 py-3">{row.supplier ?? productMap.get(row.product_id)?.supplier ?? "—"}<div className="font-medium">{row.product_sku ?? productMap.get(row.product_id)?.sku ?? `#${row.product_id}`}</div><div className="text-xs text-gray-500">{row.product_name ?? productMap.get(row.product_id)?.name ?? ""}</div><div className="text-xs text-gray-400">{row.warehouse_name ?? warehouseMap.get(row.warehouse_id)?.name}</div></td><td className="px-4 py-3"><Badge variant={row.type === "SHORTAGE" ? "danger" : "warning"}>{row.type === "SHORTAGE" ? "Thiếu" : "Thừa"}</Badge></td><td className="px-4 py-3 text-right">{formatNumber(row.quantity)}</td><td className="px-4 py-3 text-right">{formatNumber(row.quantity - row.remaining_quantity)}</td><td className="px-4 py-3 text-right font-semibold">{formatNumber(row.remaining_quantity)}</td><td className="px-4 py-3"><Badge variant={row.status === "RESOLVED" ? "success" : row.status === "PARTIAL" ? "warning" : "default"}>{statusLabels[row.status]}</Badge></td><td className="px-4 py-3 text-right flex gap-2 justify-end"><button onClick={() => void openSuggestions(row)} className="text-sky-600 hover:underline text-xs">Lịch sử / bù trừ</button></td></tr>)}</tbody></table>{visibleRows.length === 0 && <p className="p-8 text-center text-gray-500">Chưa có khoản nợ NCC.</p>}</div>
+    <div className="overflow-x-auto rounded-xl border bg-white">
+      <table className="w-full text-sm">
+        <thead className="bg-gray-50 text-gray-500">
+          <tr>
+            <th className="px-4 py-3 text-left">Ngày</th>
+            <th className="px-4 py-3 text-left">Hóa đơn</th>
+            <th className="px-4 py-3 text-left">Nhà cung cấp</th>
+            <th className="px-4 py-3 text-left">Mã SP</th>
+            <th className="px-4 py-3 text-left">Tên sản phẩm</th>
+            <th className="px-4 py-3 text-left">Kho</th>
+            <th className="px-4 py-3 text-left">Loại</th>
+            <th className="px-4 py-3 text-right">SL chênh lệch</th>
+            <th className="px-4 py-3 text-right">Đã bù</th>
+            <th className="px-4 py-3 text-right">Còn nợ</th>
+            <th className="px-4 py-3">Trạng thái</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {visibleRows.map((row) => (
+            <tr key={row.id} className="border-t hover:bg-gray-50">
+              <td className="px-4 py-3 whitespace-nowrap">{formatDateTime(row.document_date ?? row.created_at)}</td>
+              <td className="px-4 py-3 whitespace-nowrap">{row.invoice_number ?? "—"}</td>
+              <td className="px-4 py-3">{row.supplier ?? productMap.get(row.product_id)?.supplier ?? "—"}</td>
+              <td className="px-4 py-3 font-medium whitespace-nowrap">{row.product_sku ?? productMap.get(row.product_id)?.sku ?? `#${row.product_id}`}</td>
+              <td className="px-4 py-3">{row.product_name ?? productMap.get(row.product_id)?.name ?? "—"}</td>
+              <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{row.warehouse_name ?? warehouseMap.get(row.warehouse_id)?.name ?? "—"}</td>
+              <td className="px-4 py-3">
+                <Badge variant={row.type === "SHORTAGE" ? "danger" : "warning"}>
+                  {row.type === "SHORTAGE" ? "Thiếu" : "Thừa"}
+                </Badge>
+              </td>
+              <td className="px-4 py-3 text-right">{formatNumber(row.quantity)}</td>
+              <td className="px-4 py-3 text-right">{formatNumber(row.quantity - row.remaining_quantity)}</td>
+              <td className="px-4 py-3 text-right font-semibold">{formatNumber(row.remaining_quantity)}</td>
+              <td className="px-4 py-3">
+                <Badge variant={row.status === "RESOLVED" ? "success" : row.status === "PARTIAL" ? "warning" : "default"}>
+                  {statusLabels[row.status]}
+                </Badge>
+              </td>
+              <td className="px-4 py-3 text-right">
+                <button onClick={() => void openSuggestions(row)} className="text-sky-600 hover:underline text-xs whitespace-nowrap">Lịch sử / bù trừ</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {visibleRows.length === 0 && <p className="p-8 text-center text-gray-500">Chưa có khoản nợ NCC.</p>}
+    </div>
     {selected && <div className="rounded-xl border border-sky-100 bg-sky-50 p-4 space-y-4">
       <div className="flex items-center justify-between"><div><h2 className="font-semibold">Lịch sử đối soát</h2><p className="text-xs text-gray-600 mt-1">Hóa đơn {selected.invoice_number ?? "—"} · {selected.type === "SHORTAGE" ? "Thiếu" : "Thừa"}</p></div><button onClick={() => setSelected(null)} className="text-sm text-gray-500">Đóng</button></div>
       {history && <>

@@ -25,6 +25,7 @@ export interface StockLevel {
   onHand: number;
   reserved: number;
   available: number;
+  lockedQuantity?: number;
   reorderPoint: number;
   unitValue: number;
   totalValue: number;

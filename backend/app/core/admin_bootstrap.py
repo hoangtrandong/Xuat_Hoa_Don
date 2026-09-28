@@ -111,6 +111,7 @@ def create_administrator(
         full_name=full_name,
         hashed_password=hash_password(password),
         is_active=True,
+        must_change_password=False,  # Admin bootstrap biết mật khẩu rõ ràng, không cần buộc đổi
         roles=[role],
     )
     db.add(user)

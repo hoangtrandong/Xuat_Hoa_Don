@@ -22,6 +22,7 @@ interface ApiStockLevel {
   on_hand: number;
   reserved: number;
   available: number;
+  locked_quantity?: number;
   reorder_level: number;
   lot_count?: number;
   earliest_expiry?: string | null;
@@ -96,6 +97,7 @@ function toStockLevel(item: ApiStockLevel): StockLevel {
     onHand: item.on_hand,
     reserved: item.reserved,
     available: item.available,
+    lockedQuantity: item.locked_quantity,
     reorderPoint: item.reorder_level,
     unitValue: 0,
     totalValue: 0,
@@ -227,10 +229,19 @@ export default function WarehouseInventoryPage() {
     { key: "unit", title: "ĐVT" },
     {
       key: "onHand",
-      title: "Tồn kho",
+      title: "Tồn thực tế",
       sortable: true,
       align: "right",
-      render: (val) => <span className="font-semibold text-gray-900">{formatNumber(val as number)}</span>,
+      render: (val, row) => (
+        <div className="flex flex-col items-end">
+          <span className="font-semibold text-gray-900">{formatNumber(val as number)}</span>
+          {row.lockedQuantity ? (
+             <span title="Hàng bị khóa do thừa chứng từ chờ xử lý bù trừ" className="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded flex items-center gap-1 mt-1 cursor-help whitespace-nowrap">
+               🔒 Khóa {formatNumber(row.lockedQuantity)}
+             </span>
+          ) : null}
+        </div>
+      ),
     },
     {
       key: "locations",

@@ -287,6 +287,27 @@ export default function DataTable<T>({
           >
             <ChevronsRight size={16} />
           </button>
+          <form
+            className="ml-2 flex items-center gap-1 text-xs text-gray-500"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = Number(new FormData(event.currentTarget).get("page"));
+              if (Number.isFinite(value) && value >= 1) setPage(Math.min(totalPages, Math.floor(value)));
+              event.currentTarget.reset();
+            }}
+          >
+            <span>Đến trang</span>
+            <input
+              name="page"
+              type="number"
+              min={1}
+              max={totalPages}
+              placeholder={`${page}/${totalPages}`}
+              aria-label="Nhập số trang cần đến"
+              className="h-7 w-16 rounded border border-gray-200 px-1.5 text-xs text-gray-700"
+            />
+            <button type="submit" className="h-7 rounded border border-gray-200 px-2 font-medium text-gray-600 hover:bg-gray-100">Đi</button>
+          </form>
         </div>
       </div>
     </div>

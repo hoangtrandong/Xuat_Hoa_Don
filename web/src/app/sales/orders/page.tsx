@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 /* eslint-disable react-hooks/set-state-in-effect */
 // src/app/sales/orders/page.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -321,7 +321,7 @@ export default function SalesOrdersPage() {
   const remoteStatuses = Array.from(
     new Set(
       remoteOrders
-        .map((order) => displayRemoteValue(order["Trạng thái"]))
+        .map((order) => displayRemoteValue(order["Trạng thái xử lý"]))
         .filter((status) => status.length > 0)
     )
   );
@@ -338,7 +338,7 @@ export default function SalesOrdersPage() {
     if (!matches("Mã KH", customerFilter) && !matches("Tên KH", customerFilter)) return false;
     if (!matches("Mã NVBH", staffFilter) && !matches("Tên NVBH", staffFilter)) return false;
     if (!matches("Mã sản phẩm", productFilter) && !matches("Sản phẩm", productFilter)) return false;
-    if (statusFilter !== "Tất cả" && displayRemoteValue(order["Trạng thái"]) !== statusFilter) return false;
+    if (statusFilter !== "Tất cả" && displayRemoteValue(order["Trạng thái xử lý"]) !== statusFilter) return false;
     return true;
   });
 

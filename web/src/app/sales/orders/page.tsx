@@ -496,8 +496,7 @@ export default function SalesOrdersPage() {
         <DataTable
           data={filteredRemoteOrders}
           columns={remoteColumns}
-          searchKeys={remoteColumns.map((column) => column.key)}
-          searchPlaceholder="Tìm đơn hàng, khách hàng, sản phẩm..."
+          searchable={false}
           pageSize={pageSize}
           emptyMessage="Không có đơn hàng trong khoảng ngày đã chọn"
           getRowKey={orderRowKey}

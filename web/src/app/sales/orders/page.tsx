@@ -149,6 +149,7 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
   normalized["_allocation_id"] = typeof order["_allocation_id"] === "number" ? order["_allocation_id"] : null;
   normalized["_local_id"] = order["_local_id"] ?? null;
   normalized["_note"] = order["_note"] ?? null;
+  normalized["_replaced_by_order_numbers"] = order["_replaced_by_order_numbers"] ?? null;
   normalized["_uploaded_by"] = order["_uploaded_by"] ?? null;
   normalized["_uploaded_at"] = order["_uploaded_at"] ?? null;
   normalized["_warehouse_updated"] = order["_warehouse_updated"] ?? null;
@@ -410,7 +411,13 @@ export default function SalesOrdersPage() {
   const filteredRemoteOrders = remoteOrders.filter((order) => {
     const matches = (key: string, query: string) =>
       !query || displayRemoteValue(order[key]).toLocaleLowerCase("vi").includes(query.trim().toLocaleLowerCase("vi"));
-    if (!matches("Số đơn hàng", orderFilter)) return false;
+    // Tìm đơn cũ thì vẫn thấy đơn thay thế nó (và ngược lại).
+    const orderQuery = orderFilter.trim().toLocaleLowerCase("vi");
+    const relatedOrders = [
+      order["Thay thế cho đơn"],
+      ...(Array.isArray(order["_replaced_by_order_numbers"]) ? order["_replaced_by_order_numbers"] : []),
+    ].map((value) => displayRemoteValue(value).toLocaleLowerCase("vi"));
+    if (!matches("Số đơn hàng", orderFilter) && !(orderQuery && relatedOrders.some((value) => value.includes(orderQuery)))) return false;
     if (!matches("Mã KH", customerFilter) && !matches("Tên KH", customerFilter)) return false;
     if (!matches("Mã NVBH", staffFilter) && !matches("Tên NVBH", staffFilter)) return false;
     if (!matches("Mã sản phẩm", productFilter) && !matches("Sản phẩm", productFilter)) return false;

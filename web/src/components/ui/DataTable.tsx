@@ -1,7 +1,7 @@
 "use client";
 // src/components/ui/DataTable.tsx
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Search, ChevronUp, ChevronDown } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Search, ChevronUp, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface Column<T> {
@@ -241,6 +241,15 @@ export default function DataTable<T>({
         </span>
         <div className="flex items-center gap-1">
           <button
+            onClick={() => setPage(1)}
+            disabled={page === 1}
+            title="Về trang đầu"
+            aria-label="Về trang đầu"
+            className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ChevronsLeft size={16} />
+          </button>
+          <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page === 1}
             className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -268,6 +277,15 @@ export default function DataTable<T>({
             className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ChevronRight size={16} />
+          </button>
+          <button
+            onClick={() => setPage(totalPages)}
+            disabled={page === totalPages}
+            title="Về trang cuối"
+            aria-label="Về trang cuối"
+            className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ChevronsRight size={16} />
           </button>
         </div>
       </div>

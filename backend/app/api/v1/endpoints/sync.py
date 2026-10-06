@@ -15,7 +15,7 @@ from zipfile import BadZipFile
 from pydantic import BaseModel, Field
 from playwright.async_api import Browser, Error as PlaywrightError, async_playwright
 from dotenv import dotenv_values
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
@@ -291,6 +291,15 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
         snapshot.synced_at = datetime.utcnow()
         snapshot.raw_payload = row
         saved += 1
+    # Dòng tiêu đề đơn (không có sản phẩm) từ các lần đồng bộ cũ là dữ liệu thừa khi đã có dòng chi tiết.
+    detailed_orders = sorted({number for _, _, number, product in row_data_list if number and product})
+    for i in range(0, len(detailed_orders), chunk_size):
+        db.execute(
+            delete(VinamilkOrderSnapshot).where(
+                VinamilkOrderSnapshot.order_number.in_(detailed_orders[i:i + chunk_size]),
+                VinamilkOrderSnapshot.product_code.is_(None),
+            )
+        )
     return saved
 
 def read_cookie() -> str:

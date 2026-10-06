@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.customer import Company
-from app.models.vinamilk import VinamilkOrderSnapshot, VinamilkSyncRun
+from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 from app.services.vinamilk_dates import iter_inclusive_dates
 from scripts.vinamilk_login import login_and_get_cookie
@@ -75,6 +75,95 @@ class AllocationBulkDeleteRequest(BaseModel):
     delete_all: bool = False
     from_date: date | None = None
     to_date: date | None = None
+
+
+class OrderReplacementUpdateRequest(BaseModel):
+    replaced_order_number: str | None = Field(default=None, max_length=120)
+
+
+def _order_numbers(payload: Any) -> set[str]:
+    numbers = (
+        _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
+        for row in _row_list(payload)
+    )
+    return {number for number in numbers if number}
+
+
+def _apply_scoped_states(
+    db: Session,
+    day: date,
+    warehouse_orders: set[str] | None,
+    returned_orders: set[str] | None,
+) -> None:
+    """Đặt true/false theo kết quả truy vấn đã lọc; truy vấn lỗi (None) thì giữ nguyên giá trị cũ."""
+    if warehouse_orders is None and returned_orders is None:
+        return
+    snapshots = db.scalars(select(VinamilkOrderSnapshot).where(
+        VinamilkOrderSnapshot.synced_from == day,
+        VinamilkOrderSnapshot.synced_to == day,
+        VinamilkOrderSnapshot.order_number.is_not(None),
+    )).all()
+    for snapshot in snapshots:
+        if warehouse_orders is not None:
+            snapshot.warehouse_updated = snapshot.order_number in warehouse_orders
+        if returned_orders is not None:
+            snapshot.returned = snapshot.order_number in returned_orders
+
+
+def _update_order_replacement(
+    db: Session,
+    new_order_number: str,
+    replaced_order_number: str | None,
+) -> None:
+    new_order_number = new_order_number.strip()
+    replaced_order_number = replaced_order_number.strip() if replaced_order_number is not None else None
+    replaced_order_number = replaced_order_number or None
+    if not new_order_number:
+        raise HTTPException(status_code=400, detail="Số đơn hàng mới không hợp lệ.")
+    if replaced_order_number == new_order_number:
+        raise HTTPException(status_code=400, detail="Một đơn hàng không thể thay thế chính nó.")
+
+    order_exists = db.scalar(
+        select(VinamilkOrderSnapshot.id).where(VinamilkOrderSnapshot.order_number == new_order_number).limit(1)
+    )
+    if order_exists is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy đơn hàng mới trong dữ liệu đã đồng bộ.")
+
+    current = db.get(VinamilkOrderReplacement, new_order_number)
+    if replaced_order_number is None:
+        if current is not None:
+            db.delete(current)
+        return
+
+    replaced_exists = db.scalar(
+        select(VinamilkOrderSnapshot.id).where(VinamilkOrderSnapshot.order_number == replaced_order_number).limit(1)
+    )
+    if replaced_exists is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy đơn hàng được thay thế trong dữ liệu đã đồng bộ.")
+
+    relationships = {
+        order: replaced
+        for order, replaced in db.execute(
+            select(VinamilkOrderReplacement.new_order_number, VinamilkOrderReplacement.replaced_order_number)
+        )
+    }
+    relationships[new_order_number] = replaced_order_number
+    visited: set[str] = set()
+    cursor = replaced_order_number
+    while cursor in relationships:
+        if cursor == new_order_number or cursor in visited:
+            raise HTTPException(status_code=400, detail="Liên kết này tạo thành vòng thay thế đơn hàng.")
+        visited.add(cursor)
+        cursor = relationships[cursor]
+
+    if current is None:
+        db.add(VinamilkOrderReplacement(
+            new_order_number=new_order_number,
+            replaced_order_number=replaced_order_number,
+        ))
+    else:
+        current.replaced_order_number = replaced_order_number
+        current.updated_at = datetime.utcnow()
 
 
 def _date_value(value: str) -> date:
@@ -255,6 +344,13 @@ async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str,
         "reportCode": "1790085269000",
         "reportFormId": ""
     }
+    # DMS Vinamilk xác định trạng thái bằng bộ lọc truy vấn, không có cột trạng thái trong file.
+    scope = form.get("scope", "all")
+    if scope == "warehouse":
+        del export_form["saleOrderType"]
+        export_form.update({"approved": "1", "approvedStep": "3"})
+    elif scope == "returned":
+        export_form["saleOrderType"] = "0"
         
     cookies: list[dict[str, str]] = [
         {"name": part.split("=", 1)[0].strip(), "value": part.split("=", 1)[1].strip(),
@@ -367,6 +463,16 @@ async def trigger_sync(request: VinamilkSearchRequest, db: Session = Depends(get
             try:
                 session_cookie, payload = await _fetch_vinamilk_payload(session_cookie, day_form)
                 row_count = _save_snapshot(db, payload, day, day)
+                scoped: dict[str, set[str] | None] = {}
+                for scope in ("warehouse", "returned"):
+                    try:
+                        session_cookie, scoped_payload = await _fetch_vinamilk_payload(
+                            session_cookie, {**day_form, "scope": scope}
+                        )
+                        scoped[scope] = _order_numbers(scoped_payload)
+                    except (RuntimeError, ValueError):
+                        scoped[scope] = None
+                _apply_scoped_states(db, day, scoped["warehouse"], scoped["returned"])
                 db.commit()
                 saved_total += row_count
                 day_results.append({"date": day.isoformat(), "status": "SUCCESS", "row_count": row_count})
@@ -459,8 +565,30 @@ def list_local_vinamilk_orders(
         for allocation in allocations:
             allocations_by_snapshot[allocation.snapshot_id].append(allocation)
     output_rows: list[dict[str, Any]] = []
+    order_numbers = {row.order_number for row in rows if row.order_number}
+    replacements = db.scalars(
+        select(VinamilkOrderReplacement).where(
+            or_(
+                VinamilkOrderReplacement.new_order_number.in_(order_numbers),
+                VinamilkOrderReplacement.replaced_order_number.in_(order_numbers),
+            )
+        )
+    ).all() if order_numbers else []
+    replaced_by: dict[str, list[str]] = defaultdict(list)
+    replaced_order_for = {item.new_order_number: item.replaced_order_number for item in replacements}
+    for replacement in replacements:
+        replaced_by[replacement.replaced_order_number].append(replacement.new_order_number)
     for row in rows:
-        base = {**row.raw_payload, "_local_id": row.id, "_synced_at": _iso_utc(row.synced_at), "_allocation_id": None}
+        base = {
+            **row.raw_payload,
+            "_local_id": row.id,
+            "_synced_at": _iso_utc(row.synced_at),
+            "_allocation_id": None,
+            "_warehouse_updated": row.warehouse_updated,
+            "_returned": row.returned,
+            "_replaced_order_number": replaced_order_for.get(row.order_number or ""),
+            "_replaced_by_order_numbers": replaced_by.get(row.order_number or "", []),
+        }
         if source == "sync":
             output_rows.append(base)
             continue
@@ -492,6 +620,33 @@ def list_local_vinamilk_orders(
         "limit": limit,
         "source": source,
         "last_synced_at": _iso_utc(latest.finished_at) if latest else None,
+    }
+
+
+@router.get("/vinamilk-orders/order-options")
+def list_vinamilk_order_options(
+    search: str = Query(default="", max_length=120),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    query = select(VinamilkOrderSnapshot.order_number).where(VinamilkOrderSnapshot.order_number.is_not(None))
+    if search.strip():
+        query = query.where(VinamilkOrderSnapshot.order_number.ilike(f"%{search.strip()}%"))
+    order_numbers = db.scalars(query.distinct().order_by(VinamilkOrderSnapshot.order_number.desc()).limit(limit)).all()
+    return {"order_numbers": order_numbers}
+
+
+@router.patch("/vinamilk-orders/{new_order_number}/replacement")
+def update_vinamilk_order_replacement(
+    new_order_number: str,
+    payload: OrderReplacementUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    _update_order_replacement(db, new_order_number, payload.replaced_order_number)
+    db.commit()
+    return {
+        "new_order_number": new_order_number,
+        "replaced_order_number": payload.replaced_order_number.strip() if payload.replaced_order_number else None,
     }
 
 
@@ -698,4 +853,3 @@ def update_order_allocation(
     except (ValueError, TypeError) as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-

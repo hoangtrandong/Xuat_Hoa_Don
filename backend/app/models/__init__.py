@@ -13,7 +13,7 @@ from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
 from app.models.employee import Employee, SalesTerritory
 from app.models.finance import Payment, Receivable
-from app.models.vinamilk import VinamilkOrderSnapshot, VinamilkSyncRun
+from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 
 __all__ = [
@@ -28,6 +28,6 @@ __all__ = [
     "Promotion", "PromotionRule", "PromotionItem",
     "Employee", "SalesTerritory",
     "Payment", "Receivable",
-    "VinamilkOrderSnapshot", "VinamilkSyncRun",
+    "VinamilkOrderSnapshot", "VinamilkSyncRun", "VinamilkOrderReplacement",
     "VinamilkOrderAllocation",
 ]

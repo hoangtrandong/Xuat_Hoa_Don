@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -27,6 +27,8 @@ class VinamilkOrderSnapshot(Base):
     product_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    warehouse_updated: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    returned: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     order_created_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     synced_from: Mapped[date] = mapped_column(Date)
@@ -46,3 +48,11 @@ class VinamilkSyncRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class VinamilkOrderReplacement(Base):
+    __tablename__ = "vinamilk_order_replacements"
+
+    new_order_number: Mapped[str] = mapped_column(String(120), primary_key=True)
+    replaced_order_number: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

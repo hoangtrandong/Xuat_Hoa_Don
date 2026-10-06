@@ -67,6 +67,12 @@ type AllocationEditForm = {
   note: string;
 };
 
+type ReplacementEditForm = {
+  newOrderNumber: string;
+  replacedOrderNumber: string;
+  search: string;
+};
+
 /** Khóa dòng ổn định cho bảng: dòng có cân đối dùng id allocation, dòng chưa cân đối dùng id snapshot. */
 function allocationRowKey(order: RemoteOrder, index: number): string {
   const allocationId = order["_allocation_id"];
@@ -119,6 +125,8 @@ const remoteColumnDefinitions: {
   { title: "Mã NPP nội bộ", keys: ["_distributor_sku"], width: "9rem" },
   { title: "Trạng thái cân đối", keys: ["_allocation_status"], width: "9.5rem" },
   { title: "Số lượng phân bổ", keys: ["_allocated_quantity"], width: "8.5rem", align: "right" },
+  { title: "Trạng thái xử lý", keys: [], width: "14rem" },
+  { title: "Thay thế cho đơn", keys: ["_replaced_order_number"], width: "12rem" },
 ];
 
 type SyncDayPayload = {
@@ -136,13 +144,28 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
     })
   );
   normalized["Trạng thái"] = order.orderStatus ?? order.status ?? null;
+  normalized["Thay thế cho đơn"] = order["_replaced_order_number"] ?? null;
   // Giữ lại metadata kỹ thuật để phục vụ chỉnh sửa / xóa dòng cân đối.
   normalized["_allocation_id"] = typeof order["_allocation_id"] === "number" ? order["_allocation_id"] : null;
   normalized["_local_id"] = order["_local_id"] ?? null;
   normalized["_note"] = order["_note"] ?? null;
   normalized["_uploaded_by"] = order["_uploaded_by"] ?? null;
   normalized["_uploaded_at"] = order["_uploaded_at"] ?? null;
+  normalized["_warehouse_updated"] = order["_warehouse_updated"] ?? null;
+  normalized["_returned"] = order["_returned"] ?? null;
   return normalized;
+}
+
+/** Mỗi trạng thái được theo dõi là một dòng độc lập; chỉ tách ở chế độ dữ liệu đồng bộ. */
+function expandProcessingStates(order: RemoteOrder): RemoteOrder[] {
+  const states: string[] = [];
+  if (order["_warehouse_updated"] === true) states.push("Đã cập nhật kho");
+  if (order["_returned"] === true) states.push("Đã trả");
+  if (states.length === 0) {
+    const unknown = order["_warehouse_updated"] == null && order["_returned"] == null;
+    states.push(unknown ? "Chưa xác định" : "Chưa cập nhật kho / chưa trả");
+  }
+  return states.map((state, index) => ({ ...order, "Trạng thái xử lý": state, _state_copy: index > 0 }));
 }
 
 function hasRemoteValue(value: unknown) {
@@ -204,6 +227,10 @@ export default function SalesOrdersPage() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [editingAllocation, setEditingAllocation] = useState<AllocationEditForm | null>(null);
   const [isSavingAllocation, setIsSavingAllocation] = useState(false);
+  const [editingReplacement, setEditingReplacement] = useState<ReplacementEditForm | null>(null);
+  const [replacementOptions, setReplacementOptions] = useState<string[]>([]);
+  const [isSavingReplacement, setIsSavingReplacement] = useState(false);
+  const replacementSearchVersion = useRef(0);
   const [companies, setCompanies] = useState<CompanyOption[]>([]);
 
   useEffect(() => {
@@ -254,7 +281,8 @@ export default function SalesOrdersPage() {
       if (snapshotTotal != null && skip >= snapshotTotal) break;
       if (snapshotCount < LOCAL_PAGE_SIZE) break;
     }
-    setRemoteOrders(allRows.map(normalizeRemoteOrder));
+    const normalizedRows = allRows.map(normalizeRemoteOrder);
+    setRemoteOrders(source === "sync" ? normalizedRows.flatMap(expandProcessingStates) : normalizedRows);
     setLastSyncedAt(lastSynced);
   }, [fromDate, source, toDate]);
 
@@ -342,15 +370,32 @@ export default function SalesOrdersPage() {
   }
 
   const remoteColumns = remoteColumnDefinitions
-    .filter(({ title }) => remoteOrders.some((order) => hasRemoteValue(order[title])))
+    .filter(({ title }) => (
+      source === "sync" && ["Trạng thái xử lý", "Thay thế cho đơn"].includes(title)
+    ) || remoteOrders.some((order) => hasRemoteValue(order[title])))
     .map(({ title, width, align }): Column<RemoteOrder> => ({
       key: title,
       title,
       sortable: true,
       width,
       align,
-      render: (value) => {
+      render: (value, order) => {
         const text = formatRemoteColumnValue(title, value);
+        if (title === "Thay thế cho đơn" && source === "sync") {
+          return (
+            <button
+              type="button"
+              onClick={() => openReplacementEditor(order)}
+              className="text-left font-medium text-sky-700 hover:text-sky-900 hover:underline"
+            >
+              {text || "Gán đơn thay thế"}
+            </button>
+          );
+        }
+        if (title === "Trạng thái xử lý") {
+          const tone = text.startsWith("Đã") ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-600";
+          return <span className={`rounded-full px-2 py-1 text-xs font-medium ${tone}`}>{text}</span>;
+        }
         return <span className="block truncate" title={text || undefined}>{text}</span>;
       },
     }));
@@ -401,6 +446,69 @@ export default function SalesOrdersPage() {
   function clearSelection() {
     setSelectedRowKeys(new Set());
     setSelectAllRange(false);
+  }
+
+  async function loadReplacementOptions(search: string) {
+    const requestVersion = ++replacementSearchVersion.current;
+    try {
+      const response = await apiFetch(
+        `${API_URL}/sync/vinamilk-orders/order-options?search=${encodeURIComponent(search)}&limit=50`
+      );
+      const payload = await response.json() as { order_numbers?: unknown; detail?: string };
+      if (!response.ok) throw new Error(payload.detail ?? "Không thể tải danh sách đơn hàng.");
+      if (requestVersion !== replacementSearchVersion.current) return;
+      setReplacementOptions(
+        Array.isArray(payload.order_numbers)
+          ? payload.order_numbers.filter((number): number is string => typeof number === "string")
+          : []
+      );
+    } catch (error) {
+      if (requestVersion === replacementSearchVersion.current) {
+        setRemoteError(error instanceof Error ? error.message : "Không thể tải danh sách đơn hàng.");
+      }
+    }
+  }
+
+  function openReplacementEditor(order: RemoteOrder) {
+    const newOrderNumber = displayRemoteValue(order["Số đơn hàng"]);
+    setRemoteError("");
+    setEditingReplacement({
+      newOrderNumber,
+      replacedOrderNumber: displayRemoteValue(order["Thay thế cho đơn"]),
+      search: "",
+    });
+    void loadReplacementOptions("");
+  }
+
+  async function saveOrderReplacement() {
+    if (!editingReplacement) return;
+    setIsSavingReplacement(true);
+    setRemoteError("");
+    try {
+      const response = await apiFetch(
+        `${API_URL}/sync/vinamilk-orders/${encodeURIComponent(editingReplacement.newOrderNumber)}/replacement`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ replaced_order_number: editingReplacement.replacedOrderNumber || null }),
+        }
+      );
+      const result = await response.json() as { detail?: string };
+      if (!response.ok) throw new Error(result.detail ?? "Không thể lưu liên kết đơn thay thế.");
+      setEditingReplacement(null);
+      setToast(editingReplacement.replacedOrderNumber
+        ? `Đã lưu ${editingReplacement.newOrderNumber} thay thế cho ${editingReplacement.replacedOrderNumber}.`
+        : `Đã xóa liên kết thay thế của đơn ${editingReplacement.newOrderNumber}.`);
+      try {
+        await loadLocalOrders();
+      } catch (error) {
+        setRemoteError(`Đã lưu liên kết nhưng không thể tải lại dữ liệu: ${error instanceof Error ? error.message : "Lỗi không xác định."}`);
+      }
+    } catch (error) {
+      setRemoteError(error instanceof Error ? error.message : "Không thể lưu liên kết đơn thay thế.");
+    } finally {
+      setIsSavingReplacement(false);
+    }
   }
 
   async function deleteSelectedAllocations() {
@@ -495,9 +603,10 @@ export default function SalesOrdersPage() {
     XLSX.writeFile(workbook, `don-hang-vinamilk-${fromDate}-den-${toDate}.xlsx`);
   }
 
-  const totalValue = filteredRemoteOrders.reduce((sum, order) => sum + numericValue(order["Giá trị"]), 0);
-  const totalDiscount = filteredRemoteOrders.reduce((sum, order) => sum + numericValue(order["Số tiền CK"]), 0);
-  const confirmedDeliveries = filteredRemoteOrders.filter((order) => hasRemoteValue(order["Thời gian xác nhận giao hàng"])).length;
+  const primaryOrders = filteredRemoteOrders.filter((order) => order["_state_copy"] !== true);
+  const totalValue = primaryOrders.reduce((sum, order) => sum + numericValue(order["Giá trị"]), 0);
+  const totalDiscount = primaryOrders.reduce((sum, order) => sum + numericValue(order["Số tiền CK"]), 0);
+  const confirmedDeliveries = primaryOrders.filter((order) => hasRemoteValue(order["Thời gian xác nhận giao hàng"])).length;
 
   return (
     <div className="space-y-6">
@@ -519,7 +628,7 @@ export default function SalesOrdersPage() {
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Tổng bản ghi" value={remoteOrders.length} icon={<ShoppingCart size={20} />} color="bg-sky-50 text-sky-600" />
+        <StatCard label="Tổng bản ghi" value={remoteOrders.filter((order) => order["_state_copy"] !== true).length} icon={<ShoppingCart size={20} />} color="bg-sky-50 text-sky-600" />
         <StatCard label="Tổng giá trị" value={formatVND(totalValue)} icon={<CircleCheck size={20} />} color="bg-emerald-50 text-emerald-600" />
         <StatCard label="Đã xác nhận giao" value={confirmedDeliveries} icon={<Clock3 size={20} />} color="bg-amber-50 text-amber-600" />
         <StatCard label="Tổng chiết khấu" value={formatVND(totalDiscount)} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />
@@ -682,6 +791,66 @@ export default function SalesOrdersPage() {
               </button>
               <button onClick={saveAllocationEdit} disabled={isSavingAllocation} className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">
                 <Save size={16} />{isSavingAllocation ? "Đang lưu..." : "Lưu thay đổi"}
+              </button>
+            </div>
+          </div>
+        )}
+      </Drawer>
+
+      <Drawer
+        open={editingReplacement !== null}
+        onClose={() => setEditingReplacement(null)}
+        title="Liên kết đơn hàng thay thế"
+        subtitle={editingReplacement ? `Đơn mới: ${editingReplacement.newOrderNumber}` : undefined}
+      >
+        {editingReplacement && (
+          <div className="space-y-4 p-5">
+            <p className="text-sm text-gray-600">
+              Chọn đơn cũ mà đơn mới này thay thế. Liên kết chỉ phục vụ truy vết, không tự cập nhật tồn kho, thanh toán hoặc trạng thái đơn.
+            </p>
+            <label className="block text-sm text-gray-600">
+              Tìm mã đơn cũ
+              <input
+                value={editingReplacement.search}
+                onChange={(event) => {
+                  const search = event.target.value;
+                  setEditingReplacement({ ...editingReplacement, search });
+                  void loadReplacementOptions(search);
+                }}
+                placeholder="Nhập một phần mã đơn hàng"
+                className="mt-1 block w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="block text-sm text-gray-600">
+              Thay thế cho đơn
+              <select
+                value={editingReplacement.replacedOrderNumber}
+                onChange={(event) => setEditingReplacement({ ...editingReplacement, replacedOrderNumber: event.target.value })}
+                className="mt-1 block w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+              >
+                <option value="">-- Không liên kết --</option>
+                {editingReplacement.replacedOrderNumber && !replacementOptions.includes(editingReplacement.replacedOrderNumber) && (
+                  <option value={editingReplacement.replacedOrderNumber}>{editingReplacement.replacedOrderNumber}</option>
+                )}
+                {replacementOptions.map((orderNumber) => (
+                  <option key={orderNumber} value={orderNumber}>{orderNumber}</option>
+                ))}
+              </select>
+            </label>
+            <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-4">
+              <button
+                onClick={() => setEditingReplacement(null)}
+                disabled={isSavingReplacement}
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={saveOrderReplacement}
+                disabled={isSavingReplacement}
+                className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Save size={16} />{isSavingReplacement ? "Đang lưu..." : "Lưu liên kết"}
               </button>
             </div>
           </div>

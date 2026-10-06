@@ -398,6 +398,9 @@ async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str,
                 except Exception:
                     # Phiên hết hạn: DMS trả trang đăng nhập/rỗng thay vì JSON.
                     return {"status": 401, "body": ""}
+                if data and data.get("hasData") is False and not data.get("path"):
+                    # Ngày không có đơn hàng: không phải lỗi.
+                    return {"status": 200, "body": "[]"}
                 if not data or not data.get("path"):
                     raise RuntimeError(f"Failed to export excel: {data}")
                     

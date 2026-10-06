@@ -39,6 +39,7 @@ export const menuItems: MenuItem[] = [
     href: "/sales",
     children: [
       { key: "sales-orders", label: "Đơn hàng", icon: "FileText", href: "/sales/orders" },
+      { key: "sales-summary", label: "Tổng hợp đơn hàng", icon: "BarChart2", href: "/sales/summary" },
       { key: "sales-returns", label: "Trả hàng", icon: "RotateCcw", href: "/sales/returns" },
     ],
   },

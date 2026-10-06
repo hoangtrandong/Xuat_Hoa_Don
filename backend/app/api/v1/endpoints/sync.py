@@ -19,6 +19,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
+from app.services.vinamilk_sales_summary import build_sales_summary
 from app.models.customer import Company
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
@@ -637,6 +638,21 @@ def list_local_vinamilk_orders(
         "source": source,
         "last_synced_at": _iso_utc(latest.finished_at) if latest else None,
     }
+
+
+@router.get("/vinamilk-orders/summary")
+def summarize_vinamilk_sales(
+    from_date: date,
+    to_date: date,
+    group_by: str = Query(default="product", pattern="^(product|customer|staff|day)$"),
+    customer: str | None = Query(default=None, max_length=120),
+    staff: str | None = Query(default=None, max_length=120),
+    product: str | None = Query(default=None, max_length=120),
+    db: Session = Depends(get_db),
+):
+    if to_date < from_date:
+        raise HTTPException(status_code=422, detail="Ngày kết thúc phải lớn hơn hoặc bằng ngày bắt đầu.")
+    return build_sales_summary(db, from_date, to_date, group_by, customer, staff, product)
 
 
 @router.get("/vinamilk-orders/order-options")

@@ -86,13 +86,13 @@ def test_replaced_order_not_returned_is_warned_not_deducted(db):
     assert result["review"][0]["order_number"] == "OLD"
 
 
-def test_pure_return_is_deducted_and_listed_for_information(db):
+def test_pure_return_is_deducted_without_warning(db):
     line(db, "R1", D1, qty=5, value=500, returned=True)
 
     result = build_sales_summary(db, D1, D1)
 
     assert result["totals"]["net_value"] == 0
-    assert [item["type"] for item in result["review"]] == ["returned_without_replacement"]
+    assert result["review"] == []
 
 
 def test_replacement_chain_deducts_each_returned_order_once(db):

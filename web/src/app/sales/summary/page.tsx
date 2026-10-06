@@ -42,7 +42,6 @@ const GROUP_TABS: { key: GroupBy; label: string; codeTitle: string; nameTitle: s
 const REVIEW_LABELS: Record<string, string> = {
   replaced_not_returned: "Bị thay thế, chưa trả",
   replaced_order_missing: "Thiếu đơn cũ",
-  returned_without_replacement: "Trả, chưa thay thế",
 };
 
 function toInputDate(date: Date) {

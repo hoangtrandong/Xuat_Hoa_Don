@@ -213,19 +213,6 @@ def build_sales_summary(
                 "qty": new["qty"],
                 "value": new["value"],
             })
-    for order in orders.values():
-        if order["in_scope"] and order["returned"] and order["order_number"] not in replaced_orders:
-            review.append({
-                "type": "returned_without_replacement",
-                "message": "Đơn đã trả, chưa có đơn thay thế (trả hàng thuần).",
-                "order_number": order["order_number"],
-                "related_order_number": "",
-                "date": order["date"],
-                "customer_code": order["customer_code"],
-                "customer_name": order["customer_name"],
-                "qty": order["qty"],
-                "value": order["value"],
-            })
     review.sort(key=lambda item: (item["type"], item["date"] or "", item["order_number"]))
 
     return {

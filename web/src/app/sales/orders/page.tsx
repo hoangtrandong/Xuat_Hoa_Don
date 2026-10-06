@@ -414,11 +414,15 @@ export default function SalesOrdersPage() {
   }
 
   function downloadExcel() {
-    if (remoteOrders.length === 0) return;
-    const exportRows = remoteOrders.map((order) =>
-      Object.fromEntries(Object.entries(order).map(([key, value]) => [key, formatRemoteColumnValue(key, value)]))
+    if (filteredRemoteOrders.length === 0) return;
+    // Xuất đúng các cột đang hiển thị và các dòng sau lọc; mã khách hàng giữ nguyên đầy đủ.
+    const exportRows = filteredRemoteOrders.map((order) =>
+      Object.fromEntries(remoteColumns.map(({ key }) => [
+        key,
+        key === "Mã KH" ? displayRemoteValue(order[key]) : formatRemoteColumnValue(key, order[key]),
+      ]))
     );
-    const worksheet = XLSX.utils.json_to_sheet(exportRows);
+    const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: remoteColumns.map(({ key }) => key) });
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Don hang");
     XLSX.writeFile(workbook, `don-hang-vinamilk-${fromDate}-den-${toDate}.xlsx`);
@@ -467,7 +471,7 @@ export default function SalesOrdersPage() {
               {[20, 50, 100, 500].map((size) => <option key={size} value={size}>{size} dòng/trang</option>)}
             </select>
           </label>
-          <button onClick={downloadExcel} disabled={remoteOrders.length === 0} className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">
+          <button onClick={downloadExcel} disabled={filteredRemoteOrders.length === 0} className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">
             Tải Excel toàn bộ
           </button>
         </div>

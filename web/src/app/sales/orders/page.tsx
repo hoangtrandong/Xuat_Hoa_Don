@@ -160,6 +160,7 @@ function formatVinamilkDate(value: unknown, withTime: boolean): string {
 function formatRemoteColumnValue(title: string, value: unknown): string {
   if (title === "Ngày tạo") return formatVinamilkDate(value, true);
   if (title === "Ngày giao") return formatVinamilkDate(value, false);
+  if (title === "Mã KH") return displayRemoteValue(value).trim().slice(-3);
   return displayRemoteValue(value);
 }
 

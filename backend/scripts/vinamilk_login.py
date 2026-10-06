@@ -21,6 +21,13 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from dotenv import dotenv_values, set_key
 
+# Khi stdout bị chuyển hướng (Windows, cp1252) print tiếng Việt sẽ ném UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # win32cred chỉ có sẵn trên Windows — thử import, nếu lỗi thì bỏ qua (Linux/Render)
 try:
     import win32cred

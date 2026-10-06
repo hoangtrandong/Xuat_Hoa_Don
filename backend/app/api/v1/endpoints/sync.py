@@ -456,6 +456,26 @@ async def _fetch_vinamilk_payload(session_cookie: str, form: dict[str, str]) -> 
     return session_cookie, payload
 
 
+async def sync_vinamilk_day(
+    db: Session, day_form: dict[str, str], day: date, session_cookie: str
+) -> tuple[str, int]:
+    """Đồng bộ 1 ngày: dòng đơn + trạng thái kho/trả. Dùng chung cho API và cron."""
+    session_cookie, payload = await _fetch_vinamilk_payload(session_cookie, day_form)
+    row_count = _save_snapshot(db, payload, day, day)
+    scoped: dict[str, set[str] | None] = {}
+    for scope in ("warehouse", "returned"):
+        try:
+            session_cookie, scoped_payload = await _fetch_vinamilk_payload(
+                session_cookie, {**day_form, "scope": scope}
+            )
+            scoped[scope] = _order_numbers(scoped_payload)
+        except (RuntimeError, ValueError):
+            scoped[scope] = None
+    _apply_scoped_states(db, day, scoped["warehouse"], scoped["returned"])
+    db.commit()
+    return session_cookie, row_count
+
+
 @router.post("/vinamilk")
 async def trigger_sync(request: VinamilkSearchRequest, db: Session = Depends(get_db)):
     form = request.model_dump()
@@ -478,19 +498,7 @@ async def trigger_sync(request: VinamilkSearchRequest, db: Session = Depends(get
         for day in days:
             day_form = {**form, "fromDate": day.strftime("%d/%m/%Y"), "toDate": day.strftime("%d/%m/%Y")}
             try:
-                session_cookie, payload = await _fetch_vinamilk_payload(session_cookie, day_form)
-                row_count = _save_snapshot(db, payload, day, day)
-                scoped: dict[str, set[str] | None] = {}
-                for scope in ("warehouse", "returned"):
-                    try:
-                        session_cookie, scoped_payload = await _fetch_vinamilk_payload(
-                            session_cookie, {**day_form, "scope": scope}
-                        )
-                        scoped[scope] = _order_numbers(scoped_payload)
-                    except (RuntimeError, ValueError):
-                        scoped[scope] = None
-                _apply_scoped_states(db, day, scoped["warehouse"], scoped["returned"])
-                db.commit()
+                session_cookie, row_count = await sync_vinamilk_day(db, day_form, day, session_cookie)
                 saved_total += row_count
                 day_results.append({"date": day.isoformat(), "status": "SUCCESS", "row_count": row_count})
             except (RuntimeError, ValueError) as day_exc:

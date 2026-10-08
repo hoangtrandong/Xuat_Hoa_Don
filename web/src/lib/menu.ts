@@ -78,7 +78,8 @@ export const menuItems: MenuItem[] = [
       { key: "debt-employees", label: "Công nợ nhân viên", icon: "UserCheck", href: "/debt/employees" },
       { key: "debt-stores", label: "Công nợ cửa hàng", icon: "Store", href: "/debt/stores" },
       { key: "debt-transfers", label: "Chuyển công nợ", icon: "ArrowRightLeft", href: "/debt/transfers" },
-      { key: "debt-customers", label: "Công nợ khách hàng", icon: "CreditCard", href: "/debt" },
+      // Ẩn khỏi menu (trang /debt cũ vẫn truy cập được qua URL): công nợ nay theo Cửa hàng.
+      // { key: "debt-customers", label: "Công nợ khách hàng", icon: "CreditCard", href: "/debt" },
     ],
   },
   { key: "kpi", label: "KPI", icon: "Target", href: "/kpi" },

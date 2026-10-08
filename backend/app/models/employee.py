@@ -28,6 +28,8 @@ class Employee(Base):
     email: Mapped[str | None] = mapped_column(String(120))
     territory_id: Mapped[int | None] = mapped_column(ForeignKey("sales_territories.id"))
     target: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    debt_limit: Mapped[float] = mapped_column(Numeric(14, 2), default=50000000.00)
+    vinamilk_code: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(15), default="active")
     join_date: Mapped[datetime | None] = mapped_column(DateTime)
 

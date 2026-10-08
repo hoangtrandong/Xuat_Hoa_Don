@@ -331,6 +331,29 @@ return (
               </div>
             </div>
 
+            {((selectedDetail as any)?.employee_summaries?.length ?? 0) > 0 && (
+              <div className="rounded-xl border border-sky-100 bg-sky-50/40 p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-semibold text-sky-900 uppercase tracking-wider">
+                    Ghi nợ nhân viên khi Hoàn tất xuất kho
+                  </h4>
+                  <span className="text-xs font-medium text-sky-700">
+                    {(selectedDetail as any).employee_summaries.length} nhân viên
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {(selectedDetail as any).employee_summaries.map((s: any, idx: number) => (
+                    <div key={idx} className="flex items-center justify-between text-xs py-1 border-b border-sky-100 last:border-0">
+                      <span className="font-medium text-gray-800">{s.employee_code} ({s.employee_name || "—"}):</span>
+                      <span className="font-mono font-semibold text-gray-900">
+                        {Number(s.amount).toLocaleString("vi-VN")} đ
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => setSelected(null)}
@@ -349,7 +372,17 @@ return (
               )}
               {selected.status === "RECEIVED" && (
                 <button
-                  onClick={() => transition(selected.id, "complete")}
+                  onClick={() => {
+                    const summaries = (selectedDetail as any)?.employee_summaries;
+                    let confirmText = "Xác nhận hoàn tất xuất kho?";
+                    if (summaries && summaries.length > 0) {
+                      const totalAmt = summaries.reduce((sum: number, s: any) => sum + Number(s.amount || 0), 0);
+                      confirmText = `Xác nhận xuất kho thành công? Hệ thống sẽ trừ kho và tự động ghi nhận ${totalAmt.toLocaleString("vi-VN")} đ vào công nợ của ${summaries.length} nhân viên giao hàng.`;
+                    }
+                    if (confirm(confirmText)) {
+                      transition(selected.id, "complete");
+                    }
+                  }}
                   disabled={loading}
                   className="rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white py-2.5 text-sm font-medium transition-colors"
                 >

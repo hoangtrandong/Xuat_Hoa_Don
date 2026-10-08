@@ -23,6 +23,8 @@ _RESOURCE_CODES = {
     "customers", "stores", "companies", "products", "product-groups",
     "sales-orders", "inventory", "employees", "payments", "debt",
     "delivery-requests", "sync", "users",
+    "employee-debts", "store-debts", "cash-receipts", "debt-transfers",
+    "debt-approvals", "delivery-returns",
 }
 
 

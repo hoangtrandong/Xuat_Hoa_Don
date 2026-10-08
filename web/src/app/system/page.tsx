@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { UserPlus, Users, ShieldCheck, RefreshCw } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
@@ -24,6 +25,16 @@ function roleLabel(role: RoleOption) {
 }
 
 export default function SystemUsersPage() {
+  return (
+    <Suspense fallback={null}>
+      <SystemUsersPageContent />
+    </Suspense>
+  );
+}
+
+function SystemUsersPageContent() {
+  const searchParams = useSearchParams();
+  const preselectEmployeeId = searchParams.get("employee");
   const [users, setUsers] = useState<AppUser[]>([]);
   const [roles, setRoles] = useState<RoleOption[]>([]);
   const [employees, setEmployees] = useState<EmployeeOption[]>([]);
@@ -31,6 +42,7 @@ export default function SystemUsersPage() {
   const [success, setSuccess] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [preselectApplied, setPreselectApplied] = useState(false);
   const [form, setForm] = useState({ username: "", email: "", full_name: "", password: "", role_ids: [] as number[], employee_id: null as number | null });
 
   async function load() {
@@ -39,7 +51,7 @@ export default function SystemUsersPage() {
       const [usersResponse, rolesResponse, employeesResponse] = await Promise.all([
         apiFetch(`${API_URL}/users/`),
         apiFetch(`${API_URL}/users/roles/`),
-        apiFetch(`${API_URL}/employees/`),
+        apiFetch(`${API_URL}/employees/?limit=200`),
       ]);
       if (!usersResponse.ok || !rolesResponse.ok) {
         const failed = !usersResponse.ok ? usersResponse : rolesResponse;
@@ -55,6 +67,17 @@ export default function SystemUsersPage() {
   }
 
   useEffect(() => { void load(); }, []);
+
+  // Khi đến từ trang Nhân viên qua link "+ Tạo tài khoản", tự chọn sẵn nhân viên và mở form tạo tài khoản.
+  useEffect(() => {
+    if (preselectApplied || !preselectEmployeeId || employees.length === 0) return;
+    const employee = employees.find((candidate) => String(candidate.id) === preselectEmployeeId);
+    if (employee) {
+      setForm((current) => ({ ...current, employee_id: employee.id, full_name: employee.name }));
+      setCreateOpen(true);
+    }
+    setPreselectApplied(true);
+  }, [preselectApplied, preselectEmployeeId, employees]);
 
   function toggleRole(roleId: number) {
     setForm((current) => ({

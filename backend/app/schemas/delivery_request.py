@@ -11,9 +11,35 @@ class DeliveryRequestItemCreate(BaseModel):
     planned_allocations: Optional[List[Dict[str, Any]]] = None
 
 
+class DeliveryRequestEmployeeSummaryBase(BaseModel):
+    employee_id: Optional[int] = None
+    employee_code: str
+    employee_name: Optional[str] = None
+    column_key: Optional[str] = None
+    weight_ton: float = 0.0
+    order_count: int = 0
+    amount: float = 0.0
+    debt_limit: Optional[float] = 50000000.0
+    current_debt: Optional[float] = 0.0
+    projected_debt: Optional[float] = 0.0
+    is_over_limit: Optional[bool] = False
+
+
+class DeliveryRequestEmployeeSummaryCreate(DeliveryRequestEmployeeSummaryBase):
+    pass
+
+
+class DeliveryRequestEmployeeSummary(DeliveryRequestEmployeeSummaryBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    delivery_request_id: int
+    created_at: datetime
+
+
 class DeliveryRequestCreate(BaseModel):
     warehouse_id: int
     items: List[DeliveryRequestItemCreate] = Field(min_length=1)
+    employee_summaries: Optional[List[DeliveryRequestEmployeeSummaryCreate]] = None
     note: Optional[str] = None
     created_by: Optional[str] = None
 
@@ -28,6 +54,12 @@ class DeliveryPreviewItem(BaseModel):
     shortage_quantity: int = 0
     employee_allocations: Optional[Dict[str, Any]] = None
     allocations: List["DeliveryAllocation"] = Field(default_factory=list)
+
+
+class DeliveryPreviewResponse(BaseModel):
+    items: List[DeliveryPreviewItem]
+    employee_summaries: List[DeliveryRequestEmployeeSummaryBase] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
 
 
 class FefoPlanPick(BaseModel):
@@ -124,3 +156,4 @@ class DeliveryRequest(BaseModel):
     cancelled_at: Optional[datetime] = None
     created_at: datetime
     items: List[DeliveryRequestItem] = Field(default_factory=list)
+    employee_summaries: List[DeliveryRequestEmployeeSummary] = Field(default_factory=list)

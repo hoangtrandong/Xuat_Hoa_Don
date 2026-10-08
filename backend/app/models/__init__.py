@@ -7,12 +7,12 @@ from app.models.product import (
 from app.models.inventory import (
     Warehouse, WarehouseLocation, InventoryLot, InventoryTransaction, DeliveryRequest, DeliveryRequestItem,
     DeliveryAllocation, InventoryTransfer, InventoryTransferItem, SupplierGoodsDiscrepancy,
-    SupplierGoodsDiscrepancySource, SupplierGoodsDiscrepancyOffset,
+    SupplierGoodsDiscrepancySource, SupplierGoodsDiscrepancyOffset, DeliveryRequestEmployeeSummary,
 )
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
 from app.models.employee import Employee, SalesTerritory
-from app.models.finance import Payment, Receivable
+from app.models.finance import Payment, Receivable, DebtLedgerEntry, DebtTransfer, CashReceipt, DeliveryReturn
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 
@@ -23,11 +23,11 @@ __all__ = [
     "ProductGroup", "ProductGroupItem", "ProductCompany", "ProductGroupCompany",
     "Warehouse", "WarehouseLocation", "InventoryLot", "InventoryTransaction", "DeliveryRequest", "DeliveryRequestItem",
     "DeliveryAllocation", "InventoryTransfer", "InventoryTransferItem", "SupplierGoodsDiscrepancy",
-    "SupplierGoodsDiscrepancySource", "SupplierGoodsDiscrepancyOffset",
+    "SupplierGoodsDiscrepancySource", "SupplierGoodsDiscrepancyOffset", "DeliveryRequestEmployeeSummary",
     "SalesOrder", "SalesOrderItem",
     "Promotion", "PromotionRule", "PromotionItem",
     "Employee", "SalesTerritory",
-    "Payment", "Receivable",
+    "Payment", "Receivable", "DebtLedgerEntry", "DebtTransfer", "CashReceipt", "DeliveryReturn",
     "VinamilkOrderSnapshot", "VinamilkSyncRun", "VinamilkOrderReplacement",
     "VinamilkOrderAllocation",
 ]

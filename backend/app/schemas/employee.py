@@ -11,6 +11,8 @@ class EmployeeBase(BaseModel):
     email: Optional[str] = None
     territory_id: Optional[int] = None
     target: float = 0
+    debt_limit: float = 50000000.0
+    vinamilk_code: Optional[str] = None
     status: str = "active"
 
 
@@ -25,6 +27,8 @@ class EmployeeUpdate(BaseModel):
     email: Optional[str] = None
     territory_id: Optional[int] = None
     target: Optional[float] = None
+    debt_limit: Optional[float] = None
+    vinamilk_code: Optional[str] = None
     status: Optional[str] = None
 
 

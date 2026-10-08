@@ -6,8 +6,9 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.inventory import (
     DeliveryAllocation, DeliveryRequest, DeliveryRequestItem, InventoryLot,
-    InventoryTransaction, Warehouse, WarehouseLocation,
+    InventoryTransaction, Warehouse, WarehouseLocation, DeliveryRequestEmployeeSummary,
 )
+from app.models.finance import DebtLedgerEntry
 from app.models.product import Product
 from app.schemas.delivery_request import DeliveryRequestCreate, FefoPlanItem, FefoPlanPick
 
@@ -262,6 +263,20 @@ def create(
                                        planned_allocations=planned_allocations.get(product_id))
             db.add(item)
             db.flush()
+        if payload.employee_summaries:
+            for s in payload.employee_summaries:
+                summary = DeliveryRequestEmployeeSummary(
+                    delivery_request_id=request.id,
+                    employee_id=s.employee_id,
+                    employee_code=s.employee_code,
+                    employee_name=s.employee_name,
+                    column_key=s.column_key,
+                    weight_ton=s.weight_ton,
+                    order_count=s.order_count,
+                    amount=s.amount,
+                )
+                db.add(summary)
+            db.flush()
         db.commit()
         return get(db, request.id)
     except Exception:
@@ -321,7 +336,8 @@ def get(db: Session, request_id: int):
         .options(
             selectinload(DeliveryAllocation.location),
             selectinload(DeliveryAllocation.lot),
-        )
+        ),
+        selectinload(DeliveryRequest.employee_summaries),
     ).where(DeliveryRequest.id == request_id))
     return _with_stock(db, request)
 
@@ -400,6 +416,38 @@ def transition(db: Session, request_id: int, action: str):
                         quantity=-qty, lot_id=allocation.lot_id, location_id=allocation.location_id,
                         expiry_date=allocation.expiry_date, ref_type="DR", ref_code=request.code,
                         note=request.note, created_by=request.created_by))
+
+            # Record debt into ledger for each employee summary
+            summaries = db.scalars(
+                select(DeliveryRequestEmployeeSummary).where(
+                    DeliveryRequestEmployeeSummary.delivery_request_id == request.id
+                )
+            ).all()
+            for summary in summaries:
+                if summary.employee_id and summary.amount > 0:
+                    existing_entry = db.scalar(
+                        select(DebtLedgerEntry).where(
+                            DebtLedgerEntry.source_type == "DELIVERY_REQUEST",
+                            DebtLedgerEntry.source_id == request.id,
+                            DebtLedgerEntry.party_type == "EMPLOYEE",
+                            DebtLedgerEntry.party_id == summary.employee_id,
+                            DebtLedgerEntry.entry_type == "DELIVERY_ISSUE",
+                        )
+                    )
+                    if not existing_entry:
+                        db.add(DebtLedgerEntry(
+                            party_type="EMPLOYEE",
+                            party_id=summary.employee_id,
+                            entry_type="DELIVERY_ISSUE",
+                            amount=summary.amount,
+                            source_type="DELIVERY_REQUEST",
+                            source_id=request.id,
+                            source_code=request.code,
+                            document_date=now,
+                            note=f"Xuất hàng phiếu {request.code} ({summary.employee_code})",
+                            created_by=request.created_by,
+                        ))
+
             request.status, request.completed_at = "COMPLETED", now
         db.commit()
         return get(db, request_id)

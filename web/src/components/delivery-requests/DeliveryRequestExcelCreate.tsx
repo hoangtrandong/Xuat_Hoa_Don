@@ -23,6 +23,20 @@ type PickRow = {
   allocation_strategy: string;
 };
 
+type EmployeeSummary = {
+  employee_id: number | null;
+  employee_code: string;
+  employee_name: string | null;
+  column_key?: string | null;
+  weight_ton: number;
+  order_count: number;
+  amount: number;
+  debt_limit?: number;
+  current_debt?: number;
+  projected_debt?: number;
+  is_over_limit?: boolean;
+};
+
 type PlanItem = {
   product_id: number;
   sku: string;
@@ -52,6 +66,8 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
   const [message, setMessage] = useState("");
   const [uploading, setUploading] = useState(false);
   const [preview, setPreview] = useState<PreviewItem[]>([]);
+  const [employeeSummaries, setEmployeeSummaries] = useState<EmployeeSummary[]>([]);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [plan, setPlan] = useState<PlanItem[] | null>(null);
   const [planning, setPlanning] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -94,24 +110,30 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       body.append("file", file);
       body.append("warehouse_id", warehouseId);
       const response = await apiFetch(`${API_URL}/delivery-requests/upload?warehouse_id=${encodeURIComponent(warehouseId)}`, { method: "POST", body });
-        const result = await response.json() as PreviewItem[] | { detail?: string };
-      if (!response.ok) throw new Error("detail" in result ? result.detail ?? "Không thể upload yêu cầu giao hàng." : "Không thể upload yêu cầu giao hàng.");
-        setPreview(result as PreviewItem[]);
-        setPlan(null);
-        setMessage("Đã tải bản xem trước. Chưa tạo yêu cầu giao hàng.");
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail ?? "Không thể upload yêu cầu giao hàng.");
+
+      if (Array.isArray(result)) {
+        setPreview(result);
+        setEmployeeSummaries([]);
+        setWarnings([]);
+      } else if (result && typeof result === "object" && "items" in result) {
+        setPreview((result.items as PreviewItem[]) || []);
+        setEmployeeSummaries((result.employee_summaries as EmployeeSummary[]) || []);
+        setWarnings((result.warnings as string[]) || []);
+      }
+      setPlan(null);
+      setMessage("Đã tải bản xem trước. Chưa tạo yêu cầu giao hàng.");
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Không thể upload file.");
     } finally {
       setUploading(false);
     }
-
   }
 
   async function confirmPreview() {
     setError("");
     const items = preview.map((item) => {
-      // Ưu tiên product_id do backend xác thực lúc upload (đúng ngay cả khi SKU
-      // nằm ngoài 1000 sản phẩm đầu). Tra SKU client chỉ là phương án dự phòng.
       const matched = productOptionsBySku.get(item.sku.trim().toUpperCase());
       const productId = matched ? matched.id : (item.product_id > 0 ? item.product_id : 0);
       if (productId <= 0) {
@@ -135,7 +157,16 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         })),
       };
     });
-    const response = await apiFetch(`${API_URL}/delivery-requests/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warehouse_id: Number(warehouseId), items }) });
+    const payload = {
+      warehouse_id: Number(warehouseId),
+      items,
+      employee_summaries: employeeSummaries.length > 0 ? employeeSummaries : undefined,
+    };
+    const response = await apiFetch(`${API_URL}/delivery-requests/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
     const result = await response.json() as { detail?: string; id?: number; code?: string; status?: string };
     if (!response.ok) { setError(result.detail ?? "Không thể tạo yêu cầu."); return; }
     // Tự động submit sau khi kế hoạch FEFO đã được lưu cùng yêu cầu.
@@ -274,6 +305,76 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       )}
       {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">{error}</div>}
       {message && <div className="bg-emerald-50 text-emerald-700 rounded-lg px-4 py-3 text-sm">{message}</div>}
+
+      {warnings.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-4 text-sm space-y-1">
+          <div className="font-semibold flex items-center gap-1.5 text-amber-900">
+            <span>⚠️ Cảnh báo công nợ & dữ liệu kiểm tra:</span>
+          </div>
+          <ul className="list-disc list-inside space-y-0.5">
+            {warnings.map((w, idx) => (
+              <li key={idx}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {employeeSummaries.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
+          <div className="px-5 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+            <div>
+              <h4 className="font-semibold text-gray-900">Tổng hợp phân bổ xuất hàng theo Nhân viên (Dòng 15 - 17)</h4>
+              <p className="text-xs text-gray-500">Số tiền này sẽ được ghi nhận vào công nợ của nhân viên khi thủ kho xác nhận xuất hàng thành công.</p>
+            </div>
+            <span className="text-xs font-medium px-2.5 py-1 bg-sky-100 text-sky-800 rounded-full">
+              {employeeSummaries.length} nhân viên
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50/50 text-gray-500 border-b border-gray-100">
+                <tr>
+                  <th className="text-left px-5 py-3">Mã NV</th>
+                  <th className="text-left px-5 py-3">Tên NV</th>
+                  <th className="text-right px-5 py-3">Khối lượng (tấn)</th>
+                  <th className="text-right px-5 py-3">Số đơn hàng</th>
+                  <th className="text-right px-5 py-3">Tiền xuất kho</th>
+                  <th className="text-right px-5 py-3">Nợ hiện tại</th>
+                  <th className="text-right px-5 py-3">Dự kiến nợ sau xuất</th>
+                  <th className="text-center px-5 py-3">Hạn mức (50tr)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {employeeSummaries.map((s, index) => (
+                  <tr key={`${s.employee_code}-${index}`} className={s.is_over_limit ? "bg-amber-50/40" : ""}>
+                    <td className="px-5 py-2.5 font-medium text-gray-900">{s.employee_code}</td>
+                    <td className="px-5 py-2.5 text-gray-700">{s.employee_name || "—"}</td>
+                    <td className="px-5 py-2.5 text-right font-mono text-gray-600">{s.weight_ton.toFixed(3)}</td>
+                    <td className="px-5 py-2.5 text-right font-mono text-gray-600">{s.order_count}</td>
+                    <td className="px-5 py-2.5 text-right font-semibold text-gray-900">{s.amount.toLocaleString("vi-VN")} đ</td>
+                    <td className="px-5 py-2.5 text-right text-gray-600">{(s.current_debt || 0).toLocaleString("vi-VN")} đ</td>
+                    <td className={`px-5 py-2.5 text-right font-semibold ${s.is_over_limit ? "text-amber-700" : "text-gray-900"}`}>
+                      {(s.projected_debt || 0).toLocaleString("vi-VN")} đ
+                    </td>
+                    <td className="px-5 py-2.5 text-center">
+                      {s.is_over_limit ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">
+                          ⚠️ Vượt hạn mức
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-100 text-emerald-800">
+                          An toàn
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between"><div className="flex items-center gap-2"><ClipboardList size={18} className="text-sky-500" /><span className="font-semibold">Danh sách sản phẩm upload</span></div>{preview.length > 0 && <div className="flex gap-2"><button onClick={() => checkStock().catch((e) => setError(e instanceof Error ? e.message : "Không thể kiểm tra tồn kho."))} className="bg-amber-500 text-white px-3 py-2 rounded-lg text-sm">Check tồn</button><button disabled={planning} onClick={() => findLocations()} className="bg-indigo-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50">{planning ? "Đang tìm…" : "Tìm vị trí"}</button><button onClick={() => confirmPreview().catch((e) => setError(e instanceof Error ? e.message : "Không thể tạo yêu cầu."))} className="bg-emerald-500 text-white px-3 py-2 rounded-lg text-sm">Xác nhận tạo yêu cầu</button></div>}</div>
         {preview.length === 0 ? <div className="p-8 text-center text-sm text-gray-500">Chọn kho và upload Excel để xem danh sách sản phẩm.</div> : <div className="overflow-x-auto">

@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, Integer, Float, Text, CheckConstraint, JSON
+from sqlalchemy import String, DateTime, ForeignKey, Integer, Float, Numeric, Text, CheckConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import List
 
@@ -233,6 +233,9 @@ class DeliveryRequest(Base):
     items: Mapped[List["DeliveryRequestItem"]] = relationship(
         back_populates="request", cascade="all, delete-orphan"
     )
+    employee_summaries: Mapped[List["DeliveryRequestEmployeeSummary"]] = relationship(
+        back_populates="request", cascade="all, delete-orphan"
+    )
 
 
 class DeliveryRequestItem(Base):
@@ -293,3 +296,25 @@ class DeliveryAllocation(Base):
     @property
     def lot_number(self) -> str | None:
         return self.lot.lot_number if self.lot else None
+
+
+class DeliveryRequestEmployeeSummary(Base):
+    __tablename__ = "delivery_request_employee_summaries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    delivery_request_id: Mapped[int] = mapped_column(
+        ForeignKey("delivery_requests.id", ondelete="CASCADE"), index=True
+    )
+    employee_id: Mapped[int | None] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    employee_code: Mapped[str] = mapped_column(String(30))
+    employee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    column_key: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    weight_ton: Mapped[float] = mapped_column(Numeric(12, 5), default=0)
+    order_count: Mapped[int] = mapped_column(Integer, default=0)
+    amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    request: Mapped["DeliveryRequest"] = relationship(back_populates="employee_summaries")
+    employee: Mapped["Employee | None"] = relationship()

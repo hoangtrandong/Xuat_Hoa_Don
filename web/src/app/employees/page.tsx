@@ -1,6 +1,7 @@
 "use client";
 // src/app/employees/page.tsx
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { UsersRound, Users, Target, Phone as PhoneIcon, MapPin, CalendarDays, TrendingUp, Mail } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
@@ -12,6 +13,50 @@ import { employees as defaultEmployees, type Employee } from "@/lib/mock-employe
 import { formatVND, formatDate, getInitials } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL, apiFetch } from "@/lib/api";
+
+interface EmployeeRow extends Employee {
+  backendId: number;
+  accountUsername: string | null;
+}
+
+interface BackendEmployee {
+  id: number;
+  code: string;
+  name: string;
+  position: string;
+  phone: string;
+  email: string | null;
+  territory_id: number | null;
+  target: number;
+  status: string;
+  join_date: string | null;
+  account_username: string | null;
+}
+
+function mergeWithMock(list: BackendEmployee[]): EmployeeRow[] {
+  return list.map((item) => {
+    const mockMatch = defaultEmployees.find((mock) => mock.code === item.code);
+    const fallback = {
+      territory: "—", routes: [] as string[], orders: 0, customersServed: 0,
+      newCustomersTarget: 0, newCustomers: 0, visitTarget: 0, visits: 0, achieved: 0,
+      avatar: item.name.split(" ").map((word) => word[0]).filter(Boolean).slice(-2).join("").toUpperCase(),
+    };
+    return {
+      ...(mockMatch ?? fallback),
+      id: String(item.id),
+      backendId: item.id,
+      code: item.code,
+      name: item.name,
+      position: item.position as Employee["position"],
+      phone: item.phone,
+      email: item.email ?? "",
+      status: (item.status as Employee["status"]) ?? "active",
+      joinDate: item.join_date ?? new Date().toISOString(),
+      target: item.target,
+      accountUsername: item.account_username,
+    };
+  });
+}
 
 const avatarColors = ["bg-sky-500", "bg-purple-500", "bg-amber-500", "bg-emerald-500", "bg-rose-500", "bg-indigo-500"];
 
@@ -29,44 +74,38 @@ function positionVariant(position: string) {
 
 export default function EmployeesPage() {
   const [positionFilter, setPositionFilter] = useState("Tất cả");
-  const [selected, setSelected] = useState<Employee | null>(null);
+  const [selected, setSelected] = useState<EmployeeRow | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [employeesList, setEmployeesList] = useState<Employee[]>(defaultEmployees);
+  const [employeesList, setEmployeesList] = useState<EmployeeRow[]>([]);
+  const [loadError, setLoadError] = useState("");
   const [form, setForm] = useState({ code: "", name: "", position: "Nhân viên kinh doanh", phone: "", email: "" });
   const [createError, setCreateError] = useState("");
   const [createMessage, setCreateMessage] = useState("");
+
+  async function load() {
+    setLoadError("");
+    try {
+      const response = await apiFetch(`${API_URL}/employees/?limit=200`);
+      if (!response.ok) throw new Error("Không thể tải danh sách nhân viên.");
+      const data = await response.json() as BackendEmployee[];
+      setEmployeesList(mergeWithMock(data));
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Không thể tải danh sách nhân viên.");
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
   async function createEmployee() {
     setCreateError(""); setCreateMessage("");
     try {
       const response = await apiFetch(`${API_URL}/employees/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
-      const result = await response.json() as { detail?: string; id?: number; code?: string; name?: string; position?: string; phone?: string; email?: string };
+      const result = await response.json() as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo nhân viên.");
-      // Thêm nhân viên mới vào state local để hiển thị ngay lập tức
-      const newEmployee: Employee = {
-        id: result.code || form.code,
-        code: form.code,
-        name: form.name,
-        position: form.position as Employee["position"],
-        territory: "",
-        routes: [],
-        phone: form.phone,
-        email: form.email,
-        status: "active",
-        joinDate: new Date().toISOString().split("T")[0],
-        target: 0,
-        achieved: 0,
-        orders: 0,
-        customersServed: 0,
-        newCustomersTarget: 0,
-        newCustomers: 0,
-        visitTarget: 0,
-        visits: 0,
-        avatar: form.name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase(),
-      };
-      setEmployeesList((prev) => [...prev, newEmployee]);
       setCreateMessage("Đã tạo nhân viên thành công trong PostgreSQL."); setCreateOpen(false);
-      // Reset form
+      // Reset form và tải lại danh sách thật từ database để hiển thị nhân viên vừa tạo
       setForm({ code: "", name: "", position: "Nhân viên kinh doanh", phone: "", email: "" });
+      await load();
     } catch (e) { setCreateError(e instanceof Error ? e.message : "Không thể tạo nhân viên."); }
   }
 
@@ -78,7 +117,7 @@ export default function EmployeesPage() {
     (e) => positionFilter === "Tất cả" || e.position === positionFilter
   );
 
-  const columns: Column<Employee>[] = [
+  const columns: Column<EmployeeRow>[] = [
     {
       key: "code",
       title: "Mã NV",
@@ -108,6 +147,22 @@ export default function EmployeesPage() {
       render: (val) => <Badge variant={positionVariant(String(val))}>{String(val)}</Badge>,
     },
     { key: "territory", title: "Khu vực", sortable: true },
+    {
+      key: "account",
+      title: "Tài khoản đăng nhập",
+      render: (_, row) =>
+        row.accountUsername
+          ? <Badge variant="success">{row.accountUsername}</Badge>
+          : (
+            <Link
+              href={`/system?employee=${row.backendId}`}
+              onClick={(event) => event.stopPropagation()}
+              className="text-sky-600 hover:underline text-xs font-medium whitespace-nowrap"
+            >
+              + Tạo tài khoản
+            </Link>
+          ),
+    },
     {
       key: "target",
       title: "Mục tiêu tháng",
@@ -191,6 +246,7 @@ export default function EmployeesPage() {
           </select>
         }
       />
+      {loadError && <div className="bg-red-50 text-red-700 rounded-lg px-4 py-3 text-sm">{loadError}</div>}
       {createMessage && <div className="bg-emerald-50 text-emerald-700 rounded-lg px-4 py-3 text-sm">{createMessage}</div>}
       <Drawer open={createOpen} onClose={() => setCreateOpen(false)} title="Thêm nhân viên" subtitle="Tạo nhân viên trong PostgreSQL">
         <div className="p-5 space-y-4">

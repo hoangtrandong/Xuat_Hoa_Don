@@ -32,7 +32,11 @@ def sync_from_excel(db: Session, file_path: str):
         db.commit()
 
     # Caching dictionaries to avoid N+1 queries
-    emp_cache = {e.code: e for e in db.query(Employee).all()}
+    emp_cache = {}
+    for e in db.query(Employee).all():
+        emp_cache[e.code] = e
+        if getattr(e, "vinamilk_code", None):
+            emp_cache[e.vinamilk_code] = e
     cust_cache = {c.code: c for c in db.query(Customer).all()}
     prod_cache = {p.sku: p for p in db.query(Product).all()}
     unit_cache = {u.name: u for u in db.query(ProductUnit).all()}
@@ -53,10 +57,23 @@ def sync_from_excel(db: Session, file_path: str):
         if emp_code and emp_code != 'None':
             employee = emp_cache.get(emp_code)
             if not employee:
-                employee = Employee(code=emp_code, name=emp_name, phone="0000000000", position="SALES")
+                total_emp = db.query(Employee).count()
+                new_code = f"NV{total_emp + 1:03d}"
+                while db.query(Employee).filter(Employee.code == new_code).first():
+                    total_emp += 1
+                    new_code = f"NV{total_emp + 1:03d}"
+                employee = Employee(
+                    code=new_code,
+                    vinamilk_code=emp_code,
+                    name=emp_name,
+                    phone="0000000000",
+                    position="SALES",
+                    debt_limit=50000000.00,
+                )
                 db.add(employee)
                 db.flush()
                 emp_cache[emp_code] = employee
+                emp_cache[new_code] = employee
 
         # Customer
         cust_code = str(row_dict.get('Mã KH'))

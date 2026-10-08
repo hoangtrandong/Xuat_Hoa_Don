@@ -4,14 +4,20 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from zipfile import BadZipFile
 
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.crud import delivery_request as crud
+from app.models.employee import Employee
+from app.models.finance import DebtLedgerEntry
 from app.models.user import User
-from app.schemas.delivery_request import DeliveryRequest, DeliveryRequestList, DeliveryRequestCreate, DeliveryPreviewItem, FefoPlanItem
+from app.schemas.delivery_request import (
+    DeliveryRequest, DeliveryRequestList, DeliveryRequestCreate, DeliveryPreviewItem,
+    DeliveryPreviewResponse, FefoPlanItem,
+)
 
 router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
 
@@ -106,7 +112,7 @@ def plan_request(payload: DeliveryRequestCreate, db: Session = Depends(get_db)):
         return _error(db, exc)
 
 
-@router.post("/upload", response_model=List[DeliveryPreviewItem])
+@router.post("/upload", response_model=DeliveryPreviewResponse)
 def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | None = None,
                    db: Session = Depends(get_db)):
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
@@ -119,6 +125,9 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
         from app.models.product import Product
         products = {p.sku.upper(): p for p in db.query(Product).all()}
         items = []
+        employee_summaries = []
+        warnings = []
+
         # Delivery workbook: rows 1-8 are descriptive, row 9 is the header,
         # row 10 contains employee codes, and data starts at row 11.
         first = [str(v).strip().lower() if v is not None else "" for v in rows[0]]
@@ -130,16 +139,58 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
             or "tong xuat" in quantity_header
         )
         if delivery_format:
-            employee_codes = rows[9] if len(rows) > 9 else ()
+            raw_emp_row = rows[9] if len(rows) > 9 else ()
+            employee_cols = {}
+            for col in range(4, len(raw_emp_row)):
+                cell_val = raw_emp_row[col]
+                if cell_val:
+                    raw_str = str(cell_val).strip()
+                    code = raw_str[:5].strip().upper()
+                    name = raw_str.split("(", 1)[1].split(")", 1)[0].strip() if "(" in raw_str and ")" in raw_str else ""
+                    employee_cols[col] = {"code": code, "raw": raw_str, "name": name}
+
+            weights = {}
+            order_counts = {}
+            amounts = {}
+
             for number, values in enumerate(rows[10:], 11):
                 if not any(v is not None and str(v).strip() for v in values):
                     continue
                 raw_sku = values[1] if len(values) > 1 else None
                 sku = str(raw_sku).strip().upper() if raw_sku is not None else ""
+
+                # Check for footer/summary rows: TỔNG CỘNG (tấn), TỔNG ĐƠN HÀNG (đơn), TỔNG CỘNG (ngàn đồng)
+                col_b = str(values[1]).strip().lower() if len(values) > 1 and values[1] is not None else ""
+                col_c = str(values[2]).strip().lower() if len(values) > 2 and values[2] is not None else ""
+                combined_footer = f"{col_b} {col_c}".strip()
+                if "tấn" in combined_footer or "(tấn)" in combined_footer:
+                    for col, emp in employee_cols.items():
+                        if col < len(values) and values[col] is not None:
+                            try:
+                                weights[emp["code"]] = float(values[col])
+                            except Exception:
+                                pass
+                    continue
+                elif "đơn" in combined_footer or "(đơn)" in combined_footer:
+                    for col, emp in employee_cols.items():
+                        if col < len(values) and values[col] is not None:
+                            try:
+                                order_counts[emp["code"]] = int(round(float(values[col])))
+                            except Exception:
+                                pass
+                    continue
+                elif "ngàn đồng" in combined_footer or "ngan dong" in combined_footer:
+                    for col, emp in employee_cols.items():
+                        if col < len(values) and values[col] is not None:
+                            try:
+                                amounts[emp["code"]] = float(values[col]) * 1000.0
+                            except Exception:
+                                pass
+                    continue
+
                 if not sku:
                     continue
-                # Footer/signature rows can contain text in column B but no
-                # quantity in column D or the employee allocation columns.
+
                 quantity_cells = values[3:] if len(values) > 3 else ()
                 if not any(_looks_like_quantity(value) for value in quantity_cells):
                     continue
@@ -153,13 +204,13 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                     raise ValueError(f"Dòng {number}: tổng số lượng phải lớn hơn 0.")
                 allocations = {}
                 for column in range(4, len(values)):
-                    code = employee_codes[column] if column < len(employee_codes) else None
-                    if code is None or not str(code).strip() or values[column] in (None, ""):
+                    emp_info = employee_cols.get(column)
+                    if not emp_info or values[column] in (None, ""):
                         continue
                     raw_employee = str(values[column]).strip()
                     if raw_employee:
                         employee_quantity, employee_cartons, employee_boxes, _ = _quantity(raw_employee, per_carton)
-                        allocations[str(code).strip()] = {
+                        allocations[emp_info["code"]] = {
                             "quantity": employee_quantity,
                             "cartons": employee_cartons,
                             "boxes": employee_boxes,
@@ -170,6 +221,44 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                               "quantity": total,
                               "requested_quantity_raw": raw_total,
                               "employee_allocations": allocations or None})
+
+            emp_by_code = {e.code.upper(): e for e in db.query(Employee).all()}
+            for col, emp in employee_cols.items():
+                code = emp["code"]
+                db_emp = emp_by_code.get(code)
+                amt = amounts.get(code, 0.0)
+                w_ton = weights.get(code, 0.0)
+                o_cnt = order_counts.get(code, 0)
+                debt_limit = float(db_emp.debt_limit or 50000000.0) if db_emp else 50000000.0
+                curr_debt = 0.0
+                if db_emp:
+                    curr_debt = float(db.scalar(
+                        select(func.coalesce(func.sum(DebtLedgerEntry.amount), 0))
+                        .where(DebtLedgerEntry.party_type == "EMPLOYEE", DebtLedgerEntry.party_id == db_emp.id)
+                    ) or 0.0)
+                else:
+                    warnings.append(f"Không tìm thấy nhân viên {code} ({emp['name']}) trong hệ thống.")
+
+                proj_debt = curr_debt + amt
+                is_over = proj_debt > debt_limit
+                if is_over:
+                    warnings.append(
+                        f"Cảnh báo: Nhân viên {code} ({db_emp.name if db_emp else emp['name']}) có dự kiến nợ "
+                        f"{proj_debt:,.0f}đ vượt hạn mức {debt_limit:,.0f}đ."
+                    )
+                employee_summaries.append({
+                    "employee_id": db_emp.id if db_emp else None,
+                    "employee_code": code,
+                    "employee_name": db_emp.name if db_emp else emp["name"],
+                    "column_key": f"Col {col}",
+                    "weight_ton": w_ton,
+                    "order_count": o_cnt,
+                    "amount": amt,
+                    "debt_limit": debt_limit,
+                    "current_debt": curr_debt,
+                    "projected_debt": proj_debt,
+                    "is_over_limit": is_over,
+                })
         else:
             headers = first
             product_column = "sku" if "sku" in headers else "product_code"
@@ -199,7 +288,11 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                 shortage_quantity=0,
                 employee_allocations=item.get("employee_allocations"),
             ))
-        return preview
+        return DeliveryPreviewResponse(
+            items=preview,
+            employee_summaries=employee_summaries,
+            warnings=warnings,
+        )
     except HTTPException:
         db.rollback()
         raise

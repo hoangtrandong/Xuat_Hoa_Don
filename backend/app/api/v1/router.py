@@ -1,6 +1,9 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import customers, products, sales, inventory, employees, payments, delivery_requests, debt
-from app.api.v1.endpoints import stores, companies, sync, product_groups, users
+from app.api.v1.endpoints import (
+    customers, products, sales, inventory, employees, payments, delivery_requests, debt,
+    stores, companies, sync, product_groups, users,
+    employee_debts, store_debts, cash_receipts, debt_transfers, debt_approvals, delivery_returns,
+)
 
 api_router = APIRouter()
 api_router.include_router(customers.router)
@@ -13,6 +16,12 @@ api_router.include_router(employees.router)
 api_router.include_router(payments.router)
 api_router.include_router(delivery_requests.router)
 api_router.include_router(debt.router)
+api_router.include_router(employee_debts.router)
+api_router.include_router(store_debts.router)
+api_router.include_router(cash_receipts.router)
+api_router.include_router(debt_transfers.router)
+api_router.include_router(debt_approvals.router)
+api_router.include_router(delivery_returns.router)
 api_router.include_router(sync.router, prefix="/sync", tags=["Sync"])
 api_router.include_router(product_groups.router)
 api_router.include_router(users.router)

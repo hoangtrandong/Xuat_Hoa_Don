@@ -12,11 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.auth import get_current_user
 from app.crud import employee as crud
 from app.crud.user import create_user
 from app.models.employee import Employee as EmployeeModel
 from app.models.user import Role, User
 from app.schemas.employee import Employee, EmployeeCreate, EmployeeCreated, EmployeeCreateRequest, EmployeeUpdate
+from app.schemas.debt_ledger import EmployeeDebtLimitChangeOut
 from app.schemas.user import UserCreate
 
 router = APIRouter(prefix="/employees", tags=["employees"])
@@ -59,7 +61,7 @@ def _to_response(obj) -> Employee:
         email=obj.email,
         territory_id=obj.territory_id,
         target=float(obj.target),
-        debt_limit=float(obj.debt_limit if obj.debt_limit is not None else 50000000.0),
+        debt_limit=float(obj.debt_limit if obj.debt_limit is not None else 500000000.0),
         status=obj.status,
         join_date=obj.join_date,
         account_username=obj.user.username if obj.user else None,
@@ -126,7 +128,7 @@ def download_employee_template():
         "Bắt buộc. Số điện thoại (từ 10 số)",
         "Tùy chọn. VD: user@dms.vn",
         "VNĐ. Để 0 nếu khối văn phòng",
-        "VNĐ. Mặc định 50,000,000 cho NVKD (0 nếu không nhận hàng)",
+        "VNĐ. Mặc định 500,000,000 cho mỗi nhân viên",
         "Chọn: active / inactive",
     ]
 
@@ -152,9 +154,9 @@ def download_employee_template():
 
     # Dòng mẫu
     sample_rows = [
-        ["NV001", "Mai Chí Trung", "Trung NPP", "Admin", "0912345678", "trung@dms.vn", 0, 0, "active"],
-        ["NV004", "Nguyễn Duy Tịnh", "Tịnh xe", "Đội xe", "0987654321", "tinh@dms.vn", 0, 50000000, "active"],
-        ["NV026", "Trần Hồng Sơn", "Sơn VNM", "NVKD Sữa Vinamilk", "0901234567", "", 120000000, 50000000, "active"],
+        ["NV001", "Mai Chí Trung", "Trung NPP", "Admin", "0912345678", "trung@dms.vn", 0, 500000000, "active"],
+        ["NV004", "Nguyễn Duy Tịnh", "Tịnh xe", "Đội xe", "0987654321", "tinh@dms.vn", 0, 500000000, "active"],
+        ["NV026", "Trần Hồng Sơn", "Sơn VNM", "NVKD Sữa Vinamilk", "0901234567", "", 120000000, 500000000, "active"],
     ]
     for row_idx, r in enumerate(sample_rows, start=3):
         sheet.append(r)
@@ -222,7 +224,7 @@ def download_employee_template():
             "• Mã nhân viên: Bắt buộc, tối thiểu 3 ký tự (Ví dụ: NV001, KT001, ADM01). Không chứa dấu hoặc khoảng trắng.",
             "• Họ và tên: Bắt buộc, họ tên đầy đủ tiếng Việt.",
             "• Số điện thoại: Bắt buộc, định dạng số liên hệ (từ 10 số).",
-            "• Hạn mức nợ: Số tiền nợ tối đa được phép nhận hàng (Chỉ áp dụng với Nhân viên kinh doanh, thường là 50,000,000).",
+            "• Hạn mức nợ: Số tiền nợ tối đa được phép nhận hàng, mặc định 500,000,000 cho mỗi nhân viên.",
             "• Trạng thái: 'active' (đang làm việc) hoặc 'inactive' (đã nghỉ - hệ thống sẽ tự động khóa tài khoản đăng nhập).",
         ]),
     ]
@@ -250,7 +252,11 @@ def download_employee_template():
 
 
 @router.post("/upload")
-def upload_employees(file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_employees(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Thêm mới nhân viên từ Excel; mã đã tồn tại thì cập nhật các ô có dữ liệu."""
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
@@ -306,7 +312,15 @@ def upload_employees(file: UploadFile = File(...), db: Session = Depends(get_db)
                 if target:
                     obj.target = _number(target, "mục tiêu", row_number)
                 if debt_limit:
-                    obj.debt_limit = _number(debt_limit, "hạn mức nợ", row_number)
+                    new_limit = _number(debt_limit, "hạn mức nợ", row_number)
+                    crud.record_debt_limit_change(
+                        db,
+                        obj,
+                        new_limit,
+                        f"Cập nhật qua import Excel dòng {row_number}",
+                        current_user.username,
+                    )
+                    obj.debt_limit = new_limit
                 if status:
                     obj.status = status
                 updated += 1
@@ -319,7 +333,7 @@ def upload_employees(file: UploadFile = File(...), db: Session = Depends(get_db)
                     phone=fields["phone"],
                     email=fields["email"] or None,
                     target=_number(target, "mục tiêu", row_number),
-                    debt_limit=_number(debt_limit, "hạn mức nợ", row_number) if debt_limit else 50000000.0,
+                    debt_limit=_number(debt_limit, "hạn mức nợ", row_number) if debt_limit else 500000000.0,
                     status=status or "active",
                 )
                 db.add(obj)
@@ -398,15 +412,36 @@ def get_employee(employee_id: int, db: Session = Depends(get_db)):
 
 
 @router.patch("/{employee_id}", response_model=Employee)
-def update_employee(employee_id: int, payload: EmployeeUpdate, db: Session = Depends(get_db)):
+def update_employee(
+    employee_id: int,
+    payload: EmployeeUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     if payload.code is not None:
         clash = crud.get_by_code(db, payload.code)
         if clash and clash.id != employee_id:
             raise HTTPException(status_code=409, detail="Mã nhân viên đã tồn tại.")
-    obj = crud.update(db, employee_id, payload)
+    try:
+        obj = crud.update(db, employee_id, payload, changed_by=current_user.username)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not obj:
         raise HTTPException(status_code=404, detail="Employee not found")
     return _to_response(obj)
+
+
+@router.get("/{employee_id}/debt-limit-history", response_model=List[EmployeeDebtLimitChangeOut])
+def get_employee_debt_limit_history(
+    employee_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not crud.get(db, employee_id):
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return crud.list_debt_limit_changes(db, employee_id, limit)
 
 
 @router.delete("/{employee_id}", status_code=204)

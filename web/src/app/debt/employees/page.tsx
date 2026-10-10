@@ -20,6 +20,8 @@ interface EmployeeDebt {
   status: string;
   debt_limit: number;
   current_debt: number;
+  pending_delivery_debt: number;
+  projected_debt: number;
   total_debit: number;
   total_credit: number;
   is_over_limit: boolean;
@@ -283,6 +285,16 @@ export default function EmployeeDebtsPage() {
       ),
     },
     {
+      key: "pending_delivery_debt",
+      title: "Phiếu chờ xuất",
+      align: "right",
+      render: (_, r) => (
+        <span className={`font-mono ${r.pending_delivery_debt > 0 ? "text-amber-700" : "text-gray-400"}`}>
+          {formatVND(r.pending_delivery_debt)}
+        </span>
+      ),
+    },
+    {
       key: "total_debit",
       title: "Tổng phát sinh",
       align: "right",
@@ -300,7 +312,7 @@ export default function EmployeeDebtsPage() {
       align: "center",
       render: (_, r) =>
         r.is_over_limit ? (
-          <Badge variant="warning">⚠️ Vượt hạn mức 50tr</Badge>
+          <Badge variant="warning">⚠️ Vượt hạn mức 500tr</Badge>
         ) : (
           <Badge variant="success">An toàn</Badge>
         ),
@@ -397,7 +409,7 @@ export default function EmployeeDebtsPage() {
           icon={<UserCheck size={20} />}
         />
         <StatCard
-          label="NV vượt hạn mức (50tr)"
+          label="NV vượt hạn mức (500tr)"
           value={overLimitCount}
           icon={<AlertTriangle size={20} />}
           color={overLimitCount > 0 ? "bg-amber-50 text-amber-600" : "bg-sky-50 text-sky-600"}
@@ -439,6 +451,16 @@ export default function EmployeeDebtsPage() {
                 <span className="font-bold text-red-600 font-mono text-base">{formatVND(selectedEmp.current_debt)}</span>
               </div>
               <div className="flex justify-between text-sm">
+                <span className="text-gray-500">Phiếu đã gửi, chờ xuất:</span>
+                <span className="font-mono text-amber-700">{formatVND(selectedEmp.pending_delivery_debt)}</span>
+              </div>
+              <div className="flex justify-between text-sm border-t border-gray-200 pt-2">
+                <span className="text-gray-500">Dư nợ dự kiến:</span>
+                <span className={`font-bold font-mono ${selectedEmp.is_over_limit ? "text-red-600" : "text-gray-900"}`}>
+                  {formatVND(selectedEmp.projected_debt)}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
                 <span className="text-gray-500">Hạn mức tối đa:</span>
                 <span className="font-mono text-gray-700">{formatVND(selectedEmp.debt_limit)}</span>
               </div>
@@ -446,7 +468,7 @@ export default function EmployeeDebtsPage() {
                 <span className="text-gray-500">Trạng thái:</span>
                 <span>
                   {selectedEmp.is_over_limit ? (
-                    <Badge variant="warning">⚠️ Vượt hạn mức 50tr</Badge>
+                    <Badge variant="warning">⚠️ Vượt hạn mức 500tr</Badge>
                   ) : (
                     <Badge variant="success">An toàn</Badge>
                   )}

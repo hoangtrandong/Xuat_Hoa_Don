@@ -1,8 +1,10 @@
+from math import isfinite
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional
 
-from app.models.employee import Employee
+from app.models.employee import Employee, EmployeeDebtLimitChange
 from app.models.user import User
 from app.schemas.employee import EmployeeCreate, EmployeeUpdate
 
@@ -62,12 +64,59 @@ def create(db: Session, obj_in: EmployeeCreate) -> Employee:
     return employee
 
 
-def update(db: Session, employee_id: int, obj_in: EmployeeUpdate) -> Optional[Employee]:
+def record_debt_limit_change(
+    db: Session,
+    employee: Employee,
+    new_limit: float,
+    reason: str,
+    changed_by: str | None,
+) -> None:
+    old_limit = float(employee.debt_limit if employee.debt_limit is not None else 500000000)
+    if old_limit == new_limit:
+        return
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise ValueError("Cần ghi lý do khi thay đổi hạn mức công nợ.")
+    if not isfinite(new_limit) or new_limit < 0 or new_limit > 999999999999.99:
+        raise ValueError("Hạn mức công nợ phải từ 0 đến 999.999.999.999,99 đồng.")
+    db.add(EmployeeDebtLimitChange(
+        employee_id=employee.id,
+        employee_code=employee.code,
+        old_limit=old_limit,
+        new_limit=new_limit,
+        reason=normalized_reason,
+        changed_by=changed_by,
+    ))
+
+
+def list_debt_limit_changes(db: Session, employee_id: int, limit: int = 100):
+    return db.scalars(
+        select(EmployeeDebtLimitChange)
+        .where(EmployeeDebtLimitChange.employee_id == employee_id)
+        .order_by(EmployeeDebtLimitChange.changed_at.desc(), EmployeeDebtLimitChange.id.desc())
+        .limit(max(1, min(limit, 500)))
+    ).all()
+
+
+def update(
+    db: Session,
+    employee_id: int,
+    obj_in: EmployeeUpdate,
+    changed_by: str | None = None,
+) -> Optional[Employee]:
     employee = db.get(Employee, employee_id)
     if not employee:
         return None
+    update_data = obj_in.model_dump(exclude_unset=True)
+    new_limit = update_data.pop("debt_limit", None)
+    reason = update_data.pop("debt_limit_reason", None)
+    if new_limit is not None:
+        record_debt_limit_change(
+            db, employee, new_limit, reason or "", changed_by
+        )
+        employee.debt_limit = new_limit
     was_active = employee.status == "active"
-    for field, value in obj_in.model_dump(exclude_unset=True).items():
+    for field, value in update_data.items():
         setattr(employee, field, value)
     # Nhân viên nghỉ việc/chuyển trạng thái khác "active" thì tự khóa luôn tài khoản đăng nhập liên kết,
     # tránh trường hợp tài khoản vẫn đăng nhập được sau khi hồ sơ nhân sự đã đóng.
@@ -83,6 +132,8 @@ class EmployeeCRUD:
     list_ = staticmethod(list_)
     create = staticmethod(create)
     update = staticmethod(update)
+    list_debt_limit_changes = staticmethod(list_debt_limit_changes)
+    record_debt_limit_change = staticmethod(record_debt_limit_change)
     delete = staticmethod(delete)
     get_by_code = staticmethod(get_by_code)
     usage_summary = staticmethod(usage_summary)

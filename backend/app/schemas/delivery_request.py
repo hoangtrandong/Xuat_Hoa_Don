@@ -19,8 +19,9 @@ class DeliveryRequestEmployeeSummaryBase(BaseModel):
     weight_ton: float = 0.0
     order_count: int = 0
     amount: float = Field(default=0.0, ge=0, le=999999999999.99, allow_inf_nan=False)
-    debt_limit: Optional[float] = 50000000.0
+    debt_limit: Optional[float] = 500000000.0
     current_debt: Optional[float] = 0.0
+    pending_debt: Optional[float] = 0.0
     projected_debt: Optional[float] = 0.0
     is_over_limit: Optional[bool] = False
 

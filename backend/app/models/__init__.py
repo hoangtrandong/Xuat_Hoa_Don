@@ -11,7 +11,7 @@ from app.models.inventory import (
 )
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
-from app.models.employee import Employee, SalesTerritory
+from app.models.employee import Employee, EmployeeDebtLimitChange, SalesTerritory
 from app.models.finance import Payment, Receivable, DebtLedgerEntry, DebtTransfer, CashReceipt, DeliveryReturn
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
@@ -26,7 +26,7 @@ __all__ = [
     "SupplierGoodsDiscrepancySource", "SupplierGoodsDiscrepancyOffset", "DeliveryRequestEmployeeSummary",
     "SalesOrder", "SalesOrderItem",
     "Promotion", "PromotionRule", "PromotionItem",
-    "Employee", "SalesTerritory",
+    "Employee", "EmployeeDebtLimitChange", "SalesTerritory",
     "Payment", "Receivable", "DebtLedgerEntry", "DebtTransfer", "CashReceipt", "DeliveryReturn",
     "VinamilkOrderSnapshot", "VinamilkSyncRun", "VinamilkOrderReplacement",
     "VinamilkOrderAllocation",

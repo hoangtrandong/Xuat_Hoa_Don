@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.models.employee import Employee
 from app.models.customer import Store, Customer
 from app.models.finance import DebtLedgerEntry, DebtTransfer, CashReceipt, DeliveryReturn
-from app.models.inventory import DeliveryRequest
+from app.models.inventory import DeliveryRequest, DeliveryRequestEmployeeSummary
 
 
 def _code(prefix: str) -> str:
@@ -50,6 +50,19 @@ def list_employee_debt_summaries(db: Session) -> list[dict]:
     ).all()
     
     debt_map = {r.party_id: r for r in ledger_sums}
+    pending_sums = db.execute(
+        select(
+            DeliveryRequestEmployeeSummary.employee_id,
+            func.coalesce(func.sum(DeliveryRequestEmployeeSummary.amount), 0).label("pending_debt"),
+        )
+        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestEmployeeSummary.delivery_request_id)
+        .where(
+            DeliveryRequestEmployeeSummary.employee_id.is_not(None),
+            DeliveryRequest.status.in_(("SUBMITTED", "RECEIVED")),
+        )
+        .group_by(DeliveryRequestEmployeeSummary.employee_id)
+    ).all()
+    pending_debt_map = {row.employee_id: float(row.pending_debt) for row in pending_sums}
     
     results = []
     for emp in employees:
@@ -58,7 +71,11 @@ def list_employee_debt_summaries(db: Session) -> list[dict]:
         total_debit = float(stat.total_debit) if stat else 0.0
         total_credit = float(stat.total_credit) if stat else 0.0
         last_active = stat.last_active_at if stat else None
-        debt_limit = float(emp.debt_limit or 50000000.0)
+        debt_limit = float(
+            emp.debt_limit if emp.debt_limit is not None else 500000000.0
+        )
+        pending_delivery_debt = pending_debt_map.get(emp.id, 0.0)
+        projected_debt = current_debt + pending_delivery_debt
 
         results.append({
             "employee_id": emp.id,
@@ -70,9 +87,11 @@ def list_employee_debt_summaries(db: Session) -> list[dict]:
             "status": emp.status,
             "debt_limit": debt_limit,
             "current_debt": current_debt,
+            "pending_delivery_debt": pending_delivery_debt,
+            "projected_debt": projected_debt,
             "total_debit": total_debit,
             "total_credit": total_credit,
-            "is_over_limit": current_debt > debt_limit,
+            "is_over_limit": projected_debt > debt_limit,
             "last_active_at": last_active,
         })
     return results

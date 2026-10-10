@@ -7,7 +7,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
 from app.crud.delivery_request import create, list_, transition, update
-from app.models.employee import Employee
+from app.crud import employee as employee_crud
+from app.crud.debt_ledger import list_employee_debt_summaries
+from app.models.employee import Employee, EmployeeDebtLimitChange
 from app.models.finance import DebtLedgerEntry
 from app.models.inventory import (
     DeliveryAllocation,
@@ -25,6 +27,7 @@ from app.schemas.delivery_request import (
     DeliveryRequestItemCreate,
     DeliveryRequestList,
 )
+from app.schemas.employee import EmployeeUpdate
 from app.api.v1.endpoints.delivery_requests import _employee_amount
 
 
@@ -221,3 +224,77 @@ def test_employee_amount_requires_valid_nonnegative_thousand_dong_value():
         _employee_amount("not an amount", "EMP01", 17)
     with pytest.raises(ValueError, match="không âm"):
         _employee_amount(-1, "EMP01", 17)
+
+
+def test_new_employee_default_debt_limit_is_500_million(db):
+    session, _, _, _, employee = db
+
+    session.refresh(employee)
+
+    assert Decimal(employee.debt_limit) == Decimal("500000000.00")
+
+
+def test_pending_delivery_debt_is_counted_only_for_submitted_and_received(db):
+    session, warehouse, product, location, employee = db
+    request = make_received_request(
+        session, warehouse, product, location, employee.id, amount=10000000
+    )
+    draft = DeliveryRequest(
+        code="DR-TEST-DRAFT",
+        warehouse_id=warehouse.id,
+        status="DRAFT",
+    )
+    session.add(draft)
+    session.flush()
+    session.add(DeliveryRequestEmployeeSummary(
+        delivery_request_id=draft.id,
+        employee_id=employee.id,
+        employee_code=employee.code,
+        amount=500000000,
+    ))
+    session.add(DebtLedgerEntry(
+        party_type="EMPLOYEE",
+        party_id=employee.id,
+        entry_type="ADJUSTMENT",
+        amount=495000000,
+        source_type="MANUAL",
+        source_id=1,
+    ))
+    session.commit()
+
+    summary = next(
+        row for row in list_employee_debt_summaries(session)
+        if row["employee_id"] == employee.id
+    )
+
+    assert summary["current_debt"] == 495000000
+    assert summary["pending_delivery_debt"] == 10000000
+    assert summary["projected_debt"] == 505000000
+    assert summary["is_over_limit"] is True
+
+
+def test_employee_debt_limit_changes_require_reason_and_are_audited(db):
+    session, _, _, _, employee = db
+
+    with pytest.raises(ValueError, match="Cần ghi lý do"):
+        employee_crud.update(session, employee.id, EmployeeUpdate(debt_limit=600000000))
+    assert session.scalars(select(EmployeeDebtLimitChange)).all() == []
+
+    updated = employee_crud.update(
+        session,
+        employee.id,
+        EmployeeUpdate(
+            debt_limit=600000000,
+            debt_limit_reason="Được quản lý phê duyệt",
+        ),
+        changed_by="admin",
+    )
+
+    changes = session.scalars(select(EmployeeDebtLimitChange)).all()
+    assert updated is not None
+    assert Decimal(updated.debt_limit) == Decimal("600000000.00")
+    assert len(changes) == 1
+    assert Decimal(changes[0].old_limit) == Decimal("500000000.00")
+    assert Decimal(changes[0].new_limit) == Decimal("600000000.00")
+    assert changes[0].reason == "Được quản lý phê duyệt"
+    assert changes[0].changed_by == "admin"

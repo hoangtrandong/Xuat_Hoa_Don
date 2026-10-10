@@ -14,6 +14,7 @@ from app.core.auth import get_current_user
 from app.crud import delivery_request as crud
 from app.models.employee import Employee
 from app.models.finance import DebtLedgerEntry
+from app.models.inventory import DeliveryRequest, DeliveryRequestEmployeeSummary
 from app.models.user import User
 from app.schemas.delivery_request import (
     DeliveryRequest, DeliveryRequestList, DeliveryRequestCreate, DeliveryPreviewItem,
@@ -266,13 +267,23 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                 o_cnt = order_counts.get(code, 0)
                 if not db_emp:
                     raise ValueError(f"Không tìm thấy nhân viên {code} ({emp['name']}) trong hệ thống.")
-                debt_limit = float(db_emp.debt_limit or 50000000.0)
+                debt_limit = float(
+                    db_emp.debt_limit if db_emp.debt_limit is not None else 500000000.0
+                )
                 curr_debt = float(db.scalar(
                     select(func.coalesce(func.sum(DebtLedgerEntry.amount), 0))
                     .where(DebtLedgerEntry.party_type == "EMPLOYEE", DebtLedgerEntry.party_id == db_emp.id)
                 ) or 0.0)
+                pending_debt = float(db.scalar(
+                    select(func.coalesce(func.sum(DeliveryRequestEmployeeSummary.amount), 0))
+                    .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestEmployeeSummary.delivery_request_id)
+                    .where(
+                        DeliveryRequestEmployeeSummary.employee_id == db_emp.id,
+                        DeliveryRequest.status.in_(("SUBMITTED", "RECEIVED")),
+                    )
+                ) or 0.0)
 
-                proj_debt = curr_debt + amt
+                proj_debt = curr_debt + pending_debt + amt
                 is_over = proj_debt > debt_limit
                 if is_over:
                     warnings.append(
@@ -289,6 +300,7 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                     "amount": amt,
                     "debt_limit": debt_limit,
                     "current_debt": curr_debt,
+                    "pending_debt": pending_debt,
                     "projected_debt": proj_debt,
                     "is_over_limit": is_over,
                 })

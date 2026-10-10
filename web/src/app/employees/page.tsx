@@ -37,8 +37,18 @@ interface BackendEmployee {
   account_username: string | null;
 }
 
+interface DebtLimitChange {
+  id: number;
+  employee_code: string;
+  old_limit: number;
+  new_limit: number;
+  reason: string;
+  changed_by: string | null;
+  changed_at: string;
+}
+
 const DEFAULT_POSITION = "Nhân viên kinh doanh";
-const emptyForm = { code: "", name: "", nickname: "", position: DEFAULT_POSITION, phone: "", email: "", target: "0", debt_limit: "50000000", status: "active" };
+const emptyForm = { code: "", name: "", nickname: "", position: DEFAULT_POSITION, phone: "", email: "", target: "0", debt_limit: "500000000", debt_limit_reason: "", status: "active" };
 
 const VALID_POSITIONS = [
   "Nhân viên kinh doanh",
@@ -71,7 +81,7 @@ function mergeWithMock(list: BackendEmployee[]): EmployeeRow[] {
     status: (item.status as Employee["status"]) ?? "active",
     joinDate: item.join_date ?? new Date().toISOString(),
     target: item.target,
-    debtLimit: item.debt_limit ?? 50000000,
+    debtLimit: item.debt_limit ?? 500000000,
     accountUsername: item.account_username,
   }));
 }
@@ -119,6 +129,10 @@ export default function EmployeesPage() {
   const [actionError, setActionError] = useState("");
   const [createAccount, setCreateAccount] = useState(false);
   const [credentials, setCredentials] = useState<{ username: string; password: string } | null>(null);
+  const [originalDebtLimit, setOriginalDebtLimit] = useState<number | null>(null);
+  const [debtLimitHistory, setDebtLimitHistory] = useState<DebtLimitChange[]>([]);
+  const [debtLimitHistoryLoading, setDebtLimitHistoryLoading] = useState(false);
+  const [debtLimitHistoryError, setDebtLimitHistoryError] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
   async function load() {
@@ -136,16 +150,18 @@ export default function EmployeesPage() {
   useEffect(() => { void load(); }, []);
 
   function openCreate() {
+    setOriginalDebtLimit(null);
     setEditingId(null); setForm(emptyForm); setCreateError(""); setCreateOpen(true);
   }
 
   function openEdit(employee: EmployeeRow) {
     setSelected(null);
+    setOriginalDebtLimit(employee.debtLimit);
     setEditingId(employee.backendId);
     setForm({
       code: employee.code, name: employee.name, nickname: employee.nickname ?? "", position: employee.position, phone: employee.phone,
       email: employee.email ?? "", target: String(employee.target ?? 0),
-      debt_limit: String(employee.debtLimit), status: employee.status,
+      debt_limit: String(employee.debtLimit), debt_limit_reason: "", status: employee.status,
     });
     setCreateError(""); setCreateOpen(true);
   }
@@ -153,11 +169,17 @@ export default function EmployeesPage() {
   async function saveEmployee() {
     setCreateError(""); setCreateMessage(""); setActionError("");
     if (!form.code.trim() || !form.name.trim()) { setCreateError("Mã và họ tên nhân viên không được để trống."); return; }
+    const changingDebtLimit = editingId !== null && Number(form.debt_limit) !== originalDebtLimit;
+    if (changingDebtLimit && !form.debt_limit_reason.trim()) {
+      setCreateError("Vui lòng ghi lý do khi thay đổi hạn mức công nợ.");
+      return;
+    }
     try {
       const payload = {
         code: form.code.trim(), name: form.name.trim(), nickname: form.nickname.trim() || null, position: form.position,
         phone: form.phone.trim(), email: form.email.trim() || null,
         target: Number(form.target) || 0, debt_limit: Number(form.debt_limit) || 0, status: form.status,
+        ...(changingDebtLimit ? { debt_limit_reason: form.debt_limit_reason.trim() } : {}),
         ...(editingId ? {} : { create_account: createAccount }),
       };
       const response = await apiFetch(`${API_URL}/employees/${editingId ?? ""}`, {
@@ -173,6 +195,22 @@ export default function EmployeesPage() {
       setCreateOpen(false); setEditingId(null); setSelected(null); setForm(emptyForm);
       await load();
     } catch (e) { setCreateError(e instanceof Error ? e.message : "Không thể lưu nhân viên."); }
+  }
+
+  async function openProfile(employee: EmployeeRow) {
+    setSelected(employee);
+    setDebtLimitHistory([]);
+    setDebtLimitHistoryError("");
+    setDebtLimitHistoryLoading(true);
+    try {
+      const response = await apiFetch(`${API_URL}/employees/${employee.backendId}/debt-limit-history`);
+      if (!response.ok) throw new Error("Không thể tải lịch sử thay đổi hạn mức.");
+      setDebtLimitHistory(await response.json() as DebtLimitChange[]);
+    } catch (e) {
+      setDebtLimitHistoryError(e instanceof Error ? e.message : "Không thể tải lịch sử hạn mức.");
+    } finally {
+      setDebtLimitHistoryLoading(false);
+    }
   }
 
   async function deleteEmployee(employee: EmployeeRow) {
@@ -375,7 +413,7 @@ export default function EmployeesPage() {
         defaultSortDir="asc"
         searchKeys={["code", "name", "nickname", "phone", "territory", "email"]}
         searchPlaceholder="Tìm mã NV, họ tên, tên gọi, SĐT..."
-        onRowClick={(row) => setSelected(row)}
+        onRowClick={(row) => void openProfile(row)}
         toolbar={
           <select
             value={positionFilter}
@@ -435,6 +473,11 @@ export default function EmployeesPage() {
           <label className="block text-xs font-medium text-gray-500">Hạn mức nợ (VNĐ)
             <input type="number" min={0} value={form.debt_limit} onChange={(e) => setForm({ ...form, debt_limit: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border rounded-lg" />
           </label>
+          {editingId && Number(form.debt_limit) !== originalDebtLimit && (
+            <label className="block text-xs font-medium text-gray-500 sm:col-span-2">Lý do thay đổi hạn mức
+              <textarea required value={form.debt_limit_reason} onChange={(e) => setForm({ ...form, debt_limit_reason: e.target.value })} rows={2} className="mt-1 w-full px-3 py-2 text-sm border rounded-lg" placeholder="Ví dụ: điều chỉnh theo phê duyệt của quản lý" />
+            </label>
+          )}
           <label className="block text-xs font-medium text-gray-500">Trạng thái
             <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border rounded-lg">
               <option value="active">Đang làm việc</option>
@@ -463,13 +506,20 @@ export default function EmployeesPage() {
         title="Hồ sơ nhân viên"
         subtitle={selected?.position}
       >
-        {selected && <EmployeeProfile employee={selected} onEdit={() => openEdit(selected)} onDelete={() => void deleteEmployee(selected)} />}
+        {selected && <EmployeeProfile employee={selected} debtLimitHistory={debtLimitHistory} historyLoading={debtLimitHistoryLoading} historyError={debtLimitHistoryError} onEdit={() => openEdit(selected)} onDelete={() => void deleteEmployee(selected)} />}
       </Drawer>
     </div>
   );
 }
 
-function EmployeeProfile({ employee, onEdit, onDelete }: { employee: Employee; onEdit: () => void; onDelete: () => void }) {
+function EmployeeProfile({ employee, debtLimitHistory, historyLoading, historyError, onEdit, onDelete }: {
+  employee: Employee;
+  debtLimitHistory: DebtLimitChange[];
+  historyLoading: boolean;
+  historyError: string;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
 
   return (
     <div className="p-5 space-y-5">
@@ -509,6 +559,22 @@ function EmployeeProfile({ employee, onEdit, onDelete }: { employee: Employee; o
           <p className="text-lg font-bold text-sky-600">{employee.orders}</p>
           <p className="text-xs text-gray-400 mt-0.5">Đơn hàng</p>
         </div>
+        <section className="space-y-2">
+          <h3 className="text-sm font-semibold text-gray-800">Lịch sử hạn mức công nợ</h3>
+          {historyLoading ? <p className="text-xs text-gray-500">Đang tải lịch sử...</p>
+            : historyError ? <p className="text-xs text-red-600">{historyError}</p>
+              : debtLimitHistory.length === 0 ? <p className="text-xs text-gray-500">Chưa có lần điều chỉnh nào được ghi nhận.</p>
+                : <div className="space-y-2">{debtLimitHistory.map((change) => (
+                  <div key={change.id} className="rounded-lg border border-gray-100 p-3 text-xs space-y-1">
+                    <div className="flex justify-between gap-2">
+                      <span className="font-medium text-gray-800">{formatVND(change.old_limit)} → {formatVND(change.new_limit)}</span>
+                      <span className="text-gray-400">{formatDate(change.changed_at)}</span>
+                    </div>
+                    <p className="text-gray-600">{change.reason}</p>
+                    <p className="text-gray-400">Thực hiện bởi {change.changed_by || "Không xác định"}</p>
+                  </div>
+                ))}</div>}
+        </section>
         <div className="rounded-xl bg-purple-50 p-3">
           <p className="text-lg font-bold text-purple-600">{employee.customersServed}</p>
           <p className="text-xs text-gray-400 mt-0.5">Khách mua</p>

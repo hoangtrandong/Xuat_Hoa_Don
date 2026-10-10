@@ -27,12 +27,26 @@ class EmployeeDebtSummary(BaseModel):
     phone: Optional[str] = None
     position: Optional[str] = None
     status: str
-    debt_limit: float = 50000000.0
+    debt_limit: float = 500000000.0
     current_debt: float = 0.0
+    pending_delivery_debt: float = 0.0
+    projected_debt: float = 0.0
     total_debit: float = 0.0
     total_credit: float = 0.0
     is_over_limit: bool = False
     last_active_at: Optional[datetime] = None
+
+
+class EmployeeDebtLimitChangeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    employee_id: Optional[int] = None
+    employee_code: str
+    old_limit: float
+    new_limit: float
+    reason: str
+    changed_by: Optional[str] = None
+    changed_at: datetime
 
 
 class StoreDebtSummary(BaseModel):

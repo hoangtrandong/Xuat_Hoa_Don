@@ -31,6 +31,7 @@ type EmployeeSummary = {
   weight_ton: number;
   order_count: number;
   amount: number;
+  pending_debt?: number;
   debt_limit?: number;
   current_debt?: number;
   projected_debt?: number;
@@ -340,8 +341,9 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                   <th className="text-right px-5 py-3">Số đơn hàng</th>
                   <th className="text-right px-5 py-3">Tiền xuất kho</th>
                   <th className="text-right px-5 py-3">Nợ hiện tại</th>
+                  <th className="text-right px-5 py-3">Phiếu chờ xuất</th>
                   <th className="text-right px-5 py-3">Dự kiến nợ sau xuất</th>
-                  <th className="text-center px-5 py-3">Hạn mức (50tr)</th>
+                  <th className="text-center px-5 py-3">Hạn mức (500tr)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -353,6 +355,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                     <td className="px-5 py-2.5 text-right font-mono text-gray-600">{s.order_count}</td>
                     <td className="px-5 py-2.5 text-right font-semibold text-gray-900">{s.amount.toLocaleString("vi-VN")} đ</td>
                     <td className="px-5 py-2.5 text-right text-gray-600">{(s.current_debt || 0).toLocaleString("vi-VN")} đ</td>
+                    <td className="px-5 py-2.5 text-right text-amber-700">{(s.pending_debt || 0).toLocaleString("vi-VN")} đ</td>
                     <td className={`px-5 py-2.5 text-right font-semibold ${s.is_over_limit ? "text-amber-700" : "text-gray-900"}`}>
                       {(s.projected_debt || 0).toLocaleString("vi-VN")} đ
                     </td>

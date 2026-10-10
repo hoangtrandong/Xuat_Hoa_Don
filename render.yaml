@@ -3,7 +3,7 @@ services:
     name: dms-backend
     env: python
     rootDir: backend
-    buildCommand: pip install -r requirements.txt && python -m playwright install chromium chromium-headless-shell
+    buildCommand: pip install -r requirements.txt && python -m playwright install --with-deps chromium
     preDeployCommand: alembic upgrade head && python -m scripts.bootstrap_admin_from_env
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:

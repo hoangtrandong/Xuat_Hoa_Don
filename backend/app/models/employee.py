@@ -23,7 +23,8 @@ class Employee(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(20), unique=True)
     name: Mapped[str] = mapped_column(String(120))
-    position: Mapped[str] = mapped_column(String(30))  # RSM | TSM | SAS
+    nickname: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    position: Mapped[str] = mapped_column(String(50))
     phone: Mapped[str] = mapped_column(String(20))
     email: Mapped[str | None] = mapped_column(String(120))
     territory_id: Mapped[int | None] = mapped_column(ForeignKey("sales_territories.id"))

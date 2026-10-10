@@ -207,7 +207,7 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
 
 def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[StockLevel]:
     """Tính tồn kho từ inventory_lots (ưu tiên) và inventory_transactions (fallback)."""
-    # Subquery: tổng tồn theo lô từ inventory_lots
+    # Subquery: tổng tồn theo lô từ inventory_lots (chỉ tính các vị trí đang hoạt động)
     lot_subquery = (
         select(
             InventoryLot.product_id,
@@ -216,14 +216,18 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             func.count(InventoryLot.id).label("lot_count"),
             func.min(InventoryLot.expiry_date).label("earliest_expiry"),
         )
-        .where(InventoryLot.quantity_on_hand > 0)
+        .join(WarehouseLocation, WarehouseLocation.id == InventoryLot.location_id)
+        .where(
+            InventoryLot.quantity_on_hand > 0,
+            WarehouseLocation.is_active.is_(True),
+        )
         .group_by(InventoryLot.product_id)
     )
     if warehouse_id is not None:
         lot_subquery = lot_subquery.where(InventoryLot.warehouse_id == warehouse_id)
     lot_subquery = lot_subquery.subquery()
 
-    # Subquery: danh sách vị trí duy nhất
+    # Subquery: danh sách vị trí duy nhất (chỉ tính các vị trí đang hoạt động)
     location_subquery = (
         select(
             InventoryLot.product_id,
@@ -232,16 +236,19 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             ).label("locations"),
         )
         .join(WarehouseLocation, WarehouseLocation.id == InventoryLot.location_id)
-        .where(InventoryLot.quantity_on_hand > 0)
+        .where(
+            InventoryLot.quantity_on_hand > 0,
+            WarehouseLocation.is_active.is_(True),
+        )
         .group_by(InventoryLot.product_id)
     )
     if warehouse_id is not None:
         location_subquery = location_subquery.where(InventoryLot.warehouse_id == warehouse_id)
     location_subquery = location_subquery.subquery()
 
-    # Aktywne yêu cầu, które rezerwują towar (te same statusy co w delivery_request.py)
+    # Các yêu cầu xuất hàng đang hoạt động giữ chỗ hàng hóa (cùng trạng thái với delivery_request.py)
     active_statuses = ("DRAFT", "SUBMITTED", "RECEIVED")
-    # Subquery: ilość zarezerwowana przez aktywne yêu cầu (do policzenia stanu netto)
+    # Subquery: số lượng đã giữ chỗ bởi các yêu cầu xuất đang hoạt động (để tính tồn khả dụng)
     reserved_subquery = (
         select(
             DeliveryRequestItem.product_id,

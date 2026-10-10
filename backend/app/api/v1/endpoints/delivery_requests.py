@@ -1,3 +1,4 @@
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from typing import Any, List
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -55,6 +56,29 @@ def _looks_like_quantity(value: Any) -> bool:
         parts = raw.split("/")
         return len(parts) == 2 and all(part.strip().isdigit() for part in parts)
     return raw.isdigit()
+
+
+def _employee_amount(value: Any, employee_code: str, row_number: int) -> float:
+    if value is None or not str(value).strip():
+        raise ValueError(
+            f"Dòng {row_number}: thiếu tổng tiền công nợ của nhân viên {employee_code}."
+        )
+    try:
+        amount = Decimal(str(value).strip())
+    except InvalidOperation as exc:
+        raise ValueError(
+            f"Dòng {row_number}: tổng tiền của nhân viên {employee_code} không hợp lệ."
+        ) from exc
+    if not amount.is_finite() or amount < 0:
+        raise ValueError(
+            f"Dòng {row_number}: tổng tiền của nhân viên {employee_code} phải là số không âm."
+        )
+    normalized_amount = amount * 1000
+    if normalized_amount > Decimal("999999999999.99"):
+        raise ValueError(
+            f"Dòng {row_number}: tổng tiền của nhân viên {employee_code} vượt giới hạn lưu công nợ."
+        )
+    return float(normalized_amount)
 
 
 @router.get("/template")
@@ -146,12 +170,17 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                 if cell_val:
                     raw_str = str(cell_val).strip()
                     code = raw_str[:5].strip().upper()
+                    if not code:
+                        raise ValueError(f"Cột nhân viên {col + 1} không có mã nhân viên.")
+                    if any(existing["code"] == code for existing in employee_cols.values()):
+                        raise ValueError(f"Mã nhân viên {code} xuất hiện nhiều lần trong file.")
                     name = raw_str.split("(", 1)[1].split(")", 1)[0].strip() if "(" in raw_str and ")" in raw_str else ""
                     employee_cols[col] = {"code": code, "raw": raw_str, "name": name}
 
             weights = {}
             order_counts = {}
             amounts = {}
+            amount_row_found = False
 
             for number, values in enumerate(rows[10:], 11):
                 if not any(v is not None and str(v).strip() for v in values):
@@ -180,12 +209,15 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                                 pass
                     continue
                 elif "ngàn đồng" in combined_footer or "ngan dong" in combined_footer:
+                    if amount_row_found:
+                        raise ValueError(f"Dòng {number}: file có nhiều dòng tổng tiền công nợ.")
+                    amount_row_found = True
                     for col, emp in employee_cols.items():
-                        if col < len(values) and values[col] is not None:
-                            try:
-                                amounts[emp["code"]] = float(values[col]) * 1000.0
-                            except Exception:
-                                pass
+                        amounts[emp["code"]] = _employee_amount(
+                            values[col] if col < len(values) else None,
+                            emp["code"],
+                            number,
+                        )
                     continue
 
                 if not sku:
@@ -222,6 +254,9 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                               "requested_quantity_raw": raw_total,
                               "employee_allocations": allocations or None})
 
+            if employee_cols and not amount_row_found:
+                raise ValueError("File thiếu dòng tổng tiền công nợ theo nhân viên (ngàn đồng).")
+
             emp_by_code = {e.code.upper(): e for e in db.query(Employee).all()}
             for col, emp in employee_cols.items():
                 code = emp["code"]
@@ -229,27 +264,25 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                 amt = amounts.get(code, 0.0)
                 w_ton = weights.get(code, 0.0)
                 o_cnt = order_counts.get(code, 0)
-                debt_limit = float(db_emp.debt_limit or 50000000.0) if db_emp else 50000000.0
-                curr_debt = 0.0
-                if db_emp:
-                    curr_debt = float(db.scalar(
-                        select(func.coalesce(func.sum(DebtLedgerEntry.amount), 0))
-                        .where(DebtLedgerEntry.party_type == "EMPLOYEE", DebtLedgerEntry.party_id == db_emp.id)
-                    ) or 0.0)
-                else:
-                    warnings.append(f"Không tìm thấy nhân viên {code} ({emp['name']}) trong hệ thống.")
+                if not db_emp:
+                    raise ValueError(f"Không tìm thấy nhân viên {code} ({emp['name']}) trong hệ thống.")
+                debt_limit = float(db_emp.debt_limit or 50000000.0)
+                curr_debt = float(db.scalar(
+                    select(func.coalesce(func.sum(DebtLedgerEntry.amount), 0))
+                    .where(DebtLedgerEntry.party_type == "EMPLOYEE", DebtLedgerEntry.party_id == db_emp.id)
+                ) or 0.0)
 
                 proj_debt = curr_debt + amt
                 is_over = proj_debt > debt_limit
                 if is_over:
                     warnings.append(
-                        f"Cảnh báo: Nhân viên {code} ({db_emp.name if db_emp else emp['name']}) có dự kiến nợ "
+                        f"Cảnh báo: Nhân viên {code} ({db_emp.name}) có dự kiến nợ "
                         f"{proj_debt:,.0f}đ vượt hạn mức {debt_limit:,.0f}đ."
                     )
                 employee_summaries.append({
-                    "employee_id": db_emp.id if db_emp else None,
+                    "employee_id": db_emp.id,
                     "employee_code": code,
-                    "employee_name": db_emp.name if db_emp else emp["name"],
+                    "employee_name": db_emp.name,
                     "column_key": f"Col {col}",
                     "weight_ton": w_ton,
                     "order_count": o_cnt,

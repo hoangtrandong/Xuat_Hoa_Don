@@ -18,12 +18,17 @@ from app.core.audit import record_audit_log
 from app.core.admin_bootstrap import bootstrap_administrator_from_environment, sync_default_roles
 from app.api.v1.router import api_router
 from app.api.v1.endpoints.auth import router as auth_router
+from scripts.vinamilk_login import configure_playwright_browser_path
+
+configure_playwright_browser_path()
 
 logger = logging.getLogger(__name__)
 
 
 def run_database_migrations() -> None:
-    alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    backend_dir = Path(__file__).resolve().parents[1]
+    alembic_config = Config(str(backend_dir / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(backend_dir / "app" / "db" / "migrations"))
     alembic_config.set_main_option("sqlalchemy.url", settings.sqlalchemy_database_uri)
     try:
         command.upgrade(alembic_config, "head")

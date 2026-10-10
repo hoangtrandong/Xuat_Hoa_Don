@@ -37,22 +37,40 @@ def _canonical_headers(headers: list[str], aliases: dict[str, str]) -> list[str]
 
 @router.get("/template")
 def download_store_template():
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Cửa hàng"
-    sheet.append([
-        "Mã cửa hàng",
-        "Tên cửa hàng",
-        "Điện thoại",
-        "Chủ hộ",
-        "Địa chỉ",
-        "Quận",
-        "Tỉnh/TP",
-        "Trạng thái",
-    ])
-    sheet.append(["CH-0001", "Tên cửa hàng", "0900000000", "Chủ hộ", "Địa chỉ", "", "Nghệ An", "active"])
-    output = BytesIO()
-    workbook.save(output)
+    from app.core.excel_templates import create_smart_template
+
+    output = create_smart_template(
+        sheet_title="Cửa hàng",
+        headers=["Mã cửa hàng", "Tên cửa hàng", "Điện thoại", "Chủ hộ", "Địa chỉ", "Quận/Huyện", "Tỉnh/TP", "Trạng thái"],
+        sub_guides=[
+            "Bắt buộc. VD: CH-0001 (Không trùng lặp)",
+            "Bắt buộc. Tên cửa hàng / điểm bán",
+            "Tùy chọn. Số điện thoại liên hệ",
+            "Tùy chọn. Họ tên người đứng tên / chủ hộ",
+            "Tùy chọn. Địa chỉ chi tiết điểm bán",
+            "Tùy chọn. Quận / Huyện",
+            "Tùy chọn. Tỉnh / Thành phố",
+            "Chọn: active / inactive",
+        ],
+        sample_rows=[
+            ["CH-0001", "Tạp Hóa Mai Linh", "0912345678", "Nguyễn Thị Mai", "123 Đường 3/2", "Quận Ninh Kiều", "Cần Thơ", "active"],
+            ["CH-0002", "Đại Lý Sữa Hưng Thịnh", "0987654321", "Trần Văn Hưng", "45 Nguyễn Trãi", "TP Vinh", "Nghệ An", "active"],
+        ],
+        col_widths=[18, 28, 18, 22, 32, 20, 20, 16],
+        guide_title="HƯỚNG DẪN NHẬP DANH SÁCH CỬA HÀNG / ĐIỂM BÁN",
+        guide_sections=[
+            ("1. Quy tắc chung:", [
+                "• Dòng 1: Tiêu đề cột. Dòng 2: Hướng dẫn mờ. Dữ liệu bắt đầu từ dòng 3.",
+                "• Nếu Mã cửa hàng đã tồn tại, hệ thống sẽ tự động cập nhật thông tin.",
+                "• Nếu Mã cửa hàng chưa có, hệ thống sẽ thêm mới cửa hàng.",
+            ]),
+            ("2. Vai trò của Cửa hàng trong hệ sinh thái DMS:", [
+                "• Cửa hàng là điểm nhận hàng thực tế và là đơn vị đối soát công nợ cuối cùng.",
+                "• Một cửa hàng có thể có nhiều Khách hàng (mã hóa đơn) gắn kèm theo.",
+            ]),
+        ],
+        validations=[("H3:H500", '"active,inactive"', "Chọn trạng thái", "Chỉ chọn active hoặc inactive")],
+    )
     return Response(
         content=output.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -84,6 +102,9 @@ def upload_stores(file: UploadFile = File(...), db: Session = Depends(get_db)):
                 continue
             code = str(data.get("code") or "").strip()
             name = str(data.get("name") or "").strip()
+            # Bỏ qua dòng hướng dẫn phụ nếu giữ nguyên dòng 2 mẫu
+            if "Bắt buộc" in code or "VD: CH-0001" in code or "Tên cửa hàng" in name:
+                continue
             if not code:
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: mã cửa hàng không được để trống.")
             if not name:

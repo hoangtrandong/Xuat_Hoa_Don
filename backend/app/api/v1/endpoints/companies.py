@@ -33,20 +33,38 @@ def _canonical_headers(headers: list[str], aliases: dict[str, str]) -> list[str]
 
 @router.get("/template")
 def download_company_template():
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Công ty"
-    sheet.append([
-        "Mã công ty",
-        "Tên công ty",
-        "Mã số thuế",
-        "Điện thoại",
-        "Địa chỉ",
-        "Trạng thái",
-    ])
-    sheet.append(["CT001", "Tên công ty", "", "", "", "active"])
-    output = BytesIO()
-    workbook.save(output)
+    from app.core.excel_templates import create_smart_template
+
+    output = create_smart_template(
+        sheet_title="Công ty",
+        headers=["Mã công ty", "Tên công ty", "Mã số thuế", "Điện thoại", "Địa chỉ", "Trạng thái"],
+        sub_guides=[
+            "Bắt buộc. VD: CT001, CT002 (Không trùng lặp)",
+            "Bắt buộc. Tên pháp nhân công ty",
+            "Tùy chọn. Nhiều công ty có thể dùng chung MST",
+            "Tùy chọn. Số điện thoại liên hệ",
+            "Tùy chọn. Địa chỉ đăng ký kinh doanh",
+            "Chọn: active / inactive",
+        ],
+        sample_rows=[
+            ["CT001", "Công ty TNHH Phân Phối A", "0102030405", "0243123456", "Số 1 Đại lộ Lê Lợi, TP Vinh", "active"],
+            ["CT002", "Công ty CP Thương Mại B", "0102030405", "0243987654", "Số 15 Quang Trung, TP Vinh", "active"],
+        ],
+        col_widths=[18, 32, 20, 18, 35, 16],
+        guide_title="HƯỚNG DẪN NHẬP DANH SÁCH CÔNG TY QUẢN LÝ",
+        guide_sections=[
+            ("1. Quy tắc chung:", [
+                "• Dòng 1: Tiêu đề cột. Dòng 2: Hướng dẫn mờ. Dữ liệu bắt đầu từ dòng 3.",
+                "• Nếu Mã công ty đã tồn tại, hệ thống sẽ cập nhật thông tin.",
+                "• Nếu Mã công ty chưa tồn tại, hệ thống sẽ thêm mới công ty.",
+            ]),
+            ("2. Cơ chế dùng chung Mã số thuế (MST):", [
+                "• Hệ thống hỗ trợ mô hình nhiều công ty con / chi nhánh dùng chung 1 mã số thuế.",
+                "• Nhập đúng MST để hệ thống tự động gom nhóm báo cáo thuế và đối soát công nợ hợp nhất.",
+            ]),
+        ],
+        validations=[("F3:F500", '"active,inactive"', "Chọn trạng thái", "Chỉ chọn active hoặc inactive")],
+    )
     return Response(
         content=output.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -78,6 +96,9 @@ def upload_companies(file: UploadFile = File(...), db: Session = Depends(get_db)
                 continue
             code = str(data.get("code") or "").strip()
             name = str(data.get("name") or "").strip()
+            # Bỏ qua dòng hướng dẫn phụ nếu giữ nguyên dòng 2 mẫu
+            if "Bắt buộc" in code or "VD: CT001" in code or "Tên pháp nhân" in name:
+                continue
             if not code:
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: mã công ty không được để trống.")
             if not name:

@@ -13,8 +13,8 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from zipfile import BadZipFile
 from pydantic import BaseModel, Field
-from playwright.async_api import Browser, Error as PlaywrightError, async_playwright
-from dotenv import dotenv_values
+from playwright.sync_api import sync_playwright
+from dotenv import dotenv_values, set_key
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 from app.core.config import settings
@@ -24,11 +24,17 @@ from app.models.customer import Company
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 from app.services.vinamilk_dates import iter_inclusive_dates
-from scripts.vinamilk_login import login_and_get_cookie
+from scripts.vinamilk_login import configure_playwright_browser_path, login_and_get_cookie
 
 router = APIRouter()
 _cookie_refresh_lock = asyncio.Lock()
 _runtime_cookie = ""
+_ENV_LOCAL = Path(__file__).resolve().parents[4] / ".env.local"
+_PLAYWRIGHT_LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+]
 
 VINAMILK_URL = "https://vinamilk.dmsone.vn/sale-product/search-sale/search"
 
@@ -306,9 +312,17 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
 def read_cookie() -> str:
     if _runtime_cookie:
         return _runtime_cookie
-    local_env = Path(__file__).resolve().parents[4] / ".env.local"
-    local_cookie = dotenv_values(local_env).get("VINAMILK_SESSION_COOKIE", "")
+    local_cookie = dotenv_values(_ENV_LOCAL).get("VINAMILK_SESSION_COOKIE", "")
     return (local_cookie or settings.VINAMILK_SESSION_COOKIE).strip()
+
+
+def _persist_cookie(cookie: str) -> None:
+    if not cookie:
+        return
+    try:
+        set_key(str(_ENV_LOCAL), "VINAMILK_SESSION_COOKIE", cookie, quote_mode="never")
+    except Exception:
+        pass
 
 
 async def refresh_cookie() -> str:
@@ -318,23 +332,39 @@ async def refresh_cookie() -> str:
         if not cookie:
             raise RuntimeError("Đăng nhập thành công nhưng không tạo được cookie Vinamilk.")
         _runtime_cookie = cookie
+        _persist_cookie(cookie)
         return cookie
 
 
-async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str, object]:
+def _browser_cookies(session_cookie: str) -> list[dict[str, str]]:
+    return [
+        {
+            "name": part.split("=", 1)[0].strip(),
+            "value": part.split("=", 1)[1].strip(),
+            "domain": "vinamilk.dmsone.vn",
+            "path": "/",
+        }
+        for part in session_cookie.split(";")
+        if "=" in part and part.split("=", 1)[0].strip()
+    ]
+
+
+def _fetch_vinamilk_sync(session_cookie: str, form: dict[str, str]) -> dict[str, object]:
+    """Gọi DMS bằng Playwright sync. Phải chạy trong thread, không chạy trực tiếp trong loop FastAPI."""
     import tempfile
+    import os
     import openpyxl
+
     form["page"] = str(form.get("page", "1"))
     form["rows"] = str(form.get("rows", "2000"))
-    
-    # format date
+
     from_date = form.get("fromDate", "")
     to_date = form.get("toDate", "")
     if "-" in from_date:
         from_date = "/".join(reversed(from_date.split("-")))
     if "-" in to_date:
         to_date = "/".join(reversed(to_date.split("-")))
-        
+
     export_form = {
         "orderNumber": "",
         "refOrderNumber": "",
@@ -352,94 +382,92 @@ async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str,
         "orderType": "IN",
         "saleOrderType": "-1",
         "reportCode": "1790085269000",
-        "reportFormId": ""
+        "reportFormId": "",
     }
-    # DMS Vinamilk xác định trạng thái bằng bộ lọc truy vấn, không có cột trạng thái trong file.
     scope = form.get("scope", "all")
     if scope == "warehouse":
         del export_form["saleOrderType"]
         export_form.update({"approved": "1", "approvedStep": "3"})
     elif scope == "returned":
         export_form["saleOrderType"] = "0"
-        
-    cookies: list[dict[str, str]] = [
-        {"name": part.split("=", 1)[0].strip(), "value": part.split("=", 1)[1].strip(),
-         "domain": "vinamilk.dmsone.vn", "path": "/"}
-        for part in session_cookie.split(";")
-        if "=" in part and part.split("=", 1)[0].strip()
-    ]
 
-    try:
-        from playwright.async_api import async_playwright
-        import json
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
+    configure_playwright_browser_path()
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_PLAYWRIGHT_LAUNCH_ARGS)
+        try:
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/140.0.0.0 Safari/537.36"
+                ),
+                locale="en-US",
+            )
+            context.add_cookies(_browser_cookies(session_cookie))
+            resp = context.request.post(
+                "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel",
+                form=export_form,
+                headers={
+                    "accept": "application/json, text/javascript, */*; q=0.01",
+                    "x-requested-with": "XMLHttpRequest",
+                    "referer": "https://vinamilk.dmsone.vn/sale-product/search-sale/info",
+                },
+            )
+            if resp.status in (401, 403):
+                return {"status": resp.status, "body": ""}
             try:
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-                    locale="en-US",
-                )
-                await context.add_cookies(cookies)
-                
-                resp = await context.request.post(
-                    "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel",
-                    form=export_form,
-                    headers={
-                        "accept": "application/json, text/javascript, */*; q=0.01",
-                        "x-requested-with": "XMLHttpRequest",
-                        "referer": "https://vinamilk.dmsone.vn/sale-product/search-sale/info"
-                    }
-                )
-                
-                if resp.status in (401, 403):
-                    return {"status": resp.status, "body": ""}
-                    
-                try:
-                    data = await resp.json()
-                except Exception:
-                    # Phiên hết hạn: DMS trả trang đăng nhập/rỗng thay vì JSON.
-                    return {"status": 401, "body": ""}
-                if data and data.get("hasData") is False and not data.get("path"):
-                    # Ngày không có đơn hàng: không phải lỗi.
-                    return {"status": 200, "body": "[]"}
-                if not data or not data.get("path"):
-                    raise RuntimeError(f"Failed to export excel: {data}")
-                    
-                excel_resp = await context.request.get(data["path"])
-                excel_bytes = await excel_resp.body()
-                
-                # read excel
-                import os
-                fd, temp_path = tempfile.mkstemp(suffix=".xlsx")
-                with os.fdopen(fd, 'wb') as f:
-                    f.write(excel_bytes)
-                
-                wb = openpyxl.load_workbook(temp_path, data_only=True)
-                sheet = wb.active
+                data = resp.json()
+            except Exception:
+                return {"status": 401, "body": ""}
+            if data and data.get("hasData") is False and not data.get("path"):
+                return {"status": 200, "body": "[]"}
+            if not data or not data.get("path"):
+                raise RuntimeError(f"Failed to export excel: {data}")
+
+            excel_bytes = context.request.get(data["path"]).body()
+            fd, temp_path = tempfile.mkstemp(suffix=".xlsx")
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(excel_bytes)
+                workbook = openpyxl.load_workbook(temp_path, data_only=True)
+                sheet = workbook.active
                 headers = [cell.value for cell in sheet[1]]
                 rows = []
                 for row in sheet.iter_rows(min_row=2, values_only=True):
                     row_dict = dict(zip(headers, row))
                     if row_dict.get("Số đơn hàng") and str(row_dict.get("Số đơn hàng")) != "None":
-                        # Convert datetime objects to string for JSON serialization
-                        for k, v in row_dict.items():
-                            if hasattr(v, "isoformat"):
-                                row_dict[k] = v.isoformat()
+                        for key, value in row_dict.items():
+                            if hasattr(value, "isoformat"):
+                                row_dict[key] = value.isoformat()
                         rows.append(row_dict)
-                        
-                os.remove(temp_path)
-                return {"status": 200, "body": json.dumps(rows)}
-                
             finally:
-                await browser.close()
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            return {"status": 200, "body": json.dumps(rows)}
+        finally:
+            browser.close()
+
+
+async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str, object]:
+    try:
+        return await asyncio.to_thread(_fetch_vinamilk_sync, session_cookie, form)
     except Exception as exc:
-        raise RuntimeError(f"Playwright không thể gọi Vinamilk: {exc}") from exc
+        detail = str(exc).strip() or repr(exc)
+        raise RuntimeError(f"Playwright không thể gọi Vinamilk: {type(exc).__name__}: {detail}") from exc
 
 
 async def _fetch_vinamilk_payload(session_cookie: str, form: dict[str, str]) -> tuple[str, Any]:
     if not session_cookie:
         session_cookie = await refresh_cookie()
-    result = await fetch_vinamilk(session_cookie, form)
+    try:
+        result = await fetch_vinamilk(session_cookie, form)
+    except Exception:
+        # Khi cookie cũ hết hạn hoặc bị lỗi kết nối, tự động đăng nhập lại để lấy cookie mới và thử lại
+        session_cookie = await refresh_cookie()
+        result = await fetch_vinamilk(session_cookie, form)
+
     if result["status"] in (401, 403):
         session_cookie = await refresh_cookie()
         result = await fetch_vinamilk(session_cookie, form)

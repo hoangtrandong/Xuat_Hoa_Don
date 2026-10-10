@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.product import Product, ProductCategory, ProductUnit
-from scripts.vinamilk_login import login_and_get_cookie
+from scripts.vinamilk_login import configure_playwright_browser_path, login_and_get_cookie
 
 VINAMILK_PRODUCT_URL = "https://vinamilk.dmsone.vn/catalog/product/search"
 PAGE_SIZE = 500

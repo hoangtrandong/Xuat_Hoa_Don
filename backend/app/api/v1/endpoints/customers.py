@@ -45,25 +45,52 @@ def _canonical_customer_headers(headers: list[str]) -> list[str]:
 
 @router.get("/template")
 def download_customer_template():
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Khách hàng"
-    sheet.append([
-        "Mã KH",
-        "Tên khách hàng",
-        "Loại",
-        "Email",
-        "CCCD",
-        "Mã số thuế",
-        "Hạn mức công nợ",
-        "Trạng thái",
-        "Mã cửa hàng",
-        "Mã công ty quản lý",
-    ])
-    sheet.append(["KH-0004", "Tên khách hàng", "RETAIL", "", "", "", 0, "active", "CH-0001", "CT001"])
-    output = BytesIO()
-    workbook.save(output)
-    return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="mau-khach-hang.xlsx"'})
+    from app.core.excel_templates import create_smart_template
+
+    output = create_smart_template(
+        sheet_title="Khách hàng",
+        headers=[
+            "Mã KH", "Tên khách hàng", "Loại", "Email", "CCCD",
+            "Mã số thuế", "Hạn mức công nợ", "Trạng thái", "Mã cửa hàng", "Mã công ty quản lý",
+        ],
+        sub_guides=[
+            "Bắt buộc. VD: KH-0001 (Không trùng lặp)",
+            "Bắt buộc. Tên khách hàng / xuất hóa đơn",
+            "Chọn: RETAIL, WHOLESALE, DISTRIBUTOR",
+            "Tùy chọn. Email nhận hóa đơn điện tử",
+            "Tùy chọn. Căn cước công dân người đại diện",
+            "Tùy chọn. Mã số thuế",
+            "VNĐ. Hạn mức công nợ cho phép",
+            "Chọn: active / inactive",
+            "Tùy chọn. Mã điểm bán liên kết (VD: CH-0001)",
+            "Tùy chọn. Mã công ty quản lý (VD: CT001)",
+        ],
+        sample_rows=[
+            ["KH-0001", "Hộ kinh doanh Mai Linh", "RETAIL", "mailinh@gmail.com", "012345678901", "8012345678", 20000000, "active", "CH-0001", "CT001"],
+            ["KH-0002", "Công ty TNHH Hưng Thịnh", "WHOLESALE", "hungthinh@gmail.com", "", "0102030405", 50000000, "active", "CH-0002", "CT001"],
+        ],
+        col_widths=[18, 28, 16, 24, 18, 18, 20, 16, 18, 20],
+        guide_title="HƯỚNG DẪN NHẬP DANH SÁCH KHÁCH HÀNG / ĐỐI TÁC",
+        guide_sections=[
+            ("1. Quy tắc chung:", [
+                "• Dòng 1: Tiêu đề cột. Dòng 2: Hướng dẫn mờ. Dữ liệu bắt đầu từ dòng 3.",
+                "• Mã khách hàng (Mã KH) là duy nhất trong toàn hệ thống.",
+            ]),
+            ("2. Liên kết Cửa hàng & Công ty quản lý:", [
+                "• 'Mã cửa hàng': Giúp gom nhóm nhiều mã xuất hóa đơn của cùng 1 cửa hàng vật lý.",
+                "• 'Mã công ty quản lý': Chỉ định công ty nội bộ chịu trách nhiệm xuất hóa đơn cho khách hàng này.",
+            ]),
+        ],
+        validations=[
+            ("C3:C500", '"RETAIL,WHOLESALE,DISTRIBUTOR"', "Chọn loại khách hàng", "Chỉ chọn: RETAIL, WHOLESALE, DISTRIBUTOR"),
+            ("H3:H500", '"active,inactive"', "Chọn trạng thái", "Chỉ chọn active hoặc inactive"),
+        ],
+    )
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="mau-khach-hang.xlsx"'},
+    )
 
 
 @router.post("/upload")
@@ -91,9 +118,13 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
             if not any(value is not None and str(value).strip() for value in values):
                 continue
             code = str(data.get("code") or "").strip()
+            name = str(data.get("name") or "").strip()
+            # Bỏ qua dòng hướng dẫn phụ nếu giữ nguyên dòng 2 mẫu
+            if "Bắt buộc" in code or "VD: KH-0001" in code or "Tên khách hàng" in name:
+                continue
             if not code:
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: mã khách hàng không được để trống.")
-            if not str(data.get("name") or "").strip():
+            if not name:
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: tên khách hàng không được để trống.")
             if code in existing_codes or code in file_codes:
                 raise HTTPException(status_code=409, detail=f"Dòng {row_number}: mã khách hàng {code} đã tồn tại.")

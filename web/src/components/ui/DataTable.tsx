@@ -31,6 +31,8 @@ interface DataTableProps<T> {
   isRowSelectable?: (row: T) => boolean;
   /** Size columns to content, keep cells on one line, and scroll horizontally. */
   fitColumns?: boolean;
+  defaultSortKey?: string;
+  defaultSortDir?: "asc" | "desc";
 }
 
 function getByKey<T>(row: T, key: string): unknown {
@@ -53,11 +55,13 @@ export default function DataTable<T>({
   getRowKey,
   isRowSelectable,
   fitColumns = false,
+  defaultSortKey,
+  defaultSortDir = "asc",
 }: DataTableProps<T>) {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-  const [sortKey, setSortKey] = useState<string | null>(null);
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sortKey, setSortKey] = useState<string | null>(defaultSortKey ?? null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">(defaultSortDir);
   const headerCheckboxRef = useRef<HTMLInputElement>(null);
 
   const filtered = data.filter((row) => {
@@ -75,7 +79,7 @@ export default function DataTable<T>({
         if (typeof va === "number" && typeof vb === "number") {
           return sortDir === "asc" ? va - vb : vb - va;
         }
-        const cmp = String(va).localeCompare(String(vb), "vi");
+        const cmp = String(va).localeCompare(String(vb), "vi", { numeric: true });
         return sortDir === "asc" ? cmp : -cmp;
       })
     : filtered;

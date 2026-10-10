@@ -18,7 +18,7 @@ class DeliveryRequestEmployeeSummaryBase(BaseModel):
     column_key: Optional[str] = None
     weight_ton: float = 0.0
     order_count: int = 0
-    amount: float = 0.0
+    amount: float = Field(default=0.0, ge=0, le=999999999999.99, allow_inf_nan=False)
     debt_limit: Optional[float] = 50000000.0
     current_debt: Optional[float] = 0.0
     projected_debt: Optional[float] = 0.0
@@ -112,6 +112,8 @@ class DeliveryRequestItem(BaseModel):
 
 class DeliveryRequestItemList(BaseModel):
     """Lightweight item for list endpoints - avoids loading full Product/Allocation rows."""
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     product_id: int
     quantity: int
@@ -139,6 +141,7 @@ class DeliveryRequestList(BaseModel):
     cancelled_at: Optional[datetime] = None
     created_at: datetime
     items: List[DeliveryRequestItemList] = Field(default_factory=list)
+    employee_summaries: List[DeliveryRequestEmployeeSummary] = Field(default_factory=list)
     item_count: int = 0
 
 

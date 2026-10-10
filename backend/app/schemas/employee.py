@@ -6,8 +6,9 @@ from typing import Optional
 class EmployeeBase(BaseModel):
     code: str
     name: str
-    position: str = "SAS"
-    phone: str
+    nickname: Optional[str] = None
+    position: str = "Nhân viên kinh doanh"
+    phone: str = ""
     email: Optional[str] = None
     territory_id: Optional[int] = None
     target: float = 0
@@ -20,8 +21,14 @@ class EmployeeCreate(EmployeeBase):
     pass
 
 
+class EmployeeCreateRequest(EmployeeCreate):
+    create_account: bool = False
+
+
 class EmployeeUpdate(BaseModel):
+    code: Optional[str] = None
     name: Optional[str] = None
+    nickname: Optional[str] = None
     position: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
@@ -37,3 +44,8 @@ class Employee(EmployeeBase):
     id: int
     join_date: Optional[datetime]
     account_username: Optional[str] = None
+
+class EmployeeCreated(Employee):
+    initial_username: Optional[str] = None
+    initial_password: Optional[str] = None
+

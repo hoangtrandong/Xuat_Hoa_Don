@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional
 
@@ -14,10 +14,44 @@ def get(db: Session, employee_id: int) -> Optional[Employee]:
 
 
 def list_(db: Session, skip: int = 0, limit: int = 100, status: Optional[str] = None) -> List[Employee]:
-    stmt = select(Employee).options(selectinload(Employee.user)).offset(skip).limit(limit)
+    stmt = select(Employee).options(selectinload(Employee.user)).order_by(Employee.code.asc()).offset(skip).limit(limit)
     if status:
         stmt = stmt.where(Employee.status == status)
     return list(db.execute(stmt).scalars().unique().all())
+
+
+def get_by_code(db: Session, code: str) -> Optional[Employee]:
+    return db.scalar(select(Employee).where(func.upper(Employee.code) == code.strip().upper()))
+
+
+def usage_summary(db: Session, employee_id: int) -> List[str]:
+    """Liệt kê các dữ liệu đang tham chiếu tới nhân viên (rỗng = có thể xóa)."""
+    from app.core.database import Base
+    from app.models.finance import DebtLedgerEntry
+
+    used: List[str] = []
+    for table in Base.metadata.sorted_tables:
+        for fk in table.foreign_keys:
+            if fk.column.table.name != "employees":
+                continue
+            if fk.ondelete and fk.ondelete.upper() in ("SET NULL", "CASCADE"):
+                continue
+            col = fk.parent
+            count = db.scalar(select(func.count()).select_from(table).where(col == employee_id)) or 0
+            if count:
+                used.append(f"{table.name} ({count})")
+    ledger = db.scalar(
+        select(func.count()).select_from(DebtLedgerEntry)
+        .where(DebtLedgerEntry.party_type == "EMPLOYEE", DebtLedgerEntry.party_id == employee_id)
+    ) or 0
+    if ledger:
+        used.append(f"debt_ledger_entries ({ledger})")
+    return used
+
+
+def delete(db: Session, employee: Employee) -> None:
+    db.delete(employee)
+    db.commit()
 
 
 def create(db: Session, obj_in: EmployeeCreate) -> Employee:
@@ -49,6 +83,9 @@ class EmployeeCRUD:
     list_ = staticmethod(list_)
     create = staticmethod(create)
     update = staticmethod(update)
+    delete = staticmethod(delete)
+    get_by_code = staticmethod(get_by_code)
+    usage_summary = staticmethod(usage_summary)
 
 
 employee = EmployeeCRUD()

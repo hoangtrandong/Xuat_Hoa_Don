@@ -1,4 +1,5 @@
 from datetime import datetime
+from math import isfinite
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -9,6 +10,7 @@ from app.models.inventory import (
     InventoryTransaction, Warehouse, WarehouseLocation, DeliveryRequestEmployeeSummary,
 )
 from app.models.finance import DebtLedgerEntry
+from app.models.employee import Employee
 from app.models.product import Product
 from app.schemas.delivery_request import DeliveryRequestCreate, FefoPlanItem, FefoPlanPick
 
@@ -17,6 +19,41 @@ ACTIVE_STATUSES = ("DRAFT", "SUBMITTED", "RECEIVED")
 
 def _code() -> str:
     return f"DR-{datetime.utcnow():%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}"
+
+
+def _validated_employee_summaries(db: Session, summaries) -> list[dict[str, object]]:
+    validated = []
+    employee_codes = set()
+    for summary in summaries or []:
+        code = summary.employee_code.strip().upper()
+        if not code:
+            raise ValueError("Mã nhân viên ghi công nợ không được để trống.")
+        if code in employee_codes:
+            raise ValueError(f"Nhân viên {code} xuất hiện nhiều lần trong phần tổng hợp công nợ.")
+        employee_codes.add(code)
+
+        matches = db.scalars(select(Employee).where(func.upper(Employee.code) == code)).all()
+        if not matches:
+            raise ValueError(f"Không tìm thấy nhân viên {code} trong hệ thống.")
+        if len(matches) > 1:
+            raise ValueError(f"Mã nhân viên {code} không duy nhất trong hệ thống.")
+        employee = matches[0]
+        if summary.employee_id is not None and summary.employee_id != employee.id:
+            raise ValueError(f"Mã nhân viên {code} không khớp với nhân viên được chọn.")
+
+        amount = float(summary.amount)
+        if not isfinite(amount) or amount < 0 or amount > 999999999999.99:
+            raise ValueError(f"Số tiền công nợ của nhân viên {code} không hợp lệ.")
+        validated.append({
+            "employee_id": employee.id,
+            "employee_code": employee.code,
+            "employee_name": employee.name,
+            "column_key": summary.column_key,
+            "weight_ton": summary.weight_ton,
+            "order_count": summary.order_count,
+            "amount": amount,
+        })
+    return validated
 
 
 def _reserved_for_position(
@@ -107,8 +144,12 @@ def _reserved_for_lot(db: Session, lot_id: int, exclude_request_id: int | None =
 def available_for_product(db: Session, warehouse_id: int, product_id: int) -> int:
     lot_stock = db.scalar(select(func.coalesce(func.sum(
         InventoryLot.quantity_on_hand - InventoryLot.locked_quantity
-    ), 0)).where(
-        InventoryLot.warehouse_id == warehouse_id, InventoryLot.product_id == product_id,
+    ), 0)).join(
+        WarehouseLocation, WarehouseLocation.id == InventoryLot.location_id
+    ).where(
+        InventoryLot.warehouse_id == warehouse_id,
+        InventoryLot.product_id == product_id,
+        WarehouseLocation.is_active.is_(True),
     )) or 0
     return int(lot_stock) + _legacy_available(db, warehouse_id, product_id)
 
@@ -127,21 +168,26 @@ def _fefo_picks(
     Lot ordering and per-position reservation mirror the logic used at submit time so a
     preview (POST /delivery-requests/plan) matches what submit will actually consume.
     With ``for_update`` the lot rows are locked, preserving the original submit-time
-    behaviour.
+    behaviour. Only active warehouse locations are considered.
     """
     remaining = int(quantity)
     picks: list[tuple[int | None, int | None, datetime | None, int, str]] = []
-    stmt = select(InventoryLot).where(
-        InventoryLot.warehouse_id == warehouse_id,
-        InventoryLot.product_id == product_id,
-        InventoryLot.quantity_on_hand > 0,
-        InventoryLot.quantity_on_hand > InventoryLot.locked_quantity,
-    ).order_by(
-        InventoryLot.expiry_date.is_(None),
-        InventoryLot.expiry_date,
-        InventoryLot.location_id.is_(None),
-        InventoryLot.location_id,
-        InventoryLot.id,
+    stmt = (
+        select(InventoryLot)
+        .join(WarehouseLocation, WarehouseLocation.id == InventoryLot.location_id)
+        .where(
+            InventoryLot.warehouse_id == warehouse_id,
+            InventoryLot.product_id == product_id,
+            InventoryLot.quantity_on_hand > 0,
+            InventoryLot.quantity_on_hand > InventoryLot.locked_quantity,
+            WarehouseLocation.is_active.is_(True),
+        )
+        .order_by(
+            InventoryLot.expiry_date.is_(None),
+            InventoryLot.expiry_date,
+            InventoryLot.location_id,
+            InventoryLot.id,
+        )
     )
     if for_update:
         stmt = stmt.with_for_update()
@@ -246,6 +292,7 @@ def create(
                     target[employee] = target.get(employee, 0) + int(allocation)
         if row.planned_allocations:
             planned_allocations.setdefault(row.product_id, []).extend(row.planned_allocations)
+    employee_summaries = _validated_employee_summaries(db, payload.employee_summaries)
     request = DeliveryRequest(
         code=_code(),
         warehouse_id=payload.warehouse_id,
@@ -263,19 +310,12 @@ def create(
                                        planned_allocations=planned_allocations.get(product_id))
             db.add(item)
             db.flush()
-        if payload.employee_summaries:
-            for s in payload.employee_summaries:
-                summary = DeliveryRequestEmployeeSummary(
-                    delivery_request_id=request.id,
-                    employee_id=s.employee_id,
-                    employee_code=s.employee_code,
-                    employee_name=s.employee_name,
-                    column_key=s.column_key,
-                    weight_ton=s.weight_ton,
-                    order_count=s.order_count,
-                    amount=s.amount,
-                )
-                db.add(summary)
+        for summary_data in employee_summaries:
+            db.add(DeliveryRequestEmployeeSummary(
+                delivery_request_id=request.id,
+                **summary_data,
+            ))
+        if employee_summaries:
             db.flush()
         db.commit()
         return get(db, request.id)
@@ -352,8 +392,8 @@ def list_(db: Session, status: str | None = None):
     endpoint via get()).
     """
     stmt = select(DeliveryRequest).options(
-        selectinload(DeliveryRequest.items)
-        .selectinload(DeliveryRequestItem.product)
+        selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.product),
+        selectinload(DeliveryRequest.employee_summaries),
     ).order_by(DeliveryRequest.created_at.desc())
     if status:
         stmt = stmt.where(DeliveryRequest.status == status.upper())
@@ -367,9 +407,12 @@ def _with_stock(db: Session, request: DeliveryRequest | None):
         available = _legacy_available(db, request.warehouse_id, item.product_id, request.id)
         lot_stock = db.scalar(select(func.coalesce(func.sum(
             InventoryLot.quantity_on_hand - InventoryLot.locked_quantity
-        ), 0)).where(
+        ), 0)).join(
+            WarehouseLocation, WarehouseLocation.id == InventoryLot.location_id
+        ).where(
             InventoryLot.warehouse_id == request.warehouse_id,
             InventoryLot.product_id == item.product_id,
+            WarehouseLocation.is_active.is_(True),
         )) or 0
         item.available_quantity = int(available + lot_stock)
         item.shortage_quantity = max(0, item.quantity - item.available_quantity)
@@ -401,6 +444,21 @@ def transition(db: Session, request_id: int, action: str):
         elif action == "cancel":
             request.status, request.cancelled_at = "CANCELLED", now
         else:
+            summaries = db.scalars(
+                select(DeliveryRequestEmployeeSummary).where(
+                    DeliveryRequestEmployeeSummary.delivery_request_id == request.id
+                )
+            ).all()
+            for summary in summaries:
+                amount = float(summary.amount)
+                if not isfinite(amount) or amount < 0 or amount > 999999999999.99:
+                    raise ValueError(
+                        f"Không thể hoàn tất: số tiền công nợ của nhân viên {summary.employee_code} không hợp lệ."
+                    )
+                if amount > 0 and summary.employee_id is None:
+                    raise ValueError(
+                        "Không thể hoàn tất: có nhân viên ghi công nợ chưa được liên kết với nhân viên trong hệ thống."
+                    )
             for item in request.items:
                 for allocation in item.allocations:
                     qty = allocation.allocated_quantity
@@ -418,11 +476,6 @@ def transition(db: Session, request_id: int, action: str):
                         note=request.note, created_by=request.created_by))
 
             # Record debt into ledger for each employee summary
-            summaries = db.scalars(
-                select(DeliveryRequestEmployeeSummary).where(
-                    DeliveryRequestEmployeeSummary.delivery_request_id == request.id
-                )
-            ).all()
             for summary in summaries:
                 if summary.employee_id and summary.amount > 0:
                     existing_entry = db.scalar(
@@ -458,7 +511,8 @@ def transition(db: Session, request_id: int, action: str):
 
 def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> DeliveryRequest:
     request = db.scalar(select(DeliveryRequest).options(
-        selectinload(DeliveryRequest.items)
+        selectinload(DeliveryRequest.items),
+        selectinload(DeliveryRequest.employee_summaries),
     ).where(DeliveryRequest.id == request_id).with_for_update())
     if not request:
         raise ValueError("Không tìm thấy yêu cầu xuất kho.")
@@ -466,6 +520,13 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
         raise ValueError(f"Chỉ có thể cập nhật yêu cầu ở trạng thái DRAFT. Trạng thái hiện tại: {request.status}")
     if not db.get(Warehouse, payload.warehouse_id):
         raise ValueError("Không tìm thấy kho.")
+    if request.employee_summaries and payload.employee_summaries is None:
+        raise ValueError(
+            "Phiếu có công nợ nhân viên; cần gửi lại bảng tổng hợp công nợ đã xác nhận khi cập nhật."
+        )
+    employee_summaries = _validated_employee_summaries(db, payload.employee_summaries)
+    if request.employee_summaries and not employee_summaries:
+        raise ValueError("Không thể xóa toàn bộ bảng tổng hợp công nợ khỏi phiếu đã có nhân viên.")
 
     merged = {}
     employee_allocations = {}
@@ -494,19 +555,27 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
         request.warehouse_id = payload.warehouse_id
         request.note = payload.note
         
-        # Delete old items
-        for item in request.items:
-            db.delete(item)
+        request.items.clear()
         db.flush()
+
+        if payload.employee_summaries is not None:
+            request.employee_summaries.clear()
         
         # Create new items
         raw_quantities = {row.product_id: row.requested_quantity_raw for row in payload.items}
         for product_id, quantity in merged.items():
-            item = DeliveryRequestItem(request_id=request.id, product_id=product_id, quantity=quantity,
-                                       requested_quantity_raw=raw_quantities.get(product_id),
-                                       employee_allocations=employee_allocations.get(product_id),
-                                       planned_allocations=planned_allocations.get(product_id))
-            db.add(item)
+            request.items.append(DeliveryRequestItem(
+                product_id=product_id,
+                quantity=quantity,
+                requested_quantity_raw=raw_quantities.get(product_id),
+                employee_allocations=employee_allocations.get(product_id),
+                planned_allocations=planned_allocations.get(product_id),
+            ))
+        if payload.employee_summaries is not None:
+            request.employee_summaries.extend(
+                DeliveryRequestEmployeeSummary(**summary_data)
+                for summary_data in employee_summaries
+            )
         
         db.commit()
         return get(db, request.id)

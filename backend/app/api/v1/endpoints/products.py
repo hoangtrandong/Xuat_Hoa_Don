@@ -18,14 +18,52 @@ router = APIRouter(prefix="/products", tags=["products"])
 
 @router.get("/template")
 def download_product_template():
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "SKU"
-    sheet.append(["sku", "name", "category_code", "unit_code", "supplier", "base_price", "cost_price", "reorder_level", "status", "boxes_per_carton", "representative_sku", "representative_name"])
-    sheet.append(["SKU-NEW", "Ten san pham", "BKS", "CAI", "", 0, 0, 20, "active", 1, "", ""])
-    output = BytesIO()
-    workbook.save(output)
-    return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="mau-sku.xlsx"'})
+    from app.core.excel_templates import create_smart_template
+
+    output = create_smart_template(
+        sheet_title="SKU",
+        headers=[
+            "sku", "name", "category_code", "unit_code", "supplier",
+            "base_price", "cost_price", "reorder_level", "status", "boxes_per_carton",
+            "representative_sku", "representative_name",
+        ],
+        sub_guides=[
+            "Bắt buộc. Mã sản phẩm (VD: 01CX01)",
+            "Bắt buộc. Tên sản phẩm đầy đủ",
+            "Bắt buộc. Mã ngành hàng (VD: BKS, SUA, BOT...)",
+            "Bắt buộc. Mã ĐVT (VD: CAI, HOP, THUNG...)",
+            "Tùy chọn. Nhà cung cấp (VD: Vinamilk)",
+            "Giá bán niêm yết (VNĐ)",
+            "Giá vốn nhập kho (VNĐ)",
+            "Mức tồn tối thiểu cảnh báo đặt hàng",
+            "Chọn: active / inactive",
+            "Quy cách: Số hộp/gói trong 1 thùng",
+            "Tùy chọn. Mã SKU đại diện quy đổi",
+            "Tùy chọn. Tên SKU đại diện quy đổi",
+        ],
+        sample_rows=[
+            ["01CX01", "Sữa tươi tiệt trùng 100% Có đường 110ml", "SUA", "HOP", "Vinamilk", 7500, 6800, 50, "active", 48, "", ""],
+            ["02HD14", "Sữa chua ăn Có đường 100g", "SUA", "HOP", "Vinamilk", 8000, 7200, 30, "active", 48, "", ""],
+        ],
+        col_widths=[16, 36, 18, 16, 18, 18, 18, 16, 16, 18, 20, 26],
+        guide_title="HƯỚNG DẪN NHẬP DANH MỤC SẢN PHẨM (SKU)",
+        guide_sections=[
+            ("1. Quy tắc chung:", [
+                "• Dòng 1: Tiêu đề cột (tiếng Anh chuẩn). Dòng 2: Hướng dẫn mờ. Dữ liệu bắt đầu từ dòng 3.",
+                "• Nếu SKU đã có, hệ thống cập nhật giá, quy cách và thông tin liên quan.",
+                "• Nếu SKU chưa có, hệ thống tạo mới sản phẩm.",
+            ]),
+            ("2. Quy cách quy đổi Thùng / Hộp (boxes_per_carton):", [
+                "• Trường 'boxes_per_carton' dùng để quy đổi tự động giữa Thùng và Hộp/Gói trong Phiếu giao xuất kho.",
+            ]),
+        ],
+        validations=[("I3:I500", '"active,inactive"', "Chọn trạng thái", "Chỉ chọn active hoặc inactive")],
+    )
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="mau-sku.xlsx"'},
+    )
 
 
 @router.post("/upload")
@@ -53,9 +91,13 @@ def upload_products(file: UploadFile = File(...), db: Session = Depends(get_db))
             if not any(value is not None and str(value).strip() for value in values):
                 continue
             sku = str(data.get("sku") or "").strip()
+            name = str(data.get("name") or "").strip()
+            # Bỏ qua dòng hướng dẫn phụ nếu giữ nguyên dòng 2 mẫu
+            if "Bắt buộc" in sku or "Mã sản phẩm" in sku or "Tên sản phẩm đầy đủ" in name:
+                continue
             category_code = str(data.get("category_code") or "").strip().upper()
             unit_code = str(data.get("unit_code") or "").strip().upper()
-            if not sku or not str(data.get("name") or "").strip():
+            if not sku or not name:
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: SKU và tên sản phẩm là bắt buộc.")
             if category_code not in categories or unit_code not in units:
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: category_code hoặc unit_code không tồn tại.")

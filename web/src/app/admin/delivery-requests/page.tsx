@@ -10,9 +10,10 @@ import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, F
 import { API_URL, apiFetch } from "@/lib/api";
 
 type Item = { id: number; product_id: number; sku: string; product_name: string; quantity: number; requested_quantity_raw: string | null; };
+type EmployeeDebtSummary = { employee_id: number | null; employee_code: string; employee_name: string | null; amount: number; };
 type StockPick = { lot_id: number | null; location_code: string | null; location_id: number | null; lot_number: string | null; expiry_date: string | null; quantity: number; allocation_strategy: string; };
 type StockPlanItem = { product_id: number; sku: string; product_name: string; quantity: number; planned_quantity: number; shortage_quantity: number; picks: StockPick[]; };
-type DeliveryRequest = { id: number; code: string; warehouse_id: number; status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED" | "CANCELLED"; note: string | null; created_by: string | null; submitted_at: string | null; received_at: string | null; completed_at: string | null; cancelled_at: string | null; created_at: string; items: Item[]; };
+type DeliveryRequest = { id: number; code: string; warehouse_id: number; status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED" | "CANCELLED"; note: string | null; created_by: string | null; submitted_at: string | null; received_at: string | null; completed_at: string | null; cancelled_at: string | null; created_at: string; items: Item[]; employee_summaries?: EmployeeDebtSummary[]; };
 type AdminDeliveryRequestRow = DeliveryRequest & { searchText: string; totalQuantity: number; skuSummary: string; };
 
 const statusLabel: Record<string, string> = { DRAFT: "Nháp", SUBMITTED: "Chờ nhận", RECEIVED: "Đang xuất", COMPLETED: "Hoàn thành", CANCELLED: "Đã hủy" };
@@ -358,6 +359,11 @@ export default function AdminDeliveryRequestsPage() {
                   </div>
                 )}
 
+                {selected.employee_summaries?.length && (selected.status === "DRAFT" || selected.status === "SUBMITTED") ? (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                    Phiếu có công nợ theo nhân viên. Không thể sửa mặt hàng riêng lẻ vì sẽ làm lệch số tiền đã xác nhận; hãy tạo lại phiếu từ file Excel đã cập nhật.
+                  </p>
+                ) : null}
                 {(selected.status === "DRAFT" || selected.status === "SUBMITTED" || selected.status === "RECEIVED") && (
                   <div className="space-y-2 pt-1 border-t border-gray-100">
                     {selected.status === "DRAFT" && <>
@@ -382,7 +388,7 @@ export default function AdminDeliveryRequestsPage() {
                       </button>
                     </>}
                     {(selected.status === "DRAFT" || selected.status === "SUBMITTED") && (
-                      <button onClick={startEdit} className="flex items-center justify-center gap-2 w-full rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 py-2.5 text-sm font-medium transition-colors">
+                      <button onClick={startEdit} disabled={Boolean(selected.employee_summaries?.length)} title={selected.employee_summaries?.length ? "Phiếu có công nợ nhân viên; hãy tạo lại từ file Excel đã cập nhật." : ""} className="flex items-center justify-center gap-2 w-full rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50">
                         <Pencil size={15} /> Chỉnh sửa nội dung
                       </button>
                     )}

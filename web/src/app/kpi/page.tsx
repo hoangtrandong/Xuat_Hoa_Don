@@ -99,7 +99,7 @@ export default function KpiPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <Badge variant={e.position === "Giám đốc vùng" ? "purple" : e.position === "Giám sát" ? "info" : "default"}>
+                      <Badge variant={e.position === "Admin" ? "danger" : e.position === "Sales Admin" ? "purple" : e.position === "Kế toán" ? "warning" : e.position === "Thủ kho" ? "info" : "default"}>
                         {e.position}
                       </Badge>
                     </td>

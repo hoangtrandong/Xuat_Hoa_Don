@@ -49,6 +49,25 @@ LOGIN_TIMEOUT = 30_000
 MENU_TIMEOUT = 15_000
 
 
+def configure_playwright_browser_path() -> None:
+    """Bỏ PLAYWRIGHT_BROWSERS_PATH nếu thư mục đó không có Chromium.
+
+    Một số môi trường (terminal sandbox) gán biến này tới cache trống, khiến
+    Playwright báo 'Executable doesn't exist' dù Chromium đã cài ở máy.
+    Giữ nguyên '0' (cài trong package, dùng trên Render) và thư mục thật sự có browser.
+    """
+    path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if not path or path == "0":
+        return
+    root = Path(path)
+    if not root.exists():
+        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+        return
+    if any(root.glob("chromium*")) or any(root.glob("chromium_headless_shell*")):
+        return
+    os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+
+
 def _load_from_windows_credmgr() -> tuple[str, str] | None:
     """Lấy thông tin đăng nhập từ Windows Credential Manager (giống script cũ)."""
     if not _HAS_WIN32CRED:
@@ -103,6 +122,7 @@ def login_and_get_cookie() -> str:
     Ném RuntimeError nếu đăng nhập thất bại.
     """
     username, password = load_credentials(ENV_FILE)
+    configure_playwright_browser_path()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])

@@ -83,12 +83,54 @@ def _ensure_staff_role_with_read_permissions(db: Session) -> Role:
     return role
 
 
+def _ensure_role_with_permissions(db: Session, name: str, description: str, resource_actions: list[tuple[str, str]]) -> Role:
+    role = db.scalar(select(Role).where(Role.name == name))
+    if role is None:
+        role = Role(name=name, description=description)
+        db.add(role)
+
+    permissions = []
+    for resource, action in resource_actions:
+        code = f"{resource}:{action}"
+        permission = db.scalar(select(Permission).where(Permission.code == code))
+        if permission is None:
+            permission = Permission(code=code, description=f"{action.title()} {resource}")
+            db.add(permission)
+        permissions.append(permission)
+
+    role.permissions = permissions
+    return role
+
+
 def sync_default_roles() -> None:
-    """Ensure the built-in 'admin' and 'staff' roles exist with up-to-date
-    permissions. Safe to call on every application startup."""
+    """Ensure built-in roles exist with up-to-date permissions."""
     with SessionLocal.begin() as db:
         _ensure_admin_role_with_all_permissions(db)
         _ensure_staff_role_with_read_permissions(db)
+        # Sales Admin: Quản lý khách hàng, đơn hàng, phiếu giao, phân bổ
+        _ensure_role_with_permissions(
+            db, "sales_admin", "Sales Admin (Quản lý đơn hàng & giao xuất)",
+            [(r, "read") for r in RESOURCES if r != "users"] + [
+                ("customers", "write"), ("stores", "write"), ("sales-orders", "write"),
+                ("delivery-requests", "write"), ("sync", "write"),
+            ]
+        )
+        # Kế toán: Quản lý công nợ, thu tiền, duyệt công nợ, chuyển nợ
+        _ensure_role_with_permissions(
+            db, "accountant", "Kế toán (Công nợ, thanh toán, duyệt nợ)",
+            [(r, "read") for r in RESOURCES if r != "users"] + [
+                ("debt", "write"), ("payments", "write"), ("cash-receipts", "write"),
+                ("employee-debts", "write"), ("store-debts", "write"),
+                ("debt-transfers", "write"), ("debt-approvals", "write"),
+            ]
+        )
+        # Thủ kho: Quản lý tồn kho, lô FEFO, nhận hàng trả
+        _ensure_role_with_permissions(
+            db, "warehouse", "Thủ kho (Kho hàng, lô HSD, trả hàng)",
+            [(r, "read") for r in RESOURCES if r != "users"] + [
+                ("inventory", "write"), ("delivery-returns", "write"),
+            ]
+        )
 
 
 def create_administrator(

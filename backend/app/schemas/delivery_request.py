@@ -1,6 +1,93 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class DeliveryRequestOrderBase(BaseModel):
+    order_date: Optional[date] = None
+    order_number: str
+    employee_id: Optional[int] = None
+    employee_code: str
+    employee_name: Optional[str] = None
+    customer_code: Optional[str] = None
+    customer_name: Optional[str] = None
+    amount: float = Field(default=0.0, ge=0)
+    payment_status: str = "UNPAID"
+    payment_method: Optional[str] = None
+    bank_ref: Optional[str] = None
+    paid_at: Optional[datetime] = None
+    note: Optional[str] = None
+
+
+class DeliveryRequestOrderCreate(DeliveryRequestOrderBase):
+    pass
+
+
+class DeliveryRequestOrder(DeliveryRequestOrderBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    delivery_request_id: int
+    created_at: datetime
+
+
+class SettlementOrderPayRequest(BaseModel):
+    payment_method: str = "BANK"  # BANK | CASH | DEBT | RETURN
+    paid_amount: Optional[float] = None
+    bank_ref: Optional[str] = None
+    note: Optional[str] = None
+
+
+class BankStatementItem(BaseModel):
+    ref_number: Optional[str] = None
+    amount: float = Field(gt=0)
+    description: str
+
+
+class SettlementMatchStatementRequest(BaseModel):
+    statements: List[BankStatementItem]
+    auto_confirm: bool = False
+
+
+class StatementMatchResult(BaseModel):
+    statement_ref: Optional[str] = None
+    statement_amount: float
+    statement_description: str
+    order_id: Optional[int] = None
+    order_number: Optional[str] = None
+    customer_code: Optional[str] = None
+    customer_name: Optional[str] = None
+    employee_code: Optional[str] = None
+    order_amount: Optional[float] = None
+    matched: bool = False
+    confidence: float = 0.0
+    message: Optional[str] = None
+    already_paid: bool = False
+
+
+class SettlementMatchStatementResponse(BaseModel):
+    total_statements: int
+    matched_count: int
+    unmatched_count: int
+    auto_confirmed_count: int = 0
+    matches: List[StatementMatchResult]
+
+
+class DeliverySettlementOverview(BaseModel):
+    request_id: int
+    request_code: str
+    request_status: str
+    warehouse_id: int
+    total_orders_count: int
+    total_amount: float
+    total_paid_bank: float
+    total_paid_cash: float
+    total_transferred_debt: float
+    total_returned: float
+    total_unpaid: float
+    difference: float
+    employee_settlements: List[Dict[str, Any]]
+    orders: List[DeliveryRequestOrder]
+
 
 
 class DeliveryRequestItemCreate(BaseModel):
@@ -41,6 +128,7 @@ class DeliveryRequestCreate(BaseModel):
     warehouse_id: int
     items: List[DeliveryRequestItemCreate] = Field(min_length=1)
     employee_summaries: Optional[List[DeliveryRequestEmployeeSummaryCreate]] = None
+    orders: Optional[List[DeliveryRequestOrderCreate]] = None
     note: Optional[str] = None
     created_by: Optional[str] = None
 
@@ -60,6 +148,7 @@ class DeliveryPreviewItem(BaseModel):
 class DeliveryPreviewResponse(BaseModel):
     items: List[DeliveryPreviewItem]
     employee_summaries: List[DeliveryRequestEmployeeSummaryBase] = Field(default_factory=list)
+    orders: List[DeliveryRequestOrderCreate] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
 
 
@@ -161,3 +250,4 @@ class DeliveryRequest(BaseModel):
     created_at: datetime
     items: List[DeliveryRequestItem] = Field(default_factory=list)
     employee_summaries: List[DeliveryRequestEmployeeSummary] = Field(default_factory=list)
+    orders: List[DeliveryRequestOrder] = Field(default_factory=list)

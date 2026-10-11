@@ -8,6 +8,7 @@ from app.models.inventory import (
     Warehouse, WarehouseLocation, InventoryLot, InventoryTransaction, DeliveryRequest, DeliveryRequestItem,
     DeliveryAllocation, InventoryTransfer, InventoryTransferItem, SupplierGoodsDiscrepancy,
     SupplierGoodsDiscrepancySource, SupplierGoodsDiscrepancyOffset, DeliveryRequestEmployeeSummary,
+    DeliveryRequestOrder,
 )
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
@@ -24,6 +25,7 @@ __all__ = [
     "Warehouse", "WarehouseLocation", "InventoryLot", "InventoryTransaction", "DeliveryRequest", "DeliveryRequestItem",
     "DeliveryAllocation", "InventoryTransfer", "InventoryTransferItem", "SupplierGoodsDiscrepancy",
     "SupplierGoodsDiscrepancySource", "SupplierGoodsDiscrepancyOffset", "DeliveryRequestEmployeeSummary",
+    "DeliveryRequestOrder",
     "SalesOrder", "SalesOrderItem",
     "Promotion", "PromotionRule", "PromotionItem",
     "Employee", "EmployeeDebtLimitChange", "SalesTerritory",

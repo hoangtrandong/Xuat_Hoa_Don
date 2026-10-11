@@ -1,5 +1,5 @@
-from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, Integer, Float, Numeric, Text, CheckConstraint, JSON
+from datetime import datetime, date
+from sqlalchemy import String, DateTime, Date, ForeignKey, Integer, Float, Numeric, Text, CheckConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import List
 
@@ -236,6 +236,9 @@ class DeliveryRequest(Base):
     employee_summaries: Mapped[List["DeliveryRequestEmployeeSummary"]] = relationship(
         back_populates="request", cascade="all, delete-orphan"
     )
+    orders: Mapped[List["DeliveryRequestOrder"]] = relationship(
+        back_populates="request", cascade="all, delete-orphan"
+    )
 
 
 class DeliveryRequestItem(Base):
@@ -318,3 +321,32 @@ class DeliveryRequestEmployeeSummary(Base):
 
     request: Mapped["DeliveryRequest"] = relationship(back_populates="employee_summaries")
     employee: Mapped["Employee | None"] = relationship()
+
+
+class DeliveryRequestOrder(Base):
+    """Detailed individual sales order allocated to a delivery request and employee."""
+    __tablename__ = "delivery_request_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    delivery_request_id: Mapped[int] = mapped_column(
+        ForeignKey("delivery_requests.id", ondelete="CASCADE"), index=True
+    )
+    order_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    order_number: Mapped[str] = mapped_column(String(120), index=True)
+    employee_id: Mapped[int | None] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    employee_code: Mapped[str] = mapped_column(String(30), index=True)
+    employee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    customer_code: Mapped[str | None] = mapped_column(String(120), index=True)
+    customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    payment_status: Mapped[str] = mapped_column(String(30), default="UNPAID", index=True)  # UNPAID | PAID_BANK | PAID_CASH | TRANSFERRED_DEBT | RETURNED
+    payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)  # BANK | CASH | DEBT | RETURN
+    bank_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    request: Mapped["DeliveryRequest"] = relationship(back_populates="orders")
+    employee: Mapped["Employee | None"] = relationship()

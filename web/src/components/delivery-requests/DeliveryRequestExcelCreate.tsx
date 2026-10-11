@@ -38,6 +38,20 @@ type EmployeeSummary = {
   is_over_limit?: boolean;
 };
 
+export type DeliveryOrder = {
+  order_date: string | null;
+  order_number: string;
+  employee_id: number | null;
+  employee_code: string;
+  employee_name: string | null;
+  customer_code: string | null;
+  customer_name: string | null;
+  amount: number;
+  payment_status: string;
+  payment_method?: string | null;
+};
+
+
 type PlanItem = {
   product_id: number;
   sku: string;
@@ -68,6 +82,8 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
   const [uploading, setUploading] = useState(false);
   const [preview, setPreview] = useState<PreviewItem[]>([]);
   const [employeeSummaries, setEmployeeSummaries] = useState<EmployeeSummary[]>([]);
+  const [orders, setOrders] = useState<DeliveryOrder[]>([]);
+  const [orderSearch, setOrderSearch] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const [plan, setPlan] = useState<PlanItem[] | null>(null);
   const [planning, setPlanning] = useState(false);
@@ -117,10 +133,12 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       if (Array.isArray(result)) {
         setPreview(result);
         setEmployeeSummaries([]);
+        setOrders([]);
         setWarnings([]);
       } else if (result && typeof result === "object" && "items" in result) {
         setPreview((result.items as PreviewItem[]) || []);
         setEmployeeSummaries((result.employee_summaries as EmployeeSummary[]) || []);
+        setOrders((result.orders as DeliveryOrder[]) || []);
         setWarnings((result.warnings as string[]) || []);
       }
       setPlan(null);
@@ -162,6 +180,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       warehouse_id: Number(warehouseId),
       items,
       employee_summaries: employeeSummaries.length > 0 ? employeeSummaries : undefined,
+      orders: orders.length > 0 ? orders : undefined,
     };
     const response = await apiFetch(`${API_URL}/delivery-requests/`, {
       method: "POST",
@@ -183,6 +202,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       }
     }
     setPreview([]);
+    setOrders([]);
     setPlan(null);
     setMessage(`Đã tạo yêu cầu ${result.code ?? ""}.${submitNote}`);
     await load();
@@ -377,6 +397,79 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
           </div>
         </div>
       )}
+
+      {orders.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
+          <div className="px-5 py-4 border-b border-gray-100 bg-gray-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h4 className="font-semibold text-gray-900">Chi tiết đơn hàng bóc tách từ Sheet 2 (DSDonHang)</h4>
+              <p className="text-xs text-gray-500">
+                Khớp {orders.length} đơn hàng với dữ liệu đơn hàng hệ thống. Tổng giá trị:{" "}
+                <span className="font-semibold text-gray-900">
+                  {orders.reduce((sum, o) => sum + o.amount, 0).toLocaleString("vi-VN")} đ
+                </span>
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Tìm số đơn, KH, NVGH..."
+                value={orderSearch}
+                onChange={(e) => setOrderSearch(e.target.value)}
+                className="px-3 py-1.5 border border-gray-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+              />
+              <span className="text-xs font-medium px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-full whitespace-nowrap">
+                {orders.length} đơn
+              </span>
+            </div>
+          </div>
+          <div className="max-h-72 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50/80 text-gray-500 sticky top-0 border-b border-gray-100">
+                <tr>
+                  <th className="text-left px-4 py-2.5">STT</th>
+                  <th className="text-left px-4 py-2.5">Ngày đơn</th>
+                  <th className="text-left px-4 py-2.5">Số đơn hàng</th>
+                  <th className="text-left px-4 py-2.5">NVGH</th>
+                  <th className="text-left px-4 py-2.5">Mã KH</th>
+                  <th className="text-left px-4 py-2.5">Tên khách hàng</th>
+                  <th className="text-right px-4 py-2.5">Số tiền</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {orders
+                  .filter((o) => {
+                    if (!orderSearch) return true;
+                    const q = orderSearch.toLowerCase();
+                    return (
+                      o.order_number.toLowerCase().includes(q) ||
+                      (o.customer_name && o.customer_name.toLowerCase().includes(q)) ||
+                      (o.customer_code && o.customer_code.toLowerCase().includes(q)) ||
+                      o.employee_code.toLowerCase().includes(q)
+                    );
+                  })
+                  .map((o, idx) => (
+                    <tr key={`${o.order_number}-${idx}`} className="hover:bg-gray-50/60">
+                      <td className="px-4 py-2 text-gray-400">{idx + 1}</td>
+                      <td className="px-4 py-2 text-gray-600">{o.order_date || "—"}</td>
+                      <td className="px-4 py-2 font-mono font-medium text-sky-700">{o.order_number}</td>
+                      <td className="px-4 py-2 text-gray-700">
+                        <span className="font-medium text-gray-900">{o.employee_code}</span>
+                        {o.employee_name && <span className="text-gray-400 ml-1">({o.employee_name})</span>}
+                      </td>
+                      <td className="px-4 py-2 font-mono text-gray-600">{o.customer_code || "—"}</td>
+                      <td className="px-4 py-2 text-gray-800">{o.customer_name || "—"}</td>
+                      <td className="px-4 py-2 text-right font-semibold text-gray-900">
+                        {o.amount.toLocaleString("vi-VN")} đ
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
 
       <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between"><div className="flex items-center gap-2"><ClipboardList size={18} className="text-sky-500" /><span className="font-semibold">Danh sách sản phẩm upload</span></div>{preview.length > 0 && <div className="flex gap-2"><button onClick={() => checkStock().catch((e) => setError(e instanceof Error ? e.message : "Không thể kiểm tra tồn kho."))} className="bg-amber-500 text-white px-3 py-2 rounded-lg text-sm">Check tồn</button><button disabled={planning} onClick={() => findLocations()} className="bg-indigo-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50">{planning ? "Đang tìm…" : "Tìm vị trí"}</button><button onClick={() => confirmPreview().catch((e) => setError(e instanceof Error ? e.message : "Không thể tạo yêu cầu."))} className="bg-emerald-500 text-white px-3 py-2 rounded-lg text-sm">Xác nhận tạo yêu cầu</button></div>}</div>

@@ -5,13 +5,18 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from decimal import Decimal
+import re
+
 from app.models.inventory import (
     DeliveryAllocation, DeliveryRequest, DeliveryRequestItem, InventoryLot,
     InventoryTransaction, Warehouse, WarehouseLocation, DeliveryRequestEmployeeSummary,
+    DeliveryRequestOrder,
 )
 from app.models.finance import DebtLedgerEntry
 from app.models.employee import Employee
 from app.models.product import Product
+
 from app.schemas.delivery_request import DeliveryRequestCreate, FefoPlanItem, FefoPlanPick
 
 ACTIVE_STATUSES = ("DRAFT", "SUBMITTED", "RECEIVED")
@@ -317,6 +322,32 @@ def create(
             ))
         if employee_summaries:
             db.flush()
+
+        emp_lookup = {e.code.upper(): e for e in db.scalars(select(Employee)).all()}
+        for order_data in payload.orders or []:
+            emp_id = order_data.employee_id
+            if emp_id is None and order_data.employee_code:
+                emp_obj = emp_lookup.get(order_data.employee_code.strip().upper())
+                emp_id = emp_obj.id if emp_obj else None
+            db.add(DeliveryRequestOrder(
+                delivery_request_id=request.id,
+                order_date=order_data.order_date,
+                order_number=order_data.order_number,
+                employee_id=emp_id,
+                employee_code=order_data.employee_code.strip().upper(),
+                employee_name=order_data.employee_name,
+                customer_code=order_data.customer_code,
+                customer_name=order_data.customer_name,
+                amount=order_data.amount,
+                payment_status=order_data.payment_status or "UNPAID",
+                payment_method=order_data.payment_method,
+                bank_ref=order_data.bank_ref,
+                paid_at=order_data.paid_at,
+                note=order_data.note,
+            ))
+        if payload.orders:
+            db.flush()
+
         db.commit()
         return get(db, request.id)
     except Exception:
@@ -378,6 +409,7 @@ def get(db: Session, request_id: int):
             selectinload(DeliveryAllocation.lot),
         ),
         selectinload(DeliveryRequest.employee_summaries),
+        selectinload(DeliveryRequest.orders),
     ).where(DeliveryRequest.id == request_id))
     return _with_stock(db, request)
 
@@ -513,6 +545,7 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
     request = db.scalar(select(DeliveryRequest).options(
         selectinload(DeliveryRequest.items),
         selectinload(DeliveryRequest.employee_summaries),
+        selectinload(DeliveryRequest.orders),
     ).where(DeliveryRequest.id == request_id).with_for_update())
     if not request:
         raise ValueError("Không tìm thấy yêu cầu xuất kho.")
@@ -576,6 +609,30 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
                 DeliveryRequestEmployeeSummary(**summary_data)
                 for summary_data in employee_summaries
             )
+
+        if payload.orders is not None:
+            request.orders.clear()
+            emp_lookup = {e.code.upper(): e for e in db.scalars(select(Employee)).all()}
+            for order_data in payload.orders:
+                emp_id = order_data.employee_id
+                if emp_id is None and order_data.employee_code:
+                    emp_obj = emp_lookup.get(order_data.employee_code.strip().upper())
+                    emp_id = emp_obj.id if emp_obj else None
+                request.orders.append(DeliveryRequestOrder(
+                    order_date=order_data.order_date,
+                    order_number=order_data.order_number,
+                    employee_id=emp_id,
+                    employee_code=order_data.employee_code.strip().upper(),
+                    employee_name=order_data.employee_name,
+                    customer_code=order_data.customer_code,
+                    customer_name=order_data.customer_name,
+                    amount=order_data.amount,
+                    payment_status=order_data.payment_status or "UNPAID",
+                    payment_method=order_data.payment_method,
+                    bank_ref=order_data.bank_ref,
+                    paid_at=order_data.paid_at,
+                    note=order_data.note,
+                ))
         
         db.commit()
         return get(db, request.id)
@@ -600,6 +657,268 @@ def delete(db: Session, request_id: int):
         raise
 
 
+def get_settlement(db: Session, request_id: int) -> dict:
+    req = db.scalar(
+        select(DeliveryRequest).options(
+            selectinload(DeliveryRequest.employee_summaries),
+            selectinload(DeliveryRequest.orders),
+        ).where(DeliveryRequest.id == request_id)
+    )
+    if not req:
+        raise ValueError("Không tìm thấy yêu cầu xuất kho.")
+    
+    total_orders_count = len(req.orders)
+    orders_total_amount = sum(float(o.amount) for o in req.orders)
+    summaries_total_amount = sum(float(s.amount) for s in req.employee_summaries)
+    total_amount = orders_total_amount if orders_total_amount > 0 else summaries_total_amount
+
+    total_paid_bank = sum(float(o.amount) for o in req.orders if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK"))
+    total_paid_cash = sum(float(o.amount) for o in req.orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
+    total_transferred_debt = sum(float(o.amount) for o in req.orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
+    total_returned = sum(float(o.amount) for o in req.orders if o.payment_method == "RETURN" or o.payment_status == "RETURNED")
+    total_unpaid = sum(float(o.amount) for o in req.orders if o.payment_status in ("UNPAID", "PENDING"))
+
+    emp_settlements = []
+    for s in req.employee_summaries:
+        emp_orders = [o for o in req.orders if o.employee_code == s.employee_code]
+        emp_orders_amt = sum(float(o.amount) for o in emp_orders)
+        emp_bank = sum(float(o.amount) for o in emp_orders if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK"))
+        emp_cash = sum(float(o.amount) for o in emp_orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
+        emp_debt = sum(float(o.amount) for o in emp_orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
+        emp_ret = sum(float(o.amount) for o in emp_orders if o.payment_method == "RETURN" or o.payment_status == "RETURNED")
+        emp_unpaid = sum(float(o.amount) for o in emp_orders if o.payment_status in ("UNPAID", "PENDING"))
+
+        allocated = float(s.amount)
+        remaining_cash_to_turn_in = max(0.0, allocated - emp_bank - emp_debt - emp_ret)
+
+        emp_settlements.append({
+            "employee_id": s.employee_id,
+            "employee_code": s.employee_code,
+            "employee_name": s.employee_name,
+            "allocated_amount": allocated,
+            "orders_count": len(emp_orders),
+            "orders_amount": emp_orders_amt,
+            "paid_bank": emp_bank,
+            "paid_cash": emp_cash,
+            "transferred_debt": emp_debt,
+            "returned": emp_ret,
+            "unpaid": emp_unpaid,
+            "remaining_cash_to_turn_in": remaining_cash_to_turn_in,
+            "difference": emp_orders_amt - allocated,
+        })
+
+    return {
+        "request_id": req.id,
+        "request_code": req.code,
+        "request_status": req.status,
+        "warehouse_id": req.warehouse_id,
+        "total_orders_count": total_orders_count,
+        "total_amount": total_amount,
+        "total_paid_bank": total_paid_bank,
+        "total_paid_cash": total_paid_cash,
+        "total_transferred_debt": total_transferred_debt,
+        "total_returned": total_returned,
+        "total_unpaid": total_unpaid,
+        "difference": orders_total_amount - summaries_total_amount,
+        "employee_settlements": emp_settlements,
+        "orders": req.orders,
+    }
+
+
+def settle_order_pay(
+    db: Session,
+    request_id: int,
+    order_id: int,
+    payment_method: str,
+    paid_amount: float | None = None,
+    bank_ref: str | None = None,
+    note: str | None = None,
+    created_by: str | None = None,
+) -> DeliveryRequestOrder:
+    order = db.scalar(
+        select(DeliveryRequestOrder).where(
+            DeliveryRequestOrder.delivery_request_id == request_id,
+            DeliveryRequestOrder.id == order_id,
+        ).with_for_update()
+    )
+    if not order:
+        raise ValueError("Không tìm thấy đơn hàng trong phiếu xuất.")
+
+    method_upper = (payment_method or "BANK").upper()
+    order.payment_method = method_upper
+    if method_upper in ("BANK", "CASH"):
+        order.payment_status = f"PAID_{method_upper}"
+    elif method_upper == "DEBT":
+        order.payment_status = "TRANSFERRED_DEBT"
+    elif method_upper == "RETURN":
+        order.payment_status = "RETURNED"
+    else:
+        order.payment_status = "PAID"
+
+    if bank_ref:
+        order.bank_ref = bank_ref
+    if note:
+        order.note = note
+    order.paid_at = datetime.utcnow()
+
+    if order.employee_id and float(order.amount) > 0 and method_upper in ("BANK", "CASH"):
+        entry_type = "BANK_RECEIPT" if method_upper == "BANK" else "CASH_RECEIPT"
+        amt_deduct = paid_amount if (paid_amount is not None and paid_amount > 0) else float(order.amount)
+
+        existing = db.scalar(
+            select(DebtLedgerEntry).where(
+                DebtLedgerEntry.party_type == "EMPLOYEE",
+                DebtLedgerEntry.party_id == order.employee_id,
+                DebtLedgerEntry.source_type == "DELIVERY_ORDER",
+                DebtLedgerEntry.source_id == order.id,
+                DebtLedgerEntry.entry_type == entry_type,
+            )
+        )
+        if not existing:
+            db.add(DebtLedgerEntry(
+                party_type="EMPLOYEE",
+                party_id=order.employee_id,
+                entry_type=entry_type,
+                amount=-Decimal(str(amt_deduct)),
+                source_type="DELIVERY_ORDER",
+                source_id=order.id,
+                source_code=order.order_number,
+                document_date=datetime.utcnow(),
+                note=f"Quyết toán {method_upper}: đơn {order.order_number} ({order.customer_name or order.customer_code})" + (f" - Ref: {bank_ref}" if bank_ref else ""),
+                created_by=created_by,
+            ))
+
+    db.commit()
+    return order
+
+
+def _clean_str(s: str | None) -> str:
+    if not s:
+        return ""
+    return re.sub(r"[^A-Za-z0-9]", "", str(s)).upper()
+
+
+def match_statements(
+    db: Session,
+    request_id: int,
+    statements: list,
+    auto_confirm: bool = False,
+    created_by: str | None = None,
+) -> dict:
+    req = db.scalar(
+        select(DeliveryRequest).options(
+            selectinload(DeliveryRequest.orders)
+        ).where(DeliveryRequest.id == request_id)
+    )
+    if not req:
+        raise ValueError("Không tìm thấy yêu cầu xuất kho.")
+
+    orders = req.orders
+    order_by_clean_num = {_clean_str(o.order_number): o for o in orders if o.order_number}
+
+    results = []
+    matched_count = 0
+    auto_confirmed_count = 0
+
+    for stmt in statements:
+        ref_no = getattr(stmt, "ref_number", None) or (stmt.get("ref_number") if isinstance(stmt, dict) else None)
+        desc = getattr(stmt, "description", "") or (stmt.get("description", "") if isinstance(stmt, dict) else "")
+        amount = float(getattr(stmt, "amount", 0.0) if hasattr(stmt, "amount") else (stmt.get("amount", 0.0) if isinstance(stmt, dict) else 0.0))
+
+        clean_desc = _clean_str(desc)
+        matched_order = None
+        confidence = 0.0
+        msg = ""
+
+        # 1. Match by order number in description
+        for clean_num, o in order_by_clean_num.items():
+            if len(clean_num) >= 4 and clean_num in clean_desc:
+                matched_order = o
+                confidence = 1.0
+                msg = f"Khớp chính xác số đơn hàng {o.order_number}"
+                break
+
+        # 2. Match by customer code and exact amount
+        if not matched_order:
+            for o in orders:
+                if o.customer_code:
+                    clean_cust = _clean_str(o.customer_code)
+                    if len(clean_cust) >= 2 and clean_cust in clean_desc and abs(float(o.amount) - amount) < 1.0:
+                        matched_order = o
+                        confidence = 0.85
+                        msg = f"Khớp mã khách hàng {o.customer_code} và số tiền {amount:,.0f}đ"
+                        break
+
+        # 3. Match by customer name and exact amount
+        if not matched_order:
+            for o in orders:
+                if o.customer_name and len(o.customer_name) >= 3:
+                    clean_name = _clean_str(o.customer_name)
+                    if clean_name and clean_name in clean_desc and abs(float(o.amount) - amount) < 1.0:
+                        matched_order = o
+                        confidence = 0.75
+                        msg = f"Khớp tên khách hàng '{o.customer_name}' và số tiền {amount:,.0f}đ"
+                        break
+
+        if matched_order:
+            matched_count += 1
+            already_paid = matched_order.payment_status in ("PAID", "PAID_BANK", "PAID_CASH")
+            if auto_confirm and not already_paid and confidence >= 0.8:
+                settle_order_pay(
+                    db,
+                    request_id=request_id,
+                    order_id=matched_order.id,
+                    payment_method="BANK",
+                    paid_amount=amount,
+                    bank_ref=ref_no,
+                    note=f"Khớp tự động từ sao kê: {desc}",
+                    created_by=created_by,
+                )
+                auto_confirmed_count += 1
+                already_paid = True
+                msg += " (Đã tự động xác nhận)"
+
+            results.append({
+                "statement_ref": ref_no,
+                "statement_amount": amount,
+                "statement_description": desc,
+                "order_id": matched_order.id,
+                "order_number": matched_order.order_number,
+                "customer_code": matched_order.customer_code,
+                "customer_name": matched_order.customer_name,
+                "employee_code": matched_order.employee_code,
+                "order_amount": float(matched_order.amount),
+                "matched": True,
+                "confidence": confidence,
+                "message": msg,
+                "already_paid": already_paid,
+            })
+        else:
+            results.append({
+                "statement_ref": ref_no,
+                "statement_amount": amount,
+                "statement_description": desc,
+                "order_id": None,
+                "order_number": None,
+                "customer_code": None,
+                "customer_name": None,
+                "employee_code": None,
+                "order_amount": None,
+                "matched": False,
+                "confidence": 0.0,
+                "message": "Không tìm thấy đơn hàng khớp với giao dịch",
+                "already_paid": False,
+            })
+
+    return {
+        "total_statements": len(statements),
+        "matched_count": matched_count,
+        "unmatched_count": len(statements) - matched_count,
+        "auto_confirmed_count": auto_confirmed_count,
+        "matches": results,
+    }
+
+
 class DeliveryRequestCRUD:
     create = staticmethod(create)
     update = staticmethod(update)
@@ -609,6 +928,10 @@ class DeliveryRequestCRUD:
     plan = staticmethod(plan)
     transition = staticmethod(transition)
     available_for_product = staticmethod(available_for_product)
+    get_settlement = staticmethod(get_settlement)
+    settle_order_pay = staticmethod(settle_order_pay)
+    match_statements = staticmethod(match_statements)
 
 
 delivery_request = DeliveryRequestCRUD()
+

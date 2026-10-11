@@ -6,8 +6,10 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import StatCard from "@/components/ui/StatCard";
 import DeliveryRequestExcelCreate from "@/components/delivery-requests/DeliveryRequestExcelCreate";
-import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload } from "lucide-react";
+import DeliverySettlementModal from "@/components/delivery-requests/DeliverySettlementModal";
+import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload, CreditCard } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
+
 
 type Item = { id: number; product_id: number; sku: string; product_name: string; quantity: number; requested_quantity_raw: string | null; };
 type EmployeeDebtSummary = { employee_id: number | null; employee_code: string; employee_name: string | null; amount: number; };
@@ -45,6 +47,7 @@ export default function AdminDeliveryRequestsPage() {
   const [selected, setSelected] = useState<DeliveryRequest | null>(null);
   const [editing, setEditing] = useState(false); const [editNote, setEditNote] = useState(""); const [editItems, setEditItems] = useState<{ quantity: string; sku: string; product_name: string; product_id: number }[]>([]);
   const [stockPlan, setStockPlan] = useState<StockPlanItem[] | null>(null); const [checkingStock, setCheckingStock] = useState(false);
+  const [settlementRow, setSettlementRow] = useState<DeliveryRequest | null>(null);
   const [activeTab, setActiveTab] = useState<"list" | "create">(() => {
     if (typeof window === "undefined") return "list";
     return new URLSearchParams(window.location.search).get("tab") === "create" ? "create" : "list";
@@ -208,6 +211,22 @@ export default function AdminDeliveryRequestsPage() {
     { key: "created_by", title: "Người tạo", render: (val) => <span className="text-gray-600">{val ? String(val) : "—"}</span> },
     { key: "created_at", title: "Ngày tạo", sortable: true, render: (_, row) => <span className="text-gray-600 text-xs">{new Date(row.created_at).toLocaleString("vi-VN")}</span> },
     { key: "status", title: "Trạng thái", sortable: true, render: (val) => <Badge variant={statusVariant[String(val)] ?? "default"}>{statusLabel[String(val)] ?? String(val)}</Badge> },
+    {
+      key: "actions",
+      title: "Quyết toán",
+      align: "center",
+      render: (_, row) => (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setSettlementRow(row);
+          }}
+          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-sky-50 hover:bg-sky-100 text-sky-700 transition-colors border border-sky-100"
+        >
+          <CreditCard size={13} /> Quyết toán
+        </button>
+      ),
+    },
   ];
 
   return (
@@ -397,7 +416,15 @@ export default function AdminDeliveryRequestsPage() {
                     </button>
                   </div>
                 )}
-                <button onClick={() => { setSelected(null); setEditing(false); setStockPlan(null); }} className="rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 w-full">Đóng</button>
+                <button
+                  onClick={() => {
+                    setSettlementRow(selected);
+                  }}
+                  className="flex items-center justify-center gap-2 w-full rounded-lg bg-sky-500 hover:bg-sky-600 text-white py-2.5 text-sm font-semibold transition-colors shadow-xs mt-3"
+                >
+                  <CreditCard size={16} /> Bảng quyết toán chuyến xe & Sao kê
+                </button>
+                <button onClick={() => { setSelected(null); setEditing(false); setStockPlan(null); }} className="rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 w-full mt-2">Đóng</button>
               </>
             ) : (
               <>
@@ -427,6 +454,16 @@ export default function AdminDeliveryRequestsPage() {
           </div>
         )}
       </Drawer>
+
+      {settlementRow && (
+        <DeliverySettlementModal
+          requestId={settlementRow.id}
+          requestCode={settlementRow.code}
+          isOpen={Boolean(settlementRow)}
+          onClose={() => setSettlementRow(null)}
+          onSettled={load}
+        />
+      )}
     </div>
   );
 }

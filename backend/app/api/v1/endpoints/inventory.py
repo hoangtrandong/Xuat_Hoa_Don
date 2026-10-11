@@ -441,8 +441,12 @@ def list_lot_details(
 
 
 @router.get("/stock-levels/", response_model=List[StockLevel])
-def stock_levels(warehouse_id: int | None = None, db: Session = Depends(get_db)):
-    return crud.get_stock_levels(db, warehouse_id=warehouse_id)
+def stock_levels(
+    warehouse_id: int | None = None,
+    category_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    return crud.get_stock_levels(db, warehouse_id=warehouse_id, category_id=category_id)
 
 
 @router.post("/adjust/", response_model=InventoryTransaction, status_code=201)

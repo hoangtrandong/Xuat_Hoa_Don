@@ -16,6 +16,8 @@ interface ApiStockLevel {
   product_id: number;
   product_code: string;
   product_name: string;
+  category_name?: string | null;
+  category?: string | null;
   unit: string;
   on_hand: number;
   reserved: number;
@@ -48,7 +50,7 @@ function toStockLevel(item: ApiStockLevel): StockLevel {
     id: String(item.product_id),
     productCode: item.product_code,
     productName: item.product_name,
-    category: "",
+    category: item.category_name || item.category || "",
     unit: item.unit,
     onHand: item.on_hand,
     reserved: item.reserved,

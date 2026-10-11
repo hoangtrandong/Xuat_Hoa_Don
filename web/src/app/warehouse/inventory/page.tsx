@@ -1,7 +1,7 @@
 "use client";
 // src/app/warehouse/inventory/page.tsx
 import { useEffect, useState } from "react";
-import { Boxes, CircleDollarSign, TriangleAlert, ArrowDownUp, Warehouse as WarehouseIcon, SlidersHorizontal, Download } from "lucide-react";
+import { Boxes, CircleDollarSign, TriangleAlert, ArrowDownUp, Warehouse as WarehouseIcon, SlidersHorizontal, Download, Package } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -18,6 +18,9 @@ interface ApiStockLevel {
   product_id: number;
   product_code: string;
   product_name: string;
+  category_id?: number | null;
+  category_name?: string | null;
+  category?: string | null;
   unit: string;
   on_hand: number;
   reserved: number;
@@ -27,6 +30,11 @@ interface ApiStockLevel {
   lot_count?: number;
   earliest_expiry?: string | null;
   locations?: string | null;
+}
+
+interface ApiCategory {
+  id: number;
+  name: string;
 }
 
 interface ApiTransaction {
@@ -87,12 +95,13 @@ interface ApiLotDetail {
   unit_cost?: number | null;
 }
 
-function toStockLevel(item: ApiStockLevel): StockLevel {
+function toStockLevel(item: ApiStockLevel, categoryName?: string): StockLevel {
+  const cat = item.category_name || item.category || categoryName || "";
   return {
     id: String(item.product_id),
     productCode: item.product_code,
     productName: item.product_name,
-    category: "",
+    category: cat || "Chưa phân loại",
     unit: item.unit,
     onHand: item.on_hand,
     reserved: item.reserved,
@@ -146,6 +155,7 @@ export default function WarehouseInventoryPage() {
   const [adjSuccess, setAdjSuccess] = useState("");
 
   const [stockLevels, setStockLevels] = useState<StockLevel[]>([]);
+  const [categoryOptions, setCategoryOptions] = useState<ApiCategory[]>([]);
   const [ledgerEntriesState, setLedgerEntriesState] = useState<LedgerEntry[]>([]);
   const [locations, setLocations] = useState<ApiLocation[]>([]);
   const [lots, setLots] = useState<ApiLot[]>([]);
@@ -158,13 +168,14 @@ export default function WarehouseInventoryPage() {
     let cancelled = false;
     async function loadInventory() {
       try {
-        const [stockResponse, transactionResponse, warehouseResponse, locationResponse, lotResponse, lotDetailResponse] = await Promise.all([
+        const [stockResponse, transactionResponse, warehouseResponse, locationResponse, lotResponse, lotDetailResponse, categoryResponse] = await Promise.all([
           apiFetch(`${API_URL}/inventory/stock-levels/`),
           apiFetch(`${API_URL}/inventory/transactions/`),
           apiFetch(`${API_URL}/inventory/warehouses/`),
           apiFetch(`${API_URL}/inventory/locations/`),
           apiFetch(`${API_URL}/inventory/lots/`),
           apiFetch(`${API_URL}/inventory/lot-details/`),
+          apiFetch(`${API_URL}/products/categories/`),
         ]);
         if (!stockResponse.ok || !transactionResponse.ok || !warehouseResponse.ok || !locationResponse.ok || !lotResponse.ok || !lotDetailResponse.ok) {
           throw new Error("Không thể tải dữ liệu tồn kho từ API.");
@@ -175,10 +186,13 @@ export default function WarehouseInventoryPage() {
         const locationRows = await locationResponse.json() as ApiLocation[];
         const lotRows = await lotResponse.json() as ApiLot[];
         const lotDetailRows = await lotDetailResponse.json() as ApiLotDetail[];
+        const loadedCategories = categoryResponse.ok ? (await categoryResponse.json() as ApiCategory[]) : [];
         if (cancelled) return;
+        setCategoryOptions(loadedCategories);
+        const categoryMap = new Map(loadedCategories.map((c) => [c.id, c.name]));
         const stockMap = new Map(stocks.map((item) => [item.product_id, item]));
         const warehouseMap = new Map(warehouses.map((item) => [item.id, item.name]));
-        setStockLevels(stocks.map(toStockLevel));
+        setStockLevels(stocks.map((item) => toStockLevel(item, item.category_id ? categoryMap.get(item.category_id) : undefined)));
         setLedgerEntriesState(transactions.map((item) => ({
           id: item.id,
           code: item.code,
@@ -209,10 +223,17 @@ export default function WarehouseInventoryPage() {
 
   const refresh = () => setVersion((v) => v + 1);
 
-  const totalValue = stockLevels.reduce((s, i) => s + i.totalValue, 0);
-  const lowStock = stockLevels.filter((s) => s.onHand <= s.reorderPoint).length;
+  const filteredStock = stockLevels.filter((s) => categoryFilter === "Tất cả" || s.category === categoryFilter);
+  const totalStockQuantity = filteredStock.reduce((s, i) => s + (Number(i.onHand) || 0), 0);
+  const totalValue = filteredStock.reduce((s, i) => s + i.totalValue, 0);
+  const lowStock = filteredStock.filter((s) => s.onHand <= s.reorderPoint).length;
   const todayTx = ledgerEntriesState.filter((e) => e.createdAt.startsWith(new Date().toISOString().slice(0, 10))).length;
-  const categories = Array.from(new Set(stockLevels.map((s) => s.category)));
+  const categories = Array.from(
+    new Set([
+      ...categoryOptions.map((c) => c.name),
+      ...stockLevels.map((s) => s.category).filter(Boolean),
+    ])
+  ).filter((c) => c && c.trim() !== "");
   const stockColumns: Column<StockLevel>[] = [
     { key: "productCode", title: "Mã SKU", sortable: true },
     {
@@ -366,7 +387,6 @@ export default function WarehouseInventoryPage() {
       render: (val) => <span className="text-xs text-gray-500">{String(val)}</span>,
     },
   ];
-  const filteredStock = stockLevels.filter((s) => categoryFilter === "Tất cả" || s.category === categoryFilter);
   const filteredLedger = ledgerEntriesState.filter((e) => typeFilter === "Tất cả" || e.type === typeFilter);
   const filteredLotDetails = lotDetails
     .filter((lot) => lotProductFilter === "Tất cả" || lot.product_code === lotProductFilter)
@@ -376,6 +396,7 @@ export default function WarehouseInventoryPage() {
     downloadExcel(filteredStock.map((stock) => ({
       "Mã SKU": stock.productCode,
       "Sản phẩm": stock.productName,
+      "Danh mục": stock.category,
       "ĐVT": stock.unit,
       "Tồn kho": stock.onHand,
       "Đã giữ": stock.reserved,
@@ -481,11 +502,39 @@ export default function WarehouseInventoryPage() {
 
       {loadError && <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">{loadError}</div>}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Giá trị tồn kho" value={formatVND(totalValue)} icon={<CircleDollarSign size={20} />} color="bg-sky-50 text-sky-600" />
-        <StatCard label="Tổng SKU" value={stockLevels.length} icon={<Boxes size={20} />} color="bg-purple-50 text-purple-600" />
-        <StatCard label="SKU thiếu (≤ điểm đặt lại)" value={lowStock} icon={<TriangleAlert size={20} />} color="bg-amber-50 text-amber-600" />
-        <StatCard label="Giao dịch hôm nay" value={todayTx} icon={<ArrowDownUp size={20} />} color="bg-emerald-50 text-emerald-600" />
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+        <StatCard
+          label="Số lượng tồn kho"
+          value={formatNumber(totalStockQuantity)}
+          sub={categoryFilter !== "Tất cả" ? `Theo: ${categoryFilter}` : "Toàn bộ kho"}
+          icon={<Package size={20} />}
+          color="bg-blue-50 text-blue-600"
+        />
+        <StatCard
+          label="Tổng SKU"
+          value={filteredStock.length}
+          sub={categoryFilter !== "Tất cả" ? "Đang lọc danh mục" : undefined}
+          icon={<Boxes size={20} />}
+          color="bg-purple-50 text-purple-600"
+        />
+        <StatCard
+          label="Giá trị tồn kho"
+          value={formatVND(totalValue)}
+          icon={<CircleDollarSign size={20} />}
+          color="bg-sky-50 text-sky-600"
+        />
+        <StatCard
+          label="SKU thiếu (≤ điểm đặt lại)"
+          value={lowStock}
+          icon={<TriangleAlert size={20} />}
+          color="bg-amber-50 text-amber-600"
+        />
+        <StatCard
+          label="Giao dịch hôm nay"
+          value={todayTx}
+          icon={<ArrowDownUp size={20} />}
+          color="bg-emerald-50 text-emerald-600"
+        />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

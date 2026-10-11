@@ -17,6 +17,8 @@ interface ApiStockLevel {
   product_id: number;
   product_code: string;
   product_name: string;
+  category_name?: string | null;
+  category?: string | null;
   unit: string;
   on_hand: number;
   reserved: number;
@@ -99,7 +101,7 @@ function normalizeImportItem(item: ImportItem): ImportItem {
 function toStockLevel(item: ApiStockLevel): StockLevel {
   return {
     id: String(item.product_id), productCode: item.product_code,
-    productName: item.product_name, category: "", unit: item.unit,
+    productName: item.product_name, category: item.category_name || item.category || "", unit: item.unit,
     onHand: item.on_hand, reserved: item.reserved, available: item.available,
     reorderPoint: item.reorder_level, unitValue: 0, totalValue: 0,
   };

@@ -126,10 +126,6 @@ function expandProcessingStates(order: RemoteOrder): RemoteOrder[] {
   const states: string[] = [];
   if (order["_warehouse_updated"] === true) states.push("Đã cập nhật kho");
   if (order["_returned"] === true) states.push("Đã trả");
-  if (states.length === 0) {
-    const unknown = order["_warehouse_updated"] == null && order["_returned"] == null;
-    states.push(unknown ? "Chưa xác định" : "Chưa cập nhật kho / chưa trả");
-  }
   return states.map((state, index) => ({ ...order, "Trạng thái xử lý": state, _state_copy: index > 0 }));
 }
 
@@ -311,7 +307,8 @@ export default function SalesOrdersPage() {
           );
         }
         if (title === "Trạng thái xử lý") {
-          const tone = text.startsWith("Đã") ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-600";
+          if (text !== "Đã cập nhật kho" && text !== "Đã trả") return null;
+          const tone = "bg-emerald-50 text-emerald-700";
           return <span className={`rounded-full px-2 py-1 text-xs font-medium ${tone}`}>{text}</span>;
         }
         return <span className="block truncate" title={text || undefined}>{text}</span>;

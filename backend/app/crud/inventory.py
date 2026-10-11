@@ -9,7 +9,7 @@ from app.models.inventory import (
     DeliveryAllocation, DeliveryRequest, DeliveryRequestItem,
     InventoryTransfer, InventoryTransferItem,
 )
-from app.models.product import Product, ProductUnit
+from app.models.product import Product, ProductUnit, ProductCategory
 from app.schemas.inventory import StockAdjust, StockLevel
 from app.crud.finance import record_debt_on_sales_export
 
@@ -205,7 +205,11 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
     return txn
 
 
-def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[StockLevel]:
+def get_stock_levels(
+    db: Session,
+    warehouse_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+) -> List[StockLevel]:
     """Tính tồn kho từ inventory_lots (ưu tiên) và inventory_transactions (fallback)."""
     # Subquery: tổng tồn theo lô từ inventory_lots (chỉ tính các vị trí đang hoạt động)
     lot_subquery = (
@@ -262,12 +266,14 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
         reserved_subquery = reserved_subquery.where(DeliveryRequest.warehouse_id == warehouse_id)
     reserved_subquery = reserved_subquery.group_by(DeliveryRequestItem.product_id).subquery()
 
-    # Main query: join với products
-    result = db.execute(
+    # Main query: join với products & categories
+    stmt = (
         select(
             Product.id.label("product_id"),
             Product.sku.label("product_code"),
             Product.name.label("product_name"),
+            Product.category_id.label("category_id"),
+            ProductCategory.name.label("category_name"),
             ProductUnit.name.label("unit"),
             Product.reorder_level,
             func.coalesce(lot_subquery.c.lot_qty, 0).label("on_hand"),
@@ -278,11 +284,15 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             location_subquery.c.locations,
         )
         .join(ProductUnit, ProductUnit.id == Product.unit_id)
+        .outerjoin(ProductCategory, ProductCategory.id == Product.category_id)
         .outerjoin(lot_subquery, lot_subquery.c.product_id == Product.id)
         .outerjoin(location_subquery, location_subquery.c.product_id == Product.id)
         .outerjoin(reserved_subquery, reserved_subquery.c.product_id == Product.id)
-        .order_by(Product.sku)
     )
+    if category_id is not None:
+        stmt = stmt.where(Product.category_id == category_id)
+    stmt = stmt.order_by(Product.sku)
+    result = db.execute(stmt)
 
     levels = []
     for row in result.all():
@@ -294,6 +304,9 @@ def get_stock_levels(db: Session, warehouse_id: Optional[int] = None) -> List[St
             product_id=row.product_id,
             product_code=row.product_code,
             product_name=row.product_name,
+            category_id=row.category_id,
+            category_name=row.category_name,
+            category=row.category_name,
             unit=row.unit,
             on_hand=on_hand,
             reserved=reserved,

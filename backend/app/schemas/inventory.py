@@ -28,6 +28,9 @@ class StockLevel(BaseModel):
     product_id: int
     product_code: str
     product_name: str
+    category_id: Optional[int] = None
+    category_name: Optional[str] = None
+    category: Optional[str] = None
     unit: str
     on_hand: int
     reserved: int

@@ -110,11 +110,38 @@ class DebtTransferAction(BaseModel):
     reason: Optional[str] = None
 
 
+class DeliveryReturnItemBase(BaseModel):
+    product_id: int
+    quantity: int = Field(gt=0, description="Số lượng hộp/đơn vị trả về")
+    cartons: int = 0
+    loose_boxes: int = 0
+    unit_price: float = 0.0
+    amount: float = 0.0
+    reason: Optional[str] = None
+    location_id: Optional[int] = None
+
+
+class DeliveryReturnItemCreate(DeliveryReturnItemBase):
+    pass
+
+
+class DeliveryReturnItemOut(DeliveryReturnItemBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    delivery_return_id: int
+    sku: Optional[str] = None
+    product_name: Optional[str] = None
+    location_code: Optional[str] = None
+
+
 class DeliveryReturnCreate(BaseModel):
     delivery_request_id: int
     employee_id: int
-    amount: float = Field(gt=0, description="Return value must be positive")
+    order_id: Optional[int] = None
+    amount: Optional[float] = Field(default=0.0, ge=0)
     note: Optional[str] = None
+    items: Optional[List[DeliveryReturnItemCreate]] = None
+    restore_stock: bool = True
 
 
 class DeliveryReturnOut(BaseModel):
@@ -123,9 +150,14 @@ class DeliveryReturnOut(BaseModel):
     code: str
     delivery_request_id: int
     employee_id: int
+    employee_code: Optional[str] = None
+    employee_name: Optional[str] = None
+    order_id: Optional[int] = None
+    order_number: Optional[str] = None
     amount: float
     status: str
     note: Optional[str] = None
     created_by: Optional[str] = None
     approved_by: Optional[str] = None
     created_at: datetime
+    items: List[DeliveryReturnItemOut] = Field(default_factory=list)

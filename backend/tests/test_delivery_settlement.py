@@ -273,3 +273,142 @@ def test_upload_request_sheet2_parsing(db):
     assert order_res.customer_name == "Cua Hang A"
     assert order_res.amount == 1500000.0
 
+
+def test_delivery_return_and_stock_restoration(db):
+    from app.crud.debt_ledger import create_delivery_return
+    from app.models.inventory import InventoryTransaction
+    from app.models.finance import DeliveryReturn
+
+    session, wh, prod, emp = db
+
+    # 1. Create delivery request with orders
+    payload = DeliveryRequestCreate(
+        warehouse_id=wh.id,
+        items=[
+            DeliveryRequestItemCreate(
+                product_id=prod.id,
+                quantity=20,
+                employee_allocations={
+                    "EMP01": {"quantity": 20, "cartons": 1, "boxes": 8, "raw": "1T 8H"}
+                }
+            )
+        ],
+        employee_summaries=[
+            DeliveryRequestEmployeeSummaryCreate(
+                employee_id=emp.id,
+                employee_code="EMP01",
+                employee_name=emp.name,
+                amount=6000000.0,
+                order_count=2,
+            )
+        ],
+        orders=[
+            DeliveryRequestOrderCreate(
+                order_date=date(2026, 9, 8),
+                order_number="ORD-RET-001",
+                employee_id=emp.id,
+                employee_code="EMP01",
+                employee_name=emp.name,
+                customer_code="KH001",
+                customer_name="Cua Hang 1",
+                amount=2000000.0,
+                payment_status="UNPAID",
+            ),
+            DeliveryRequestOrderCreate(
+                order_date=date(2026, 9, 8),
+                order_number="ORD-RET-002",
+                employee_id=emp.id,
+                employee_code="EMP01",
+                employee_name=emp.name,
+                customer_code="KH002",
+                customer_name="Cua Hang 2",
+                amount=4000000.0,
+                payment_status="UNPAID",
+            ),
+        ]
+    )
+    dr = create(session, payload)
+
+    # 2. Return entire order ORD-RET-001 via settle_order_pay(method="RETURN")
+    ord_1 = [o for o in dr.orders if o.order_number == "ORD-RET-001"][0]
+    settle_order_pay(session, dr.id, ord_1.id, payment_method="RETURN")
+
+    # Check order is marked RETURNED
+    assert ord_1.payment_status == "RETURNED"
+    assert ord_1.payment_method == "RETURN"
+
+    # Check DeliveryReturn created and debt deducted
+    ret_ord1 = session.scalar(
+        select(DeliveryReturn).where(
+            DeliveryReturn.delivery_request_id == dr.id,
+            DeliveryReturn.order_id == ord_1.id,
+        )
+    )
+    assert ret_ord1 is not None
+    assert float(ret_ord1.amount) == 2000000.0
+
+    debt_ret1 = session.scalar(
+        select(DebtLedgerEntry).where(
+            DebtLedgerEntry.party_type == "EMPLOYEE",
+            DebtLedgerEntry.party_id == emp.id,
+            DebtLedgerEntry.source_type == "DELIVERY_RETURN",
+            DebtLedgerEntry.source_id == ret_ord1.id,
+        )
+    )
+    assert debt_ret1 is not None
+    assert float(debt_ret1.amount) == -2000000.0
+
+    # 3. Create partial item return (e.g. 5 boxes returned to warehouse)
+    ret_slip = create_delivery_return(
+        session,
+        delivery_request_id=dr.id,
+        employee_id=emp.id,
+        items=[
+            {
+                "product_id": prod.id,
+                "quantity": 5,
+                "cartons": 0,
+                "loose_boxes": 5,
+                "unit_price": 100000.0,
+                "amount": 500000.0,
+                "reason": "Khách thừa hàng, trả lại",
+            }
+        ],
+        restore_stock=True,
+        note="Nhập trả 5 hộp hàng về kho",
+    )
+    assert ret_slip.id is not None
+    assert float(ret_slip.amount) == 500000.0
+    assert len(ret_slip.items) == 1
+    assert ret_slip.items[0].quantity == 5
+
+    # Verify InventoryTransaction IN was generated to restore stock
+    txn = session.scalar(
+        select(InventoryTransaction).where(
+            InventoryTransaction.ref_type == "DELIVERY_RETURN",
+            InventoryTransaction.ref_code == ret_slip.code,
+        )
+    )
+    assert txn is not None
+    assert txn.type == "IN"
+    assert txn.quantity == 5
+    assert txn.warehouse_id == wh.id
+    assert txn.product_id == prod.id
+
+    # 4. Settle ord_2 with Bank transfer of 3,500,000 (customer transferred part of it)
+    ord_2 = [o for o in dr.orders if o.order_number == "ORD-RET-002"][0]
+    settle_order_pay(session, dr.id, ord_2.id, payment_method="BANK", paid_amount=3500000.0)
+
+    # 5. Check settlement overview
+    overview = get_settlement(session, dr.id)
+    assert overview["total_returned"] == 2500000.0  # 2M from ord_1 + 500k from item return
+    assert overview["total_paid_bank"] == 4000000.0  # order 2 full amount settled
+    assert len(overview["returns"]) == 2
+
+    emp_settle = overview["employee_settlements"][0]
+    assert emp_settle["returned"] == 2500000.0
+    # Allocated: 6,000,000. Bank: 4,000,000. Returned: 2,500,000.
+    # Remaining cash to turn in: max(0, 6,000,000 - 4,000,000 - 2,500,000) = 0
+    assert emp_settle["remaining_cash_to_turn_in"] == 0.0
+
+

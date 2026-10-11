@@ -1,12 +1,13 @@
 from datetime import datetime
 from uuid import uuid4
 from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.employee import Employee
 from app.models.customer import Store, Customer
-from app.models.finance import DebtLedgerEntry, DebtTransfer, CashReceipt, DeliveryReturn
-from app.models.inventory import DeliveryRequest, DeliveryRequestEmployeeSummary
+from app.models.finance import DebtLedgerEntry, DebtTransfer, CashReceipt, DeliveryReturn, DeliveryReturnItem
+from app.models.inventory import DeliveryRequest, DeliveryRequestEmployeeSummary, DeliveryRequestOrder, InventoryTransaction, WarehouseLocation
+from app.models.product import Product
 
 
 def _code(prefix: str) -> str:
@@ -324,11 +325,17 @@ def reject_debt_transfer(db: Session, transfer_id: int, approved_by: str | None 
 
 
 def create_delivery_return(
-    db: Session, delivery_request_id: int, employee_id: int, amount: float, note: str | None = None,
-    created_by: str | None = None, approved_by: str | None = None
+    db: Session,
+    delivery_request_id: int,
+    employee_id: int,
+    amount: float = 0.0,
+    order_id: int | None = None,
+    items: list | None = None,
+    restore_stock: bool = True,
+    note: str | None = None,
+    created_by: str | None = None,
+    approved_by: str | None = None,
 ) -> DeliveryReturn:
-    if amount <= 0:
-        raise ValueError("Giá trị hàng trả về phải lớn hơn 0.")
     dr = db.get(DeliveryRequest, delivery_request_id)
     if not dr:
         raise ValueError("Không tìm thấy phiếu xuất kho.")
@@ -336,12 +343,65 @@ def create_delivery_return(
     if not emp:
         raise ValueError("Không tìm thấy nhân viên.")
 
+    target_order = None
+    if order_id:
+        target_order = db.get(DeliveryRequestOrder, order_id)
+        if not target_order or target_order.delivery_request_id != delivery_request_id:
+            raise ValueError("Không tìm thấy đơn hàng tương ứng trong chuyến xe này.")
+
     now = datetime.utcnow()
+    total_amount = float(amount or 0.0)
+
+    # Calculate item amounts and populate return items if provided
+    prepared_items = []
+    if items:
+        calculated_items_total = 0.0
+        for it in items:
+            p_id = it.product_id if hasattr(it, "product_id") else it.get("product_id")
+            qty = it.quantity if hasattr(it, "quantity") else it.get("quantity", 0)
+            cartons = (it.cartons if hasattr(it, "cartons") else it.get("cartons", 0)) or 0
+            loose_boxes = (it.loose_boxes if hasattr(it, "loose_boxes") else it.get("loose_boxes", 0)) or 0
+            unit_price = float((it.unit_price if hasattr(it, "unit_price") else it.get("unit_price", 0.0)) or 0.0)
+            item_amt = float((it.amount if hasattr(it, "amount") else it.get("amount", 0.0)) or 0.0)
+            reason = it.reason if hasattr(it, "reason") else it.get("reason")
+            loc_id = it.location_id if hasattr(it, "location_id") else it.get("location_id")
+
+            if qty <= 0:
+                raise ValueError("Số lượng hàng trả về phải lớn hơn 0.")
+            prod = db.get(Product, p_id)
+            if not prod:
+                raise ValueError(f"Không tìm thấy sản phẩm {p_id}.")
+
+            if item_amt <= 0 and unit_price > 0:
+                item_amt = qty * unit_price
+            calculated_items_total += item_amt
+
+            prepared_items.append({
+                "product_id": p_id,
+                "quantity": qty,
+                "cartons": cartons,
+                "loose_boxes": loose_boxes,
+                "unit_price": unit_price,
+                "amount": item_amt,
+                "reason": reason,
+                "location_id": loc_id,
+            })
+
+        if total_amount <= 0:
+            total_amount = calculated_items_total
+
+    if total_amount <= 0 and target_order:
+        total_amount = float(target_order.amount)
+
+    if total_amount <= 0:
+        raise ValueError("Giá trị hàng trả về phải lớn hơn 0.")
+
     ret = DeliveryReturn(
         code=_code("RET"),
         delivery_request_id=delivery_request_id,
         employee_id=employee_id,
-        amount=amount,
+        order_id=order_id,
+        amount=total_amount,
         status="APPROVED",
         note=note,
         created_by=created_by,
@@ -351,12 +411,54 @@ def create_delivery_return(
     db.add(ret)
     db.flush()
 
+    # Create DeliveryReturnItems and restore physical inventory if requested
+    for pit in prepared_items:
+        ret_item = DeliveryReturnItem(
+            delivery_return_id=ret.id,
+            product_id=pit["product_id"],
+            quantity=pit["quantity"],
+            cartons=pit["cartons"],
+            loose_boxes=pit["loose_boxes"],
+            unit_price=pit["unit_price"],
+            amount=pit["amount"],
+            reason=pit["reason"],
+            location_id=pit["location_id"],
+        )
+        db.add(ret_item)
+
+        if restore_stock:
+            # Physical inventory is restored back into warehouse
+            txn_code = f"RET-TXN-{now:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}"
+            db.add(InventoryTransaction(
+                code=txn_code,
+                type="IN",
+                warehouse_id=dr.warehouse_id,
+                product_id=pit["product_id"],
+                quantity=pit["quantity"],
+                unit_cost=pit["unit_price"],
+                location_id=pit["location_id"],
+                ref_type="DELIVERY_RETURN",
+                ref_code=ret.code,
+                document_date=now,
+                note=f"Nhập kho hàng trả về từ chuyến xe {dr.code} (Phiếu {ret.code})",
+                created_by=created_by,
+                created_at=now,
+            ))
+
+    # If linked to an order, mark the order as returned
+    if target_order:
+        target_order.payment_method = "RETURN"
+        target_order.payment_status = "RETURNED"
+        target_order.paid_at = now
+        if note:
+            target_order.note = (target_order.note or "") + (f" [Trả hàng: {note}]" if target_order.note else f"Trả hàng: {note}")
+
     # Credit debt ledger: negative amount reduces employee debt
     db.add(DebtLedgerEntry(
         party_type="EMPLOYEE",
         party_id=employee_id,
         entry_type="RETURN",
-        amount=-amount,
+        amount=-total_amount,
         source_type="DELIVERY_RETURN",
         source_id=ret.id,
         source_code=ret.code,
@@ -371,7 +473,25 @@ def create_delivery_return(
     return ret
 
 
-def list_delivery_returns(db: Session, limit: int = 50) -> list[DeliveryReturn]:
-    return db.scalars(
-        select(DeliveryReturn).order_by(DeliveryReturn.created_at.desc()).limit(limit)
-    ).all()
+def list_delivery_returns(
+    db: Session,
+    delivery_request_id: int | None = None,
+    employee_id: int | None = None,
+    limit: int = 50,
+) -> list[DeliveryReturn]:
+    stmt = (
+        select(DeliveryReturn)
+        .options(
+            selectinload(DeliveryReturn.employee),
+            selectinload(DeliveryReturn.order),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.product),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.location),
+        )
+        .order_by(DeliveryReturn.created_at.desc())
+    )
+    if delivery_request_id:
+        stmt = stmt.where(DeliveryReturn.delivery_request_id == delivery_request_id)
+    if employee_id:
+        stmt = stmt.where(DeliveryReturn.employee_id == employee_id)
+    return db.scalars(stmt.limit(limit)).all()
+

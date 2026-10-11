@@ -2,6 +2,8 @@ from datetime import date, datetime
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from app.schemas.debt_ledger import DeliveryReturnOut
+
 
 class DeliveryRequestOrderBase(BaseModel):
     order_date: Optional[date] = None
@@ -87,6 +89,8 @@ class DeliverySettlementOverview(BaseModel):
     difference: float
     employee_settlements: List[Dict[str, Any]]
     orders: List[DeliveryRequestOrder]
+    returns: List[DeliveryReturnOut] = Field(default_factory=list)
+    items: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 

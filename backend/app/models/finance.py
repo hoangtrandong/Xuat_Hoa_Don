@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import List
 from sqlalchemy import String, DateTime, ForeignKey, Float, Numeric, Text, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -101,8 +102,9 @@ class DeliveryReturn(Base):
     code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     delivery_request_id: Mapped[int] = mapped_column(ForeignKey("delivery_requests.id"), index=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("delivery_request_orders.id", ondelete="SET NULL"), nullable=True, index=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
-    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)  # PENDING | APPROVED | CANCELLED
+    status: Mapped[str] = mapped_column(String(20), default="APPROVED", index=True)  # PENDING | APPROVED | CANCELLED
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -110,3 +112,48 @@ class DeliveryReturn(Base):
 
     delivery_request: Mapped["DeliveryRequest"] = relationship()
     employee: Mapped["Employee"] = relationship()
+    order: Mapped["DeliveryRequestOrder | None"] = relationship()
+    items: Mapped[List["DeliveryReturnItem"]] = relationship(back_populates="return_record", cascade="all, delete-orphan")
+
+    @property
+    def employee_code(self) -> str | None:
+        return self.employee.code if self.employee else None
+
+    @property
+    def employee_name(self) -> str | None:
+        return self.employee.name if self.employee else None
+
+    @property
+    def order_number(self) -> str | None:
+        return self.order.order_number if self.order else None
+
+
+class DeliveryReturnItem(Base):
+    __tablename__ = "delivery_return_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    delivery_return_id: Mapped[int] = mapped_column(ForeignKey("delivery_returns.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    cartons: Mapped[int] = mapped_column(Integer, default=0)
+    loose_boxes: Mapped[int] = mapped_column(Integer, default=0)
+    unit_price: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    location_id: Mapped[int | None] = mapped_column(ForeignKey("warehouse_locations.id", ondelete="SET NULL"), nullable=True)
+
+    return_record: Mapped["DeliveryReturn"] = relationship(back_populates="items")
+    product: Mapped["Product"] = relationship()
+    location: Mapped["WarehouseLocation | None"] = relationship()
+
+    @property
+    def sku(self) -> str | None:
+        return self.product.sku if self.product else None
+
+    @property
+    def product_name(self) -> str | None:
+        return self.product.name if self.product else None
+
+    @property
+    def location_code(self) -> str | None:
+        return self.location.code if self.location else None

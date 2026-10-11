@@ -13,7 +13,7 @@ from app.models.inventory import (
     InventoryTransaction, Warehouse, WarehouseLocation, DeliveryRequestEmployeeSummary,
     DeliveryRequestOrder,
 )
-from app.models.finance import DebtLedgerEntry
+from app.models.finance import DebtLedgerEntry, DeliveryReturn, DeliveryReturnItem
 from app.models.employee import Employee
 from app.models.product import Product
 
@@ -668,11 +668,26 @@ def get_settlement(db: Session, request_id: int) -> dict:
         select(DeliveryRequest).options(
             selectinload(DeliveryRequest.employee_summaries),
             selectinload(DeliveryRequest.orders),
+            selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.product),
         ).where(DeliveryRequest.id == request_id)
     )
     if not req:
         raise ValueError("Không tìm thấy yêu cầu xuất kho.")
     
+    returns = db.scalars(
+        select(DeliveryReturn)
+        .options(
+            selectinload(DeliveryReturn.employee),
+            selectinload(DeliveryReturn.order),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.product),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.location),
+        )
+        .where(DeliveryReturn.delivery_request_id == request_id)
+        .order_by(DeliveryReturn.created_at.desc())
+    ).all()
+
+    returned_order_ids = {r.order_id for r in returns if r.order_id}
+
     total_orders_count = len(req.orders)
     orders_total_amount = sum(float(o.amount) for o in req.orders)
     summaries_total_amount = sum(float(s.amount) for s in req.employee_summaries)
@@ -681,7 +696,13 @@ def get_settlement(db: Session, request_id: int) -> dict:
     total_paid_bank = sum(float(o.amount) for o in req.orders if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK"))
     total_paid_cash = sum(float(o.amount) for o in req.orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
     total_transferred_debt = sum(float(o.amount) for o in req.orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
-    total_returned = sum(float(o.amount) for o in req.orders if o.payment_method == "RETURN" or o.payment_status == "RETURNED")
+
+    # total_returned includes all DeliveryReturn records, plus any order marked RETURNED that doesn't have a DeliveryReturn record yet
+    total_returned = sum(float(r.amount) for r in returns) + sum(
+        float(o.amount) for o in req.orders
+        if (o.payment_method == "RETURN" or o.payment_status == "RETURNED") and o.id not in returned_order_ids
+    )
+
     total_unpaid = sum(float(o.amount) for o in req.orders if o.payment_status in ("UNPAID", "PENDING"))
 
     emp_settlements = []
@@ -691,7 +712,11 @@ def get_settlement(db: Session, request_id: int) -> dict:
         emp_bank = sum(float(o.amount) for o in emp_orders if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK"))
         emp_cash = sum(float(o.amount) for o in emp_orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
         emp_debt = sum(float(o.amount) for o in emp_orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
-        emp_ret = sum(float(o.amount) for o in emp_orders if o.payment_method == "RETURN" or o.payment_status == "RETURNED")
+        
+        emp_ret = sum(float(r.amount) for r in returns if r.employee_id == s.employee_id) + sum(
+            float(o.amount) for o in emp_orders
+            if (o.payment_method == "RETURN" or o.payment_status == "RETURNED") and o.id not in returned_order_ids
+        )
         emp_unpaid = sum(float(o.amount) for o in emp_orders if o.payment_status in ("UNPAID", "PENDING"))
 
         allocated = float(s.amount)
@@ -713,6 +738,20 @@ def get_settlement(db: Session, request_id: int) -> dict:
             "difference": emp_orders_amt - allocated,
         })
 
+    items_list = [
+        {
+            "id": it.id,
+            "product_id": it.product_id,
+            "sku": it.sku,
+            "product_name": it.product_name,
+            "quantity": it.quantity,
+            "cartons": it.cartons,
+            "loose_boxes": it.loose_boxes,
+            "boxes_per_carton": it.boxes_per_carton,
+        }
+        for it in req.items
+    ]
+
     return {
         "request_id": req.id,
         "request_code": req.code,
@@ -728,7 +767,10 @@ def get_settlement(db: Session, request_id: int) -> dict:
         "difference": orders_total_amount - summaries_total_amount,
         "employee_settlements": emp_settlements,
         "orders": req.orders,
+        "returns": returns,
+        "items": items_list,
     }
+
 
 
 def settle_order_pay(
@@ -767,35 +809,80 @@ def settle_order_pay(
         order.note = note
     order.paid_at = datetime.utcnow()
 
-    if order.employee_id and float(order.amount) > 0 and method_upper in ("BANK", "CASH"):
-        entry_type = "BANK_RECEIPT" if method_upper == "BANK" else "CASH_RECEIPT"
-        amt_deduct = paid_amount if (paid_amount is not None and paid_amount > 0) else float(order.amount)
+    amt_deduct = paid_amount if (paid_amount is not None and paid_amount > 0) else float(order.amount)
 
-        existing = db.scalar(
-            select(DebtLedgerEntry).where(
-                DebtLedgerEntry.party_type == "EMPLOYEE",
-                DebtLedgerEntry.party_id == order.employee_id,
-                DebtLedgerEntry.source_type == "DELIVERY_ORDER",
-                DebtLedgerEntry.source_id == order.id,
-                DebtLedgerEntry.entry_type == entry_type,
+    if order.employee_id and amt_deduct > 0:
+        if method_upper in ("BANK", "CASH"):
+            entry_type = "BANK_RECEIPT" if method_upper == "BANK" else "CASH_RECEIPT"
+            existing = db.scalar(
+                select(DebtLedgerEntry).where(
+                    DebtLedgerEntry.party_type == "EMPLOYEE",
+                    DebtLedgerEntry.party_id == order.employee_id,
+                    DebtLedgerEntry.source_type == "DELIVERY_ORDER",
+                    DebtLedgerEntry.source_id == order.id,
+                    DebtLedgerEntry.entry_type == entry_type,
+                )
             )
-        )
-        if not existing:
-            db.add(DebtLedgerEntry(
-                party_type="EMPLOYEE",
-                party_id=order.employee_id,
-                entry_type=entry_type,
-                amount=-Decimal(str(amt_deduct)),
-                source_type="DELIVERY_ORDER",
-                source_id=order.id,
-                source_code=order.order_number,
-                document_date=datetime.utcnow(),
-                note=f"Quyết toán {method_upper}: đơn {order.order_number} ({order.customer_name or order.customer_code})" + (f" - Ref: {bank_ref}" if bank_ref else ""),
-                created_by=created_by,
-            ))
+            if not existing:
+                db.add(DebtLedgerEntry(
+                    party_type="EMPLOYEE",
+                    party_id=order.employee_id,
+                    entry_type=entry_type,
+                    amount=-Decimal(str(amt_deduct)),
+                    source_type="DELIVERY_ORDER",
+                    source_id=order.id,
+                    source_code=order.order_number,
+                    document_date=datetime.utcnow(),
+                    note=f"Quyết toán {method_upper}: đơn {order.order_number} ({order.customer_name or order.customer_code})" + (f" - Ref: {bank_ref}" if bank_ref else ""),
+                    created_by=created_by,
+                ))
+        elif method_upper == "RETURN":
+            # Auto-create DeliveryReturn if one does not exist yet
+            existing_ret = db.scalar(
+                select(DeliveryReturn).where(
+                    DeliveryReturn.delivery_request_id == request_id,
+                    DeliveryReturn.order_id == order.id,
+                )
+            )
+            if not existing_ret:
+                from app.crud.debt_ledger import create_delivery_return
+                create_delivery_return(
+                    db,
+                    delivery_request_id=request_id,
+                    employee_id=order.employee_id,
+                    order_id=order.id,
+                    amount=amt_deduct,
+                    note=note or f"Khách không nhận đơn {order.order_number}",
+                    created_by=created_by,
+                )
+        elif method_upper == "DEBT":
+            # Transfer debt from employee: negative ledger entry on employee
+            existing = db.scalar(
+                select(DebtLedgerEntry).where(
+                    DebtLedgerEntry.party_type == "EMPLOYEE",
+                    DebtLedgerEntry.party_id == order.employee_id,
+                    DebtLedgerEntry.source_type == "DELIVERY_ORDER",
+                    DebtLedgerEntry.source_id == order.id,
+                    DebtLedgerEntry.entry_type == "TRANSFER_OUT",
+                )
+            )
+            if not existing:
+                db.add(DebtLedgerEntry(
+                    party_type="EMPLOYEE",
+                    party_id=order.employee_id,
+                    entry_type="TRANSFER_OUT",
+                    amount=-Decimal(str(amt_deduct)),
+                    source_type="DELIVERY_ORDER",
+                    source_id=order.id,
+                    source_code=order.order_number,
+                    document_date=datetime.utcnow(),
+                    note=f"Chuyển nợ cho khách hàng đơn {order.order_number} ({order.customer_name or order.customer_code})",
+                    created_by=created_by,
+                ))
 
     db.commit()
     return order
+
 
 
 def _clean_str(s: str | None) -> str:

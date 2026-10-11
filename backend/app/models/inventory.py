@@ -271,8 +271,19 @@ class DeliveryRequestItem(Base):
     def boxes_per_carton(self) -> int:
         return max(1, self.product.boxes_per_carton or 1)
 
+    @property
+    def cartons(self) -> int:
+        bpc = self.boxes_per_carton
+        return self.quantity // bpc
+
+    @property
+    def loose_boxes(self) -> int:
+        bpc = self.boxes_per_carton
+        return self.quantity % bpc
+
 
 class DeliveryAllocation(Base):
+
     """A quantity reserved from one exact lot and warehouse location."""
     __tablename__ = "delivery_allocations"
     __table_args__ = (

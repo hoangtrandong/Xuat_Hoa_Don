@@ -7,16 +7,72 @@ import Drawer from "@/components/ui/Drawer";
 import StatCard from "@/components/ui/StatCard";
 import DeliveryRequestExcelCreate from "@/components/delivery-requests/DeliveryRequestExcelCreate";
 import DeliverySettlementModal from "@/components/delivery-requests/DeliverySettlementModal";
-import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload, CreditCard } from "lucide-react";
+import DeliveryDispatchPrintModal from "@/components/delivery-requests/DeliveryDispatchPrintModal";
+import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload, CreditCard, Printer } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
+import { splitCartons, formatNumber } from "@/lib/format";
 
 
-type Item = { id: number; product_id: number; sku: string; product_name: string; quantity: number; requested_quantity_raw: string | null; };
+type Item = {
+  id: number;
+  product_id: number;
+  sku: string;
+  product_name: string;
+  boxes_per_carton?: number;
+  quantity: number;
+  cartons?: number;
+  loose_boxes?: number;
+  requested_quantity_raw: string | null;
+};
 type EmployeeDebtSummary = { employee_id: number | null; employee_code: string; employee_name: string | null; amount: number; };
-type StockPick = { lot_id: number | null; location_code: string | null; location_id: number | null; lot_number: string | null; expiry_date: string | null; quantity: number; allocation_strategy: string; };
-type StockPlanItem = { product_id: number; sku: string; product_name: string; quantity: number; planned_quantity: number; shortage_quantity: number; picks: StockPick[]; };
-type DeliveryRequest = { id: number; code: string; warehouse_id: number; status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED" | "CANCELLED"; note: string | null; created_by: string | null; submitted_at: string | null; received_at: string | null; completed_at: string | null; cancelled_at: string | null; created_at: string; items: Item[]; employee_summaries?: EmployeeDebtSummary[]; };
-type AdminDeliveryRequestRow = DeliveryRequest & { searchText: string; totalQuantity: number; skuSummary: string; };
+type StockPick = {
+  lot_id: number | null;
+  location_code: string | null;
+  location_id: number | null;
+  lot_number: string | null;
+  expiry_date: string | null;
+  quantity: number;
+  cartons?: number;
+  loose_boxes?: number;
+  allocation_strategy: string;
+};
+type StockPlanItem = {
+  product_id: number;
+  sku: string;
+  product_name: string;
+  boxes_per_carton?: number;
+  quantity: number;
+  cartons?: number;
+  loose_boxes?: number;
+  planned_quantity: number;
+  shortage_quantity: number;
+  picks: StockPick[];
+};
+type DeliveryRequest = {
+  id: number;
+  code: string;
+  warehouse_id: number;
+  status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED" | "CANCELLED";
+  note: string | null;
+  created_by: string | null;
+  submitted_at: string | null;
+  received_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  created_at: string;
+  items: Item[];
+  employee_summaries?: EmployeeDebtSummary[];
+  total_cartons?: number;
+  total_loose_boxes?: number;
+  total_quantity?: number;
+};
+type AdminDeliveryRequestRow = DeliveryRequest & {
+  searchText: string;
+  totalQuantity: number;
+  totalCartons: number;
+  totalLooseBoxes: number;
+  skuSummary: string;
+};
 
 const statusLabel: Record<string, string> = { DRAFT: "Nháp", SUBMITTED: "Chờ nhận", RECEIVED: "Đang xuất", COMPLETED: "Hoàn thành", CANCELLED: "Đã hủy" };
 const statusVariant: Record<string, "default" | "info" | "warning" | "success" | "danger"> = { DRAFT: "default", SUBMITTED: "warning", RECEIVED: "info", COMPLETED: "success", CANCELLED: "danger" };
@@ -48,6 +104,7 @@ export default function AdminDeliveryRequestsPage() {
   const [editing, setEditing] = useState(false); const [editNote, setEditNote] = useState(""); const [editItems, setEditItems] = useState<{ quantity: string; sku: string; product_name: string; product_id: number }[]>([]);
   const [stockPlan, setStockPlan] = useState<StockPlanItem[] | null>(null); const [checkingStock, setCheckingStock] = useState(false);
   const [settlementRow, setSettlementRow] = useState<DeliveryRequest | null>(null);
+  const [printRow, setPrintRow] = useState<DeliveryRequest | null>(null);
   const [activeTab, setActiveTab] = useState<"list" | "create">(() => {
     if (typeof window === "undefined") return "list";
     return new URLSearchParams(window.location.search).get("tab") === "create" ? "create" : "list";
@@ -154,12 +211,24 @@ export default function AdminDeliveryRequestsPage() {
     } catch (e) { setError(e instanceof Error ? e.message : "Thao tác thất bại."); } finally { setLoading(false); }
   }
 
-  const enrichedRows = useMemo<AdminDeliveryRequestRow[]>(() => rows.map((row) => ({
-    ...row,
-    searchText: toSearchText(row),
-    totalQuantity: totalQuantityOf(row),
-    skuSummary: row.items.map((item) => `${item.sku} - ${item.product_name}`).join("; "),
-  })), [rows]);
+  const enrichedRows = useMemo<AdminDeliveryRequestRow[]>(() => rows.map((row) => {
+    const totalCartons = row.total_cartons ?? row.items.reduce((s, it) => {
+      const { cartons } = splitCartons(it.quantity, it.boxes_per_carton);
+      return s + cartons;
+    }, 0);
+    const totalLooseBoxes = row.total_loose_boxes ?? row.items.reduce((s, it) => {
+      const { looseBoxes } = splitCartons(it.quantity, it.boxes_per_carton);
+      return s + looseBoxes;
+    }, 0);
+    return {
+      ...row,
+      searchText: toSearchText(row),
+      totalQuantity: totalQuantityOf(row),
+      totalCartons,
+      totalLooseBoxes,
+      skuSummary: row.items.map((item) => `${item.sku} - ${item.product_name}`).join("; "),
+    };
+  }), [rows]);
 
   const stats = useMemo(() => ({
     total: rows.length,
@@ -207,24 +276,52 @@ export default function AdminDeliveryRequestsPage() {
   const columns: Column<AdminDeliveryRequestRow>[] = [
     { key: "code", title: "Mã yêu cầu", sortable: true },
     { key: "items", title: "Số SKU", align: "center", render: (_, row) => <span className="font-medium">{row.items?.length || 0}</span> },
-    { key: "totalQuantity", title: "Tổng SL", sortable: true, align: "right", render: (val) => <span className="font-semibold text-gray-900">{Number(val).toLocaleString("vi-VN")}</span> },
+    {
+      key: "totalQuantity",
+      title: "Số lượng xuất",
+      sortable: true,
+      align: "right",
+      render: (_, row) => (
+        <div className="text-right">
+          <span className="font-bold text-sky-950 block text-sm">
+            {row.totalCartons > 0 ? `${row.totalCartons.toLocaleString("vi-VN")}T` : ""}
+            {row.totalLooseBoxes > 0 ? ` ${row.totalLooseBoxes}H` : (row.totalCartons === 0 ? "0H" : "")}
+          </span>
+          <span className="text-[11px] text-gray-400">
+            ({Number(row.totalQuantity || 0).toLocaleString("vi-VN")} hộp)
+          </span>
+        </div>
+      ),
+    },
     { key: "created_by", title: "Người tạo", render: (val) => <span className="text-gray-600">{val ? String(val) : "—"}</span> },
     { key: "created_at", title: "Ngày tạo", sortable: true, render: (_, row) => <span className="text-gray-600 text-xs">{new Date(row.created_at).toLocaleString("vi-VN")}</span> },
     { key: "status", title: "Trạng thái", sortable: true, render: (val) => <Badge variant={statusVariant[String(val)] ?? "default"}>{statusLabel[String(val)] ?? String(val)}</Badge> },
     {
       key: "actions",
-      title: "Quyết toán",
+      title: "Thao tác",
       align: "center",
       render: (_, row) => (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setSettlementRow(row);
-          }}
-          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-sky-50 hover:bg-sky-100 text-sky-700 transition-colors border border-sky-100"
-        >
-          <CreditCard size={13} /> Quyết toán
-        </button>
+        <div className="flex items-center justify-center gap-1.5">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setPrintRow(row);
+            }}
+            title="In phiếu bốc xếp xuất kho"
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-gray-50 hover:bg-gray-100 text-gray-700 transition-colors border border-gray-200"
+          >
+            <Printer size={13} /> In phiếu
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setSettlementRow(row);
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-sky-50 hover:bg-sky-100 text-sky-700 transition-colors border border-sky-100"
+          >
+            <CreditCard size={13} /> Quyết toán
+          </button>
+        </div>
       ),
     },
   ];
@@ -308,17 +405,30 @@ export default function AdminDeliveryRequestsPage() {
 
             {!editing ? (
               <>
+                {/* Carton/Box Dispatch Summary Card */}
+                {(() => {
+                  const totalCartons = selected.total_cartons ?? selected.items.reduce((s, it) => s + splitCartons(it.quantity, it.boxes_per_carton).cartons, 0);
+                  const totalLoose = selected.total_loose_boxes ?? selected.items.reduce((s, it) => s + splitCartons(it.quantity, it.boxes_per_carton).looseBoxes, 0);
+                  const totalQty = selected.total_quantity ?? selected.items.reduce((s, it) => s + it.quantity, 0);
+                  return (
+                    <div className="grid grid-cols-3 gap-2 p-3.5 bg-gradient-to-r from-sky-50 to-indigo-50/40 rounded-xl border border-sky-100">
+                      <div className="text-center">
+                        <span className="text-[11px] font-semibold text-sky-800 uppercase block">Thùng nguyên</span>
+                        <span className="text-2xl font-black text-sky-950 mt-0.5 block">{totalCartons.toLocaleString("vi-VN")} <span className="text-xs font-normal text-sky-700">thùng</span></span>
+                      </div>
+                      <div className="text-center border-x border-sky-200/60">
+                        <span className="text-[11px] font-semibold text-amber-800 uppercase block">Hộp lẻ</span>
+                        <span className="text-2xl font-black text-amber-950 mt-0.5 block">{totalLoose.toLocaleString("vi-VN")} <span className="text-xs font-normal text-amber-700">hộp</span></span>
+                      </div>
+                      <div className="text-center">
+                        <span className="text-[11px] font-semibold text-gray-600 uppercase block">Tổng quy đổi</span>
+                        <span className="text-2xl font-black text-gray-900 mt-0.5 block">{totalQty.toLocaleString("vi-VN")} <span className="text-xs font-normal text-gray-500">hộp</span></span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 <div className="rounded-xl bg-gray-50 px-4 py-3 space-y-2">
-                  <div className="grid grid-cols-2 gap-3 pb-2 border-b border-gray-100">
-                    <div className="rounded-lg bg-white px-3 py-2 border border-gray-100">
-                      <p className="text-xs text-gray-400">Số SKU</p>
-                      <p className="text-lg font-bold text-gray-900">{selected.items.length}</p>
-                    </div>
-                    <div className="rounded-lg bg-white px-3 py-2 border border-gray-100">
-                      <p className="text-xs text-gray-400">Tổng số lượng</p>
-                      <p className="text-lg font-bold text-gray-900">{totalQuantityOf(selected).toLocaleString("vi-VN")}</p>
-                    </div>
-                  </div>
                   <div className="flex justify-between text-sm"><span className="text-gray-400">Người tạo</span><span className="text-gray-700 font-medium">{selected.created_by || "—"}</span></div>
                   <div className="flex justify-between text-sm"><span className="text-gray-400">Ngày tạo</span><span className="text-gray-700">{new Date(selected.created_at).toLocaleString("vi-VN")}</span></div>
                   {selected.note && <div className="flex justify-between text-sm"><span className="text-gray-400">Ghi chú</span><span className="text-gray-700 text-right max-w-[60%]">{selected.note}</span></div>}
@@ -347,14 +457,30 @@ export default function AdminDeliveryRequestsPage() {
                 </div>
 
                 <div>
-                  <h4 className="text-sm font-semibold text-gray-700 mb-2">Danh sách sản phẩm</h4>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-semibold text-gray-700">Danh sách sản phẩm ({selected.items.length} SKU)</h4>
+                    <span className="text-xs text-gray-400">Thùng (T) / Hộp (H)</span>
+                  </div>
                   <div className="rounded-xl border border-gray-100 divide-y divide-gray-50">
-                    {selected.items.map((item, idx) => (
-                      <div key={item.id ?? idx} className="flex items-center justify-between px-4 py-3">
-                        <div className="flex-1 min-w-0"><p className="text-sm font-medium text-gray-800 truncate">{item.product_name}</p><p className="text-xs text-gray-400">{item.sku}</p></div>
-                        <div className="text-right"><p className="text-sm font-bold text-gray-900">{item.requested_quantity_raw || item.quantity}</p><p className="text-xs text-gray-400">Yêu cầu</p></div>
-                      </div>
-                    ))}
+                    {selected.items.map((item, idx) => {
+                      const { cartons, looseBoxes, bpc } = splitCartons(item.quantity, item.boxes_per_carton);
+                      return (
+                        <div key={item.id ?? idx} className="flex items-center justify-between px-4 py-3">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-gray-800 truncate">{item.product_name}</p>
+                            <p className="text-xs text-gray-400">{item.sku} · 1T = {bpc}H</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-bold text-sky-950">
+                              {cartons > 0 && <span className="text-sky-800">{cartons}T </span>}
+                              {looseBoxes > 0 && <span className="text-amber-800">{looseBoxes}H</span>}
+                              {cartons === 0 && looseBoxes === 0 && <span>0H</span>}
+                            </p>
+                            <p className="text-xs text-gray-400">({item.quantity.toLocaleString("vi-VN")} hộp)</p>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -370,9 +496,14 @@ export default function AdminDeliveryRequestsPage() {
                           <span className="text-gray-600 font-medium">{plan.sku} — {plan.product_name}</span>
                           {plan.shortage_quantity > 0 ? <span className="text-red-600 font-bold">Thiếu {plan.shortage_quantity}</span> : <span className="text-emerald-600 font-medium">✓ Đủ ({plan.planned_quantity})</span>}
                         </div>
-                        {plan.picks.filter(p => p.location_code).map((pick, j) => (
-                          <p key={j} className="text-gray-400 pl-2">+ {pick.location_code ?? "Không xác định"} · Lô {pick.lot_number ?? "không mã"} · HSD {pick.expiry_date ? new Date(pick.expiry_date).toLocaleDateString("vi-VN") : "—"} · {pick.quantity} cái</p>
-                        ))}
+                        {plan.picks.filter(p => p.location_code).map((pick, j) => {
+                          const { cartons, looseBoxes } = splitCartons(pick.quantity, plan.boxes_per_carton);
+                          return (
+                            <p key={j} className="text-gray-500 pl-2">
+                              + {pick.location_code ?? "Không xác định"} · Lô {pick.lot_number ?? "không mã"} · HSD {pick.expiry_date ? new Date(pick.expiry_date).toLocaleDateString("vi-VN") : "—"} · <span className="font-semibold text-gray-800">Lấy: {cartons > 0 ? `${cartons}T ` : ""}{looseBoxes > 0 ? `${looseBoxes}H ` : ""}({pick.quantity} hộp)</span>
+                            </p>
+                          );
+                        })}
                       </div>
                     ))}
                   </div>
@@ -418,9 +549,17 @@ export default function AdminDeliveryRequestsPage() {
                 )}
                 <button
                   onClick={() => {
+                    setPrintRow(selected);
+                  }}
+                  className="flex items-center justify-center gap-2 w-full rounded-lg bg-gray-900 hover:bg-gray-800 text-white py-2.5 text-sm font-semibold transition-colors shadow-xs mt-3"
+                >
+                  <Printer size={16} /> In Phiếu Bốc Xếp & Xuất Kho
+                </button>
+                <button
+                  onClick={() => {
                     setSettlementRow(selected);
                   }}
-                  className="flex items-center justify-center gap-2 w-full rounded-lg bg-sky-500 hover:bg-sky-600 text-white py-2.5 text-sm font-semibold transition-colors shadow-xs mt-3"
+                  className="flex items-center justify-center gap-2 w-full rounded-lg bg-sky-500 hover:bg-sky-600 text-white py-2.5 text-sm font-semibold transition-colors shadow-xs mt-2"
                 >
                   <CreditCard size={16} /> Bảng quyết toán chuyến xe & Sao kê
                 </button>
@@ -462,6 +601,14 @@ export default function AdminDeliveryRequestsPage() {
           isOpen={Boolean(settlementRow)}
           onClose={() => setSettlementRow(null)}
           onSettled={load}
+        />
+      )}
+
+      {printRow && (
+        <DeliveryDispatchPrintModal
+          open={Boolean(printRow)}
+          onClose={() => setPrintRow(null)}
+          request={printRow}
         />
       )}
     </div>

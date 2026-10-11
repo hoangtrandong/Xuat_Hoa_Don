@@ -374,6 +374,7 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
     result: list[FefoPlanItem] = []
     for product_id, quantity in merged.items():
         product = products.get(product_id)
+        bpc = max(1, product.boxes_per_carton or 1) if product else 1
         pick_rows: list[FefoPlanPick] = []
         picks, remaining = _fefo_picks(db, payload.warehouse_id, product_id, quantity)
         for location_id, lot_id, expiry_date, take, strategy in picks:
@@ -386,6 +387,8 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
                 lot_number=lot.lot_number if lot else None,
                 expiry_date=expiry_date,
                 quantity=take,
+                cartons=take // bpc,
+                loose_boxes=take % bpc,
                 allocation_strategy=strategy,
             ))
         result.append(FefoPlanItem(
@@ -393,6 +396,9 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
             sku=product.sku if product else str(product_id),
             product_name=product.name if product else "Chưa đăng ký",
             quantity=quantity,
+            boxes_per_carton=bpc,
+            cartons=quantity // bpc,
+            loose_boxes=quantity % bpc,
             planned_quantity=quantity - remaining,
             shortage_quantity=remaining,
             picks=pick_rows,

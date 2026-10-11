@@ -3,13 +3,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardList, Download, MapPin, Upload } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
+import { splitCartons, formatNumber } from "@/lib/format";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 
 type Warehouse = { id: number; name: string };
 type ProductOption = { id: number; sku: string; name: string };
 type PreviewItem = {
-  product_id: number; sku: string; product_name: string; quantity: number;
-  requested_quantity_raw?: string | null; available_quantity: number; reserved_quantity?: number; shortage_quantity: number;
+  product_id: number;
+  sku: string;
+  product_name: string;
+  boxes_per_carton?: number;
+  quantity: number;
+  cartons?: number;
+  loose_boxes?: number;
+  requested_quantity_raw?: string | null;
+  available_quantity: number;
+  reserved_quantity?: number;
+  shortage_quantity: number;
   employee_allocations?: Record<string, unknown> | null;
 };
 
@@ -20,6 +30,8 @@ type PickRow = {
   lot_number: string | null;
   expiry_date: string | null;
   quantity: number;
+  cartons?: number;
+  loose_boxes?: number;
   allocation_strategy: string;
 };
 
@@ -56,7 +68,10 @@ type PlanItem = {
   product_id: number;
   sku: string;
   product_name: string;
+  boxes_per_carton?: number;
   quantity: number;
+  cartons?: number;
+  loose_boxes?: number;
   planned_quantity: number;
   shortage_quantity: number;
   picks: PickRow[];
@@ -471,49 +486,180 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       )}
 
 
-      <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between"><div className="flex items-center gap-2"><ClipboardList size={18} className="text-sky-500" /><span className="font-semibold">Danh sách sản phẩm upload</span></div>{preview.length > 0 && <div className="flex gap-2"><button onClick={() => checkStock().catch((e) => setError(e instanceof Error ? e.message : "Không thể kiểm tra tồn kho."))} className="bg-amber-500 text-white px-3 py-2 rounded-lg text-sm">Check tồn</button><button disabled={planning} onClick={() => findLocations()} className="bg-indigo-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50">{planning ? "Đang tìm…" : "Tìm vị trí"}</button><button onClick={() => confirmPreview().catch((e) => setError(e instanceof Error ? e.message : "Không thể tạo yêu cầu."))} className="bg-emerald-500 text-white px-3 py-2 rounded-lg text-sm">Xác nhận tạo yêu cầu</button></div>}</div>
-        {preview.length === 0 ? <div className="p-8 text-center text-sm text-gray-500">Chọn kho và upload Excel để xem danh sách sản phẩm.</div> : <div className="overflow-x-auto">
-          <table className="w-full text-sm"><thead className="bg-gray-50 text-gray-500"><tr><th className="text-left px-5 py-3">Mã hàng</th><th className="text-left px-5 py-3">Tên sản phẩm</th><th className="text-right px-5 py-3">Số lượng yêu cầu</th><th className="text-right px-5 py-3">Tồn khả dụng</th><th className="text-right px-5 py-3">Đã giữ chỗ</th><th className="text-right px-5 py-3">Thiếu</th></tr></thead><tbody>{preview.map((item, index) => <tr key={`${item.sku}-${index}`} className={item.shortage_quantity > 0 ? "bg-red-50" : ""}><td className="px-5 py-2"><input list="delivery-product-options" value={item.sku} placeholder="Tìm mã SKU..." onChange={(event) => { const sku = event.target.value; selectPreviewSku(index, sku); }} onBlur={(event) => replacePreviewSku(index, event.target.value).catch(() => setError("Không thể kiểm tra mã thay thế."))} className="w-40 border rounded px-2 py-1" /></td><td className="px-5 py-2">{item.product_name}</td><td className="px-5 py-2 text-right">{item.requested_quantity_raw ?? item.quantity}</td><td className="px-5 py-2 text-right">{item.available_quantity || "-"}</td><td className="px-5 py-2 text-right">{item.reserved_quantity || "-"}</td><td className={`px-5 py-2 text-right font-medium ${item.shortage_quantity > 0 ? "text-red-600" : "text-gray-500"}`}>{item.shortage_quantity || "-"}</td></tr>)}</tbody></table>
-        </div>}
-      </div>
-      {plan && plan.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-          <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-            <div className="flex items-center gap-2"><MapPin size={18} className="text-indigo-500" /><span className="font-semibold">Kế hoạch lấy hàng FEFO (HSD gần nhất trước)</span></div>
-            <button onClick={() => setPlan(null)} className="text-xs text-gray-400 hover:text-gray-600">Ẩn</button>
+      <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
+        <div className="px-5 py-4 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-gray-50/50">
+          <div className="flex items-center gap-2">
+            <ClipboardList size={18} className="text-sky-500" />
+            <span className="font-semibold text-gray-900">Danh sách sản phẩm upload</span>
           </div>
+          {preview.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => checkStock().catch((e) => setError(e instanceof Error ? e.message : "Không thể kiểm tra tồn kho."))}
+                className="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition"
+              >
+                Check tồn kho
+              </button>
+              <button
+                disabled={planning}
+                onClick={() => findLocations()}
+                className="bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-50 transition"
+              >
+                {planning ? "Đang tìm…" : "Tìm vị trí (FEFO)"}
+              </button>
+              <button
+                onClick={() => confirmPreview().catch((e) => setError(e instanceof Error ? e.message : "Không thể tạo yêu cầu."))}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition shadow-xs"
+              >
+                Xác nhận tạo yêu cầu
+              </button>
+            </div>
+          )}
+        </div>
+
+        {preview.length > 0 && (
+          <div className="grid grid-cols-3 gap-3 p-3.5 bg-sky-50/50 border-b border-gray-100">
+            <div className="text-center">
+              <span className="text-[11px] font-semibold text-sky-800 uppercase block">Tổng Thùng Nguyên</span>
+              <span className="text-xl font-black text-sky-950 mt-0.5 block">
+                {preview.reduce((s, it) => s + (it.cartons ?? splitCartons(it.quantity, it.boxes_per_carton).cartons), 0).toLocaleString("vi-VN")}{" "}
+                <span className="text-xs font-normal text-sky-700">thùng</span>
+              </span>
+            </div>
+            <div className="text-center border-x border-sky-200">
+              <span className="text-[11px] font-semibold text-amber-800 uppercase block">Tổng Hộp Lẻ</span>
+              <span className="text-xl font-black text-amber-950 mt-0.5 block">
+                {preview.reduce((s, it) => s + (it.loose_boxes ?? splitCartons(it.quantity, it.boxes_per_carton).looseBoxes), 0).toLocaleString("vi-VN")}{" "}
+                <span className="text-xs font-normal text-amber-700">hộp</span>
+              </span>
+            </div>
+            <div className="text-center">
+              <span className="text-[11px] font-semibold text-gray-600 uppercase block">Tổng Quy Đổi</span>
+              <span className="text-xl font-black text-gray-900 mt-0.5 block">
+                {preview.reduce((s, it) => s + it.quantity, 0).toLocaleString("vi-VN")}{" "}
+                <span className="text-xs font-normal text-gray-500">hộp ({preview.length} SKU)</span>
+              </span>
+            </div>
+          </div>
+        )}
+
+        {preview.length === 0 ? (
+          <div className="p-8 text-center text-sm text-gray-500">
+            Chọn kho và upload Excel để xem danh sách sản phẩm.
+          </div>
+        ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-gray-500">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-600 border-b border-gray-100">
                 <tr>
-                  <th className="text-left px-5 py-3">Mã hàng</th>
-                  <th className="text-left px-5 py-3">Tên sản phẩm</th>
-                  <th className="text-left px-5 py-3">Vị trí</th>
-                  <th className="text-left px-5 py-3">Lô</th>
-                  <th className="text-left px-5 py-3">HSD</th>
-                  <th className="text-right px-5 py-3">SL lấy</th>
+                  <th className="text-left px-4 py-3">Mã hàng</th>
+                  <th className="text-left px-4 py-3">Tên sản phẩm</th>
+                  <th className="text-center px-3 py-3 w-20">Quy cách</th>
+                  <th className="text-right px-3 py-3 bg-sky-50 font-bold text-sky-900 w-24">Thùng (T)</th>
+                  <th className="text-right px-3 py-3 bg-amber-50 font-bold text-amber-900 w-20">Lẻ (H)</th>
+                  <th className="text-right px-4 py-3">Tổng yêu cầu</th>
+                  <th className="text-right px-4 py-3">Tồn khả dụng</th>
+                  <th className="text-right px-4 py-3">Đã giữ chỗ</th>
+                  <th className="text-right px-4 py-3">Thiếu</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-gray-100">
+                {preview.map((item, index) => {
+                  const { cartons, looseBoxes, bpc } = splitCartons(item.quantity, item.boxes_per_carton);
+                  return (
+                    <tr key={`${item.sku}-${index}`} className={item.shortage_quantity > 0 ? "bg-red-50/70" : "hover:bg-gray-50/60"}>
+                      <td className="px-4 py-2">
+                        <input
+                          list="delivery-product-options"
+                          value={item.sku}
+                          placeholder="Tìm SKU..."
+                          onChange={(event) => selectPreviewSku(index, event.target.value)}
+                          onBlur={(event) => replacePreviewSku(index, event.target.value).catch(() => setError("Không thể kiểm tra mã thay thế."))}
+                          className="w-36 border border-gray-200 rounded px-2 py-1 font-mono font-medium bg-white"
+                        />
+                      </td>
+                      <td className="px-4 py-2 font-medium text-gray-800">{item.product_name}</td>
+                      <td className="px-3 py-2 text-center text-gray-500">{bpc} H/T</td>
+                      <td className="px-3 py-2 text-right font-black text-sky-950 bg-sky-50/40">
+                        {cartons > 0 ? cartons.toLocaleString("vi-VN") : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right font-bold text-amber-900 bg-amber-50/40">
+                        {looseBoxes > 0 ? looseBoxes : "—"}
+                      </td>
+                      <td className="px-4 py-2 text-right font-semibold text-gray-900">
+                        {item.quantity.toLocaleString("vi-VN")}
+                      </td>
+                      <td className="px-4 py-2 text-right text-gray-600">{item.available_quantity || "-"}</td>
+                      <td className="px-4 py-2 text-right text-gray-600">{item.reserved_quantity || "-"}</td>
+                      <td className={`px-4 py-2 text-right font-semibold ${item.shortage_quantity > 0 ? "text-red-600" : "text-gray-400"}`}>
+                        {item.shortage_quantity || "-"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {plan && plan.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
+          <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+            <div className="flex items-center gap-2">
+              <MapPin size={18} className="text-indigo-500" />
+              <span className="font-semibold text-gray-900">Kế hoạch lấy hàng FEFO (HSD gần nhất trước)</span>
+            </div>
+            <button onClick={() => setPlan(null)} className="text-xs text-gray-400 hover:text-gray-600 font-medium">
+              Ẩn
+            </button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-600 border-b border-gray-100">
+                <tr>
+                  <th className="text-left px-4 py-3">Mã hàng</th>
+                  <th className="text-left px-4 py-3">Tên sản phẩm</th>
+                  <th className="text-left px-4 py-3">Vị trí</th>
+                  <th className="text-left px-4 py-3">Lô</th>
+                  <th className="text-left px-4 py-3">HSD</th>
+                  <th className="text-right px-3 py-3 bg-sky-50 font-bold text-sky-900 w-24">Thùng (T)</th>
+                  <th className="text-right px-3 py-3 bg-amber-50 font-bold text-amber-900 w-20">Lẻ (H)</th>
+                  <th className="text-right px-4 py-3">Tổng SL lấy</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
                 {plan.map((item) =>
                   item.picks.length === 0 ? (
                     <tr key={item.sku} className="bg-red-50">
-                      <td className="px-5 py-2 font-medium">{item.sku}</td>
-                      <td className="px-5 py-2">{item.product_name}</td>
-                      <td colSpan={4} className="px-5 py-2 text-red-600">Thiếu {item.shortage_quantity} đơn vị</td>
+                      <td className="px-4 py-2 font-medium font-mono">{item.sku}</td>
+                      <td className="px-4 py-2">{item.product_name}</td>
+                      <td colSpan={6} className="px-4 py-2 text-red-600 font-semibold">
+                        Thiếu {item.shortage_quantity} đơn vị
+                      </td>
                     </tr>
                   ) : (
-                    item.picks.map((pick, pickIndex) => (
-                      <tr key={`${item.sku}-${pickIndex}`} className={pickIndex === 0 ? "" : "border-t border-gray-50"}>
-                        {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-5 py-2 font-medium">{item.sku}</td>}
-                        {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-5 py-2">{item.product_name}</td>}
-                        <td className="px-5 py-2">{pick.location_code ?? "-"}</td>
-                        <td className="px-5 py-2">{pick.lot_number ?? "-"}</td>
-                        <td className="px-5 py-2">{pick.expiry_date ? formatDate(pick.expiry_date) : "-"}</td>
-                        <td className="px-5 py-2 text-right">{pick.quantity}</td>
-                      </tr>
-                    ))
+                    item.picks.map((pick, pickIndex) => {
+                      const { cartons, looseBoxes } = splitCartons(pick.quantity, item.boxes_per_carton);
+                      return (
+                        <tr key={`${item.sku}-${pickIndex}`} className={pickIndex === 0 ? "" : "border-t border-gray-50"}>
+                          {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-4 py-2 font-medium font-mono">{item.sku}</td>}
+                          {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-4 py-2 font-medium text-gray-800">{item.product_name}</td>}
+                          <td className="px-4 py-2 font-medium text-gray-800">{pick.location_code ?? "-"}</td>
+                          <td className="px-4 py-2 text-gray-600">{pick.lot_number ?? "-"}</td>
+                          <td className="px-4 py-2 text-gray-600">{pick.expiry_date ? formatDate(pick.expiry_date) : "-"}</td>
+                          <td className="px-3 py-2 text-right font-black text-sky-950 bg-sky-50/40">
+                            {cartons > 0 ? cartons : "—"}
+                          </td>
+                          <td className="px-3 py-2 text-right font-bold text-amber-900 bg-amber-50/40">
+                            {looseBoxes > 0 ? looseBoxes : "—"}
+                          </td>
+                          <td className="px-4 py-2 text-right font-bold text-gray-900">
+                            {pick.quantity.toLocaleString("vi-VN")}
+                          </td>
+                        </tr>
+                      );
+                    })
                   )
                 )}
               </tbody>

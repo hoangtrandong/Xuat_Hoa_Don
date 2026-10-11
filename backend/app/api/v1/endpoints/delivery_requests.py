@@ -328,11 +328,17 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
         preview = []
         for item in items:
             product = db.get(Product, item["product_id"]) if item["product_id"] else None
+            bpc = max(1, product.boxes_per_carton or 1) if product else (item.get("boxes_per_carton") or 1)
+            qty = item["quantity"]
             preview.append(DeliveryPreviewItem(
                 product_id=product.id if product else 0,
                 sku=product.sku if product else item["sku"],
                 product_name=product.name if product else item["product_name"],
-                quantity=item["quantity"], requested_quantity_raw=item.get("requested_quantity_raw"),
+                quantity=qty,
+                boxes_per_carton=bpc,
+                cartons=qty // bpc,
+                loose_boxes=qty % bpc,
+                requested_quantity_raw=item.get("requested_quantity_raw"),
                 available_quantity=0,
                 shortage_quantity=0,
                 employee_allocations=item.get("employee_allocations"),
@@ -422,11 +428,18 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                         payment_method="UNKNOWN",
                     ))
 
+        total_cartons = sum(p.cartons for p in preview)
+        total_loose_boxes = sum(p.loose_boxes for p in preview)
+        total_quantity = sum(p.quantity for p in preview)
+
         return DeliveryPreviewResponse(
             items=preview,
             employee_summaries=employee_summaries,
             orders=orders,
             warnings=warnings,
+            total_cartons=total_cartons,
+            total_loose_boxes=total_loose_boxes,
+            total_quantity=total_quantity,
         )
     except HTTPException:
         db.rollback()

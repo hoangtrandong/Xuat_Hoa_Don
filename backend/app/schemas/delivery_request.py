@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class DeliveryRequestOrderBase(BaseModel):
@@ -138,6 +138,9 @@ class DeliveryPreviewItem(BaseModel):
     sku: str
     product_name: str
     quantity: int
+    boxes_per_carton: int = 1
+    cartons: int = 0
+    loose_boxes: int = 0
     requested_quantity_raw: Optional[str] = None
     available_quantity: int = 0
     shortage_quantity: int = 0
@@ -150,6 +153,9 @@ class DeliveryPreviewResponse(BaseModel):
     employee_summaries: List[DeliveryRequestEmployeeSummaryBase] = Field(default_factory=list)
     orders: List[DeliveryRequestOrderCreate] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
+    total_cartons: int = 0
+    total_loose_boxes: int = 0
+    total_quantity: int = 0
 
 
 class FefoPlanPick(BaseModel):
@@ -159,6 +165,8 @@ class FefoPlanPick(BaseModel):
     lot_number: Optional[str] = None
     expiry_date: Optional[datetime] = None
     quantity: int
+    cartons: int = 0
+    loose_boxes: int = 0
     allocation_strategy: str
 
 
@@ -167,6 +175,9 @@ class FefoPlanItem(BaseModel):
     sku: str
     product_name: str
     quantity: int
+    boxes_per_carton: int = 1
+    cartons: int = 0
+    loose_boxes: int = 0
     planned_quantity: int
     shortage_quantity: int
     picks: List[FefoPlanPick] = Field(default_factory=list)
@@ -199,6 +210,18 @@ class DeliveryRequestItem(BaseModel):
     employee_allocations: Optional[Dict[str, Any]] = None
     planned_allocations: Optional[List[Dict[str, Any]]] = None
 
+    @computed_field
+    @property
+    def cartons(self) -> int:
+        bpc = max(1, self.boxes_per_carton or 1)
+        return self.quantity // bpc
+
+    @computed_field
+    @property
+    def loose_boxes(self) -> int:
+        bpc = max(1, self.boxes_per_carton or 1)
+        return self.quantity % bpc
+
 
 class DeliveryRequestItemList(BaseModel):
     """Lightweight item for list endpoints - avoids loading full Product/Allocation rows."""
@@ -214,6 +237,18 @@ class DeliveryRequestItemList(BaseModel):
     available_quantity: int = 0
     shortage_quantity: int = 0
     planned_allocations: Optional[List[Dict[str, Any]]] = None
+
+    @computed_field
+    @property
+    def cartons(self) -> int:
+        bpc = max(1, self.boxes_per_carton or 1)
+        return self.quantity // bpc
+
+    @computed_field
+    @property
+    def loose_boxes(self) -> int:
+        bpc = max(1, self.boxes_per_carton or 1)
+        return self.quantity % bpc
 
 
 class DeliveryRequestList(BaseModel):
@@ -234,6 +269,21 @@ class DeliveryRequestList(BaseModel):
     employee_summaries: List[DeliveryRequestEmployeeSummary] = Field(default_factory=list)
     item_count: int = 0
 
+    @computed_field
+    @property
+    def total_cartons(self) -> int:
+        return sum(item.cartons for item in self.items)
+
+    @computed_field
+    @property
+    def total_loose_boxes(self) -> int:
+        return sum(item.loose_boxes for item in self.items)
+
+    @computed_field
+    @property
+    def total_quantity(self) -> int:
+        return sum(item.quantity for item in self.items)
+
 
 class DeliveryRequest(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -251,3 +301,18 @@ class DeliveryRequest(BaseModel):
     items: List[DeliveryRequestItem] = Field(default_factory=list)
     employee_summaries: List[DeliveryRequestEmployeeSummary] = Field(default_factory=list)
     orders: List[DeliveryRequestOrder] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def total_cartons(self) -> int:
+        return sum(item.cartons for item in self.items)
+
+    @computed_field
+    @property
+    def total_loose_boxes(self) -> int:
+        return sum(item.loose_boxes for item in self.items)
+
+    @computed_field
+    @property
+    def total_quantity(self) -> int:
+        return sum(item.quantity for item in self.items)

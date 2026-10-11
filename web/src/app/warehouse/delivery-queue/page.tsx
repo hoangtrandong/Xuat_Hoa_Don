@@ -2,7 +2,7 @@
 // src/app/warehouse/delivery-queue/page.tsx
 import { useEffect, useState } from "react";
 import {
-  ClipboardList, Package, CheckCircle2, Truck,
+  ClipboardList, Package, CheckCircle2, Truck, Printer,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
@@ -10,6 +10,8 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { API_URL, apiFetch } from "@/lib/api";
+import { splitCartons, formatNumber } from "@/lib/format";
+import DeliveryDispatchPrintModal from "@/components/delivery-requests/DeliveryDispatchPrintModal";
 
 type DeliveryRequest = {
   id: number;
@@ -80,6 +82,7 @@ export default function DeliveryQueuePage() {
   const [loading, setLoading] = useState(false);
 
   const [statusFilter, setStatusFilter] = useState<"SUBMITTED" | "RECEIVED">("SUBMITTED");
+  const [printModalOpen, setPrintModalOpen] = useState(false);
 
   // Polling mỗi 5s để cập nhật trạng thái thời gian thực.
   useEffect(() => {
@@ -245,6 +248,8 @@ return (
             {(() => {
               const detail = selectedDetail ?? selected;
               const requested = detail.items.reduce((sum, item) => sum + item.quantity, 0);
+              const totalCartons = detail.items.reduce((sum, item) => sum + splitCartons(item.quantity, item.boxes_per_carton).cartons, 0);
+              const totalLoose = detail.items.reduce((sum, item) => sum + splitCartons(item.quantity, item.boxes_per_carton).looseBoxes, 0);
               const allocated = detail.items.reduce((sum, item) => sum + (item.allocations ?? []).reduce((total, allocation) => total + allocation.allocated_quantity, 0), 0);
               const planned = detail.items.reduce((sum, item) => {
                 const itemPlan = (item.planned_allocations ?? []).reduce((total, allocation) => total + allocation.quantity, 0);
@@ -252,11 +257,26 @@ return (
               }, 0);
               const shortage = detail.items.reduce((sum, item) => sum + item.shortage_quantity, 0);
               return (
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="rounded-lg bg-gray-50 px-3 py-2"><p className="text-xs text-gray-500">Tổng yêu cầu</p><p className="font-bold text-gray-900">{requested} hộp</p></div>
-                  <div className="rounded-lg bg-sky-50 px-3 py-2"><p className="text-xs text-sky-600">Phân bổ lấy hàng</p><p className="font-bold text-sky-800">{planned} hộp</p></div>
-                  <div className="rounded-lg bg-emerald-50 px-3 py-2"><p className="text-xs text-emerald-600">Đã giữ cho yêu cầu</p><p className="font-bold text-emerald-800">{allocated} hộp</p><p className="text-[10px] text-emerald-700">Chưa trừ tồn vật lý</p></div>
-                  <div className={`rounded-lg px-3 py-2 ${shortage > 0 ? "bg-red-50" : "bg-gray-50"}`}><p className={`text-xs ${shortage > 0 ? "text-red-600" : "text-gray-500"}`}>Còn thiếu</p><p className={`font-bold ${shortage > 0 ? "text-red-700" : "text-gray-900"}`}>{shortage} hộp</p></div>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-3 gap-2 p-3 bg-gradient-to-r from-sky-50 to-indigo-50/40 rounded-xl border border-sky-100">
+                    <div className="text-center">
+                      <span className="text-[11px] font-semibold text-sky-800 uppercase block">Thùng nguyên</span>
+                      <span className="text-xl font-black text-sky-950 mt-0.5 block">{totalCartons.toLocaleString("vi-VN")} <span className="text-xs font-normal text-sky-700">thùng</span></span>
+                    </div>
+                    <div className="text-center border-x border-sky-200/60">
+                      <span className="text-[11px] font-semibold text-amber-800 uppercase block">Hộp lẻ</span>
+                      <span className="text-xl font-black text-amber-950 mt-0.5 block">{totalLoose.toLocaleString("vi-VN")} <span className="text-xs font-normal text-amber-700">hộp</span></span>
+                    </div>
+                    <div className="text-center">
+                      <span className="text-[11px] font-semibold text-gray-600 uppercase block">Tổng quy đổi</span>
+                      <span className="text-xl font-black text-gray-900 mt-0.5 block">{requested.toLocaleString("vi-VN")} <span className="text-xs font-normal text-gray-500">hộp</span></span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="rounded-lg bg-sky-50 px-3 py-2"><p className="text-xs text-sky-600">Phân bổ lấy hàng</p><p className="font-bold text-sky-800">{planned} hộp</p></div>
+                    <div className="rounded-lg bg-emerald-50 px-3 py-2"><p className="text-xs text-emerald-600">Đã giữ cho yêu cầu</p><p className="font-bold text-emerald-800">{allocated} hộp</p><p className="text-[10px] text-emerald-700">Chưa trừ tồn vật lý</p></div>
+                    <div className={`rounded-lg px-3 py-2 ${shortage > 0 ? "bg-red-50" : "bg-gray-50"}`}><p className={`text-xs ${shortage > 0 ? "text-red-600" : "text-gray-500"}`}>Còn thiếu</p><p className={`font-bold ${shortage > 0 ? "text-red-700" : "text-gray-900"}`}>{shortage} hộp</p></div>
+                  </div>
                 </div>
               );
             })()}
@@ -354,6 +374,12 @@ return (
               </div>
             )}
 
+            <button
+              onClick={() => setPrintModalOpen(true)}
+              className="w-full rounded-lg bg-gray-900 hover:bg-gray-800 text-white py-2.5 text-sm font-semibold transition-colors flex items-center justify-center gap-1.5 shadow-xs mb-2"
+            >
+              <Printer size={16} /> In Phiếu Bốc Xếp Xuất Kho
+            </button>
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => setSelected(null)}
@@ -414,6 +440,14 @@ return (
           </div>
         )}
       </Drawer>
+
+      {selected && (
+        <DeliveryDispatchPrintModal
+          open={printModalOpen}
+          onClose={() => setPrintModalOpen(false)}
+          request={selectedDetail ?? selected}
+        />
+      )}
     </div>
   );
 }

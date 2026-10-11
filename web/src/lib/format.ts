@@ -48,3 +48,55 @@ export function getInitials(name: string): string {
     .join("")
     .toUpperCase();
 }
+
+/**
+ * Quy đổi số lượng lẻ sang Thùng và Hộp lẻ
+ * Ví dụ: 125 hộp, 48 hộp/thùng -> { cartons: 2, looseBoxes: 29, bpc: 48 }
+ */
+export function splitCartons(quantity: number, boxesPerCarton?: number | null): {
+  cartons: number;
+  looseBoxes: number;
+  bpc: number;
+} {
+  const safeQty = Number.isFinite(quantity) ? Math.max(0, Math.floor(quantity)) : 0;
+  const bpc = Number.isFinite(boxesPerCarton) && (boxesPerCarton ?? 0) > 1
+    ? Math.floor(boxesPerCarton as number)
+    : 1;
+  const cartons = Math.floor(safeQty / bpc);
+  const looseBoxes = safeQty % bpc;
+  return { cartons, looseBoxes, bpc };
+}
+
+/**
+ * Hiển thị số lượng theo định dạng: "2T 29H (125 hộp)" hoặc "2T (96 hộp)" hoặc "15H"
+ */
+export function formatCartonBox(quantity: number, boxesPerCarton?: number | null, unit: string = "hộp"): string {
+  const { cartons, looseBoxes, bpc } = splitCartons(quantity, boxesPerCarton);
+  if (bpc <= 1) {
+    return `${quantity.toLocaleString("vi-VN")} ${unit}`;
+  }
+  if (cartons > 0 && looseBoxes > 0) {
+    return `${cartons}T ${looseBoxes}H (${quantity.toLocaleString("vi-VN")} ${unit})`;
+  }
+  if (cartons > 0) {
+    return `${cartons}T (${quantity.toLocaleString("vi-VN")} ${unit})`;
+  }
+  return `${looseBoxes}H`;
+}
+
+/**
+ * Hiển thị ngắn gọn: "2T 29H" hoặc "2T" hoặc "15H"
+ */
+export function formatCartonBoxShort(quantity: number, boxesPerCarton?: number | null): string {
+  const { cartons, looseBoxes, bpc } = splitCartons(quantity, boxesPerCarton);
+  if (bpc <= 1) {
+    return `${quantity.toLocaleString("vi-VN")}`;
+  }
+  if (cartons > 0 && looseBoxes > 0) {
+    return `${cartons}T ${looseBoxes}H`;
+  }
+  if (cartons > 0) {
+    return `${cartons}T`;
+  }
+  return `${looseBoxes}H`;
+}

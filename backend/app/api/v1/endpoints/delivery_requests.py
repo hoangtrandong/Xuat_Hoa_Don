@@ -1,5 +1,7 @@
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
+import re
 from typing import Any, List
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -21,7 +23,7 @@ from app.schemas.delivery_request import (
     DeliveryPreviewResponse, FefoPlanItem, DeliveryRequestOrder,
     DeliveryRequestOrderCreate, SettlementOrderPayRequest,
     SettlementMatchStatementRequest, SettlementMatchStatementResponse,
-    DeliverySettlementOverview, BankStatementItem,
+    DeliverySettlementOverview, DailyEmployeeSettlement, BankStatementItem,
 )
 
 router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
@@ -445,6 +447,24 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
         db.rollback()
         raise
     except (ValueError, TypeError, InvalidFileException, BadZipFile, OSError) as exc:
+        return _error(db, exc)
+
+
+@router.get("/daily-settlements", response_model=List[DailyEmployeeSettlement])
+def list_daily_settlements(
+    from_date: date,
+    to_date: date,
+    warehouse_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        return crud.list_daily_settlements(
+            db,
+            from_date=from_date,
+            to_date=to_date,
+            warehouse_id=warehouse_id,
+        )
+    except ValueError as exc:
         return _error(db, exc)
 
 

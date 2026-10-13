@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 import pytest
 from sqlalchemy import create_engine, select
@@ -18,7 +18,7 @@ from app.models.inventory import (
 from app.models.product import Product, ProductCategory, ProductUnit
 from app.schemas.delivery_request import (
     DeliveryRequestCreate, DeliveryRequestItemCreate, DeliveryRequestEmployeeSummaryCreate,
-    DeliveryRequestOrderCreate, BankStatementItem,
+    DeliveryRequestOrderCreate, BankStatementItem, DailyEmployeeSettlement,
 )
 
 
@@ -412,3 +412,101 @@ def test_delivery_return_and_stock_restoration(db):
     assert emp_settle["remaining_cash_to_turn_in"] == 0.0
 
 
+def test_daily_settlement_groups_completed_requests_by_vietnam_business_date(db):
+    session, warehouse, _, employee = db
+    first = DeliveryRequest(
+        code="DR-DAILY-001",
+        warehouse_id=warehouse.id,
+        status="COMPLETED",
+        completed_at=datetime(2026, 10, 13, 13, 0),
+    )
+    second = DeliveryRequest(
+        code="DR-DAILY-002",
+        warehouse_id=warehouse.id,
+        status="COMPLETED",
+        completed_at=datetime(2026, 10, 13, 15, 0),
+    )
+    draft = DeliveryRequest(
+        code="DR-DAILY-DRAFT",
+        warehouse_id=warehouse.id,
+        status="RECEIVED",
+        completed_at=datetime(2026, 10, 13, 16, 0),
+    )
+    next_business_day = DeliveryRequest(
+        code="DR-DAILY-NEXT",
+        warehouse_id=warehouse.id,
+        status="COMPLETED",
+        completed_at=datetime(2026, 10, 13, 17, 30),
+    )
+    session.add_all([first, second, draft, next_business_day])
+    session.flush()
+
+    for request, amount in ((first, 40000000), (second, 60000000), (draft, 900000000), (next_business_day, 1)):
+        session.add(DeliveryRequestEmployeeSummary(
+            delivery_request_id=request.id,
+            employee_id=employee.id,
+            employee_code=employee.code,
+            employee_name=employee.name,
+            amount=amount,
+        ))
+    session.add_all([
+        DeliveryRequestOrder(
+            delivery_request_id=first.id,
+            order_date=date(2026, 10, 13),
+            order_number="DAILY-ORDER-1",
+            employee_id=employee.id,
+            employee_code=employee.code,
+            employee_name=employee.name,
+            amount=10000000,
+            payment_status="PAID_BANK",
+            payment_method="BANK",
+        ),
+        DeliveryRequestOrder(
+            delivery_request_id=first.id,
+            order_date=date(2026, 10, 13),
+            order_number="DAILY-ORDER-2",
+            employee_id=employee.id,
+            employee_code=employee.code,
+            employee_name=employee.name,
+            amount=30000000,
+            payment_status="UNPAID",
+        ),
+        DeliveryRequestOrder(
+            delivery_request_id=second.id,
+            order_date=date(2026, 10, 13),
+            order_number="DAILY-ORDER-3",
+            employee_id=employee.id,
+            employee_code=employee.code,
+            employee_name=employee.name,
+            amount=60000000,
+            payment_status="PAID_CASH",
+            payment_method="CASH",
+        ),
+    ])
+    session.commit()
+
+    from app.crud.delivery_request import list_daily_settlements
+
+    results = list_daily_settlements(
+        session,
+        from_date=date(2026, 10, 13),
+        to_date=date(2026, 10, 13),
+    )
+
+    assert len(results) == 1
+    row = results[0]
+    assert row["settlement_date"] == date(2026, 10, 13)
+    assert row["employee_code"] == employee.code
+    assert row["delivery_requests_count"] == 2
+    assert row["orders_count"] == 3
+    assert row["allocated_amount"] == 100000000
+    assert row["orders_amount"] == 100000000
+    assert row["paid_bank"] == 10000000
+    assert row["paid_cash"] == 60000000
+    assert row["unpaid"] == 30000000
+    assert row["remaining_cash_to_turn_in"] == 90000000
+    assert {item["request_code"] for item in row["requests"]} == {
+        "DR-DAILY-001",
+        "DR-DAILY-002",
+    }
+    DailyEmployeeSettlement.model_validate(row)

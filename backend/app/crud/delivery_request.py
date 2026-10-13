@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 from math import isfinite
 from uuid import uuid4
 
@@ -770,6 +770,180 @@ def get_settlement(db: Session, request_id: int) -> dict:
         "returns": returns,
         "items": items_list,
     }
+
+
+def list_daily_settlements(
+    db: Session,
+    from_date: date,
+    to_date: date,
+    warehouse_id: int | None = None,
+) -> list[dict]:
+    if to_date < from_date:
+        raise ValueError("Ngày kết thúc phải bằng hoặc sau ngày bắt đầu.")
+    if (to_date - from_date).days > 92:
+        raise ValueError("Mỗi lần tra cứu tối đa 93 ngày.")
+
+    # completed_at is stored as naive UTC; settlement dates follow Vietnam local time.
+    utc_offset = timedelta(hours=7)
+    start_utc = datetime.combine(from_date, time.min) - utc_offset
+    end_utc = datetime.combine(to_date + timedelta(days=1), time.min) - utc_offset
+    statement = (
+        select(DeliveryRequest)
+        .options(
+            selectinload(DeliveryRequest.employee_summaries),
+            selectinload(DeliveryRequest.orders),
+            selectinload(DeliveryRequest.warehouse),
+        )
+        .where(
+            DeliveryRequest.status == "COMPLETED",
+            DeliveryRequest.completed_at >= start_utc,
+            DeliveryRequest.completed_at < end_utc,
+        )
+        .order_by(DeliveryRequest.completed_at, DeliveryRequest.id)
+    )
+    if warehouse_id is not None:
+        statement = statement.where(DeliveryRequest.warehouse_id == warehouse_id)
+    requests = db.scalars(statement).all()
+    if not requests:
+        return []
+
+    returns = db.scalars(
+        select(DeliveryReturn)
+        .options(selectinload(DeliveryReturn.employee))
+        .where(DeliveryReturn.delivery_request_id.in_([request.id for request in requests]))
+    ).all()
+    returns_by_request: dict[int, list[DeliveryReturn]] = {}
+    for return_record in returns:
+        returns_by_request.setdefault(return_record.delivery_request_id, []).append(return_record)
+
+    totals: dict[tuple[date, int | None, str], dict] = {}
+    for request in requests:
+        completed_at = request.completed_at
+        if completed_at is None:
+            continue
+        business_date = (completed_at.replace(tzinfo=timezone.utc) + utc_offset).date()
+        request_returns = returns_by_request.get(request.id, [])
+        returned_order_ids = {record.order_id for record in request_returns if record.order_id}
+        orders_by_code: dict[str, list[DeliveryRequestOrder]] = {}
+        for order in request.orders:
+            orders_by_code.setdefault(order.employee_code.upper(), []).append(order)
+        summaries_by_code = {
+            summary.employee_code.upper(): summary
+            for summary in request.employee_summaries
+        }
+        employee_codes = set(summaries_by_code) | set(orders_by_code)
+
+        for employee_code in employee_codes:
+            summary = summaries_by_code.get(employee_code)
+            employee_orders = orders_by_code.get(employee_code, [])
+            order_amount = sum(float(order.amount) for order in employee_orders)
+            allocated_amount = (
+                float(summary.amount)
+                if summary is not None
+                else order_amount
+            )
+            paid_bank = sum(
+                float(order.amount) for order in employee_orders
+                if order.payment_method == "BANK" and order.payment_status in ("PAID", "PAID_BANK")
+            )
+            paid_cash = sum(
+                float(order.amount) for order in employee_orders
+                if order.payment_method == "CASH" and order.payment_status in ("PAID", "PAID_CASH")
+            )
+            transferred_debt = sum(
+                float(order.amount) for order in employee_orders
+                if order.payment_method == "DEBT" or order.payment_status == "TRANSFERRED_DEBT"
+            )
+            employee_id = (
+                summary.employee_id if summary is not None
+                else next((order.employee_id for order in employee_orders if order.employee_id is not None), None)
+            )
+            employee_returns = [
+                record for record in request_returns
+                if record.employee_id == employee_id
+                or (
+                    employee_id is None
+                    and record.employee
+                    and record.employee.code.upper() == employee_code
+                )
+            ]
+            returned_amount = sum(float(record.amount) for record in employee_returns)
+            returned_amount += sum(
+                float(order.amount) for order in employee_orders
+                if (order.payment_method == "RETURN" or order.payment_status == "RETURNED")
+                and order.id not in returned_order_ids
+            )
+            unpaid = sum(
+                float(order.amount) for order in employee_orders
+                if order.payment_status in ("UNPAID", "PENDING")
+            )
+            remaining_cash = max(0.0, allocated_amount - paid_bank - transferred_debt - returned_amount)
+            difference = order_amount - allocated_amount
+            employee_name = (
+                summary.employee_name if summary is not None
+                else next((order.employee_name for order in employee_orders if order.employee_name), None)
+            )
+            key = (business_date, employee_id, employee_code)
+            row = totals.setdefault(key, {
+                "settlement_date": business_date,
+                "employee_id": employee_id,
+                "employee_code": employee_code,
+                "employee_name": employee_name,
+                "delivery_requests_count": 0,
+                "allocated_amount": 0.0,
+                "orders_count": 0,
+                "orders_amount": 0.0,
+                "paid_bank": 0.0,
+                "paid_cash": 0.0,
+                "transferred_debt": 0.0,
+                "returned": 0.0,
+                "unpaid": 0.0,
+                "remaining_cash_to_turn_in": 0.0,
+                "difference": 0.0,
+                "requests": [],
+                "_request_ids": set(),
+            })
+            row["allocated_amount"] += allocated_amount
+            row["orders_count"] += len(employee_orders)
+            row["orders_amount"] += order_amount
+            row["paid_bank"] += paid_bank
+            row["paid_cash"] += paid_cash
+            row["transferred_debt"] += transferred_debt
+            row["returned"] += returned_amount
+            row["unpaid"] += unpaid
+            row["remaining_cash_to_turn_in"] += remaining_cash
+            row["difference"] += difference
+            if request.id not in row["_request_ids"]:
+                row["_request_ids"].add(request.id)
+                row["delivery_requests_count"] += 1
+                row["requests"].append({
+                    "request_id": request.id,
+                    "request_code": request.code,
+                    "warehouse_id": request.warehouse_id,
+                    "warehouse_name": request.warehouse.name,
+                    "completed_at": completed_at,
+                    "allocated_amount": allocated_amount,
+                    "orders_count": len(employee_orders),
+                    "orders_amount": order_amount,
+                    "paid_bank": paid_bank,
+                    "paid_cash": paid_cash,
+                    "transferred_debt": transferred_debt,
+                    "returned": returned_amount,
+                    "unpaid": unpaid,
+                    "remaining_cash_to_turn_in": remaining_cash,
+                    "difference": difference,
+                })
+
+    results = []
+    for row in totals.values():
+        row.pop("_request_ids")
+        row["requests"].sort(key=lambda item: item["completed_at"])
+        results.append(row)
+    return sorted(
+        results,
+        key=lambda row: (row["settlement_date"], row["employee_code"]),
+        reverse=True,
+    )
 
 
 

@@ -93,6 +93,43 @@ class DeliverySettlementOverview(BaseModel):
     items: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class DailySettlementRequestBreakdown(BaseModel):
+    request_id: int
+    request_code: str
+    warehouse_id: int
+    warehouse_name: str
+    completed_at: datetime
+    allocated_amount: float
+    orders_count: int
+    orders_amount: float
+    paid_bank: float
+    paid_cash: float
+    transferred_debt: float
+    returned: float
+    unpaid: float
+    remaining_cash_to_turn_in: float
+    difference: float
+
+
+class DailyEmployeeSettlement(BaseModel):
+    settlement_date: date
+    employee_id: Optional[int] = None
+    employee_code: str
+    employee_name: Optional[str] = None
+    delivery_requests_count: int
+    allocated_amount: float
+    orders_count: int
+    orders_amount: float
+    paid_bank: float
+    paid_cash: float
+    transferred_debt: float
+    returned: float
+    unpaid: float
+    remaining_cash_to_turn_in: float
+    difference: float
+    requests: List[DailySettlementRequestBreakdown]
+
+
 
 class DeliveryRequestItemCreate(BaseModel):
     product_id: int

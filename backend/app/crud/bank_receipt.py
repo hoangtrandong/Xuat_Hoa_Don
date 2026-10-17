@@ -190,94 +190,57 @@ def get_allocatable_employee_days_for_store(
     store_id: Optional[int] = None,
     customer_code: Optional[str] = None,
 ) -> List[dict]:
-    customer_codes = set()
-    if customer_code:
-        customer_codes.add(customer_code.strip().upper())
-    if store_id:
-        customer_codes.update(
-            code.strip().upper()
-            for code in db.scalars(
-                select(Customer.code).where(Customer.store_id == store_id)
-            ).all()
-            if code and code.strip()
-        )
-    if not customer_codes:
-        return []
-
-    qualifying_orders = db.execute(
+    completed_at_range = db.execute(
         select(
-            DeliveryRequestOrder.id,
-            DeliveryRequestOrder.employee_id,
-            DeliveryRequestOrder.amount,
-            DeliveryRequest.completed_at,
-        )
-        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
-        .where(
+            func.min(DeliveryRequest.completed_at),
+            func.max(DeliveryRequest.completed_at),
+        ).where(
             DeliveryRequest.status == "COMPLETED",
             DeliveryRequest.completed_at.is_not(None),
-            DeliveryRequestOrder.employee_id.is_not(None),
-            func.upper(DeliveryRequestOrder.customer_code).in_(customer_codes),
         )
-    ).all()
-    store_orders_by_employee_day: dict[tuple[date, int], list[tuple[int, float]]] = {}
-    for order_id, employee_id, amount, completed_at in qualifying_orders:
-        key = (
-            (completed_at.replace(tzinfo=timezone.utc) + timedelta(hours=7)).date(),
-            employee_id,
-        )
-        store_orders_by_employee_day.setdefault(key, []).append((order_id, float(amount)))
-    eligible_employee_days = set(store_orders_by_employee_day)
-    if not eligible_employee_days:
+    ).one()
+    min_completed_at, max_completed_at = completed_at_range
+    if min_completed_at is None or max_completed_at is None:
         return []
-
-    store_order_ids = [
-        order_id
-        for orders in store_orders_by_employee_day.values()
-        for order_id, _ in orders
-    ]
-    allocated_by_order = dict(
-        db.execute(
-            select(
-                PaymentAllocation.order_id,
-                func.coalesce(func.sum(PaymentAllocation.amount), 0),
-            )
-            .where(PaymentAllocation.order_id.in_(store_order_ids))
-            .group_by(PaymentAllocation.order_id)
-        ).all()
-    )
-    store_open_debt = {
-        key: sum(
-            max(0.0, amount - float(allocated_by_order.get(order_id, 0.0)))
-            for order_id, amount in orders
-        )
-        for key, orders in store_orders_by_employee_day.items()
-    }
 
     from app.crud.delivery_request import list_daily_settlements
 
-    results = []
-    for settlement_date in sorted({item[0] for item in eligible_employee_days}, reverse=True):
-        for row in list_daily_settlements(db, settlement_date, settlement_date):
-            key = (row["settlement_date"], row["employee_id"])
-            if (
-                key not in eligible_employee_days
-                or row["employee_id"] is None
-                or row["remaining_employee_debt"] <= 0.01
-            ):
-                continue
-            remaining = min(row["remaining_employee_debt"], store_open_debt[key])
-            if remaining <= 0.01:
-                continue
-            results.append({
-                "employee_id": row["employee_id"],
-                "employee_code": row["employee_code"],
-                "employee_name": row["employee_name"],
-                "settlement_date": row["settlement_date"],
-                "allocated_amount": row["allocated_amount"],
-                "paid_bank": row["paid_bank"],
-                "remaining_employee_debt": remaining,
-            })
-    return results
+    utc_offset = timedelta(hours=7)
+    from_date = (min_completed_at.replace(tzinfo=timezone.utc) + utc_offset).date()
+    to_date = (max_completed_at.replace(tzinfo=timezone.utc) + utc_offset).date()
+    return [
+        {
+            "employee_id": row["employee_id"],
+            "employee_code": row["employee_code"],
+            "employee_name": row["employee_name"],
+            "settlement_date": row["settlement_date"],
+            "allocated_amount": row["allocated_amount"],
+            "paid_bank": row["paid_bank"],
+            "remaining_employee_debt": row["remaining_employee_debt"],
+        }
+        for row in list_daily_settlements(db, from_date, to_date)
+        if row["employee_id"] is not None
+        and row["remaining_employee_debt"] > 0.01
+    ]
+
+
+def get_allocatable_store_debt(db: Session, store_id: Optional[int]) -> dict | None:
+    if store_id is None:
+        return None
+    store = db.get(Store, store_id)
+    if not store:
+        return None
+    from app.crud.debt_ledger import get_store_balance
+
+    remaining = max(0.0, get_store_balance(db, store.id))
+    if remaining <= 0.01:
+        return None
+    return {
+        "store_id": store.id,
+        "store_code": store.code,
+        "store_name": store.name,
+        "remaining_store_debt": remaining,
+    }
 
 
 def allocate_bank_receipt(
@@ -323,12 +286,17 @@ def allocate_bank_receipt(
 
     eligible_employee_days: dict[tuple[date, int], dict] | None = None
     staged_employee_day_allocations: dict[tuple[date, int], float] = {}
+    staged_store_allocations: dict[int, float] = {}
     for item in allocations:
         amt = round(float(item.amount), 2)
         if amt <= 0:
             continue
         if item.order_id is not None and (item.employee_id is not None or item.settlement_date is not None):
             raise ValueError("Không thể kết hợp phân bổ theo đơn với phân bổ theo nhân viên/ngày.")
+        if item.store_id is not None and (
+            item.order_id is not None or item.employee_id is not None or item.settlement_date is not None
+        ):
+            raise ValueError("Không thể kết hợp phân bổ công nợ cửa hàng với đối tượng khác.")
         if (item.employee_id is None) != (item.settlement_date is None):
             raise ValueError("Phân bổ theo nhân viên cần có cả nhân viên và ngày quyết toán.")
 
@@ -471,9 +439,21 @@ def allocate_bank_receipt(
                 raise ValueError("Phân bổ theo nhân viên cần có cả nhân viên và ngày quyết toán, không gắn mã đơn.")
 
         elif item.store_id:
-            store = db.get(Store, item.store_id)
+            if item.store_id != receipt.store_id:
+                raise ValueError("Chỉ được phân bổ trực tiếp cho cửa hàng đã gắn với phiếu chuyển khoản.")
+            store = db.scalar(
+                select(Store).where(Store.id == item.store_id).with_for_update()
+            )
             if not store:
                 raise ValueError(f"Không tìm thấy Cửa hàng ID {item.store_id}.")
+            from app.crud.debt_ledger import get_store_balance
+
+            store_balance = max(0.0, get_store_balance(db, store.id))
+            available = max(0.0, store_balance - staged_store_allocations.get(store.id, 0.0))
+            if amt > available + 0.01:
+                raise ValueError(
+                    f"Số tiền phân bổ vượt công nợ còn lại của cửa hàng ({available:,.0f}đ)."
+                )
 
             pa = PaymentAllocation(
                 code=_code("PA"),
@@ -506,6 +486,7 @@ def allocate_bank_receipt(
                     created_at=now,
                 )
             )
+            staged_store_allocations[store.id] = staged_store_allocations.get(store.id, 0.0) + amt
 
     # Recalculate receipt allocated & unallocated
     total_allocated = float(

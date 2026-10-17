@@ -98,3 +98,10 @@ class AllocatableEmployeeDayOut(BaseModel):
     allocated_amount: float
     paid_bank: float
     remaining_employee_debt: float
+
+
+class AllocatableStoreDebtOut(BaseModel):
+    store_id: int
+    store_code: str
+    store_name: str
+    remaining_store_debt: float

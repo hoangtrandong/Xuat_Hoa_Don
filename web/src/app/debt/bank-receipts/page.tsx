@@ -73,6 +73,13 @@ interface AllocatableEmployeeDay {
   remaining_employee_debt: number;
 }
 
+interface AllocatableStoreDebt {
+  store_id: number;
+  store_code: string;
+  store_name: string;
+  remaining_store_debt: number;
+}
+
 interface StoreOption {
   id: number;
   code: string;
@@ -122,6 +129,9 @@ export default function BankReceiptsPage() {
   const [allocateModalOpen, setAllocateModalOpen] = useState(false);
   const [selectedReceipt, setSelectedReceipt] = useState<BankReceipt | null>(null);
   const [allocatableEmployeeDays, setAllocatableEmployeeDays] = useState<AllocatableEmployeeDay[]>([]);
+  const [allocatableStoreDebt, setAllocatableStoreDebt] = useState<AllocatableStoreDebt | null>(null);
+  const [allocationMode, setAllocationMode] = useState<"EMPLOYEE_DAY" | "STORE">("EMPLOYEE_DAY");
+  const [allocationLoadError, setAllocationLoadError] = useState("");
   const [allocAmounts, setAllocAmounts] = useState<Record<string, number>>({});
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [submittingAlloc, setSubmittingAlloc] = useState(false);
@@ -200,23 +210,38 @@ export default function BankReceiptsPage() {
   async function handleOpenAllocate(receipt: BankReceipt) {
     setSelectedReceipt(receipt);
     setAllocAmounts({});
+    setAllocatableEmployeeDays([]);
+    setAllocatableStoreDebt(null);
+    setAllocationMode("EMPLOYEE_DAY");
+    setAllocationLoadError("");
     setAllocateModalOpen(true);
     setLoadingOrders(true);
     try {
-      const res = await apiFetch(`${API_URL}/bank-receipts/${receipt.id}/allocatable-employee-days`);
-      if (!res.ok) throw new Error("Không thể tải công nợ ngày/nhân viên của cửa hàng.");
-      const targets: AllocatableEmployeeDay[] = await res.json();
+      const [employeeDaysRes, storeDebtRes] = await Promise.all([
+        apiFetch(`${API_URL}/bank-receipts/${receipt.id}/allocatable-employee-days`),
+        apiFetch(`${API_URL}/bank-receipts/${receipt.id}/allocatable-store-debt`),
+      ]);
+      if (!employeeDaysRes.ok) {
+        const result = await employeeDaysRes.json();
+        throw new Error(result.detail || "Không thể tải công nợ ngày/nhân viên của cửa hàng.");
+      }
+      if (!storeDebtRes.ok) {
+        const result = await storeDebtRes.json();
+        throw new Error(result.detail || "Không thể tải công nợ cửa hàng.");
+      }
+      const targets: AllocatableEmployeeDay[] = await employeeDaysRes.json();
+      const storeDebt: AllocatableStoreDebt | null = await storeDebtRes.json();
       setAllocatableEmployeeDays(targets);
+      setAllocatableStoreDebt(storeDebt);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Lỗi tải công nợ theo ngày/nhân viên.");
-      setAllocatableEmployeeDays([]);
+      setAllocationLoadError(err instanceof Error ? err.message : "Lỗi tải công nợ để phân bổ.");
     } finally {
       setLoadingOrders(false);
     }
   }
 
   function handleAutoAllocate() {
-    if (!selectedReceipt) return;
+    if (!selectedReceipt || allocationMode !== "EMPLOYEE_DAY") return;
     let budget = selectedReceipt.unallocated_amount;
     const newAmounts: Record<string, number> = {};
 
@@ -241,7 +266,13 @@ export default function BankReceiptsPage() {
 
   async function handleConfirmAllocate() {
     if (!selectedReceipt) return;
-    const allocationsToSubmit = Object.entries(allocAmounts)
+    const allocationsToSubmit: Array<{
+      employee_id?: number;
+      settlement_date?: string;
+      store_id?: number;
+      amount: number;
+    }> = Object.entries(allocAmounts)
+      .filter(([key]) => key !== "STORE")
       .map(([key, amount]) => {
         const [settlement_date, employeeId] = key.split(":");
         return {
@@ -251,6 +282,15 @@ export default function BankReceiptsPage() {
         };
       })
       .filter((a) => a.amount > 0);
+    if (allocationMode === "STORE" && allocatableStoreDebt) {
+      const amount = allocAmounts.STORE ?? 0;
+      if (amount > 0) {
+        allocationsToSubmit.push({
+          store_id: allocatableStoreDebt.store_id,
+          amount,
+        });
+      }
+    }
 
     if (allocationsToSubmit.length === 0) {
       alert("Vui lòng chọn ít nhất một nhân viên/ngày và nhập số tiền phân bổ.");
@@ -700,29 +740,71 @@ export default function BankReceiptsPage() {
                 <button
                   type="button"
                   onClick={handleAutoAllocate}
+                  disabled={allocationMode !== "EMPLOYEE_DAY" || allocatableEmployeeDays.length === 0}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 shadow-sm"
                 >
                   <Zap size={14} />
-                  Tự phân bổ theo ngày cũ
+                  Tự phân bổ nhân viên/ngày
                 </button>
               </div>
             </div>
 
-            {/* Orders Table */}
             <div className="flex-1 overflow-y-auto px-6 py-4">
+              <div className="mb-4 flex flex-wrap gap-2" role="tablist" aria-label="Loại công nợ cần phân bổ">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={allocationMode === "EMPLOYEE_DAY"}
+                  onClick={() => {
+                    setAllocationMode("EMPLOYEE_DAY");
+                    setAllocAmounts({});
+                  }}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold ${
+                    allocationMode === "EMPLOYEE_DAY"
+                      ? "bg-sky-600 text-white"
+                      : "border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                  }`}
+                >
+                  Gạch nợ nhân viên theo ngày ({allocatableEmployeeDays.length})
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={allocationMode === "STORE"}
+                  onClick={() => {
+                    setAllocationMode("STORE");
+                    setAllocAmounts({});
+                  }}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold ${
+                    allocationMode === "STORE"
+                      ? "bg-emerald-600 text-white"
+                      : "border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                  }`}
+                >
+                  Gạch nợ cửa hàng
+                </button>
+              </div>
+              {allocationLoadError && (
+                <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {allocationLoadError}
+                </div>
+              )}
+
+              {allocationMode === "EMPLOYEE_DAY" ? (
+                <>
               <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
                 Công nợ còn lại theo ngày/nhân viên ({allocatableEmployeeDays.length} dòng)
               </h4>
               <p className="mb-3 rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
-                Xác nhận cửa hàng đã chuyển khoản, sau đó phân bổ trực tiếp cho nhân viên và ngày quyết toán.
-                Hệ thống giới hạn số tiền theo công nợ còn lại; chi tiết đơn hàng vẫn lưu để tra cứu.
+                Sau khi xác nhận với cửa hàng, chọn đúng nhân viên và ngày mà khoản chuyển khoản cần giảm trừ.
+                Danh sách hiển thị công nợ còn lại của nhân viên; số phân bổ bị giới hạn theo khoản chuyển còn dư và công nợ ngày.
               </p>
 
               {loadingOrders && <p className="py-10 text-center text-sm text-gray-500">Đang tải công nợ ngày/nhân viên...</p>}
 
-              {!loadingOrders && allocatableEmployeeDays.length === 0 && (
+              {!loadingOrders && !allocationLoadError && allocatableEmployeeDays.length === 0 && (
                 <div className="rounded-xl border border-dashed border-gray-200 py-12 text-center text-sm text-gray-500">
-                  Không có công nợ theo ngày/nhân viên còn có thể phân bổ cho cửa hàng này.
+                  Hiện không có công nợ nhân viên/ngày còn lại. Kiểm tra ngày xuất hàng đã hoàn tất hoặc khoản nợ đã được ghi nhận/đối trừ chưa.
                 </div>
               )}
 
@@ -801,6 +883,62 @@ export default function BankReceiptsPage() {
                     </tbody>
                   </table>
                 </div>
+              )}
+                </>
+              ) : (
+                <>
+                  <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                    Công nợ trên sổ cửa hàng
+                  </h4>
+                  {loadingOrders && <p className="py-10 text-center text-sm text-gray-500">Đang tải công nợ cửa hàng...</p>}
+                  {!loadingOrders && !allocationLoadError && !allocatableStoreDebt && (
+                    <div className="rounded-xl border border-dashed border-gray-200 py-12 text-center text-sm text-gray-500">
+                      Cửa hàng chuyển tiền hiện không có dư nợ cửa hàng để phân bổ.
+                    </div>
+                  )}
+                  {!loadingOrders && allocatableStoreDebt && (
+                    <div className="rounded-xl border border-gray-200 bg-white p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-4">
+                        <div>
+                          <p className="font-semibold text-gray-900">
+                            {allocatableStoreDebt.store_code} - {allocatableStoreDebt.store_name}
+                          </p>
+                          <p className="mt-1 text-xs text-gray-500">
+                            Cửa hàng được xác định theo phiếu chuyển khoản đã ghi nhận.
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs text-gray-500">Công nợ cửa hàng còn lại</p>
+                          <p className="font-bold text-amber-700">{formatVND(allocatableStoreDebt.remaining_store_debt)}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min={0}
+                            max={allocatableStoreDebt.remaining_store_debt}
+                            step={1}
+                            value={allocAmounts.STORE ?? ""}
+                            placeholder="Số tiền phân bổ"
+                            onChange={(event) => {
+                              const amount = Number(event.target.value) || 0;
+                              setAllocAmounts({
+                                STORE: Math.min(amount, allocatableStoreDebt.remaining_store_debt),
+                              });
+                            }}
+                            className="w-44 rounded border border-gray-300 px-2 py-2 text-right text-sm font-semibold"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setAllocAmounts({ STORE: allocatableStoreDebt.remaining_store_debt })}
+                            className="rounded bg-gray-100 px-3 py-2 text-xs text-gray-700 hover:bg-gray-200"
+                          >
+                            Max
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </div>
 

@@ -10,6 +10,7 @@ from app.crud.bank_receipt import (
     get_bank_receipt,
     get_allocatable_orders_for_store,
     get_allocatable_employee_days_for_store,
+    get_allocatable_store_debt,
     allocate_bank_receipt,
     cancel_allocation,
 )
@@ -311,7 +312,7 @@ def test_partial_allocation_and_cancellation(db):
     assert allocatable_after[0]["remaining_amount"] == 10000000.0
 
 
-def test_store_transfer_cannot_reduce_an_unrelated_employee_order_debt(db):
+def test_confirmed_store_transfer_can_be_explicitly_allocated_to_employee_day(db):
     session, wh, _, store, _, employee, _ = db
     other_store = Store(code="ST-OTHER", name="Đại lý khác")
     session.add(other_store)
@@ -358,21 +359,86 @@ def test_store_transfer_cannot_reduce_an_unrelated_employee_order_debt(db):
             [PaymentAllocationItemCreate(order_id=order.id, amount=5000000.0)],
         )
 
-    with pytest.raises(ValueError, match="(?i)cửa hàng này"):
+    targets = get_allocatable_employee_days_for_store(session, store_id=store.id)
+    assert len(targets) == 1
+    assert targets[0]["employee_id"] == employee.id
+    assert targets[0]["remaining_employee_debt"] == 5000000.0
+
+    allocated = allocate_bank_receipt(
+        session,
+        receipt.id,
+        [
+            PaymentAllocationItemCreate(
+                employee_id=employee.id,
+                settlement_date=date(2026, 10, 14),
+                amount=5000000.0,
+            )
+        ],
+    )
+    assert allocated.status == "FULLY_ALLOCATED"
+    assert allocated.allocations[0].order_id is None
+    assert allocated.allocations[0].employee_id == employee.id
+
+    wrong_store_receipt = create_bank_receipt(
+        session,
+        BankReceiptCreate(store_id=store.id, amount=1000000.0),
+    )
+    with pytest.raises(ValueError, match="(?i)phiếu chuyển khoản"):
         allocate_bank_receipt(
             session,
-            receipt.id,
-            [
-                PaymentAllocationItemCreate(
-                    employee_id=employee.id,
-                    settlement_date=date(2026, 10, 14),
-                    amount=5000000.0,
-                )
-            ],
+            wrong_store_receipt.id,
+            [PaymentAllocationItemCreate(store_id=other_store.id, amount=1000000.0)],
         )
 
     session.refresh(receipt)
-    assert float(receipt.unallocated_amount) == 5000000.0
-    assert session.scalar(
-        select(PaymentAllocation).where(PaymentAllocation.bank_receipt_id == receipt.id)
-    ) is None
+    assert float(receipt.unallocated_amount) == 0.0
+
+
+def test_bank_receipt_can_reduce_its_store_ledger_debt(db):
+    session, _, _, store, _, _, _ = db
+    session.add(
+        DebtLedgerEntry(
+            party_type="STORE",
+            party_id=store.id,
+            entry_type="TRANSFER_IN",
+            amount=7000000.0,
+            source_type="MANUAL",
+            source_id=99001,
+            source_code="STORE-DEBT-TEST",
+        )
+    )
+    session.commit()
+
+    receipt = create_bank_receipt(
+        session,
+        BankReceiptCreate(store_id=store.id, amount=5000000.0),
+    )
+    store_target = get_allocatable_store_debt(session, store.id)
+    assert store_target is not None
+    assert store_target["remaining_store_debt"] == 7000000.0
+
+    updated = allocate_bank_receipt(
+        session,
+        receipt.id,
+        [PaymentAllocationItemCreate(store_id=store.id, amount=5000000.0)],
+    )
+    assert updated.status == "FULLY_ALLOCATED"
+    assert float(updated.unallocated_amount) == 0.0
+    assert float(session.scalar(
+        select(DebtLedgerEntry.amount).where(
+            DebtLedgerEntry.party_type == "STORE",
+            DebtLedgerEntry.party_id == store.id,
+            DebtLedgerEntry.source_type == "PAYMENT_ALLOCATION",
+        )
+    )) == -5000000.0
+
+    overpayment = create_bank_receipt(
+        session,
+        BankReceiptCreate(store_id=store.id, amount=3000000.0),
+    )
+    with pytest.raises(ValueError, match="(?i)công nợ còn lại của cửa hàng"):
+        allocate_bank_receipt(
+            session,
+            overpayment.id,
+            [PaymentAllocationItemCreate(store_id=store.id, amount=3000000.0)],
+        )

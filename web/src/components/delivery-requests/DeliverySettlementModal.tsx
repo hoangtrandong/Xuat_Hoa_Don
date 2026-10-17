@@ -154,7 +154,7 @@ export default function DeliverySettlementModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [activeTab, setActiveTab] = useState<"employees" | "orders" | "statement" | "returns">("employees");
+  const [activeTab, setActiveTab] = useState<"returns" | "orders" | "employees" | "statement">("returns");
 
   // Orders filter & search
   const [orderSearch, setOrderSearch] = useState("");
@@ -401,18 +401,18 @@ export default function DeliverySettlementModal({
         {/* Modal Header */}
         <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/70 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-sky-500 flex items-center justify-center text-white shadow-sm">
-              <CreditCard size={20} />
+            <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-sm">
+              <RotateCcw size={20} />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-bold text-gray-900">Bảng Quyết Toán Chuyến Xe</h3>
-                <span className="font-mono text-xs px-2.5 py-0.5 rounded-full bg-sky-100 text-sky-800 font-semibold">
+                <h3 className="text-lg font-bold text-gray-900">Biên Bản Giao Hàng & Trả Hàng Về Kho</h3>
+                <span className="font-mono text-xs px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-semibold">
                   {requestCode}
                 </span>
               </div>
               <p className="text-xs text-gray-500">
-                Đối soát các khoản tiền khách hàng thanh toán (ngân hàng / tiền mặt) và khấu trừ công nợ nhân viên
+                Tiếp nhận hàng trả về kho, phục hồi tồn kho và theo dõi danh sách đơn hàng xuất theo chuyến
               </p>
             </div>
           </div>
@@ -488,14 +488,15 @@ export default function DeliverySettlementModal({
         {/* Tab Navigation */}
         <div className="px-6 pt-4 border-b border-gray-100 flex gap-4 overflow-x-auto">
           <button
-            onClick={() => setActiveTab("employees")}
-            className={`pb-3 text-sm font-semibold border-b-2 transition-colors shrink-0 ${
-              activeTab === "employees"
-                ? "border-sky-500 text-sky-600"
+            onClick={() => setActiveTab("returns")}
+            className={`pb-3 text-sm font-semibold border-b-2 transition-colors shrink-0 flex items-center gap-1.5 ${
+              activeTab === "returns"
+                ? "border-rose-500 text-rose-600"
                 : "border-transparent text-gray-500 hover:text-gray-800"
             }`}
           >
-            1. Quyết toán theo NVGH ({data?.employee_settlements.length || 0})
+            <RotateCcw size={14} />
+            1. Hàng trả về kho ({data?.returns?.length || 0})
           </button>
           <button
             onClick={() => setActiveTab("orders")}
@@ -505,28 +506,17 @@ export default function DeliverySettlementModal({
                 : "border-transparent text-gray-500 hover:text-gray-800"
             }`}
           >
-            2. Chi tiết đơn hàng ({data?.orders.length || 0} đơn)
+            2. Danh sách đơn hàng ({data?.orders.length || 0} đơn)
           </button>
           <button
-            onClick={() => setActiveTab("statement")}
+            onClick={() => setActiveTab("employees")}
             className={`pb-3 text-sm font-semibold border-b-2 transition-colors shrink-0 ${
-              activeTab === "statement"
+              activeTab === "employees"
                 ? "border-sky-500 text-sky-600"
                 : "border-transparent text-gray-500 hover:text-gray-800"
             }`}
           >
-            3. Đối soát sao kê ngân hàng
-          </button>
-          <button
-            onClick={() => setActiveTab("returns")}
-            className={`pb-3 text-sm font-semibold border-b-2 transition-colors shrink-0 flex items-center gap-1.5 ${
-              activeTab === "returns"
-                ? "border-rose-500 text-rose-600"
-                : "border-transparent text-gray-500 hover:text-gray-800"
-            }`}
-          >
-            <RotateCcw size={14} />
-            4. Hàng trả về / Trả kho ({data?.returns?.length || 0})
+            3. Phân bổ hàng theo NVGH ({data?.employee_settlements.length || 0})
           </button>
         </div>
 

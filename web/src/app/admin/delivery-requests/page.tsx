@@ -8,7 +8,7 @@ import StatCard from "@/components/ui/StatCard";
 import DeliveryRequestExcelCreate from "@/components/delivery-requests/DeliveryRequestExcelCreate";
 import DeliverySettlementModal from "@/components/delivery-requests/DeliverySettlementModal";
 import DeliveryDispatchPrintModal from "@/components/delivery-requests/DeliveryDispatchPrintModal";
-import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload, CreditCard, Printer } from "lucide-react";
+import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload, CreditCard, Printer, RotateCcw } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
 import { splitCartons, formatNumber } from "@/lib/format";
 
@@ -312,15 +312,6 @@ export default function AdminDeliveryRequestsPage() {
           >
             <Printer size={13} /> In phiếu
           </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setSettlementRow(row);
-            }}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-sky-50 hover:bg-sky-100 text-sky-700 transition-colors border border-sky-100"
-          >
-            <CreditCard size={13} /> Quyết toán
-          </button>
         </div>
       ),
     },
@@ -555,14 +546,16 @@ export default function AdminDeliveryRequestsPage() {
                 >
                   <Printer size={16} /> In Phiếu Bốc Xếp & Xuất Kho
                 </button>
-                <button
-                  onClick={() => {
-                    setSettlementRow(selected);
-                  }}
-                  className="flex items-center justify-center gap-2 w-full rounded-lg bg-sky-500 hover:bg-sky-600 text-white py-2.5 text-sm font-semibold transition-colors shadow-xs mt-2"
-                >
-                  <CreditCard size={16} /> Bảng quyết toán chuyến xe & Sao kê
-                </button>
+                {selected.status === "COMPLETED" && (
+                  <button
+                    onClick={() => {
+                      setSettlementRow(selected);
+                    }}
+                    className="flex items-center justify-center gap-2 w-full rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 text-sm font-semibold transition-colors shadow-xs mt-2"
+                  >
+                    <RotateCcw size={16} /> Biên bản giao hàng & Trả hàng về kho
+                  </button>
+                )}
                 <button onClick={() => { setSelected(null); setEditing(false); setStockPlan(null); }} className="rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 w-full mt-2">Đóng</button>
               </>
             ) : (

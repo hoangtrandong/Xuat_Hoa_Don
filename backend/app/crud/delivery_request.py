@@ -871,6 +871,24 @@ def list_daily_settlements(
         ).all()
         alloc_sums = {row[0]: float(row[1]) for row in alloc_rows}
 
+    employee_day_bank_rows = db.execute(
+        select(
+            PaymentAllocation.settlement_date,
+            PaymentAllocation.employee_id,
+            func.coalesce(func.sum(PaymentAllocation.amount), 0),
+        )
+        .where(
+            PaymentAllocation.order_id.is_(None),
+            PaymentAllocation.settlement_date >= from_date,
+            PaymentAllocation.settlement_date <= to_date,
+            PaymentAllocation.employee_id.is_not(None),
+        )
+        .group_by(PaymentAllocation.settlement_date, PaymentAllocation.employee_id)
+    ).all()
+    employee_day_bank = {
+        (row[0], row[1]): float(row[2]) for row in employee_day_bank_rows
+    }
+
     totals: dict[tuple[date, int | None, str], dict] = {}
     for request in requests:
         completed_at = request.completed_at
@@ -1117,15 +1135,21 @@ def list_daily_settlements(
 
     results = []
     for row in totals.values():
-        row["cash_remitted"] = remitted_by_date_employee.get(
+        employee_day_paid_bank = employee_day_bank.get(
             (row["settlement_date"], row["employee_id"]), 0.0
         )
-        row["cash_pending_remittance"] = max(
-            0.0, row["paid_cash"] - row["cash_remitted"]
+        row["paid_bank"] += employee_day_paid_bank
+        row["unpaid"] = max(0.0, row["unpaid"] - employee_day_paid_bank)
+        row["remaining_employee_debt"] = max(
+            0.0, row["remaining_employee_debt"] - employee_day_paid_bank
+        )
+        row["cash_remitted"] = remitted_by_date_employee.get(
+            (row["settlement_date"], row["employee_id"]), 0.0
         )
         row["remaining_employee_debt"] = max(
             0.0, row["remaining_employee_debt"] - row["cash_remitted"]
         )
+        row["cash_pending_remittance"] = row["remaining_employee_debt"]
         row.pop("_request_ids", None)
         row.pop("_order_ids", None)
         products_dict = row.pop("_products_by_id", {})
@@ -1168,6 +1192,12 @@ def settle_order_pay(
         raise ValueError("Không tìm thấy đơn hàng trong phiếu xuất.")
 
     method_upper = (payment_method or "BANK").upper()
+    if method_upper in ("BANK", "DEBT"):
+        raise ValueError(
+            "Không thể quyết toán công nợ theo từng đơn/chuyến. Kế toán cần xác nhận chuyển khoản tại màn hình Thu & Phân bổ chuyển khoản hoặc ghi nhận tiền mặt tại Quyết toán ngày."
+        )
+    if method_upper not in ("CASH", "RETURN"):
+        raise ValueError("Hình thức không hợp lệ. Chỉ hỗ trợ ghi nhận tiền khách trả mặt hoặc lập phiếu hàng trả.")
     order.payment_method = method_upper
     if method_upper in ("BANK", "CASH"):
         order.payment_status = f"PAID_{method_upper}"
@@ -1187,31 +1217,7 @@ def settle_order_pay(
     amt_deduct = paid_amount if (paid_amount is not None and paid_amount > 0) else float(order.amount)
 
     if order.employee_id and amt_deduct > 0:
-        if method_upper in ("BANK", "CASH"):
-            entry_type = "BANK_RECEIPT" if method_upper == "BANK" else "CASH_RECEIPT"
-            existing = db.scalar(
-                select(DebtLedgerEntry).where(
-                    DebtLedgerEntry.party_type == "EMPLOYEE",
-                    DebtLedgerEntry.party_id == order.employee_id,
-                    DebtLedgerEntry.source_type == "DELIVERY_ORDER",
-                    DebtLedgerEntry.source_id == order.id,
-                    DebtLedgerEntry.entry_type == entry_type,
-                )
-            )
-            if not existing:
-                db.add(DebtLedgerEntry(
-                    party_type="EMPLOYEE",
-                    party_id=order.employee_id,
-                    entry_type=entry_type,
-                    amount=-Decimal(str(amt_deduct)),
-                    source_type="DELIVERY_ORDER",
-                    source_id=order.id,
-                    source_code=order.order_number,
-                    document_date=datetime.utcnow(),
-                    note=f"Quyết toán {method_upper}: đơn {order.order_number} ({order.customer_name or order.customer_code})" + (f" - Ref: {bank_ref}" if bank_ref else ""),
-                    created_by=created_by,
-                ))
-        elif method_upper == "RETURN":
+        if method_upper == "RETURN":
             # Auto-create DeliveryReturn if one does not exist yet
             existing_ret = db.scalar(
                 select(DeliveryReturn).where(
@@ -1230,31 +1236,6 @@ def settle_order_pay(
                     note=note or f"Khách không nhận đơn {order.order_number}",
                     created_by=created_by,
                 )
-        elif method_upper == "DEBT":
-            # Transfer debt from employee: negative ledger entry on employee
-            existing = db.scalar(
-                select(DebtLedgerEntry).where(
-                    DebtLedgerEntry.party_type == "EMPLOYEE",
-                    DebtLedgerEntry.party_id == order.employee_id,
-                    DebtLedgerEntry.source_type == "DELIVERY_ORDER",
-                    DebtLedgerEntry.source_id == order.id,
-                    DebtLedgerEntry.entry_type == "TRANSFER_OUT",
-                )
-            )
-            if not existing:
-                db.add(DebtLedgerEntry(
-                    party_type="EMPLOYEE",
-                    party_id=order.employee_id,
-                    entry_type="TRANSFER_OUT",
-                    amount=-Decimal(str(amt_deduct)),
-                    source_type="DELIVERY_ORDER",
-                    source_id=order.id,
-                    source_code=order.order_number,
-                    document_date=datetime.utcnow(),
-                    note=f"Chuyển nợ cho khách hàng đơn {order.order_number} ({order.customer_name or order.customer_code})",
-                    created_by=created_by,
-                ))
-
     db.commit()
     return order
 

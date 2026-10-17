@@ -1,25 +1,17 @@
 "use client";
 
-import { useEffect, useState, useMemo, useRef } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   X,
-  CreditCard,
-  Banknote,
   CheckCircle2,
   Clock,
   Search,
-  Upload,
   RefreshCw,
   ArrowRight,
-  ShieldCheck,
-  FileSpreadsheet,
   RotateCcw,
   PackageMinus,
   Plus,
   Trash2,
-  ArrowLeftRight,
-  Undo2,
-  AlertCircle,
   PackageCheck,
 } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
@@ -119,22 +111,6 @@ type SettlementOverview = {
   items?: SettlementOverviewItem[];
 };
 
-type MatchResult = {
-  statement_ref: string | null;
-  statement_amount: number;
-  statement_description: string;
-  order_id: number | null;
-  order_number: string | null;
-  customer_code: string | null;
-  customer_name: string | null;
-  employee_code: string | null;
-  order_amount: number | null;
-  matched: boolean;
-  confidence: number;
-  message: string | null;
-  already_paid: boolean;
-};
-
 type Props = {
   requestId: number;
   requestCode: string;
@@ -154,19 +130,12 @@ export default function DeliverySettlementModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [activeTab, setActiveTab] = useState<"returns" | "orders" | "employees" | "statement">("returns");
+  const [activeTab, setActiveTab] = useState<"returns" | "orders">("returns");
 
   // Orders filter & search
   const [orderSearch, setOrderSearch] = useState("");
   const [selectedEmp, setSelectedEmp] = useState<string>("ALL");
   const [selectedStatus, setSelectedStatus] = useState<string>("ALL");
-
-  // Single order payment modal
-  const [payingOrder, setPayingOrder] = useState<DeliveryOrder | null>(null);
-  const [payMethod, setPayMethod] = useState<"BANK" | "CASH" | "DEBT" | "RETURN">("BANK");
-  const [payBankRef, setPayBankRef] = useState("");
-  const [payNote, setPayNote] = useState("");
-  const [submittingPay, setSubmittingPay] = useState(false);
 
   // Delivery return modal states
   const [showReturnModal, setShowReturnModal] = useState(false);
@@ -189,78 +158,42 @@ export default function DeliverySettlementModal({
   >([]);
   const [submittingReturn, setSubmittingReturn] = useState(false);
 
+  const fetchSettlement = useCallback(async () => {
+    const res = await apiFetch(`${API_URL}/delivery-requests/${requestId}/settlement`);
+    if (!res.ok) throw new Error("Không thể tải chi tiết phiếu xuất.");
+    const json: SettlementOverview = await res.json();
+    return json;
+  }, [requestId]);
 
-  // Bank statement matching
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [matchingFile, setMatchingFile] = useState(false);
-  const [matchResults, setMatchResults] = useState<MatchResult[] | null>(null);
-  const [matchStats, setMatchStats] = useState<{ total: number; matched: number; autoConfirmed: number } | null>(null);
-
-  useEffect(() => {
-    if (isOpen && requestId) {
-      loadSettlement();
-    }
-  }, [isOpen, requestId]);
-
-  async function loadSettlement() {
+  const loadSettlement = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const res = await apiFetch(`${API_URL}/delivery-requests/${requestId}/settlement`);
-      if (!res.ok) throw new Error("Không thể tải bảng quyết toán chuyến xe.");
-      const json: SettlementOverview = await res.json();
-      setData(json);
+      setData(await fetchSettlement());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Lỗi khi tải dữ liệu.");
     } finally {
       setLoading(false);
     }
-  }
+  }, [fetchSettlement]);
 
-  async function handlePayOrder() {
-    if (!payingOrder) return;
-    setSubmittingPay(true);
-    setError("");
-    setMessage("");
-    try {
-      const res = await apiFetch(
-        `${API_URL}/delivery-requests/${requestId}/settlement/orders/${payingOrder.id}/pay`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            payment_method: payMethod,
-            bank_ref: payBankRef || undefined,
-            note: payNote || undefined,
-          }),
-        }
-      );
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail ?? "Không thể cập nhật thanh toán đơn hàng.");
-      }
-      const methodLabel =
-        payMethod === "BANK"
-          ? "Chuyển khoản (Bank)"
-          : payMethod === "CASH"
-          ? "Tiền mặt (Cash)"
-          : payMethod === "RETURN"
-          ? "Trả hàng (Hoàn kho & Cấn trừ nợ)"
-          : "Chuyển nợ khách hàng";
-      setMessage(
-        `Đã ghi nhận ${methodLabel} cho đơn ${payingOrder.order_number}. Đã khấu trừ công nợ nhân viên.`
-      );
-      setPayingOrder(null);
-      setPayBankRef("");
-      setPayNote("");
-      await loadSettlement();
-      onSettled?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Lỗi khi thanh toán đơn.");
-    } finally {
-      setSubmittingPay(false);
-    }
-  }
+  useEffect(() => {
+    if (!isOpen || !requestId) return;
+    let active = true;
+    void fetchSettlement()
+      .then((json) => {
+        if (active) setData(json);
+      })
+      .catch((e: unknown) => {
+        if (active) setError(e instanceof Error ? e.message : "Lỗi khi tải dữ liệu.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, requestId, fetchSettlement]);
 
   async function handleCreateReturn() {
     if (!returnEmpId) {
@@ -281,26 +214,27 @@ export default function DeliverySettlementModal({
     setError("");
     setMessage("");
     try {
-      const payload: any = {
+      const payload = {
         delivery_request_id: requestId,
         employee_id: Number(returnEmpId),
         order_id: returnOrderId ? Number(returnOrderId) : undefined,
         amount: finalAmount,
         note: returnNote || undefined,
         restore_stock: returnRestoreStock,
+        ...(returnItems.length > 0
+          ? {
+              items: returnItems.map((it) => ({
+                product_id: it.product_id,
+                quantity: it.quantity,
+                cartons: it.cartons,
+                loose_boxes: it.loose_boxes,
+                unit_price: it.unit_price,
+                amount: it.amount,
+                reason: it.reason || undefined,
+              })),
+            }
+          : {}),
       };
-
-      if (returnItems.length > 0) {
-        payload.items = returnItems.map((it) => ({
-          product_id: it.product_id,
-          quantity: it.quantity,
-          cartons: it.cartons,
-          loose_boxes: it.loose_boxes,
-          unit_price: it.unit_price,
-          amount: it.amount,
-          reason: it.reason || undefined,
-        }));
-      }
 
       const res = await apiFetch(`${API_URL}/delivery-returns`, {
         method: "POST",
@@ -332,66 +266,21 @@ export default function DeliverySettlementModal({
     }
   }
 
-
-  async function handleUploadStatement(file: File, autoConfirm: boolean = false) {
-    setMatchingFile(true);
-    setError("");
-    setMessage("");
-    setMatchResults(null);
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await apiFetch(
-        `${API_URL}/delivery-requests/${requestId}/settlement/upload-statement?auto_confirm=${autoConfirm}`,
-        {
-          method: "POST",
-          body: formData,
-        }
+  const filteredOrders = (data?.orders ?? []).filter((o) => {
+    if (selectedEmp !== "ALL" && o.employee_code !== selectedEmp) return false;
+    if (selectedStatus === "PAID" && !o.payment_status.startsWith("PAID")) return false;
+    if (selectedStatus === "UNPAID" && o.payment_status.startsWith("PAID")) return false;
+    if (orderSearch) {
+      const q = orderSearch.toLowerCase();
+      return (
+        o.order_number.toLowerCase().includes(q) ||
+        (o.customer_name && o.customer_name.toLowerCase().includes(q)) ||
+        (o.customer_code && o.customer_code.toLowerCase().includes(q)) ||
+        o.employee_code.toLowerCase().includes(q)
       );
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.detail ?? "Không thể đọc và đối soát file sao kê.");
-
-      setMatchResults(json.matches || []);
-      setMatchStats({
-        total: json.total_statements || 0,
-        matched: json.matched_count || 0,
-        autoConfirmed: json.auto_confirmed_count || 0,
-      });
-
-      if (autoConfirm && json.auto_confirmed_count > 0) {
-        setMessage(
-          `Đã đối soát thành công và tự động quyết toán & khấu trừ công nợ cho ${json.auto_confirmed_count} đơn hàng!`
-        );
-        await loadSettlement();
-        onSettled?.();
-      } else {
-        setMessage(`Đã đối soát file sao kê: Khớp ${json.matched_count}/${json.total_statements} giao dịch.`);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Lỗi khi đối soát file sao kê.");
-    } finally {
-      setMatchingFile(false);
     }
-  }
-
-  const filteredOrders = useMemo(() => {
-    if (!data?.orders) return [];
-    return data.orders.filter((o) => {
-      if (selectedEmp !== "ALL" && o.employee_code !== selectedEmp) return false;
-      if (selectedStatus === "PAID" && !o.payment_status.startsWith("PAID")) return false;
-      if (selectedStatus === "UNPAID" && o.payment_status.startsWith("PAID")) return false;
-      if (orderSearch) {
-        const q = orderSearch.toLowerCase();
-        return (
-          o.order_number.toLowerCase().includes(q) ||
-          (o.customer_name && o.customer_name.toLowerCase().includes(q)) ||
-          (o.customer_code && o.customer_code.toLowerCase().includes(q)) ||
-          o.employee_code.toLowerCase().includes(q)
-        );
-      }
-      return true;
-    });
-  }, [data?.orders, selectedEmp, selectedStatus, orderSearch]);
+    return true;
+  });
 
   if (!isOpen) return null;
 
@@ -406,13 +295,13 @@ export default function DeliverySettlementModal({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-bold text-gray-900">Biên Bản Giao Hàng & Trả Hàng Về Kho</h3>
+                <h3 className="text-lg font-bold text-gray-900">Chi Tiết Phiếu Xuất & Hàng Trả</h3>
                 <span className="font-mono text-xs px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-semibold">
                   {requestCode}
                 </span>
               </div>
               <p className="text-xs text-gray-500">
-                Tiếp nhận hàng trả về kho, phục hồi tồn kho và theo dõi danh sách đơn hàng xuất theo chuyến
+                Theo dõi đơn và xử lý hàng trả cho phiếu này; quyết toán công nợ được tổng hợp theo ngày và nhân viên
               </p>
             </div>
           </div>
@@ -438,52 +327,9 @@ export default function DeliverySettlementModal({
         {error && <div className="mx-6 mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-sm">{error}</div>}
         {message && <div className="mx-6 mt-4 p-3 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-sm">{message}</div>}
 
-        {/* KPI Summary Cards */}
-        {data && (
-          <div className="px-6 pt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <div className="p-3 bg-slate-50 border border-slate-100 rounded-xl">
-              <span className="text-xs text-slate-500 font-medium">Tổng tiền chuyến ({data.total_orders_count} đơn)</span>
-              <p className="text-base font-bold text-slate-900 mt-1">{data.total_amount.toLocaleString("vi-VN")} đ</p>
-            </div>
-            <div className="p-3 bg-sky-50 border border-sky-100 rounded-xl">
-              <div className="flex items-center gap-1.5 text-xs text-sky-700 font-medium">
-                <CreditCard size={14} />
-                <span>Đã thu Chuyển khoản</span>
-              </div>
-              <p className="text-base font-bold text-sky-900 mt-1">{data.total_paid_bank.toLocaleString("vi-VN")} đ</p>
-            </div>
-            <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl">
-              <div className="flex items-center gap-1.5 text-xs text-indigo-700 font-medium">
-                <Banknote size={14} />
-                <span>Đã nộp Tiền mặt</span>
-              </div>
-              <p className="text-base font-bold text-indigo-900 mt-1">{data.total_paid_cash.toLocaleString("vi-VN")} đ</p>
-            </div>
-            <div className="p-3 bg-rose-50 border border-rose-100 rounded-xl">
-              <div className="flex items-center gap-1.5 text-xs text-rose-700 font-medium">
-                <RotateCcw size={14} />
-                <span>Hàng trả về (-Nợ)</span>
-              </div>
-              <p className="text-base font-bold text-rose-900 mt-1">{data.total_returned.toLocaleString("vi-VN")} đ</p>
-            </div>
-            <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl">
-              <div className="flex items-center gap-1.5 text-xs text-amber-700 font-medium">
-                <Clock size={14} />
-                <span>Còn phải thu (chưa TT)</span>
-              </div>
-              <p className="text-base font-bold text-amber-900 mt-1">{data.total_unpaid.toLocaleString("vi-VN")} đ</p>
-            </div>
-            <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-xl">
-              <div className="flex items-center gap-1.5 text-xs text-emerald-700 font-medium">
-                <ShieldCheck size={14} />
-                <span>Đã khấu trừ công nợ</span>
-              </div>
-              <p className="text-base font-bold text-emerald-900 mt-1">
-                {(data.total_paid_bank + data.total_paid_cash + data.total_transferred_debt + data.total_returned).toLocaleString("vi-VN")} đ
-              </p>
-            </div>
-          </div>
-        )}
+        <div className="mx-6 mt-4 rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+          Đây là chi tiết nghiệp vụ của một phiếu xuất, không phải màn hình quyết toán chuyến. Công nợ được đối chiếu chung theo ngày/nhân viên.
+        </div>
 
         {/* Tab Navigation */}
         <div className="px-6 pt-4 border-b border-gray-100 flex gap-4 overflow-x-auto">
@@ -496,7 +342,7 @@ export default function DeliverySettlementModal({
             }`}
           >
             <RotateCcw size={14} />
-            1. Hàng trả về kho ({data?.returns?.length || 0})
+            Hàng trả về kho ({data?.returns?.length || 0})
           </button>
           <button
             onClick={() => setActiveTab("orders")}
@@ -506,95 +352,12 @@ export default function DeliverySettlementModal({
                 : "border-transparent text-gray-500 hover:text-gray-800"
             }`}
           >
-            2. Danh sách đơn hàng ({data?.orders.length || 0} đơn)
-          </button>
-          <button
-            onClick={() => setActiveTab("employees")}
-            className={`pb-3 text-sm font-semibold border-b-2 transition-colors shrink-0 ${
-              activeTab === "employees"
-                ? "border-sky-500 text-sky-600"
-                : "border-transparent text-gray-500 hover:text-gray-800"
-            }`}
-          >
-            3. Phân bổ hàng theo NVGH ({data?.employee_settlements.length || 0})
+            Đơn hàng tra cứu ({data?.orders.length || 0})
           </button>
         </div>
 
         {/* Modal Body / Tab Content */}
         <div className="p-6 flex-1 overflow-y-auto">
-          {/* TAB 1: EMPLOYEES */}
-          {activeTab === "employees" && data && (
-            <div className="space-y-4">
-              <div className="bg-sky-50/60 border border-sky-100 rounded-xl p-3 text-xs text-sky-800 leading-relaxed">
-                💡 <strong>Nguyên tắc quyết toán công nợ chuyến xe:</strong> Khi phiếu xuất kho hoàn thành, NVGH được ghi nhận công nợ đúng bằng tổng tiền hàng. Khi cửa hàng chuyển khoản hoặc trả hàng về kho, hệ thống <strong>tự động khấu trừ công nợ NVGH</strong> tương ứng. Số tiền còn lại là số <strong>tiền mặt NVGH phải nộp về cho thủ quỹ</strong>.
-              </div>
-              <div className="overflow-x-auto rounded-xl border border-gray-100">
-                <table className="w-full text-xs">
-                  <thead className="bg-gray-50/80 text-gray-500 border-b border-gray-100">
-                    <tr>
-                      <th className="text-left px-4 py-3">Mã NV</th>
-                      <th className="text-left px-4 py-3">Tên NVGH</th>
-                      <th className="text-right px-4 py-3">Nợ xuất kho (đã giao)</th>
-                      <th className="text-right px-4 py-3">Số đơn</th>
-                      <th className="text-right px-4 py-3">Tiền theo đơn</th>
-                      <th className="text-right px-4 py-3 text-sky-700">KH Chuyển khoản (-Nợ)</th>
-                      <th className="text-right px-4 py-3 text-indigo-700">Đã nộp TM (-Nợ)</th>
-                      <th className="text-right px-4 py-3 text-rose-700">Hàng trả (-Nợ)</th>
-                      <th className="text-right px-4 py-3 text-purple-700">Khách nợ (-Nợ)</th>
-                      <th className="text-right px-4 py-3 text-amber-700 font-bold">Tiền mặt phải nộp về cty</th>
-                      <th className="text-center px-4 py-3">Trạng thái</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {data.employee_settlements.map((emp) => {
-                      const isFullySettled = emp.remaining_cash_to_turn_in <= 0;
-                      return (
-                        <tr key={emp.employee_code} className="hover:bg-gray-50/60">
-                          <td className="px-4 py-3 font-semibold text-gray-900">{emp.employee_code}</td>
-                          <td className="px-4 py-3 text-gray-700">{emp.employee_name || "—"}</td>
-                          <td className="px-4 py-3 text-right font-semibold text-gray-900">
-                            {emp.allocated_amount.toLocaleString("vi-VN")} đ
-                          </td>
-                          <td className="px-4 py-3 text-right font-mono text-gray-600">{emp.orders_count}</td>
-                          <td className="px-4 py-3 text-right font-mono text-gray-600">
-                            {emp.orders_amount.toLocaleString("vi-VN")} đ
-                          </td>
-                          <td className="px-4 py-3 text-right font-semibold text-sky-700">
-                            {emp.paid_bank.toLocaleString("vi-VN")} đ
-                          </td>
-                          <td className="px-4 py-3 text-right font-semibold text-indigo-700">
-                            {emp.paid_cash.toLocaleString("vi-VN")} đ
-                          </td>
-                          <td className="px-4 py-3 text-right font-semibold text-rose-700">
-                            {emp.returned.toLocaleString("vi-VN")} đ
-                          </td>
-                          <td className="px-4 py-3 text-right font-semibold text-purple-700">
-                            {emp.transferred_debt.toLocaleString("vi-VN")} đ
-                          </td>
-                          <td className="px-4 py-3 text-right font-bold text-amber-800 bg-amber-50/40">
-                            {emp.remaining_cash_to_turn_in.toLocaleString("vi-VN")} đ
-                          </td>
-                          <td className="px-4 py-3 text-center">
-                            {isFullySettled ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-800">
-                                <CheckCircle2 size={12} /> Đã tất toán
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-800">
-                                <Clock size={12} /> Cần nộp tiền mặt
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-
           {/* TAB 2: ORDERS */}
           {activeTab === "orders" && (
             <div className="space-y-4">
@@ -658,7 +421,6 @@ export default function DeliverySettlementModal({
                       <th className="text-right px-4 py-2.5">Số tiền</th>
                       <th className="text-center px-4 py-2.5">Trạng thái TT</th>
                       <th className="text-left px-4 py-2.5">Hình thức / Ref</th>
-                      <th className="text-center px-4 py-2.5">Thao tác</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
@@ -666,7 +428,6 @@ export default function DeliverySettlementModal({
                       const isPaid = ord.payment_status.startsWith("PAID");
                       const isReturned = ord.payment_status === "RETURNED";
                       const isTransferredDebt = ord.payment_status === "TRANSFERRED_DEBT";
-                      const isResolved = isPaid || isReturned || isTransferredDebt;
 
                       return (
                         <tr key={ord.id} className="hover:bg-gray-50/60">
@@ -716,23 +477,6 @@ export default function DeliverySettlementModal({
                               "—"
                             )}
                           </td>
-                          <td className="px-4 py-2.5 text-center">
-                            {!isResolved ? (
-                              <button
-                                onClick={() => {
-                                  setPayingOrder(ord);
-                                  setPayMethod("BANK");
-                                  setPayBankRef("");
-                                  setPayNote("");
-                                }}
-                                className="px-2.5 py-1 bg-sky-50 hover:bg-sky-100 text-sky-700 font-medium rounded-lg text-[11px] transition-colors"
-                              >
-                                Xử lý
-                              </button>
-                            ) : (
-                              <span className="text-[11px] text-gray-400 font-mono">Đã xong</span>
-                            )}
-                          </td>
                         </tr>
                       );
                     })}
@@ -742,190 +486,6 @@ export default function DeliverySettlementModal({
               </div>
             </div>
           )}
-
-          {/* TAB 3: BANK STATEMENT MATCHING */}
-          {activeTab === "statement" && (
-            <div className="space-y-5">
-              <div className="bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-100 rounded-2xl p-5">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div>
-                    <h4 className="font-bold text-gray-900 flex items-center gap-2">
-                      <FileSpreadsheet className="text-sky-600" size={18} />
-                      Tải lên file Sao Kê Ngân Hàng (Excel hoặc CSV)
-                    </h4>
-                    <p className="text-xs text-gray-600 mt-1 max-w-xl">
-                      Hệ thống tự động phân tích diễn giải sao kê (tìm số đơn hàng INxxxxxx, mã khách hàng, tên KH) và số tiền phát sinh CÓ để khớp với danh sách đơn hàng chuyến xe này.
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".xlsx,.xlsm,.csv"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) handleUploadStatement(file, false);
-                        e.target.value = "";
-                      }}
-                    />
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={matchingFile}
-                      className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 hover:bg-gray-50 text-gray-800 rounded-xl text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
-                    >
-                      <Upload size={14} />
-                      {matchingFile ? "Đang xử lý..." : "Xem trước đối soát"}
-                    </button>
-                    <button
-                      onClick={() => {
-                        const file = fileInputRef.current?.files?.[0];
-                        if (!file) {
-                          fileInputRef.current?.click();
-                        }
-                      }}
-                      disabled={matchingFile}
-                      className="inline-flex items-center gap-2 px-4 py-2 bg-sky-500 hover:bg-sky-600 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
-                    >
-                      <ShieldCheck size={14} />
-                      Tải lên & Tự động quyết toán
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Match Results Preview */}
-              {matchResults && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h5 className="font-semibold text-gray-900 text-sm">
-                      Kết quả đối soát ({matchStats?.matched}/{matchStats?.total} giao dịch khớp đơn hàng)
-                    </h5>
-                    {matchStats && matchStats.matched > 0 && (
-                      <button
-                        onClick={async () => {
-                          // Auto confirm all matched
-                          if (!data) return;
-                          setMatchingFile(true);
-                          try {
-                            const unmatchedItems = matchResults
-                              .filter((m) => m.matched && !m.already_paid && m.order_id)
-                              .map((m) => ({
-                                ref_number: m.statement_ref,
-                                amount: m.statement_amount,
-                                description: m.statement_description,
-                              }));
-                            if (unmatchedItems.length === 0) {
-                              setMessage("Tất cả các giao dịch đã được thanh toán.");
-                              return;
-                            }
-                            const res = await apiFetch(
-                              `${API_URL}/delivery-requests/${requestId}/settlement/match-statement`,
-                              {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({
-                                  statements: unmatchedItems,
-                                  auto_confirm: true,
-                                }),
-                              }
-                            );
-                            const json = await res.json();
-                            if (!res.ok) throw new Error(json.detail ?? "Lỗi khi xác nhận.");
-                            setMessage(
-                              `Đã tự động quyết toán & khấu trừ công nợ cho ${json.auto_confirmed_count} đơn hàng!`
-                            );
-                            await loadSettlement();
-                            onSettled?.();
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Lỗi khi xác nhận.");
-                          } finally {
-                            setMatchingFile(false);
-                          }
-                        }}
-                        className="inline-flex items-center gap-2 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition-colors"
-                      >
-                        <CheckCircle2 size={14} />
-                        Xác nhận tất toán các đơn đã khớp
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="overflow-x-auto rounded-xl border border-gray-100 max-h-[400px]">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50/90 text-gray-500 border-b border-gray-100 sticky top-0">
-                        <tr>
-                          <th className="text-left px-4 py-2.5">Giao dịch sao kê</th>
-                          <th className="text-right px-4 py-2.5">Tiền sao kê</th>
-                          <th className="text-left px-4 py-2.5">Khớp đơn hàng</th>
-                          <th className="text-left px-4 py-2.5">Khách hàng</th>
-                          <th className="text-left px-4 py-2.5">NVGH</th>
-                          <th className="text-center px-4 py-2.5">Độ tin cậy</th>
-                          <th className="text-center px-4 py-2.5">Trạng thái</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100">
-                        {matchResults.map((m, idx) => (
-                          <tr key={idx} className={m.matched ? "bg-emerald-50/30" : "bg-gray-50/20"}>
-                            <td className="px-4 py-2.5 max-w-[280px]">
-                              <p className="font-mono text-gray-700 truncate">{m.statement_description}</p>
-                              {m.statement_ref && (
-                                <p className="text-[10px] text-gray-400 font-mono">Ref: {m.statement_ref}</p>
-                              )}
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-bold text-gray-900">
-                              {m.statement_amount.toLocaleString("vi-VN")} đ
-                            </td>
-                            <td className="px-4 py-2.5">
-                              {m.matched ? (
-                                <span className="font-mono font-semibold text-sky-700">{m.order_number}</span>
-                              ) : (
-                                <span className="text-gray-400">Không tìm thấy</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-2.5 text-gray-700">
-                              {m.customer_name ? (
-                                <span>
-                                  {m.customer_name} <span className="text-gray-400">({m.customer_code})</span>
-                                </span>
-                              ) : (
-                                "—"
-                              )}
-                            </td>
-                            <td className="px-4 py-2.5 font-medium text-gray-900">{m.employee_code || "—"}</td>
-                            <td className="px-4 py-2.5 text-center">
-                              {m.matched ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-800">
-                                  {Math.round(m.confidence * 100)}%
-                                </span>
-                              ) : (
-                                <span className="text-gray-400">—</span>
-                              )}
-                            </td>
-                            <td className="px-4 py-2.5 text-center">
-                              {m.already_paid ? (
-                                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
-                                  <CheckCircle2 size={12} /> Đã tất toán
-                                </span>
-                              ) : m.matched ? (
-                                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-sky-600">
-                                  Sẵn sàng tất toán
-                                </span>
-                              ) : (
-                                <span className="text-gray-400 text-[11px]">Chưa khớp</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* TAB 4: RETURNS */}
 
           {activeTab === "returns" && data && (
             <div className="space-y-4">
@@ -1051,140 +611,6 @@ export default function DeliverySettlementModal({
           </button>
         </div>
       </div>
-
-      {/* Single Order Pay Dialog */}
-      {payingOrder && (
-        <div className="fixed inset-0 z-60 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl border border-gray-100 w-full max-w-md p-5 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-              <h4 className="font-bold text-gray-900 text-sm">Xử lý thanh toán / Trả hàng đơn</h4>
-              <button onClick={() => setPayingOrder(null)} className="text-gray-400 hover:text-gray-600">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="bg-sky-50 rounded-xl p-3 text-xs space-y-1">
-              <p className="text-sky-900 font-semibold">Đơn hàng: {payingOrder.order_number}</p>
-              <p className="text-sky-800">
-                Khách hàng: {payingOrder.customer_name} ({payingOrder.customer_code})
-              </p>
-              <p className="text-sky-800 font-bold text-sm pt-1">
-                Số tiền: {payingOrder.amount.toLocaleString("vi-VN")} đ
-              </p>
-              <p className="text-sky-700 text-[11px]">
-                NVGH: {payingOrder.employee_code} ({payingOrder.employee_name})
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-gray-700 mb-1">Phương thức xử lý</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setPayMethod("BANK")}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-xl border text-xs font-semibold transition-all ${
-                    payMethod === "BANK"
-                      ? "border-sky-500 bg-sky-50 text-sky-700 shadow-xs"
-                      : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-                  }`}
-                >
-                  <CreditCard size={14} /> Chuyển khoản (Bank)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPayMethod("CASH")}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-xl border text-xs font-semibold transition-all ${
-                    payMethod === "CASH"
-                      ? "border-indigo-500 bg-indigo-50 text-indigo-700 shadow-xs"
-                      : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-                  }`}
-                >
-                  <Banknote size={14} /> Tiền mặt (Cash)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPayMethod("RETURN")}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-xl border text-xs font-semibold transition-all ${
-                    payMethod === "RETURN"
-                      ? "border-rose-500 bg-rose-50 text-rose-700 shadow-xs"
-                      : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-                  }`}
-                >
-                  <RotateCcw size={14} /> Trả hàng (Hoàn kho)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPayMethod("DEBT")}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-xl border text-xs font-semibold transition-all ${
-                    payMethod === "DEBT"
-                      ? "border-purple-500 bg-purple-50 text-purple-700 shadow-xs"
-                      : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
-                  }`}
-                >
-                  <ArrowRight size={14} /> Khách nợ (Chuyển nợ)
-                </button>
-              </div>
-            </div>
-
-            {payMethod === "BANK" && (
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  Mã giao dịch / Mã tham chiếu ngân hàng (FT / Ref ID)
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ví dụ: FT260908123456 hoặc MB998877"
-                  value={payBankRef}
-                  onChange={(e) => setPayBankRef(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs bg-white focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </div>
-            )}
-
-            {payMethod === "RETURN" && (
-              <div className="p-2.5 bg-rose-50 border border-rose-100 rounded-xl text-[11px] text-rose-800 leading-relaxed">
-                💡 Khách từ chối nhận nguyên đơn này. Khi xác nhận, hệ thống tự động lập phiếu hàng trả về và khấu trừ <strong>{payingOrder.amount.toLocaleString("vi-VN")} đ</strong> khỏi công nợ của NV {payingOrder.employee_code}.
-              </div>
-            )}
-
-            {payMethod === "DEBT" && (
-              <div className="p-2.5 bg-purple-50 border border-purple-100 rounded-xl text-[11px] text-purple-800 leading-relaxed">
-                💡 Cửa hàng chưa thanh toán ngay. Hệ thống sẽ ghi nhận chuyển nợ sang cửa hàng và giảm trừ trách nhiệm thu tiền của NV {payingOrder.employee_code}.
-              </div>
-            )}
-
-            <div>
-              <label className="block text-xs font-semibold text-gray-700 mb-1">Ghi chú (tùy chọn)</label>
-              <input
-                type="text"
-                placeholder="Ghi chú thêm..."
-                value={payNote}
-                onChange={(e) => setPayNote(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-xl text-xs bg-white focus:outline-none focus:ring-2 focus:ring-sky-500"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
-              <button
-                type="button"
-                onClick={() => setPayingOrder(null)}
-                className="px-3 py-2 border border-gray-200 rounded-xl text-xs font-medium text-gray-600 hover:bg-gray-50"
-              >
-                Hủy
-              </button>
-              <button
-                type="button"
-                onClick={handlePayOrder}
-                disabled={submittingPay}
-                className="px-4 py-2 bg-sky-500 hover:bg-sky-600 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors disabled:opacity-50 flex items-center gap-1.5"
-              >
-                <ArrowRight size={14} />
-                {submittingPay ? "Đang xử lý..." : "Xác nhận & Khấu trừ công nợ"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Create Return Slip Modal */}
       {showReturnModal && (
@@ -1479,4 +905,3 @@ export default function DeliverySettlementModal({
     </div>
   );
 }
-

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 class PaymentAllocationItemCreate(BaseModel):
     order_id: Optional[int] = None
     employee_id: Optional[int] = None
+    settlement_date: Optional[date] = None
     store_id: Optional[int] = None
     amount: float
     note: Optional[str] = None
@@ -38,6 +39,7 @@ class PaymentAllocationOut(BaseModel):
     employee_code: Optional[str] = None
     employee_name: Optional[str] = None
     store_id: Optional[int] = None
+    settlement_date: Optional[date] = None
     amount: float
     allocation_date: datetime
     note: Optional[str] = None
@@ -86,3 +88,13 @@ class AllocatableOrderOut(BaseModel):
     allocated_amount: float
     remaining_amount: float
     payment_status: str
+
+
+class AllocatableEmployeeDayOut(BaseModel):
+    employee_id: int
+    employee_code: str
+    employee_name: Optional[str] = None
+    settlement_date: date
+    allocated_amount: float
+    paid_bank: float
+    remaining_employee_debt: float

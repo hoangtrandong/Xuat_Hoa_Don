@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.crud import bank_receipt as crud
 from app.models.user import User
 from app.schemas.bank_receipt import (
+    AllocatableEmployeeDayOut,
     AllocatableOrderOut,
     BankReceiptAllocateRequest,
     BankReceiptCreate,
@@ -75,6 +76,27 @@ def get_allocatable_orders(
         raise HTTPException(status_code=404, detail="Không tìm thấy phiếu chuyển khoản.")
 
     return crud.get_allocatable_orders_for_store(
+        db,
+        store_id=receipt.store_id,
+        customer_code=receipt.customer.code if receipt.customer else None,
+    )
+
+
+@router.get(
+    "/{receipt_id}/allocatable-employee-days",
+    response_model=List[AllocatableEmployeeDayOut],
+)
+def get_allocatable_employee_days(
+    receipt_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lấy công nợ còn lại theo ngày/nhân viên có đơn thuộc cửa hàng chuyển tiền."""
+    receipt = crud.get_bank_receipt(db, receipt_id)
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Không tìm thấy phiếu chuyển khoản.")
+
+    return crud.get_allocatable_employee_days_for_store(
         db,
         store_id=receipt.store_id,
         customer_code=receipt.customer.code if receipt.customer else None,

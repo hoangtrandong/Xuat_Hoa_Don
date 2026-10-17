@@ -9,13 +9,11 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
-  ArrowRight,
   Trash2,
   Zap,
   History,
   X,
   CreditCard,
-  Building2,
   Search,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
@@ -35,6 +33,7 @@ interface PaymentAllocationItem {
   employee_code: string | null;
   employee_name: string | null;
   store_id: number | null;
+  settlement_date: string | null;
   amount: number;
   allocation_date: string;
   note: string | null;
@@ -64,21 +63,14 @@ interface BankReceipt {
   allocations: PaymentAllocationItem[];
 }
 
-interface AllocatableOrder {
-  id: number;
-  delivery_request_id: number;
-  delivery_request_code: string;
-  order_date: string | null;
-  order_number: string;
-  customer_code: string | null;
-  customer_name: string | null;
-  employee_id: number | null;
+interface AllocatableEmployeeDay {
+  employee_id: number;
   employee_code: string;
   employee_name: string | null;
-  total_amount: number;
+  settlement_date: string;
   allocated_amount: number;
-  remaining_amount: number;
-  payment_status: string;
+  paid_bank: number;
+  remaining_employee_debt: number;
 }
 
 interface StoreOption {
@@ -129,8 +121,8 @@ export default function BankReceiptsPage() {
   // Allocate modal state
   const [allocateModalOpen, setAllocateModalOpen] = useState(false);
   const [selectedReceipt, setSelectedReceipt] = useState<BankReceipt | null>(null);
-  const [allocatableOrders, setAllocatableOrders] = useState<AllocatableOrder[]>([]);
-  const [allocAmounts, setAllocAmounts] = useState<Record<number, number>>({});
+  const [allocatableEmployeeDays, setAllocatableEmployeeDays] = useState<AllocatableEmployeeDay[]>([]);
+  const [allocAmounts, setAllocAmounts] = useState<Record<string, number>>({});
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [submittingAlloc, setSubmittingAlloc] = useState(false);
 
@@ -138,10 +130,7 @@ export default function BankReceiptsPage() {
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   const [historyReceipt, setHistoryReceipt] = useState<BankReceipt | null>(null);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
+  const fetchData = useCallback(async () => {
       const [receiptsRes, storesRes] = await Promise.all([
         apiFetch(`${API_URL}/bank-receipts`),
         apiFetch(`${API_URL}/stores?limit=5000`),
@@ -151,18 +140,41 @@ export default function BankReceiptsPage() {
 
       const receiptsData = await receiptsRes.json();
       const storesData = await storesRes.json();
-      setReceipts(receiptsData);
-      setStores(storesData);
+      return { receipts: receiptsData as BankReceipt[], stores: storesData as StoreOption[] };
+  }, []);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const data = await fetchData();
+      setReceipts(data.receipts);
+      setStores(data.stores);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Đã có lỗi xảy ra.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchData]);
 
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
+    let active = true;
+    void fetchData()
+      .then((data) => {
+        if (!active) return;
+        setReceipts(data.receipts);
+        setStores(data.stores);
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : "Đã có lỗi xảy ra.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [fetchData]);
 
   const filteredReceipts = useMemo(() => {
     return receipts.filter((r) => {
@@ -191,29 +203,32 @@ export default function BankReceiptsPage() {
     setAllocateModalOpen(true);
     setLoadingOrders(true);
     try {
-      const res = await apiFetch(`${API_URL}/bank-receipts/${receipt.id}/allocatable-orders`);
-      if (!res.ok) throw new Error("Không thể tải đơn hàng nợ của cửa hàng.");
-      const orders: AllocatableOrder[] = await res.json();
-      setAllocatableOrders(orders);
+      const res = await apiFetch(`${API_URL}/bank-receipts/${receipt.id}/allocatable-employee-days`);
+      if (!res.ok) throw new Error("Không thể tải công nợ ngày/nhân viên của cửa hàng.");
+      const targets: AllocatableEmployeeDay[] = await res.json();
+      setAllocatableEmployeeDays(targets);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Lỗi tải đơn hàng.");
-      setAllocatableOrders([]);
+      setError(err instanceof Error ? err.message : "Lỗi tải công nợ theo ngày/nhân viên.");
+      setAllocatableEmployeeDays([]);
     } finally {
       setLoadingOrders(false);
     }
   }
 
-  // FIFO auto allocation calculation
-  function handleAutoFifo() {
+  function handleAutoAllocate() {
     if (!selectedReceipt) return;
     let budget = selectedReceipt.unallocated_amount;
-    const newAmounts: Record<number, number> = {};
+    const newAmounts: Record<string, number> = {};
 
-    for (const order of allocatableOrders) {
+    for (const target of [...allocatableEmployeeDays].sort((a, b) =>
+      a.settlement_date.localeCompare(b.settlement_date) ||
+      a.employee_code.localeCompare(b.employee_code)
+    )) {
       if (budget <= 0.01) break;
-      const take = Math.min(order.remaining_amount, budget);
+      const key = `${target.settlement_date}:${target.employee_id}`;
+      const take = Math.min(target.remaining_employee_debt, budget);
       if (take > 0) {
-        newAmounts[order.id] = take;
+        newAmounts[key] = take;
         budget -= take;
       }
     }
@@ -227,14 +242,18 @@ export default function BankReceiptsPage() {
   async function handleConfirmAllocate() {
     if (!selectedReceipt) return;
     const allocationsToSubmit = Object.entries(allocAmounts)
-      .map(([orderIdStr, amount]) => ({
-        order_id: Number(orderIdStr),
-        amount: Number(amount) || 0,
-      }))
+      .map(([key, amount]) => {
+        const [settlement_date, employeeId] = key.split(":");
+        return {
+          employee_id: Number(employeeId),
+          settlement_date,
+          amount: Number(amount) || 0,
+        };
+      })
       .filter((a) => a.amount > 0);
 
     if (allocationsToSubmit.length === 0) {
-      alert("Vui lòng chọn ít nhất 1 đơn và nhập số tiền gạch nợ.");
+      alert("Vui lòng chọn ít nhất một nhân viên/ngày và nhập số tiền phân bổ.");
       return;
     }
 
@@ -249,7 +268,7 @@ export default function BankReceiptsPage() {
         const err = await res.json();
         throw new Error(err.detail || "Không thể phân bổ gạch nợ.");
       }
-      setMessage(`Đã phân bổ thành công ${formatVND(currentTotalAllocating)} cho các đơn hàng.`);
+      setMessage(`Đã phân bổ thành công ${formatVND(currentTotalAllocating)} theo nhân viên/ngày.`);
       setAllocateModalOpen(false);
       await loadData();
     } catch (err) {
@@ -328,7 +347,7 @@ export default function BankReceiptsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Thu chuyển khoản & Phân bổ"
-        subtitle="Quản lý tiền ngân hàng báo có từ Cửa hàng và gạch nợ cho các đơn hàng / nhân viên giao hàng"
+        subtitle="Xác nhận tiền cửa hàng chuyển khoản và phân bổ giảm công nợ theo ngày / nhân viên"
         actions={
           <div className="flex gap-2">
             <button
@@ -380,7 +399,7 @@ export default function BankReceiptsPage() {
           color="bg-sky-50 text-sky-600"
         />
         <StatCard
-          label="Đã gạch nợ đơn"
+          label="Đã phân bổ giảm công nợ"
           value={formatVND(stats.allocatedAmount)}
           icon={<Receipt size={20} />}
           color="bg-emerald-50 text-emerald-600"
@@ -441,7 +460,7 @@ export default function BankReceiptsPage() {
               <th className="px-4 py-3 text-left">Cửa hàng chuyển</th>
               <th className="px-4 py-3 text-left">Ngân hàng / Mã GD</th>
               <th className="px-4 py-3 text-right">Tổng tiền</th>
-              <th className="px-4 py-3 text-right">Đã gạch nợ</th>
+              <th className="px-4 py-3 text-right">Đã phân bổ</th>
               <th className="px-4 py-3 text-right">Còn lại</th>
               <th className="px-4 py-3 text-center">Trạng thái</th>
               <th className="px-4 py-3 text-right">Thao tác</th>
@@ -567,7 +586,7 @@ export default function BankReceiptsPage() {
                     type="number"
                     required
                     min={1000}
-                    step={1000}
+                    step={1}
                     placeholder="VD: 20000000"
                     value={addAmount}
                     onChange={(e) => setAddAmount(Number(e.target.value) || "")}
@@ -672,7 +691,7 @@ export default function BankReceiptsPage() {
                 <p className="text-base font-bold text-sky-700">{formatVND(selectedReceipt.unallocated_amount)}</p>
               </div>
               <div>
-                <span className="text-gray-500">Tổng đang gạch:</span>
+                <span className="text-gray-500">Tổng đang phân bổ:</span>
                 <p className={`text-base font-bold ${currentTotalAllocating > selectedReceipt.unallocated_amount ? "text-red-600" : "text-emerald-700"}`}>
                   {formatVND(currentTotalAllocating)}
                 </p>
@@ -680,11 +699,11 @@ export default function BankReceiptsPage() {
               <div className="flex items-center justify-end">
                 <button
                   type="button"
-                  onClick={handleAutoFifo}
+                  onClick={handleAutoAllocate}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 shadow-sm"
                 >
                   <Zap size={14} />
-                  ⚡ Tự động gạch theo FIFO (Từ đơn cũ)
+                  Tự phân bổ theo ngày cũ
                 </button>
               </div>
             </div>
@@ -692,82 +711,82 @@ export default function BankReceiptsPage() {
             {/* Orders Table */}
             <div className="flex-1 overflow-y-auto px-6 py-4">
               <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
-                Danh sách các đơn hàng còn nợ của Cửa hàng ({allocatableOrders.length} đơn)
+                Công nợ còn lại theo ngày/nhân viên ({allocatableEmployeeDays.length} dòng)
               </h4>
               <p className="mb-3 rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
-                Kế toán xác nhận khoản chuyển với cửa hàng, sau đó phân bổ vào các đơn đúng nhân viên phụ trách.
-                Mỗi khoản gạch theo đơn sẽ giảm công nợ của nhân viên gắn với đơn đó.
+                Xác nhận cửa hàng đã chuyển khoản, sau đó phân bổ trực tiếp cho nhân viên và ngày quyết toán.
+                Hệ thống giới hạn số tiền theo công nợ còn lại; chi tiết đơn hàng vẫn lưu để tra cứu.
               </p>
 
-              {loadingOrders && <p className="py-10 text-center text-sm text-gray-500">Đang tải danh sách đơn nợ...</p>}
+              {loadingOrders && <p className="py-10 text-center text-sm text-gray-500">Đang tải công nợ ngày/nhân viên...</p>}
 
-              {!loadingOrders && allocatableOrders.length === 0 && (
+              {!loadingOrders && allocatableEmployeeDays.length === 0 && (
                 <div className="rounded-xl border border-dashed border-gray-200 py-12 text-center text-sm text-gray-500">
-                  Cửa hàng này hiện không còn đơn hàng nào chưa thanh toán.
+                  Không có công nợ theo ngày/nhân viên còn có thể phân bổ cho cửa hàng này.
                 </div>
               )}
 
-              {!loadingOrders && allocatableOrders.length > 0 && (
+              {!loadingOrders && allocatableEmployeeDays.length > 0 && (
                 <div className="overflow-hidden rounded-xl border border-gray-200">
                   <table className="w-full text-left text-sm">
                     <thead className="bg-gray-50 text-xs font-semibold uppercase text-gray-600">
                       <tr>
-                        <th className="px-3 py-2.5">Mã đơn / Ngày</th>
-                        <th className="px-3 py-2.5">Phiếu xuất</th>
-                        <th className="px-3 py-2.5">NV phụ trách</th>
-                        <th className="px-3 py-2.5 text-right">Tổng đơn</th>
-                        <th className="px-3 py-2.5 text-right">Còn nợ</th>
-                        <th className="px-3 py-2.5 text-right w-44">Số tiền gạch nợ</th>
+                        <th className="px-3 py-2.5">Ngày quyết toán</th>
+                        <th className="px-3 py-2.5">Nhân viên</th>
+                        <th className="px-3 py-2.5 text-right">Tổng công nợ ngày</th>
+                        <th className="px-3 py-2.5 text-right">Đã chuyển khoản</th>
+                        <th className="px-3 py-2.5 text-right">Còn công nợ</th>
+                        <th className="px-3 py-2.5 text-right w-44">Số tiền phân bổ</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {allocatableOrders.map((ord) => {
-                        const curVal = allocAmounts[ord.id] ?? "";
+                      {allocatableEmployeeDays.map((target) => {
+                        const key = `${target.settlement_date}:${target.employee_id}`;
+                        const curVal = allocAmounts[key] ?? "";
                         return (
-                          <tr key={ord.id} className="hover:bg-gray-50">
+                          <tr key={key} className="hover:bg-gray-50">
                             <td className="px-3 py-2.5">
-                              <p className="font-semibold text-gray-900">{ord.order_number}</p>
-                              <p className="text-xs text-gray-500">{ord.order_date || "—"}</p>
-                            </td>
-                            <td className="px-3 py-2.5 text-xs font-mono text-gray-600">
-                              {ord.delivery_request_code}
+                              {new Date(`${target.settlement_date}T00:00:00`).toLocaleDateString("vi-VN")}
                             </td>
                             <td className="px-3 py-2.5">
                               <span className="inline-flex items-center rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-800">
-                                {ord.employee_code} - {ord.employee_name || ""}
+                                {target.employee_code} - {target.employee_name || ""}
                               </span>
                             </td>
                             <td className="px-3 py-2.5 text-right text-gray-600">
-                              {formatVND(ord.total_amount)}
+                              {formatVND(target.allocated_amount)}
                             </td>
                             <td className="px-3 py-2.5 text-right font-medium text-amber-700">
-                              {formatVND(ord.remaining_amount)}
+                              {formatVND(target.paid_bank)}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-semibold text-amber-700">
+                              {formatVND(target.remaining_employee_debt)}
                             </td>
                             <td className="px-3 py-2.5 text-right">
                               <div className="flex items-center justify-end gap-1">
                                 <input
                                   type="number"
                                   min={0}
-                                  max={ord.remaining_amount}
-                                  step={1000}
+                                  max={target.remaining_employee_debt}
+                                  step={1}
                                   value={curVal}
                                   placeholder="0"
                                   onChange={(e) => {
                                     const val = Number(e.target.value) || 0;
                                     setAllocAmounts((prev) => ({
                                       ...prev,
-                                      [ord.id]: Math.min(val, ord.remaining_amount),
+                                      [key]: Math.min(val, target.remaining_employee_debt),
                                     }));
                                   }}
                                   className="w-32 rounded border border-gray-300 px-2 py-1 text-right text-sm font-semibold focus:border-sky-500"
                                 />
                                 <button
                                   type="button"
-                                  title="Gạch hết đơn này"
+                                  title="Phân bổ tối đa cho nhân viên/ngày này"
                                   onClick={() => {
                                     setAllocAmounts((prev) => ({
                                       ...prev,
-                                      [ord.id]: ord.remaining_amount,
+                                      [key]: target.remaining_employee_debt,
                                     }));
                                   }}
                                   className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-600 hover:bg-gray-200"
@@ -807,7 +826,7 @@ export default function BankReceiptsPage() {
                   onClick={handleConfirmAllocate}
                   className="rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50 shadow-sm"
                 >
-                  {submittingAlloc ? "Đang xử lý..." : "Xác nhận gạch nợ"}
+                  {submittingAlloc ? "Đang xử lý..." : "Xác nhận phân bổ"}
                 </button>
               </div>
             </div>
@@ -841,9 +860,12 @@ export default function BankReceiptsPage() {
           {historyReceipt?.allocations?.map((alloc) => (
             <div key={alloc.id} className="flex items-center justify-between rounded-lg border p-3 bg-white shadow-xs">
               <div>
-                <p className="font-semibold text-gray-900">Đơn: {alloc.order_number || "Giảm nợ CH"}</p>
+                <p className="font-semibold text-gray-900">
+                  {alloc.order_number ? `Đơn: ${alloc.order_number}` : alloc.employee_id ? "Phân bổ công nợ nhân viên" : "Giảm nợ cửa hàng"}
+                </p>
                 <p className="text-xs text-gray-500">
                   NV: <span className="font-medium text-gray-700">{alloc.employee_code || "—"}</span> ({alloc.employee_name || ""})
+                  {alloc.settlement_date && ` · Ngày quyết toán ${new Date(`${alloc.settlement_date}T00:00:00`).toLocaleDateString("vi-VN")}`}
                 </p>
                 <p className="text-xs text-gray-400">{formatDateTime(alloc.created_at)}</p>
               </div>

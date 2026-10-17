@@ -208,8 +208,12 @@ def create_cash_receipt(
         )
         if employee_settlement is None:
             raise ValueError("Nhân viên không có quyết toán trong ngày đã chọn.")
-        if amount > employee_settlement["cash_pending_remittance"] + 0.01:
-            raise ValueError("Số tiền nộp vượt quá tiền mặt nhân viên đã thu còn phải nộp trong ngày.")
+        max_remittance = min(
+            employee_settlement["remaining_employee_debt"],
+            max(0.0, get_employee_balance(db, party_id)),
+        )
+        if amount > max_remittance + 0.01:
+            raise ValueError("Số tiền nộp vượt quá công nợ còn phải quyết toán của nhân viên.")
 
     now = datetime.utcnow()
     receipt = CashReceipt(

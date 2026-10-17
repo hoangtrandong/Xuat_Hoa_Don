@@ -9,6 +9,7 @@ from app.crud.bank_receipt import (
     create_bank_receipt,
     get_bank_receipt,
     get_allocatable_orders_for_store,
+    get_allocatable_employee_days_for_store,
     allocate_bank_receipt,
     cancel_allocation,
 )
@@ -122,7 +123,17 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
     session.add(req)
     session.commit()
 
-    # Verify initial allocatable orders for the Store
+    # Bank receipts can be allocated by daily employee debt instead of every order.
+    allocatable_days = get_allocatable_employee_days_for_store(session, store_id=store.id)
+    assert len(allocatable_days) == 2
+    assert allocatable_days[0]["settlement_date"] == date(2026, 10, 14)
+    assert {row["employee_code"] for row in allocatable_days} == {"NV001", "NV002"}
+    assert {row["remaining_employee_debt"] for row in allocatable_days} == {
+        8000000.0,
+        12000000.0,
+    }
+
+    # Legacy order targets remain available for existing receipts and audit history.
     allocatable = get_allocatable_orders_for_store(session, store_id=store.id)
     assert len(allocatable) == 2
     assert allocatable[0]["remaining_amount"] == 8000000.0
@@ -144,16 +155,21 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
     assert receipt.status == "UNALLOCATED"
     assert float(receipt.unallocated_amount) == 20000000.0
 
-    order1_id = allocatable[0]["id"]
-    order2_id = allocatable[1]["id"]
-
-    # 3. Accountant allocates: 8M to Order 1 (emp1) and 12M to Order 2 (emp2)
+    # 3. Accountant allocates by employee and settlement date.
     updated_receipt = allocate_bank_receipt(
         session,
         receipt.id,
         [
-            PaymentAllocationItemCreate(order_id=order1_id, amount=8000000.0, note="Gạch nợ đơn NV001"),
-            PaymentAllocationItemCreate(order_id=order2_id, amount=12000000.0, note="Gạch nợ đơn NV002"),
+            PaymentAllocationItemCreate(
+                employee_id=emp1.id,
+                settlement_date=date(2026, 10, 14),
+                amount=8000000.0,
+            ),
+            PaymentAllocationItemCreate(
+                employee_id=emp2.id,
+                settlement_date=date(2026, 10, 14),
+                amount=12000000.0,
+            ),
         ],
         created_by="ketoan_lan",
     )
@@ -163,13 +179,15 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
     assert float(updated_receipt.unallocated_amount) == 0.0
     assert len(updated_receipt.allocations) == 2
 
-    # 4. Verify orders updated to PAID_BANK
-    ord1 = session.get(DeliveryRequestOrder, order1_id)
-    ord2 = session.get(DeliveryRequestOrder, order2_id)
-    assert ord1.payment_status == "PAID_BANK"
-    assert ord1.payment_method == "BANK"
-    assert ord2.payment_status == "PAID_BANK"
-    assert ord2.payment_method == "BANK"
+    # Employee/day allocations do not require finding or marking individual orders.
+    assert all(allocation.order_id is None for allocation in updated_receipt.allocations)
+    assert {
+        (allocation.employee_id, allocation.settlement_date)
+        for allocation in updated_receipt.allocations
+    } == {
+        (emp1.id, date(2026, 10, 14)),
+        (emp2.id, date(2026, 10, 14)),
+    }
 
     # 5. Verify DebtLedgerEntry generated for both employees
     ledger_emp1 = session.scalars(
@@ -211,6 +229,24 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
     assert row_emp2["paid_bank"] == 12000000.0
     assert row_emp2["unpaid"] == 0.0
     assert row_emp2["remaining_employee_debt"] == 0.0
+
+    # Oversettling a specific employee/day is rejected.
+    extra_receipt = create_bank_receipt(
+        session,
+        BankReceiptCreate(store_id=store.id, amount=1000000.0),
+    )
+    with pytest.raises(ValueError, match="(?i)nhân viên"):
+        allocate_bank_receipt(
+            session,
+            extra_receipt.id,
+            [
+                PaymentAllocationItemCreate(
+                    employee_id=emp1.id,
+                    settlement_date=date(2026, 10, 14),
+                    amount=1000000.0,
+                )
+            ],
+        )
 
 
 def test_partial_allocation_and_cancellation(db):
@@ -320,6 +356,19 @@ def test_store_transfer_cannot_reduce_an_unrelated_employee_order_debt(db):
             session,
             receipt.id,
             [PaymentAllocationItemCreate(order_id=order.id, amount=5000000.0)],
+        )
+
+    with pytest.raises(ValueError, match="(?i)cửa hàng này"):
+        allocate_bank_receipt(
+            session,
+            receipt.id,
+            [
+                PaymentAllocationItemCreate(
+                    employee_id=employee.id,
+                    settlement_date=date(2026, 10, 14),
+                    amount=5000000.0,
+                )
+            ],
         )
 
     session.refresh(receipt)

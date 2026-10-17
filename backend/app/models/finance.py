@@ -208,6 +208,7 @@ class PaymentAllocation(Base):
     order_id: Mapped[int | None] = mapped_column(ForeignKey("delivery_request_orders.id", ondelete="SET NULL"), nullable=True, index=True)
     employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
     store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), nullable=True, index=True)
+    settlement_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
 
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
     allocation_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

@@ -344,16 +344,17 @@ export default function AdminDailySettlementsPage() {
               <th className="px-4 py-3 text-left">Nhân viên</th>
               <th className="px-4 py-3 text-right">Tổng công nợ</th>
               <th className="px-4 py-3 text-right">Chuyển khoản</th>
-              <th className="px-4 py-3 text-right">Tiền mặt đã thu</th>
+              <th className="px-4 py-3 text-right">Tiền mặt đã nộp</th>
               <th className="px-4 py-3 text-right">Hàng trả</th>
               <th className="px-4 py-3 text-right">Còn công nợ NV</th>
+              <th className="px-4 py-3 text-center">Xác nhận tiền mặt</th>
               <th className="px-4 py-3 text-center">Chi tiết</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {loading && <tr><td colSpan={8} className="px-4 py-10 text-center text-gray-500">Đang tải quyết toán ngày...</td></tr>}
+            {loading && <tr><td colSpan={9} className="px-4 py-10 text-center text-gray-500">Đang tải quyết toán ngày...</td></tr>}
             {!loading && filteredRows.length === 0 && (
-              <tr><td colSpan={8} className="px-4 py-10 text-center text-gray-500">Không có phiếu xuất kho hoàn thành trong bộ lọc này.</td></tr>
+              <tr><td colSpan={9} className="px-4 py-10 text-center text-gray-500">Không có phiếu xuất kho hoàn thành trong bộ lọc này.</td></tr>
             )}
             {!loading && filteredRows.map((row) => {
               const key = rowKey(row);
@@ -370,9 +371,23 @@ export default function AdminDailySettlementsPage() {
                     </td>
                     <td className="px-4 py-3 text-right font-semibold tabular-nums">{formatVND(row.allocated_amount)}</td>
                     <td className="px-4 py-3 text-right tabular-nums text-sky-700 font-medium">{formatVND(row.paid_bank)}</td>
-                    <td className="px-4 py-3 text-right tabular-nums text-indigo-700 font-medium">{formatVND(row.paid_cash)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums text-emerald-700 font-medium">{formatVND(row.cash_remitted)}</td>
                     <td className="px-4 py-3 text-right tabular-nums text-rose-700 font-medium">{formatVND(row.returned)}</td>
                     <td className="px-4 py-3 text-right tabular-nums text-gray-600 font-medium">{formatVND(row.remaining_employee_debt)}</td>
+                    <td className="px-4 py-3 text-center">
+                      <button
+                        type="button"
+                        disabled={!row.employee_id || row.cash_pending_remittance <= 0}
+                        onClick={() => {
+                          setRemittanceError("");
+                          setRemittanceRow(row);
+                          setRemittanceAmount(String(row.cash_pending_remittance));
+                        }}
+                        className="whitespace-nowrap rounded-md border border-emerald-200 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Ghi nhận nộp
+                      </button>
+                    </td>
                     <td className="px-4 py-3 text-center">
                       <button
                         type="button"
@@ -387,7 +402,7 @@ export default function AdminDailySettlementsPage() {
                   </tr>
                   {expanded && (
                     <tr key={`${key}:details`}>
-                      <td colSpan={8} className="bg-slate-50/80 p-5">
+                      <td colSpan={9} className="bg-slate-50/80 p-5">
                         <div className="space-y-4">
                           {/* Sub-header with Tab Switcher */}
                           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
@@ -428,18 +443,6 @@ export default function AdminDailySettlementsPage() {
                             </div>
                             <div className="flex items-center gap-2">
                               <Badge variant={needsFollowUp ? "warning" : "success"}>{reconciliationLabel(row)}</Badge>
-                              <button
-                                type="button"
-                                disabled={!row.employee_id || row.cash_pending_remittance <= 0}
-                                onClick={() => {
-                                  setRemittanceError("");
-                                  setRemittanceRow(row);
-                                  setRemittanceAmount(String(row.cash_pending_remittance));
-                                }}
-                                className="whitespace-nowrap rounded-md border border-emerald-200 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
-                              >
-                                Ghi nhận nộp tiền
-                              </button>
                             </div>
                           </div>
 
@@ -464,7 +467,7 @@ export default function AdminDailySettlementsPage() {
                                     Đã chuyển khoản: <span className="text-emerald-700">{formatVND(row.paid_bank)}</span>
                                   </span>
                                   <span className="rounded-md bg-white px-2.5 py-1 font-semibold text-gray-700 shadow-sm border border-sky-200">
-                                    Tiền mặt: <span className="text-indigo-700">{formatVND(row.paid_cash)}</span>
+                                    Khách trả tiền mặt: <span className="text-indigo-700">{formatVND(row.paid_cash)}</span>
                                   </span>
                                   <span className="rounded-md bg-white px-2.5 py-1 font-semibold text-gray-700 shadow-sm border border-sky-200">
                                     Còn lại chưa thu: <span className="text-amber-700">{formatVND(row.unpaid)}</span>
@@ -735,7 +738,7 @@ export default function AdminDailySettlementsPage() {
             <input
               id="remittance-amount"
               type="number"
-              min="0.01"
+              min="1"
               max={remittanceRow.cash_pending_remittance}
               step="1"
               required

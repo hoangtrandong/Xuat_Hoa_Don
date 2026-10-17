@@ -133,23 +133,31 @@ def test_delivery_settlement_crud_and_debt_deduction(db):
     assert emp_settle["allocated_amount"] == 5000000.0
     assert emp_settle["remaining_cash_to_turn_in"] == 5000000.0
 
-    # 3. Pay order ORD-TEST-001 via BANK
+    # 3. Direct order-level BANK settlement is disabled; accounting uses bank allocations.
     ord_1 = [o for o in dr.orders if o.order_number == "ORD-TEST-001"][0]
+    with pytest.raises(ValueError, match="(?i)phân bổ chuyển khoản"):
+        settle_order_pay(
+            session,
+            request_id=dr.id,
+            order_id=ord_1.id,
+            payment_method="BANK",
+            bank_ref="FT260908123456",
+            note="Chuyen khoan VCB",
+            created_by="accountant",
+        )
+
+    # Customer cash status is informational and must not credit employee debt.
     paid_ord = settle_order_pay(
         session,
         request_id=dr.id,
         order_id=ord_1.id,
-        payment_method="BANK",
-        bank_ref="FT260908123456",
-        note="Chuyen khoan VCB",
+        payment_method="CASH",
+        note="Khách thanh toán tiền mặt",
         created_by="accountant",
     )
-    assert paid_ord.payment_status == "PAID_BANK"
-    assert paid_ord.payment_method == "BANK"
-    assert paid_ord.bank_ref == "FT260908123456"
-
-    # Verify DebtLedgerEntry was created to deduct employee debt
-    debt_entry = session.scalar(
+    assert paid_ord.payment_status == "PAID_CASH"
+    assert paid_ord.payment_method == "CASH"
+    cash_credit = session.scalar(
         select(DebtLedgerEntry).where(
             DebtLedgerEntry.party_type == "EMPLOYEE",
             DebtLedgerEntry.party_id == emp.id,
@@ -157,19 +165,24 @@ def test_delivery_settlement_crud_and_debt_deduction(db):
             DebtLedgerEntry.source_id == ord_1.id,
         )
     )
-    assert debt_entry is not None
-    assert float(debt_entry.amount) == -2000000.0
-    assert debt_entry.entry_type == "BANK_RECEIPT"
+    assert cash_credit is None
+    with pytest.raises(ValueError, match="(?i)không thể quyết toán công nợ"):
+        settle_order_pay(
+            session,
+            request_id=dr.id,
+            order_id=ord_1.id,
+            payment_method="DEBT",
+        )
 
-    # 4. Check overview after payment 1
+    # 4. Cash marked at order level does not reduce the employee debt.
     overview2 = get_settlement(session, dr.id)
-    assert overview2["total_paid_bank"] == 2000000.0
-    assert overview2["total_unpaid"] == 3000000.0
+    assert overview2["total_paid_cash"] == 2000000.0
+    assert overview2["total_paid_bank"] == 0.0
     emp_settle2 = overview2["employee_settlements"][0]
-    assert emp_settle2["paid_bank"] == 2000000.0
-    assert emp_settle2["remaining_cash_to_turn_in"] == 3000000.0
+    assert emp_settle2["paid_cash"] == 2000000.0
+    assert emp_settle2["remaining_cash_to_turn_in"] == 5000000.0
 
-    # 5. Bank statement matching for ORD-TEST-002
+    # 5. Statement matching can preview, but cannot bypass explicit bank allocation.
     statements = [
         BankStatementItem(
             ref_number="MB_TRANS_999",
@@ -186,35 +199,24 @@ def test_delivery_settlement_crud_and_debt_deduction(db):
         session,
         request_id=dr.id,
         statements=statements,
-        auto_confirm=True,
+        auto_confirm=False,
         created_by="accountant",
     )
     assert match_result["matched_count"] == 1
-    assert match_result["auto_confirmed_count"] == 1
+    assert match_result["auto_confirmed_count"] == 0
     assert match_result["unmatched_count"] == 1
 
-    # Verify ORD-TEST-002 was auto-paid and debt deducted
+    # ORD-TEST-002 remains unpaid until an explicit bank receipt allocation.
     ord_2 = [o for o in dr.orders if o.order_number == "ORD-TEST-002"][0]
     session.refresh(ord_2)
-    assert ord_2.payment_status == "PAID_BANK"
+    assert ord_2.payment_status == "UNPAID"
 
-    debt_entry_2 = session.scalar(
-        select(DebtLedgerEntry).where(
-            DebtLedgerEntry.party_type == "EMPLOYEE",
-            DebtLedgerEntry.party_id == emp.id,
-            DebtLedgerEntry.source_type == "DELIVERY_ORDER",
-            DebtLedgerEntry.source_id == ord_2.id,
-        )
-    )
-    assert debt_entry_2 is not None
-    assert float(debt_entry_2.amount) == -3000000.0
-
-    # 6. Check final overview: everything settled via bank transfer!
+    # 6. No bank transfers have been confirmed.
     overview_final = get_settlement(session, dr.id)
-    assert overview_final["total_paid_bank"] == 5000000.0
-    assert overview_final["total_unpaid"] == 0.0
+    assert overview_final["total_paid_bank"] == 0.0
+    assert overview_final["total_unpaid"] == 3000000.0
     emp_settle_final = overview_final["employee_settlements"][0]
-    assert emp_settle_final["remaining_cash_to_turn_in"] == 0.0
+    assert emp_settle_final["remaining_cash_to_turn_in"] == 5000000.0
 
 
 def test_upload_request_sheet2_parsing(db):
@@ -396,21 +398,21 @@ def test_delivery_return_and_stock_restoration(db):
     assert txn.warehouse_id == wh.id
     assert txn.product_id == prod.id
 
-    # 4. Settle ord_2 with Bank transfer of 3,500,000 (customer transferred part of it)
+    # 4. Bank payment cannot be confirmed on an individual order.
     ord_2 = [o for o in dr.orders if o.order_number == "ORD-RET-002"][0]
-    settle_order_pay(session, dr.id, ord_2.id, payment_method="BANK", paid_amount=3500000.0)
+    with pytest.raises(ValueError, match="(?i)phân bổ chuyển khoản"):
+        settle_order_pay(session, dr.id, ord_2.id, payment_method="BANK", paid_amount=3500000.0)
 
     # 5. Check settlement overview
     overview = get_settlement(session, dr.id)
     assert overview["total_returned"] == 2500000.0  # 2M from ord_1 + 500k from item return
-    assert overview["total_paid_bank"] == 4000000.0  # order 2 full amount settled
+    assert overview["total_paid_bank"] == 0.0
     assert len(overview["returns"]) == 2
 
     emp_settle = overview["employee_settlements"][0]
     assert emp_settle["returned"] == 2500000.0
-    # Allocated: 6,000,000. Bank: 4,000,000. Returned: 2,500,000.
-    # Remaining cash to turn in: max(0, 6,000,000 - 4,000,000 - 2,500,000) = 0
-    assert emp_settle["remaining_cash_to_turn_in"] == 0.0
+    # Allocated: 6,000,000. Bank: 0. Returned: 2,500,000.
+    assert emp_settle["remaining_cash_to_turn_in"] == 3500000.0
 
 
 def test_import_orders_for_request(db):
@@ -535,6 +537,28 @@ def test_daily_settlement_groups_completed_requests_by_vietnam_business_date(db)
             payment_method="CASH",
         ),
     ])
+    session.add_all([
+        DebtLedgerEntry(
+            party_type="EMPLOYEE",
+            party_id=employee.id,
+            entry_type="DELIVERY_ISSUE",
+            amount=Decimal("40000000"),
+            source_type="DELIVERY_REQUEST",
+            source_id=first.id,
+            source_code=first.code,
+            document_date=first.completed_at,
+        ),
+        DebtLedgerEntry(
+            party_type="EMPLOYEE",
+            party_id=employee.id,
+            entry_type="DELIVERY_ISSUE",
+            amount=Decimal("60000000"),
+            source_type="DELIVERY_REQUEST",
+            source_id=second.id,
+            source_code=second.code,
+            document_date=second.completed_at,
+        ),
+    ])
     session.commit()
 
     from app.crud import delivery_request as crud_obj
@@ -620,7 +644,7 @@ def test_daily_settlement_groups_completed_requests_by_vietnam_business_date(db)
         to_date=date(2026, 10, 13),
     )[0]
     assert refreshed["cash_remitted"] == 25000000
-    assert refreshed["cash_pending_remittance"] == 35000000
+    assert refreshed["cash_pending_remittance"] == 65000000
     assert refreshed["remaining_employee_debt"] == 65000000
     assert session.scalar(
         select(func.count(CashReceipt.id)).where(

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, List
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -68,6 +68,7 @@ class CashReceiptCreate(BaseModel):
     party_type: str = Field(description="EMPLOYEE or STORE")
     party_id: int
     amount: float = Field(gt=0, description="Amount must be positive")
+    settlement_date: Optional[date] = None
     note: Optional[str] = None
 
 
@@ -77,6 +78,7 @@ class CashReceiptOut(BaseModel):
     code: str
     party_type: str
     party_id: int
+    settlement_date: Optional[date] = None
     amount: float
     receipt_date: datetime
     note: Optional[str] = None

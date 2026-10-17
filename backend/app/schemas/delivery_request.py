@@ -93,22 +93,53 @@ class DeliverySettlementOverview(BaseModel):
     items: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class DailySettlementOrderBreakdown(BaseModel):
+    id: int
+    order_number: str
+    order_date: Optional[date] = None
+    delivery_request_id: int
+    delivery_request_code: str
+    customer_code: Optional[str] = None
+    customer_name: Optional[str] = None
+    amount: float
+    paid_bank: float
+    paid_cash: float
+    transferred_debt: float
+    remaining_unpaid: float
+    payment_status: str
+    payment_method: Optional[str] = None
+    bank_ref: Optional[str] = None
+    note: Optional[str] = None
+
+
+class DailySettlementProductBreakdown(BaseModel):
+    product_id: int
+    sku: str
+    product_name: str
+    unit_name: Optional[str] = None
+    boxes_per_carton: int = 1
+    quantity: int = 0
+    cartons: int = 0
+    loose_boxes: int = 0
+    returned_quantity: int = 0
+    returned_cartons: int = 0
+    returned_loose_boxes: int = 0
+    net_quantity: int = 0
+    net_cartons: int = 0
+    net_loose_boxes: int = 0
+    unit_price: Optional[float] = None
+    amount: Optional[float] = None
+    returned_amount: float = 0.0
+    net_amount: Optional[float] = None
+
+
 class DailySettlementRequestBreakdown(BaseModel):
     request_id: int
     request_code: str
     warehouse_id: int
     warehouse_name: str
     completed_at: datetime
-    allocated_amount: float
     orders_count: int
-    orders_amount: float
-    paid_bank: float
-    paid_cash: float
-    transferred_debt: float
-    returned: float
-    unpaid: float
-    remaining_cash_to_turn_in: float
-    difference: float
 
 
 class DailyEmployeeSettlement(BaseModel):
@@ -125,9 +156,13 @@ class DailyEmployeeSettlement(BaseModel):
     transferred_debt: float
     returned: float
     unpaid: float
-    remaining_cash_to_turn_in: float
+    cash_remitted: float = 0.0
+    cash_pending_remittance: float = 0.0
+    remaining_employee_debt: float
     difference: float
-    requests: List[DailySettlementRequestBreakdown]
+    products: List[DailySettlementProductBreakdown] = Field(default_factory=list)
+    orders: List[DailySettlementOrderBreakdown] = Field(default_factory=list)
+    requests: List[DailySettlementRequestBreakdown] = Field(default_factory=list)
 
 
 

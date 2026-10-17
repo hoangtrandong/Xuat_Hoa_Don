@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import uuid4
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
@@ -163,7 +163,13 @@ def get_party_ledger(db: Session, party_type: str, party_id: int, limit: int = 1
 
 
 def create_cash_receipt(
-    db: Session, party_type: str, party_id: int, amount: float, note: str | None = None, created_by: str | None = None
+    db: Session,
+    party_type: str,
+    party_id: int,
+    amount: float,
+    note: str | None = None,
+    created_by: str | None = None,
+    settlement_date: date | None = None,
 ) -> CashReceipt:
     if amount <= 0:
         raise ValueError("Số tiền thu phải lớn hơn 0.")
@@ -182,11 +188,35 @@ def create_cash_receipt(
             raise ValueError("Không tìm thấy cửa hàng.")
         party_name = f"{st.code} - {st.name}"
 
+    if settlement_date is not None:
+        if party_type != "EMPLOYEE":
+            raise ValueError("Chỉ có thể gắn ngày quyết toán với phiếu nộp tiền của nhân viên.")
+        employee = db.scalar(
+            select(Employee).where(Employee.id == party_id).with_for_update()
+        )
+        if not employee:
+            raise ValueError("Không tìm thấy nhân viên.")
+        from app.crud.delivery_request import list_daily_settlements
+
+        settlements = list_daily_settlements(db, settlement_date, settlement_date)
+        employee_settlement = next(
+            (
+                row for row in settlements
+                if row["employee_id"] == party_id
+            ),
+            None,
+        )
+        if employee_settlement is None:
+            raise ValueError("Nhân viên không có quyết toán trong ngày đã chọn.")
+        if amount > employee_settlement["cash_pending_remittance"] + 0.01:
+            raise ValueError("Số tiền nộp vượt quá tiền mặt nhân viên đã thu còn phải nộp trong ngày.")
+
     now = datetime.utcnow()
     receipt = CashReceipt(
         code=_code("CR"),
         party_type=party_type,
         party_id=party_id,
+        settlement_date=settlement_date,
         amount=amount,
         receipt_date=now,
         note=note,
@@ -196,7 +226,6 @@ def create_cash_receipt(
     db.add(receipt)
     db.flush()
 
-    # Credit debt ledger: negative amount reduces debt
     db.add(DebtLedgerEntry(
         party_type=party_type,
         party_id=party_id,
@@ -494,4 +523,3 @@ def list_delivery_returns(
     if employee_id:
         stmt = stmt.where(DeliveryReturn.employee_id == employee_id)
     return db.scalars(stmt.limit(limit)).all()
-

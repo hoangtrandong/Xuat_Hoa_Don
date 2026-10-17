@@ -1,16 +1,17 @@
 from datetime import date, datetime
 from decimal import Decimal
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
 from app.crud.delivery_request import (
-    create, get, get_settlement, settle_order_pay, match_statements
+    create, get, get_settlement, settle_order_pay, match_statements,
+    import_orders_for_request,
 )
 from app.models.employee import Employee
-from app.models.finance import DebtLedgerEntry
+from app.models.finance import CashReceipt, DebtLedgerEntry
 from app.models.inventory import (
     DeliveryRequest, DeliveryRequestEmployeeSummary, DeliveryRequestItem,
     DeliveryRequestOrder, Warehouse, WarehouseLocation,
@@ -412,6 +413,57 @@ def test_delivery_return_and_stock_restoration(db):
     assert emp_settle["remaining_cash_to_turn_in"] == 0.0
 
 
+def test_import_orders_for_request(db):
+    session, wh, prod, emp = db
+
+    req_create = DeliveryRequestCreate(
+        warehouse_id=wh.id,
+        items=[DeliveryRequestItemCreate(product_id=prod.id, quantity=50)],
+        employee_summaries=[
+            DeliveryRequestEmployeeSummaryCreate(
+                employee_id=emp.id,
+                employee_code=emp.code,
+                employee_name=emp.name,
+                order_count=2,
+                amount=5000000.0,
+            )
+        ],
+    )
+    dr = create(session, req_create)
+
+    # Initially 0 orders
+    assert len(dr.orders) == 0
+
+    orders_data = [
+        {
+            "order_number": "ORD-IMP-001",
+            "order_date": date.today(),
+            "employee_code": emp.code,
+            "employee_name": emp.name,
+            "customer_code": "CUST01",
+            "customer_name": "Tạp hoá Hoa Mai",
+            "amount": 2000000.0,
+        },
+        {
+            "order_number": "ORD-IMP-002",
+            "order_date": date.today(),
+            "employee_code": emp.code,
+            "employee_name": emp.name,
+            "customer_code": "CUST02",
+            "customer_name": "Đại lý Phúc Lộc",
+            "amount": 3000000.0,
+        },
+    ]
+
+    settlement = import_orders_for_request(session, dr.id, orders_data, replace_existing=True)
+
+    assert settlement["total_orders_count"] == 2
+    assert settlement["total_amount"] == 5000000.0
+    assert len(settlement["orders"]) == 2
+    assert settlement["employee_settlements"][0]["orders_count"] == 2
+    assert settlement["employee_settlements"][0]["orders_amount"] == 5000000.0
+
+
 def test_daily_settlement_groups_completed_requests_by_vietnam_business_date(db):
     session, warehouse, _, employee = db
     first = DeliveryRequest(
@@ -485,9 +537,11 @@ def test_daily_settlement_groups_completed_requests_by_vietnam_business_date(db)
     ])
     session.commit()
 
-    from app.crud.delivery_request import list_daily_settlements
+    from app.crud import delivery_request as crud_obj
+    from app.crud.debt_ledger import create_cash_receipt
 
-    results = list_daily_settlements(
+    assert hasattr(crud_obj, "list_daily_settlements")
+    results = crud_obj.list_daily_settlements(
         session,
         from_date=date(2026, 10, 13),
         to_date=date(2026, 10, 13),
@@ -504,9 +558,74 @@ def test_daily_settlement_groups_completed_requests_by_vietnam_business_date(db)
     assert row["paid_bank"] == 10000000
     assert row["paid_cash"] == 60000000
     assert row["unpaid"] == 30000000
-    assert row["remaining_cash_to_turn_in"] == 90000000
     assert {item["request_code"] for item in row["requests"]} == {
         "DR-DAILY-001",
         "DR-DAILY-002",
     }
-    DailyEmployeeSettlement.model_validate(row)
+    assert len(row["orders"]) == 3
+    assert [o["order_number"] for o in row["orders"]] == [
+        "DAILY-ORDER-1",
+        "DAILY-ORDER-2",
+        "DAILY-ORDER-3",
+    ]
+    assert row["orders"][0]["amount"] == 10000000.0
+    assert row["orders"][0]["paid_bank"] == 10000000.0
+    assert row["orders"][0]["remaining_unpaid"] == 0.0
+    assert row["orders"][1]["amount"] == 30000000.0
+    assert row["orders"][1]["remaining_unpaid"] == 30000000.0
+    assert row["orders"][2]["amount"] == 60000000.0
+    assert row["orders"][2]["paid_cash"] == 60000000.0
+    assert row["orders"][2]["remaining_unpaid"] == 0.0
+    create_cash_receipt(
+        session,
+        party_type="EMPLOYEE",
+        party_id=employee.id,
+        amount=1000000,
+        note="Thu khoản nợ cũ, không gắn phiếu",
+    )
+    unallocated_receipt_settlement = crud_obj.list_daily_settlements(
+        session,
+        from_date=date(2026, 10, 13),
+        to_date=date(2026, 10, 13),
+    )[0]
+    assert unallocated_receipt_settlement["remaining_employee_debt"] == 90000000
+
+    receipt = create_cash_receipt(
+        session,
+        party_type="EMPLOYEE",
+        party_id=employee.id,
+        amount=25000000,
+        settlement_date=date(2026, 10, 13),
+        note="Nộp tiền mặt quyết toán ngày",
+    )
+    assert receipt.settlement_date == date(2026, 10, 13)
+    assert session.scalar(
+        select(func.count(DebtLedgerEntry.id)).where(
+            DebtLedgerEntry.source_type == "CASH_RECEIPT",
+            DebtLedgerEntry.source_id == receipt.id,
+        )
+    ) == 1
+    with pytest.raises(ValueError, match="vượt quá"):
+        create_cash_receipt(
+            session,
+            party_type="EMPLOYEE",
+            party_id=employee.id,
+            amount=66000000,
+            settlement_date=date(2026, 10, 13),
+        )
+
+    refreshed = crud_obj.list_daily_settlements(
+        session,
+        from_date=date(2026, 10, 13),
+        to_date=date(2026, 10, 13),
+    )[0]
+    assert refreshed["cash_remitted"] == 25000000
+    assert refreshed["cash_pending_remittance"] == 35000000
+    assert refreshed["remaining_employee_debt"] == 65000000
+    assert session.scalar(
+        select(func.count(CashReceipt.id)).where(
+            CashReceipt.settlement_date == date(2026, 10, 13),
+            CashReceipt.party_id == employee.id,
+        )
+    ) == 1
+    DailyEmployeeSettlement.model_validate(refreshed)

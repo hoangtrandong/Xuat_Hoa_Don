@@ -143,13 +143,130 @@ def plan_request(payload: DeliveryRequestCreate, db: Session = Depends(get_db)):
         return _error(db, exc)
 
 
+def _parse_orders_from_excel(content: bytes, db: Session) -> list[dict]:
+    wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    target_ws = None
+    for ws in wb.worksheets:
+        name_clean = re.sub(r"\s+", "", ws.title.lower())
+        if any(k in name_clean for k in ["dsdonhang", "danhsachdonhang", "orders", "donhang"]):
+            target_ws = ws
+            break
+    if target_ws is None:
+        target_ws = wb.worksheets[1] if len(wb.worksheets) > 1 else wb.worksheets[0]
+
+    rows = list(target_ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    header_idx = None
+    order_num_col = None
+    order_date_col = None
+    emp_code_col = None
+    emp_name_col = None
+    cust_code_col = None
+    cust_name_col = None
+    amt_col = None
+
+    for idx, r in enumerate(rows[:15]):
+        row_strs = [str(v).lower() if v is not None else "" for v in r]
+        for c_idx, cell in enumerate(row_strs):
+            if any(k in cell for k in ["số đơn hàng", "so don hang", "order_number", "mã đơn hàng", "ma don hang", "mã đơn", "ma don"]):
+                order_num_col = c_idx
+                header_idx = idx
+            elif any(k in cell for k in ["ngày đơn hàng", "ngay don hang", "ngày đơn", "ngay don", "order_date", "ngày", "ngay", "date"]):
+                if order_date_col is None:
+                    order_date_col = c_idx
+            elif any(k in cell for k in ["mã nvgh", "ma nvgh", "mã nv", "ma nv", "manv", "emp_code"]):
+                emp_code_col = c_idx
+            elif any(k in cell for k in ["tên nvgh", "ten nvgh", "tên nv", "ten nv", "tennv", "emp_name"]):
+                emp_name_col = c_idx
+            elif any(k in cell for k in ["mã khách hàng", "ma khach hang", "mã kh", "ma kh", "makh", "cust_code", "customer_code"]):
+                cust_code_col = c_idx
+            elif any(k in cell for k in ["tên khách hàng", "ten khach hang", "tên kh", "ten kh", "tenkh", "cust_name", "customer_name"]):
+                cust_name_col = c_idx
+            elif any(k in cell for k in ["tiền", "tien", "giá trị", "gia tri", "thành tiền", "thanh tien", "amount"]):
+                if amt_col is None:
+                    amt_col = c_idx
+
+    if header_idx is None or order_num_col is None:
+        return []
+
+    parsed_orders = []
+    order_numbers = []
+
+    for r in rows[header_idx + 1:]:
+        if not r or not any(v is not None for v in r):
+            continue
+        order_num = str(r[order_num_col]).strip() if order_num_col < len(r) and r[order_num_col] is not None else ""
+        if not order_num:
+            continue
+
+        raw_date = r[order_date_col] if order_date_col is not None and order_date_col < len(r) else None
+        order_date = None
+        if raw_date:
+            if hasattr(raw_date, "date"):
+                order_date = raw_date.date()
+            elif isinstance(raw_date, str):
+                for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+                    try:
+                        order_date = datetime.strptime(raw_date.strip(), fmt).date()
+                        break
+                    except Exception:
+                        pass
+
+        emp_code = str(r[emp_code_col]).strip().upper() if emp_code_col is not None and emp_code_col < len(r) and r[emp_code_col] is not None else ""
+        emp_name = str(r[emp_name_col]).strip() if emp_name_col is not None and emp_name_col < len(r) and r[emp_name_col] is not None else ""
+        cust_code = str(r[cust_code_col]).strip() if cust_code_col is not None and cust_code_col < len(r) and r[cust_code_col] is not None else ""
+        cust_name = str(r[cust_name_col]).strip() if cust_name_col is not None and cust_name_col < len(r) and r[cust_name_col] is not None else ""
+
+        amt = 0.0
+        if amt_col is not None and amt_col < len(r) and r[amt_col] is not None:
+            try:
+                amt = float(str(r[amt_col]).replace(",", "").strip())
+            except Exception:
+                amt = 0.0
+
+        parsed_orders.append({
+            "order_date": order_date,
+            "order_number": order_num,
+            "employee_code": emp_code,
+            "employee_name": emp_name,
+            "customer_code": cust_code,
+            "customer_name": cust_name,
+            "amount": amt,
+        })
+        order_numbers.append(order_num)
+
+    orders_needing_amount = [o["order_number"] for o in parsed_orders if not o["amount"]]
+    if orders_needing_amount:
+        from app.models import VinamilkOrderSnapshot
+        snaps = db.scalars(
+            select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number.in_(orders_needing_amount))
+        ).all()
+        snap_totals: dict[str, float] = {}
+        for s in snaps:
+            val = s.raw_payload.get("Giá trị") if s.raw_payload else None
+            if val:
+                try:
+                    v_float = float(str(val).replace(",", "").strip())
+                    snap_totals[s.order_number] = snap_totals.get(s.order_number, 0.0) + v_float
+                except Exception:
+                    pass
+        for o in parsed_orders:
+            if not o["amount"]:
+                o["amount"] = round(snap_totals.get(o["order_number"], 0.0), 2)
+
+    return parsed_orders
+
+
 @router.post("/upload", response_model=DeliveryPreviewResponse)
 def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | None = None,
                    db: Session = Depends(get_db)):
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
     try:
-        workbook = load_workbook(BytesIO(file.file.read()), read_only=True, data_only=True)
+        file_bytes = file.file.read()
+        workbook = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
         rows = list(workbook.worksheets[0].iter_rows(values_only=True))
         if not rows:
             raise ValueError("File Excel không có dữ liệu.")
@@ -347,88 +464,68 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
             ))
 
         orders = []
-        if len(workbook.worksheets) > 1:
-            ws2 = workbook.worksheets[1]
-            rows2 = list(ws2.iter_rows(values_only=True))
-            order_header_row_idx = None
-            for idx, r in enumerate(rows2[:15]):
-                r_str = " ".join([str(v).lower() for v in r if v is not None])
-                if "số đơn hàng" in r_str or "so don hang" in r_str or "ngày đơn hàng" in r_str:
-                    order_header_row_idx = idx
-                    break
+        parsed_order_rows = _parse_orders_from_excel(file_bytes, db)
+        if parsed_order_rows:
+            col_to_nv_map = {
+                "MG07730": "NV001",
+                "MG09637": "NV002",
+                "MG12028": "NV003",
+                "MG120281": "NV004",
+                "MG12885": "NV005",
+                "MG2003": "NV006",
+                "MG200312": "NV007",
+            }
+            summaries_are_nv_sequential = any(
+                s.get("employee_code") in ("NV001", "NV002", "NV003", "NV004", "NV005", "NV006", "NV007")
+                for s in employee_summaries
+            )
+            emp_by_code = {e.code.upper(): e for e in db.query(Employee).all()}
+            emp_by_name = {e.name.strip().lower(): e for e in db.query(Employee).all() if e.name}
+            summary_by_code = {s.get("employee_code", "").upper(): s for s in employee_summaries}
 
-            if order_header_row_idx is not None:
-                parsed_order_rows = []
-                order_numbers = []
-                emp_by_code = {e.code.upper(): e for e in db.query(Employee).all()}
+            for row_data in parsed_order_rows:
+                emp_code = (row_data.get("employee_code") or "").strip().upper()
+                emp_name = (row_data.get("employee_name") or "").strip()
 
-                for r in rows2[order_header_row_idx + 1:]:
-                    if not r or not any(v is not None for v in r):
-                        continue
-                    order_num = str(r[1]).strip() if len(r) > 1 and r[1] is not None else ""
-                    if not order_num:
-                        continue
+                target_emp_id = None
+                target_emp_code = emp_code
+                target_emp_name = emp_name
 
-                    raw_date = r[0] if len(r) > 0 else None
-                    order_date = None
-                    if raw_date:
-                        if hasattr(raw_date, "date"):
-                            order_date = raw_date.date()
-                        elif isinstance(raw_date, str):
-                            try:
-                                order_date = datetime.strptime(raw_date.strip(), "%d/%m/%Y").date()
-                            except Exception:
-                                try:
-                                    order_date = datetime.strptime(raw_date.strip(), "%Y-%m-%d").date()
-                                except Exception:
-                                    pass
+                if summaries_are_nv_sequential and emp_code in col_to_nv_map:
+                    mapped_code = col_to_nv_map[emp_code]
+                    sum_obj = summary_by_code.get(mapped_code)
+                    if sum_obj:
+                        target_emp_id = sum_obj.get("employee_id")
+                        target_emp_code = sum_obj.get("employee_code")
+                        target_emp_name = sum_obj.get("employee_name") or emp_name
 
-                    emp_code = str(r[2]).strip().upper() if len(r) > 2 and r[2] is not None else ""
-                    emp_name = str(r[3]).strip() if len(r) > 3 and r[3] is not None else ""
-                    cust_code = str(r[4]).strip() if len(r) > 4 and r[4] is not None else ""
-                    cust_name = str(r[5]).strip() if len(r) > 5 and r[5] is not None else ""
+                if target_emp_id is None:
+                    emp_obj = emp_by_code.get(emp_code)
+                    if not emp_obj and emp_name:
+                        emp_obj = emp_by_name.get(emp_name.lower())
+                    if not emp_obj and emp_code in summary_by_code:
+                        sum_obj = summary_by_code[emp_code]
+                        target_emp_id = sum_obj.get("employee_id")
+                        target_emp_code = sum_obj.get("employee_code")
+                        target_emp_name = sum_obj.get("employee_name") or emp_name
 
-                    parsed_order_rows.append({
-                        "order_date": order_date,
-                        "order_number": order_num,
-                        "employee_code": emp_code,
-                        "employee_name": emp_name,
-                        "customer_code": cust_code,
-                        "customer_name": cust_name,
-                    })
-                    order_numbers.append(order_num)
+                    if emp_obj:
+                        target_emp_id = emp_obj.id
+                        target_emp_code = emp_obj.code
+                        target_emp_name = emp_obj.name
 
-                from app.models import VinamilkOrderSnapshot
-                snaps = db.scalars(
-                    select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number.in_(order_numbers))
-                ).all()
-
-                snap_totals = {}
-                for s in snaps:
-                    val = s.raw_payload.get("Giá trị") if s.raw_payload else None
-                    if val:
-                        try:
-                            amt = float(str(val).replace(",", "").strip())
-                            snap_totals[s.order_number] = snap_totals.get(s.order_number, 0.0) + amt
-                        except Exception:
-                            pass
-
-                for row_data in parsed_order_rows:
-                    num = row_data["order_number"]
-                    calculated_amt = snap_totals.get(num, 0.0)
-                    emp_obj = emp_by_code.get(row_data["employee_code"])
-                    orders.append(DeliveryRequestOrderCreate(
-                        order_date=row_data["order_date"],
-                        order_number=num,
-                        employee_id=emp_obj.id if emp_obj else None,
-                        employee_code=row_data["employee_code"],
-                        employee_name=row_data["employee_name"] or (emp_obj.name if emp_obj else None),
-                        customer_code=row_data["customer_code"],
-                        customer_name=row_data["customer_name"],
-                        amount=round(calculated_amt, 2),
-                        payment_status="UNPAID",
-                        payment_method="UNKNOWN",
-                    ))
+                orders.append(DeliveryRequestOrderCreate(
+                    order_date=row_data.get("order_date"),
+                    order_number=row_data["order_number"],
+                    employee_id=target_emp_id,
+                    employee_code=target_emp_code,
+                    employee_name=target_emp_name,
+                    customer_code=row_data.get("customer_code"),
+                    customer_name=row_data.get("customer_name"),
+                    amount=row_data.get("amount", 0.0),
+                    payment_status="UNPAID",
+                    payment_method="UNKNOWN",
+                ))
 
         total_cartons = sum(p.cartons for p in preview)
         total_loose_boxes = sum(p.loose_boxes for p in preview)
@@ -658,6 +755,56 @@ def upload_bank_statement(
     except HTTPException:
         db.rollback()
         raise
+    except Exception as exc:
+        return _error(db, exc)
+
+
+@router.post("/{request_id}/settlement/import-orders-excel", response_model=DeliverySettlementOverview)
+def import_settlement_orders_excel(
+    request_id: int,
+    file: UploadFile = File(...),
+    replace_existing: bool = True,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Import orders from an Excel file (BCTHGH or generic order list) into a delivery trip settlement."""
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
+    try:
+        content = file.file.read()
+        orders_data = _parse_orders_from_excel(content, db)
+        if not orders_data:
+            raise ValueError("Không tìm thấy dòng đơn hàng nào trong file Excel.")
+        return crud.import_orders_for_request(
+            db,
+            request_id=request_id,
+            orders_data=orders_data,
+            replace_existing=replace_existing,
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        return _error(db, exc)
+
+
+@router.post("/{request_id}/settlement/import-orders", response_model=DeliverySettlementOverview)
+def import_settlement_orders(
+    request_id: int,
+    payload: List[DeliveryRequestOrderCreate],
+    replace_existing: bool = True,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Import orders from JSON payload into a delivery trip settlement."""
+    try:
+        orders_data = [o.model_dump() for o in payload]
+        return crud.import_orders_for_request(
+            db,
+            request_id=request_id,
+            orders_data=orders_data,
+            replace_existing=replace_existing,
+        )
     except Exception as exc:
         return _error(db, exc)
 

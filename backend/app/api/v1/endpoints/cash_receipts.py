@@ -30,6 +30,7 @@ def create_cash_receipt(
             amount=payload.amount,
             note=payload.note,
             created_by=current_user.username,
+            settlement_date=payload.settlement_date,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

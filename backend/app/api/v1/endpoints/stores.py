@@ -149,7 +149,7 @@ def upload_stores(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
 
 @router.get("/", response_model=List[Store])
-def list_stores(skip: int = 0, limit: int = 1000, status: str | None = None, db: Session = Depends(get_db)):
+def list_stores(skip: int = 0, limit: int = 5000, status: str | None = None, db: Session = Depends(get_db)):
     return store_crud.list_(db, skip=skip, limit=limit, status=status)
 
 

@@ -13,7 +13,7 @@ from app.models.inventory import (
     InventoryTransaction, Warehouse, WarehouseLocation, DeliveryRequestEmployeeSummary,
     DeliveryRequestOrder,
 )
-from app.models.finance import DebtLedgerEntry, DeliveryReturn, DeliveryReturnItem
+from app.models.finance import CashReceipt, DebtLedgerEntry, DeliveryReturn, DeliveryReturnItem, PaymentAllocation
 from app.models.employee import Employee
 from app.models.product import Product
 
@@ -703,13 +703,32 @@ def get_settlement(db: Session, request_id: int) -> dict:
         if (o.payment_method == "RETURN" or o.payment_status == "RETURNED") and o.id not in returned_order_ids
     )
 
-    total_unpaid = sum(float(o.amount) for o in req.orders if o.payment_status in ("UNPAID", "PENDING"))
+    order_ids = [o.id for o in req.orders]
+    alloc_sums = {}
+    if order_ids:
+        alloc_rows = db.execute(
+            select(PaymentAllocation.order_id, func.coalesce(func.sum(PaymentAllocation.amount), 0))
+            .where(PaymentAllocation.order_id.in_(order_ids))
+            .group_by(PaymentAllocation.order_id)
+        ).all()
+        alloc_sums = {row[0]: float(row[1]) for row in alloc_rows}
+
+    total_unpaid = sum(
+        (max(0.0, float(o.amount) - alloc_sums.get(o.id, 0.0))
+         if o.payment_status not in ("PAID", "PAID_BANK", "PAID_CASH", "RETURNED", "TRANSFERRED_DEBT")
+         else 0.0)
+        for o in req.orders
+    )
 
     emp_settlements = []
     for s in req.employee_summaries:
         emp_orders = [o for o in req.orders if o.employee_code == s.employee_code]
         emp_orders_amt = sum(float(o.amount) for o in emp_orders)
-        emp_bank = sum(float(o.amount) for o in emp_orders if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK"))
+        emp_bank = sum(
+            alloc_sums[o.id] if o.id in alloc_sums
+            else (float(o.amount) if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK") else 0.0)
+            for o in emp_orders
+        )
         emp_cash = sum(float(o.amount) for o in emp_orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
         emp_debt = sum(float(o.amount) for o in emp_orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
         
@@ -717,7 +736,12 @@ def get_settlement(db: Session, request_id: int) -> dict:
             float(o.amount) for o in emp_orders
             if (o.payment_method == "RETURN" or o.payment_status == "RETURNED") and o.id not in returned_order_ids
         )
-        emp_unpaid = sum(float(o.amount) for o in emp_orders if o.payment_status in ("UNPAID", "PENDING"))
+        emp_unpaid = sum(
+            (max(0.0, float(o.amount) - alloc_sums.get(o.id, 0.0))
+             if o.payment_status not in ("PAID", "PAID_BANK", "PAID_CASH", "RETURNED", "TRANSFERRED_DEBT")
+             else 0.0)
+            for o in emp_orders
+        )
 
         allocated = float(s.amount)
         remaining_cash_to_turn_in = max(0.0, allocated - emp_bank - emp_debt - emp_ret)
@@ -793,6 +817,7 @@ def list_daily_settlements(
             selectinload(DeliveryRequest.employee_summaries),
             selectinload(DeliveryRequest.orders),
             selectinload(DeliveryRequest.warehouse),
+            selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.product).selectinload(Product.unit),
         )
         .where(
             DeliveryRequest.status == "COMPLETED",
@@ -807,14 +832,44 @@ def list_daily_settlements(
     if not requests:
         return []
 
+    receipt_rows = db.execute(
+        select(
+            CashReceipt.settlement_date,
+            CashReceipt.party_id,
+            func.coalesce(func.sum(CashReceipt.amount), 0),
+        )
+        .where(
+            CashReceipt.party_type == "EMPLOYEE",
+            CashReceipt.settlement_date >= from_date,
+            CashReceipt.settlement_date <= to_date,
+        )
+        .group_by(CashReceipt.settlement_date, CashReceipt.party_id)
+    ).all()
+    remitted_by_date_employee = {
+        (row[0], row[1]): float(row[2]) for row in receipt_rows
+    }
+
     returns = db.scalars(
         select(DeliveryReturn)
-        .options(selectinload(DeliveryReturn.employee))
+        .options(
+            selectinload(DeliveryReturn.employee),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.product).selectinload(Product.unit),
+        )
         .where(DeliveryReturn.delivery_request_id.in_([request.id for request in requests]))
     ).all()
     returns_by_request: dict[int, list[DeliveryReturn]] = {}
     for return_record in returns:
         returns_by_request.setdefault(return_record.delivery_request_id, []).append(return_record)
+
+    all_order_ids = [order.id for req in requests for order in req.orders if order.id]
+    alloc_sums = {}
+    if all_order_ids:
+        alloc_rows = db.execute(
+            select(PaymentAllocation.order_id, func.coalesce(func.sum(PaymentAllocation.amount), 0))
+            .where(PaymentAllocation.order_id.in_(all_order_ids))
+            .group_by(PaymentAllocation.order_id)
+        ).all()
+        alloc_sums = {row[0]: float(row[1]) for row in alloc_rows}
 
     totals: dict[tuple[date, int | None, str], dict] = {}
     for request in requests:
@@ -843,8 +898,9 @@ def list_daily_settlements(
                 else order_amount
             )
             paid_bank = sum(
-                float(order.amount) for order in employee_orders
-                if order.payment_method == "BANK" and order.payment_status in ("PAID", "PAID_BANK")
+                alloc_sums[order.id] if order.id in alloc_sums
+                else (float(order.amount) if order.payment_method == "BANK" and order.payment_status in ("PAID", "PAID_BANK") else 0.0)
+                for order in employee_orders
             )
             paid_cash = sum(
                 float(order.amount) for order in employee_orders
@@ -874,10 +930,15 @@ def list_daily_settlements(
                 and order.id not in returned_order_ids
             )
             unpaid = sum(
-                float(order.amount) for order in employee_orders
-                if order.payment_status in ("UNPAID", "PENDING")
+                (max(0.0, float(order.amount) - alloc_sums.get(order.id, 0.0))
+                 if order.payment_status not in ("PAID", "PAID_BANK", "PAID_CASH", "RETURNED", "TRANSFERRED_DEBT")
+                 else 0.0)
+                for order in employee_orders
             )
-            remaining_cash = max(0.0, allocated_amount - paid_bank - transferred_debt - returned_amount)
+            remaining_cash = max(
+                0.0,
+                allocated_amount - paid_bank - transferred_debt - returned_amount,
+            )
             difference = order_amount - allocated_amount
             employee_name = (
                 summary.employee_name if summary is not None
@@ -898,11 +959,18 @@ def list_daily_settlements(
                 "transferred_debt": 0.0,
                 "returned": 0.0,
                 "unpaid": 0.0,
-                "remaining_cash_to_turn_in": 0.0,
+                "remaining_employee_debt": 0.0,
+                "cash_remitted": 0.0,
                 "difference": 0.0,
+                "products": [],
+                "orders": [],
                 "requests": [],
                 "_request_ids": set(),
+                "_order_ids": set(),
+                "_products_by_id": {},
             })
+            if not row["employee_name"] and employee_name:
+                row["employee_name"] = employee_name
             row["allocated_amount"] += allocated_amount
             row["orders_count"] += len(employee_orders)
             row["orders_amount"] += order_amount
@@ -911,8 +979,130 @@ def list_daily_settlements(
             row["transferred_debt"] += transferred_debt
             row["returned"] += returned_amount
             row["unpaid"] += unpaid
-            row["remaining_cash_to_turn_in"] += remaining_cash
+            row["remaining_employee_debt"] += remaining_cash
             row["difference"] += difference
+
+            prod_map = row["_products_by_id"]
+            for item in request.items:
+                emp_qty = 0
+                if item.employee_allocations and isinstance(item.employee_allocations, dict):
+                    for k, v in item.employee_allocations.items():
+                        if k.upper() == employee_code.upper():
+                            if isinstance(v, dict):
+                                emp_qty = int(v.get("quantity", 0))
+                            else:
+                                try:
+                                    emp_qty = int(v)
+                                except (ValueError, TypeError):
+                                    emp_qty = 0
+                            break
+                elif len(employee_codes) == 1:
+                    emp_qty = item.quantity
+
+                if emp_qty > 0:
+                    prod = item.product
+                    bpc = max(1, item.boxes_per_carton)
+                    if item.product_id not in prod_map:
+                        unit_name = "Hộp"
+                        if prod and hasattr(prod, "unit") and prod.unit:
+                            unit_name = prod.unit.name
+                        prod_map[item.product_id] = {
+                            "product_id": item.product_id,
+                            "sku": item.sku,
+                            "product_name": item.product_name,
+                            "unit_name": unit_name,
+                            "boxes_per_carton": bpc,
+                            "quantity": 0,
+                            "cartons": 0,
+                            "loose_boxes": 0,
+                            "returned_quantity": 0,
+                            "returned_cartons": 0,
+                            "returned_loose_boxes": 0,
+                            "net_quantity": 0,
+                            "net_cartons": 0,
+                            "net_loose_boxes": 0,
+                            "unit_price": None,
+                            "amount": None,
+                            "returned_amount": 0.0,
+                            "net_amount": None,
+                        }
+                    rec = prod_map[item.product_id]
+                    rec["quantity"] += emp_qty
+                    rec["cartons"] = rec["quantity"] // bpc
+                    rec["loose_boxes"] = rec["quantity"] % bpc
+
+            for ret_slip in employee_returns:
+                for ret_item in (ret_slip.items or []):
+                    r_prod = ret_item.product
+                    r_bpc = max(1, r_prod.boxes_per_carton or 1) if r_prod else 1
+                    if ret_item.product_id not in prod_map:
+                        r_unit_name = "Hộp"
+                        if r_prod and hasattr(r_prod, "unit") and r_prod.unit:
+                            r_unit_name = r_prod.unit.name
+                        prod_map[ret_item.product_id] = {
+                            "product_id": ret_item.product_id,
+                            "sku": ret_item.sku or "",
+                            "product_name": ret_item.product_name or "",
+                            "unit_name": r_unit_name,
+                            "boxes_per_carton": r_bpc,
+                            "quantity": 0,
+                            "cartons": 0,
+                            "loose_boxes": 0,
+                            "returned_quantity": 0,
+                            "returned_cartons": 0,
+                            "returned_loose_boxes": 0,
+                            "net_quantity": 0,
+                            "net_cartons": 0,
+                            "net_loose_boxes": 0,
+                            "unit_price": None,
+                            "amount": None,
+                            "returned_amount": 0.0,
+                            "net_amount": None,
+                        }
+                    rec = prod_map[ret_item.product_id]
+                    rec["returned_quantity"] += ret_item.quantity
+                    rec["returned_cartons"] = rec["returned_quantity"] // rec["boxes_per_carton"]
+                    rec["returned_loose_boxes"] = rec["returned_quantity"] % rec["boxes_per_carton"]
+                    rec["returned_amount"] += float(ret_item.amount or 0.0)
+
+            for order in employee_orders:
+                if order.id not in row["_order_ids"]:
+                    row["_order_ids"].add(order.id)
+                    o_paid_bank = (
+                        alloc_sums[order.id] if order.id in alloc_sums
+                        else (float(order.amount) if order.payment_method == "BANK" and order.payment_status in ("PAID", "PAID_BANK") else 0.0)
+                    )
+                    o_paid_cash = (
+                        float(order.amount) if order.payment_method == "CASH" and order.payment_status in ("PAID", "PAID_CASH") else 0.0
+                    )
+                    o_transferred_debt = (
+                        float(order.amount) if order.payment_method == "DEBT" or order.payment_status == "TRANSFERRED_DEBT" else 0.0
+                    )
+                    is_returned = (order.payment_method == "RETURN" or order.payment_status == "RETURNED" or order.id in returned_order_ids)
+                    if is_returned:
+                        o_remaining = 0.0
+                    else:
+                        o_remaining = max(0.0, float(order.amount) - (o_paid_bank + o_paid_cash + o_transferred_debt))
+
+                    row["orders"].append({
+                        "id": order.id,
+                        "order_number": order.order_number,
+                        "order_date": order.order_date,
+                        "delivery_request_id": request.id,
+                        "delivery_request_code": request.code,
+                        "customer_code": order.customer_code,
+                        "customer_name": order.customer_name,
+                        "amount": float(order.amount),
+                        "paid_bank": o_paid_bank,
+                        "paid_cash": o_paid_cash,
+                        "transferred_debt": o_transferred_debt,
+                        "remaining_unpaid": o_remaining,
+                        "payment_status": order.payment_status,
+                        "payment_method": order.payment_method,
+                        "bank_ref": order.bank_ref,
+                        "note": order.note,
+                    })
+
             if request.id not in row["_request_ids"]:
                 row["_request_ids"].add(request.id)
                 row["delivery_requests_count"] += 1
@@ -922,22 +1112,33 @@ def list_daily_settlements(
                     "warehouse_id": request.warehouse_id,
                     "warehouse_name": request.warehouse.name,
                     "completed_at": completed_at,
-                    "allocated_amount": allocated_amount,
                     "orders_count": len(employee_orders),
-                    "orders_amount": order_amount,
-                    "paid_bank": paid_bank,
-                    "paid_cash": paid_cash,
-                    "transferred_debt": transferred_debt,
-                    "returned": returned_amount,
-                    "unpaid": unpaid,
-                    "remaining_cash_to_turn_in": remaining_cash,
-                    "difference": difference,
                 })
 
     results = []
     for row in totals.values():
-        row.pop("_request_ids")
+        row["cash_remitted"] = remitted_by_date_employee.get(
+            (row["settlement_date"], row["employee_id"]), 0.0
+        )
+        row["cash_pending_remittance"] = max(
+            0.0, row["paid_cash"] - row["cash_remitted"]
+        )
+        row["remaining_employee_debt"] = max(
+            0.0, row["remaining_employee_debt"] - row["cash_remitted"]
+        )
+        row.pop("_request_ids", None)
+        row.pop("_order_ids", None)
+        products_dict = row.pop("_products_by_id", {})
+        for rec in products_dict.values():
+            bpc = rec["boxes_per_carton"]
+            net_q = max(0, rec["quantity"] - rec["returned_quantity"])
+            rec["net_quantity"] = net_q
+            rec["net_cartons"] = net_q // bpc
+            rec["net_loose_boxes"] = net_q % bpc
+            rec["net_amount"] = None
+        row["products"] = sorted(products_dict.values(), key=lambda p: p["sku"])
         row["requests"].sort(key=lambda item: item["completed_at"])
+        row["orders"].sort(key=lambda item: item["order_number"])
         results.append(row)
     return sorted(
         results,
@@ -1056,6 +1257,126 @@ def settle_order_pay(
 
     db.commit()
     return order
+
+
+
+def import_orders_for_request(
+    db: Session,
+    request_id: int,
+    orders_data: list[dict],
+    replace_existing: bool = True,
+) -> dict:
+    req = db.scalar(
+        select(DeliveryRequest).options(
+            selectinload(DeliveryRequest.employee_summaries),
+            selectinload(DeliveryRequest.orders),
+        ).where(DeliveryRequest.id == request_id)
+    )
+    if not req:
+        raise ValueError(f"Không tìm thấy yêu cầu xuất kho ID {request_id}.")
+
+    if replace_existing:
+        db.query(DeliveryRequestOrder).filter(
+            DeliveryRequestOrder.delivery_request_id == request_id
+        ).delete(synchronize_session=False)
+        db.flush()
+
+    employees = db.scalars(select(Employee)).all()
+    emp_by_code = {e.code.upper(): e for e in employees}
+    emp_by_name = {e.name.strip().lower(): e for e in employees if e.name}
+
+    summary_by_code = {s.employee_code.upper(): s for s in (req.employee_summaries or [])}
+    summary_by_name = {s.employee_name.strip().lower(): s for s in (req.employee_summaries or []) if s.employee_name}
+
+    aliases = {
+        "MG2003": "NV001",
+        "MAI GOLD": "NV001",
+        "MG200312": "NV009",
+        "DUY PHƯỚC": "NV009",
+    }
+    col_to_nv_map = {
+        "MG07730": "NV001",
+        "MG09637": "NV002",
+        "MG12028": "NV003",
+        "MG120281": "NV004",
+        "MG12885": "NV005",
+        "MG2003": "NV006",
+        "MG200312": "NV007",
+    }
+    summaries_are_nv_sequential = any(
+        s.employee_code in ("NV001", "NV002", "NV003", "NV004", "NV005", "NV006", "NV007")
+        for s in (req.employee_summaries or [])
+    )
+
+    for od in orders_data:
+        emp_code = (od.get("employee_code") or "").strip().upper()
+        emp_name = (od.get("employee_name") or "").strip()
+
+        target_emp_id = None
+        target_emp_code = emp_code
+        target_emp_name = emp_name
+
+        if summaries_are_nv_sequential and emp_code in col_to_nv_map:
+            mapped_code = col_to_nv_map[emp_code]
+            sum_obj = summary_by_code.get(mapped_code)
+            if sum_obj:
+                target_emp_id = sum_obj.employee_id
+                target_emp_code = sum_obj.employee_code
+                target_emp_name = sum_obj.employee_name or emp_name
+
+        if target_emp_id is None:
+            emp_obj = emp_by_code.get(emp_code)
+            if not emp_obj and emp_name:
+                emp_obj = emp_by_name.get(emp_name.lower())
+            if not emp_obj and emp_code in summary_by_code:
+                sum_obj = summary_by_code[emp_code]
+                target_emp_id = sum_obj.employee_id
+                target_emp_code = sum_obj.employee_code
+                target_emp_name = sum_obj.employee_name or emp_name
+            if not emp_obj and emp_name and emp_name.lower() in summary_by_name:
+                sum_obj = summary_by_name[emp_name.lower()]
+                target_emp_id = sum_obj.employee_id
+                target_emp_code = sum_obj.employee_code
+                target_emp_name = sum_obj.employee_name or emp_name
+            if not emp_obj:
+                alias = aliases.get(emp_code) or (aliases.get(emp_name.upper()) if emp_name else None)
+                if alias:
+                    emp_obj = emp_by_code.get(alias)
+            if not emp_obj and emp_name:
+                emp_name_lower = emp_name.lower()
+                for e in employees:
+                    el = e.name.strip().lower()
+                    if emp_name_lower in el or el in emp_name_lower:
+                        emp_obj = e
+                        break
+
+            if emp_obj:
+                target_emp_id = emp_obj.id
+                target_emp_code = emp_obj.code
+                target_emp_name = emp_obj.name
+
+        amt = float(od.get("amount") or 0.0)
+        new_order = DeliveryRequestOrder(
+            delivery_request_id=request_id,
+            order_date=od.get("order_date"),
+            order_number=od["order_number"],
+            employee_id=target_emp_id,
+            employee_code=target_emp_code,
+            employee_name=target_emp_name,
+            customer_code=od.get("customer_code"),
+            customer_name=od.get("customer_name"),
+            amount=amt,
+            payment_status=od.get("payment_status") or "UNPAID",
+            payment_method=od.get("payment_method"),
+            bank_ref=od.get("bank_ref"),
+            paid_at=od.get("paid_at"),
+            note=od.get("note"),
+        )
+        db.add(new_order)
+
+    db.commit()
+    db.expire_all()
+    return get_settlement(db, request_id)
 
 
 
@@ -1196,9 +1517,10 @@ class DeliveryRequestCRUD:
     transition = staticmethod(transition)
     available_for_product = staticmethod(available_for_product)
     get_settlement = staticmethod(get_settlement)
+    list_daily_settlements = staticmethod(list_daily_settlements)
     settle_order_pay = staticmethod(settle_order_pay)
     match_statements = staticmethod(match_statements)
+    import_orders_for_request = staticmethod(import_orders_for_request)
 
 
 delivery_request = DeliveryRequestCRUD()
-

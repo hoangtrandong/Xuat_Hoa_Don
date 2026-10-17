@@ -13,7 +13,10 @@ from app.models.inventory import (
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
 from app.models.employee import Employee, EmployeeDebtLimitChange, SalesTerritory
-from app.models.finance import Payment, Receivable, DebtLedgerEntry, DebtTransfer, CashReceipt, DeliveryReturn, DeliveryReturnItem
+from app.models.finance import (
+    Payment, Receivable, DebtLedgerEntry, DebtTransfer, CashReceipt,
+    DeliveryReturn, DeliveryReturnItem, BankReceipt, PaymentAllocation,
+)
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 
@@ -29,7 +32,8 @@ __all__ = [
     "SalesOrder", "SalesOrderItem",
     "Promotion", "PromotionRule", "PromotionItem",
     "Employee", "EmployeeDebtLimitChange", "SalesTerritory",
-    "Payment", "Receivable", "DebtLedgerEntry", "DebtTransfer", "CashReceipt", "DeliveryReturn", "DeliveryReturnItem",
+    "Payment", "Receivable", "DebtLedgerEntry", "DebtTransfer", "CashReceipt",
+    "DeliveryReturn", "DeliveryReturnItem", "BankReceipt", "PaymentAllocation",
     "VinamilkOrderSnapshot", "VinamilkSyncRun", "VinamilkOrderReplacement",
     "VinamilkOrderAllocation",
 ]

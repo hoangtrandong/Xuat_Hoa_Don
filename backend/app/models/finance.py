@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import List
-from sqlalchemy import String, DateTime, ForeignKey, Float, Numeric, Text, Integer, UniqueConstraint
+from sqlalchemy import Date, String, DateTime, ForeignKey, Float, Numeric, Text, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -87,6 +87,7 @@ class CashReceipt(Base):
     code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     party_type: Mapped[str] = mapped_column(String(20), index=True)  # EMPLOYEE | STORE
     party_id: Mapped[int] = mapped_column(Integer, index=True)
+    settlement_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
     receipt_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -157,3 +158,76 @@ class DeliveryReturnItem(Base):
     @property
     def location_code(self) -> str | None:
         return self.location.code if self.location else None
+
+
+class BankReceipt(Base):
+    """Tiền chuyển khoản từ Ngân hàng (Cửa hàng / Khách hàng thanh toán)."""
+    __tablename__ = "bank_receipts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    bank_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    account_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    ref_number: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
+    transaction_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    party_type: Mapped[str] = mapped_column(String(20), default="STORE", index=True)  # STORE | CUSTOMER
+    store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), nullable=True, index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    amount: Mapped[float] = mapped_column(Numeric(14, 2))
+    allocated_amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    unallocated_amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    status: Mapped[str] = mapped_column(String(20), default="UNALLOCATED", index=True)  # UNALLOCATED | PARTIALLY_ALLOCATED | FULLY_ALLOCATED
+
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    store: Mapped["Store | None"] = relationship()
+    customer: Mapped["Customer | None"] = relationship()
+    allocations: Mapped[List["PaymentAllocation"]] = relationship(back_populates="bank_receipt", cascade="all, delete-orphan")
+
+    @property
+    def store_code(self) -> str | None:
+        return self.store.code if self.store else None
+
+    @property
+    def store_name(self) -> str | None:
+        return self.store.name if self.store else None
+
+
+class PaymentAllocation(Base):
+    """Bút toán phân bổ gạch nợ chi tiết từ BankReceipt sang Đơn hàng / Nhân viên / Cửa hàng."""
+    __tablename__ = "payment_allocations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    bank_receipt_id: Mapped[int] = mapped_column(ForeignKey("bank_receipts.id", ondelete="CASCADE"), index=True)
+
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("delivery_request_orders.id", ondelete="SET NULL"), nullable=True, index=True)
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
+    store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    amount: Mapped[float] = mapped_column(Numeric(14, 2))
+    allocation_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    bank_receipt: Mapped["BankReceipt"] = relationship(back_populates="allocations")
+    order: Mapped["DeliveryRequestOrder | None"] = relationship()
+    employee: Mapped["Employee | None"] = relationship()
+    store: Mapped["Store | None"] = relationship()
+
+    @property
+    def order_number(self) -> str | None:
+        return self.order.order_number if self.order else None
+
+    @property
+    def employee_code(self) -> str | None:
+        return self.employee.code if self.employee else (self.order.employee_code if self.order else None)
+
+    @property
+    def employee_name(self) -> str | None:
+        return self.employee.name if self.employee else (self.order.employee_name if self.order else None)

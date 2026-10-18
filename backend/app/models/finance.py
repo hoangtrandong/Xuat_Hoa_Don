@@ -60,16 +60,20 @@ class DebtLedgerEntry(Base):
 
 
 class DebtTransfer(Base):
-    """Transfer debt from an employee to a store."""
+    """Immediate transfer of debt between an employee or a store."""
     __tablename__ = "debt_transfers"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
-    from_employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
-    to_store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), index=True)
+    from_party_type: Mapped[str] = mapped_column(String(20), index=True)
+    from_party_id: Mapped[int] = mapped_column(Integer, index=True)
+    to_party_type: Mapped[str] = mapped_column(String(20), index=True)
+    to_party_id: Mapped[int] = mapped_column(Integer, index=True)
+    from_employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True, index=True)
+    to_store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id"), nullable=True, index=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)  # PENDING | APPROVED | REJECTED
+    status: Mapped[str] = mapped_column(String(20), default="COMPLETED", index=True)
     requested_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

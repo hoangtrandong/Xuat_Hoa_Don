@@ -91,7 +91,7 @@ function statusBadge(status: string) {
     case "FULLY_ALLOCATED":
       return <Badge variant="success">Đã phân bổ đủ</Badge>;
     case "PARTIALLY_ALLOCATED":
-      return <Badge variant="warning">Đang gạch dở</Badge>;
+      return <Badge variant="warning">Đang phân bổ</Badge>;
     default:
       return <Badge variant="danger">Chờ phân bổ</Badge>;
   }
@@ -306,7 +306,7 @@ export default function BankReceiptsPage() {
       });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.detail || "Không thể phân bổ gạch nợ.");
+        throw new Error(err.detail || "Không thể phân bổ khoản chuyển tiền.");
       }
       setMessage(`Đã phân bổ thành công ${formatVND(currentTotalAllocating)} theo nhân viên/ngày.`);
       setAllocateModalOpen(false);
@@ -361,7 +361,7 @@ export default function BankReceiptsPage() {
   }
 
   async function handleCancelAlloc(receiptId: number, allocationId: number) {
-    if (!confirm("Bạn có chắc chắn muốn hủy dòng gạch nợ này? Đơn hàng và công nợ nhân viên sẽ được phục hồi.")) return;
+    if (!confirm("Bạn có chắc chắn muốn hủy dòng phân bổ này? Công nợ liên quan sẽ được phục hồi.")) return;
     try {
       const res = await apiFetch(`${API_URL}/bank-receipts/${receiptId}/allocations/${allocationId}`, {
         method: "DELETE",
@@ -468,8 +468,8 @@ export default function BankReceiptsPage() {
             className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm"
           >
             <option value="ALL">Tất cả trạng thái</option>
-            <option value="UNALLOCATED">Chờ phân bổ (Chưa gạch)</option>
-            <option value="PARTIALLY_ALLOCATED">Đang gạch dở</option>
+            <option value="UNALLOCATED">Chờ phân bổ</option>
+            <option value="PARTIALLY_ALLOCATED">Đang phân bổ</option>
             <option value="FULLY_ALLOCATED">Đã phân bổ đủ</option>
           </select>
         </label>
@@ -554,7 +554,7 @@ export default function BankReceiptsPage() {
                         className="inline-flex items-center gap-1 rounded-lg bg-sky-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-sky-700 shadow-sm"
                       >
                         <Zap size={14} />
-                        Gạch nợ
+                        Phân bổ
                       </button>
                     )}
                     <button
@@ -707,7 +707,7 @@ export default function BankReceiptsPage() {
             <div className="flex items-center justify-between border-b px-6 py-4">
               <div>
                 <h3 className="text-lg font-bold text-gray-900">
-                  Phân bổ gạch nợ chuyển khoản - {selectedReceipt.code}
+                  Phân bổ khoản chuyển khoản - {selectedReceipt.code}
                 </h3>
                 <p className="text-xs text-gray-500">
                   Cửa hàng: <strong className="text-gray-800">{selectedReceipt.store_name}</strong> ({selectedReceipt.store_code})
@@ -727,7 +727,7 @@ export default function BankReceiptsPage() {
             {/* Top Budget Bar */}
             <div className="grid grid-cols-3 gap-4 border-b bg-sky-50/60 px-6 py-3 text-sm">
               <div>
-                <span className="text-gray-500">Tiền còn có thể gạch:</span>
+                <span className="text-gray-500">Tiền còn có thể phân bổ:</span>
                 <p className="text-base font-bold text-sky-700">{formatVND(selectedReceipt.unallocated_amount)}</p>
               </div>
               <div>
@@ -765,7 +765,7 @@ export default function BankReceiptsPage() {
                       : "border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
                   }`}
                 >
-                  Gạch nợ nhân viên theo ngày ({allocatableEmployeeDays.length})
+                  Phân bổ cho nhân viên theo ngày ({allocatableEmployeeDays.length})
                 </button>
                 <button
                   type="button"
@@ -781,7 +781,7 @@ export default function BankReceiptsPage() {
                       : "border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
                   }`}
                 >
-                  Gạch nợ cửa hàng
+                  Phân bổ cho cửa hàng
                 </button>
               </div>
               {allocationLoadError && (
@@ -976,20 +976,20 @@ export default function BankReceiptsPage() {
       <Drawer
         open={historyDrawerOpen}
         onClose={() => setHistoryDrawerOpen(false)}
-        title={`Lịch sử gạch nợ - ${historyReceipt?.code || ""}`}
+        title={`Lịch sử phân bổ - ${historyReceipt?.code || ""}`}
       >
         <div className="space-y-4 p-4 text-sm">
           {historyReceipt && (
             <div className="rounded-xl border border-gray-100 bg-gray-50 p-3 space-y-1">
               <p className="font-semibold text-gray-900">{historyReceipt.store_name}</p>
               <p className="text-xs text-gray-500">
-                Tổng tiền: <strong>{formatVND(historyReceipt.amount)}</strong> • Đã gạch:{" "}
+                Tổng tiền: <strong>{formatVND(historyReceipt.amount)}</strong> • Đã phân bổ:{" "}
                 <strong className="text-emerald-600">{formatVND(historyReceipt.allocated_amount)}</strong>
               </p>
             </div>
           )}
 
-          <h5 className="font-semibold text-gray-800">Các bút toán phân bổ đã tạo:</h5>
+          <h5 className="font-semibold text-gray-800">Lịch sử các khoản phân bổ:</h5>
 
           {(!historyReceipt?.allocations || historyReceipt.allocations.length === 0) && (
             <p className="text-xs text-gray-500">Chưa có bút toán phân bổ nào.</p>
@@ -1015,7 +1015,7 @@ export default function BankReceiptsPage() {
                   className="inline-flex items-center gap-1 text-xs text-red-600 hover:text-red-800"
                 >
                   <Trash2 size={12} />
-                  Hủy gạch
+                  Hủy phân bổ
                 </button>
               </div>
             </div>

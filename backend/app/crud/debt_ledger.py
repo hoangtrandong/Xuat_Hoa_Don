@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 from uuid import uuid4
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
@@ -255,106 +256,104 @@ def list_cash_receipts(db: Session, limit: int = 50) -> list[CashReceipt]:
 
 
 def create_debt_transfer(
-    db: Session, from_employee_id: int, to_store_id: int, amount: float, reason: str | None = None, requested_by: str | None = None
+    db: Session,
+    from_party_type: str,
+    from_party_id: int,
+    to_party_type: str,
+    to_party_id: int,
+    amount: float,
+    reason: str | None = None,
+    created_by: str | None = None,
 ) -> DebtTransfer:
     if amount <= 0:
         raise ValueError("Số tiền chuyển phải lớn hơn 0.")
-    emp = db.get(Employee, from_employee_id)
-    if not emp:
-        raise ValueError("Không tìm thấy nhân viên chuyển nợ.")
-    st = db.get(Store, to_store_id)
-    if not st:
-        raise ValueError("Không tìm thấy cửa hàng nhận nợ.")
+    from_type = from_party_type.upper()
+    to_type = to_party_type.upper()
+    if from_type not in ("EMPLOYEE", "STORE") or to_type not in ("EMPLOYEE", "STORE"):
+        raise ValueError("Đối tượng chuyển và nhận chỉ có thể là nhân viên hoặc cửa hàng.")
+    if (from_type, from_party_id) == (to_type, to_party_id):
+        raise ValueError("Đối tượng chuyển và nhận công nợ phải khác nhau.")
 
+    def lock_party(party_type: str, party_id: int, action: str):
+        model = Employee if party_type == "EMPLOYEE" else Store
+        party = db.scalar(select(model).where(model.id == party_id).with_for_update())
+        if not party:
+            label = "nhân viên" if party_type == "EMPLOYEE" else "cửa hàng"
+            raise ValueError(f"Không tìm thấy {label} {action} công nợ.")
+        return party
+
+    source = lock_party(from_type, from_party_id, "chuyển")
+    recipient = lock_party(to_type, to_party_id, "nhận")
+    source_balance = (
+        get_employee_balance(db, from_party_id)
+        if from_type == "EMPLOYEE"
+        else get_store_balance(db, from_party_id)
+    )
+    transfer_amount = Decimal(str(amount))
+    if transfer_amount > Decimal(str(max(0.0, source_balance))) + Decimal("0.01"):
+        raise ValueError(
+            f"Số tiền chuyển vượt công nợ hiện tại của bên chuyển ({max(0.0, source_balance):,.0f}đ)."
+        )
+
+    now = datetime.utcnow()
     transfer = DebtTransfer(
         code=_code("TRF"),
-        from_employee_id=from_employee_id,
-        to_store_id=to_store_id,
-        amount=amount,
+        from_party_type=from_type,
+        from_party_id=from_party_id,
+        to_party_type=to_type,
+        to_party_id=to_party_id,
+        from_employee_id=from_party_id if from_type == "EMPLOYEE" else None,
+        to_store_id=to_party_id if to_type == "STORE" else None,
+        amount=transfer_amount,
         reason=reason,
-        status="PENDING",
-        requested_by=requested_by,
-        created_at=datetime.utcnow(),
+        status="COMPLETED",
+        requested_by=created_by,
+        created_at=now,
     )
     db.add(transfer)
+    db.flush()
+
+    from_code = source.code
+    to_code = recipient.code
+    db.add_all([
+        DebtLedgerEntry(
+            party_type=from_type,
+            party_id=from_party_id,
+            entry_type="TRANSFER_OUT",
+            amount=-transfer_amount,
+            source_type="DEBT_TRANSFER",
+            source_id=transfer.id,
+            source_code=transfer.code,
+            document_date=now,
+            note=f"Chuyển công nợ sang {to_type} {to_code}: {reason or ''}".strip(),
+            created_by=created_by,
+            created_at=now,
+        ),
+        DebtLedgerEntry(
+            party_type=to_type,
+            party_id=to_party_id,
+            entry_type="TRANSFER_IN",
+            amount=transfer_amount,
+            source_type="DEBT_TRANSFER",
+            source_id=transfer.id,
+            source_code=transfer.code,
+            document_date=now,
+            note=f"Nhận công nợ từ {from_type} {from_code}: {reason or ''}".strip(),
+            created_by=created_by,
+            created_at=now,
+        ),
+    ])
     db.commit()
     db.refresh(transfer)
     return transfer
 
 
-def list_debt_transfers(db: Session, status: str | None = None) -> list[DebtTransfer]:
-    stmt = select(DebtTransfer).order_by(DebtTransfer.created_at.desc())
-    if status:
-        stmt = stmt.where(DebtTransfer.status == status)
-    return db.scalars(stmt).all()
-
-
-def approve_debt_transfer(db: Session, transfer_id: int, approved_by: str | None = None) -> DebtTransfer:
-    transfer = db.get(DebtTransfer, transfer_id)
-    if not transfer:
-        raise ValueError("Không tìm thấy phiếu chuyển công nợ.")
-    if transfer.status != "PENDING":
-        raise ValueError(f"Không thể duyệt phiếu đang ở trạng thái {transfer.status}.")
-
-    emp = db.get(Employee, transfer.from_employee_id)
-    st = db.get(Store, transfer.to_store_id)
-    now = datetime.utcnow()
-
-    # 1. Deduct debt from Employee (-amount)
-    db.add(DebtLedgerEntry(
-        party_type="EMPLOYEE",
-        party_id=transfer.from_employee_id,
-        entry_type="TRANSFER_OUT",
-        amount=-transfer.amount,
-        source_type="DEBT_TRANSFER",
-        source_id=transfer.id,
-        source_code=transfer.code,
-        document_date=now,
-        note=f"Chuyển nợ sang cửa hàng {st.code if st else ''} theo phiếu {transfer.code}",
-        created_by=approved_by,
-        created_at=now,
-    ))
-
-    # 2. Add debt to Store (+amount)
-    db.add(DebtLedgerEntry(
-        party_type="STORE",
-        party_id=transfer.to_store_id,
-        entry_type="TRANSFER_IN",
-        amount=transfer.amount,
-        source_type="DEBT_TRANSFER",
-        source_id=transfer.id,
-        source_code=transfer.code,
-        document_date=now,
-        note=f"Nhận nợ từ NV {emp.code if emp else ''} ({emp.name if emp else ''}) theo phiếu {transfer.code}",
-        created_by=approved_by,
-        created_at=now,
-    ))
-
-    transfer.status = "APPROVED"
-    transfer.approved_by = approved_by
-    transfer.approved_at = now
-
-    db.commit()
-    db.refresh(transfer)
-    return transfer
-
-
-def reject_debt_transfer(db: Session, transfer_id: int, approved_by: str | None = None, reason: str | None = None) -> DebtTransfer:
-    transfer = db.get(DebtTransfer, transfer_id)
-    if not transfer:
-        raise ValueError("Không tìm thấy phiếu chuyển công nợ.")
-    if transfer.status != "PENDING":
-        raise ValueError(f"Không thể từ chối phiếu đang ở trạng thái {transfer.status}.")
-
-    transfer.status = "REJECTED"
-    transfer.approved_by = approved_by
-    transfer.approved_at = datetime.utcnow()
-    if reason:
-        transfer.reason = (transfer.reason or "") + f" [Lý do từ chối: {reason}]"
-
-    db.commit()
-    db.refresh(transfer)
-    return transfer
+def list_debt_transfers(db: Session) -> list[DebtTransfer]:
+    return db.scalars(
+        select(DebtTransfer)
+        .where(DebtTransfer.status == "COMPLETED")
+        .order_by(DebtTransfer.created_at.desc())
+    ).all()
 
 
 def create_delivery_return(

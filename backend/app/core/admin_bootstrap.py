@@ -13,7 +13,7 @@ RESOURCES = (
     "sales-orders", "inventory", "employees", "payments", "debt",
     "delivery-requests", "sync", "users",
     "employee-debts", "store-debts", "cash-receipts", "debt-transfers",
-    "debt-approvals", "delivery-returns", "bank-receipts",
+    "delivery-returns", "bank-receipts",
 )
 ENVIRONMENT_VARIABLES = (
     "INITIAL_ADMIN_USERNAME",
@@ -115,13 +115,13 @@ def sync_default_roles() -> None:
                 ("delivery-requests", "write"), ("sync", "write"),
             ]
         )
-        # Kế toán: Quản lý công nợ, thu tiền, duyệt công nợ, chuyển nợ
+        # Kế toán: Quản lý công nợ, thu tiền và chuyển công nợ trực tiếp
         _ensure_role_with_permissions(
             db, "accountant", "Kế toán (Công nợ, thanh toán, duyệt nợ)",
             [(r, "read") for r in RESOURCES if r != "users"] + [
                 ("debt", "write"), ("payments", "write"), ("cash-receipts", "write"),
                 ("employee-debts", "write"), ("store-debts", "write"),
-                ("debt-transfers", "write"), ("debt-approvals", "write"),
+                ("debt-transfers", "write"),
                 ("bank-receipts", "write"),
             ]
         )

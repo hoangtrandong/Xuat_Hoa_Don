@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { UserCheck, Wallet, AlertTriangle, ArrowRightLeft, Plus, History } from "lucide-react";
+import { UserCheck, Wallet, AlertTriangle, Plus, History } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -43,13 +43,6 @@ interface LedgerEntry {
   created_at: string;
 }
 
-interface StoreItem {
-  id: number;
-  code: string;
-  name: string;
-  phone?: string;
-}
-
 function entryTypeLabel(type: string): { label: string; variant: "success" | "danger" | "warning" | "default" } {
   switch (type) {
     case "DELIVERY_ISSUE":
@@ -71,7 +64,6 @@ function entryTypeLabel(type: string): { label: string; variant: "success" | "da
 
 export default function EmployeeDebtsPage() {
   const [employees, setEmployees] = useState<EmployeeDebt[]>([]);
-  const [stores, setStores] = useState<StoreItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -88,22 +80,8 @@ export default function EmployeeDebtsPage() {
   const [receiptNote, setReceiptNote] = useState("");
   const [submittingReceipt, setSubmittingReceipt] = useState(false);
 
-  // Debt transfer modal state
-  const [transferModalOpen, setTransferModalOpen] = useState(false);
-  const [transferEmpId, setTransferEmpId] = useState<number | "">("");
-  const [transferStoreId, setTransferStoreId] = useState<number | "">("");
-  const [transferAmount, setTransferAmount] = useState<number | "">("");
-  const [transferReason, setTransferReason] = useState("");
-  const [submittingTransfer, setSubmittingTransfer] = useState(false);
-
-  // Quick store creation inside transfer modal
-  const [quickStoreCode, setQuickStoreCode] = useState("");
-  const [quickStoreName, setQuickStoreName] = useState("");
-  const [showQuickStore, setShowQuickStore] = useState(false);
-
   const fetchEmployees = useCallback(async () => {
     try {
-      setLoading(true);
       const res = await apiFetch(`${API_URL}/employee-debts`);
       if (!res.ok) throw new Error("Không thể tải danh sách công nợ nhân viên.");
       const data = await res.json();
@@ -115,22 +93,11 @@ export default function EmployeeDebtsPage() {
     }
   }, []);
 
-  const fetchStores = useCallback(async () => {
-    try {
-      const res = await apiFetch(`${API_URL}/stores/?limit=500`);
-      if (res.ok) {
-        const data = await res.json();
-        setStores(data);
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
   useEffect(() => {
+    // The callback updates React state only after its network request completes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchEmployees();
-    fetchStores();
-  }, [fetchEmployees, fetchStores]);
+  }, [fetchEmployees]);
 
   const openLedger = async (emp: EmployeeDebt) => {
     setSelectedEmp(emp);
@@ -173,70 +140,12 @@ export default function EmployeeDebtsPage() {
       setReceiptModalOpen(false);
       setReceiptAmount("");
       setReceiptNote("");
+      setLoading(true);
       fetchEmployees();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Lỗi lập phiếu thu.");
     } finally {
       setSubmittingReceipt(false);
-    }
-  };
-
-  const handleCreateTransfer = async (e: React.FormEvent) => {
-    e.preventDefault();
-    let finalStoreId = transferStoreId;
-
-    if (showQuickStore) {
-      if (!quickStoreCode || !quickStoreName) {
-        setError("Vui lòng nhập mã và tên cửa hàng mới.");
-        return;
-      }
-      try {
-        const createStoreRes = await apiFetch(`${API_URL}/stores/`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code: quickStoreCode, name: quickStoreName }),
-        });
-        const storeData = await createStoreRes.json();
-        if (!createStoreRes.ok) throw new Error(storeData.detail || "Không thể tạo cửa hàng mới.");
-        finalStoreId = storeData.id;
-        fetchStores();
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : "Lỗi tạo cửa hàng.");
-        return;
-      }
-    }
-
-    if (!transferEmpId || !finalStoreId || !transferAmount || Number(transferAmount) <= 0) {
-      setError("Vui lòng điền đầy đủ thông tin chuyển nợ.");
-      return;
-    }
-
-    setSubmittingTransfer(true);
-    setError("");
-    setMessage("");
-    try {
-      const res = await apiFetch(`${API_URL}/debt-transfers`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          from_employee_id: Number(transferEmpId),
-          to_store_id: Number(finalStoreId),
-          amount: Number(transferAmount),
-          reason: transferReason,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Không thể gửi đề nghị chuyển nợ.");
-      setMessage(`Đã gửi đề nghị chuyển nợ ${formatVND(Number(transferAmount))} sang Cửa hàng. Chờ kế toán duyệt.`);
-      setTransferModalOpen(false);
-      setTransferAmount("");
-      setTransferReason("");
-      setShowQuickStore(false);
-      fetchEmployees();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Lỗi chuyển nợ.");
-    } finally {
-      setSubmittingTransfer(false);
     }
   };
 
@@ -340,17 +249,6 @@ export default function EmployeeDebtsPage() {
           >
             <Wallet size={13} /> Thu tiền
           </button>
-          <button
-            onClick={() => {
-              setTransferEmpId(r.employee_id);
-              setTransferAmount(r.current_debt > 0 ? r.current_debt : "");
-              setTransferModalOpen(true);
-            }}
-            className="p-1.5 text-xs font-medium text-amber-700 hover:bg-amber-50 rounded flex items-center gap-1 border border-amber-200"
-            title="Chuyển nợ sang cửa hàng"
-          >
-            <ArrowRightLeft size={13} /> Chuyển nợ
-          </button>
         </div>
       ),
     },
@@ -360,28 +258,17 @@ export default function EmployeeDebtsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Công nợ Nhân viên Giao hàng"
-        subtitle="Quản lý hạn mức, theo dõi biến động nợ từ phiếu xuất hàng, thu tiền mặt và chuyển nợ sang cửa hàng"
+        subtitle="Quản lý hạn mức, theo dõi biến động nợ từ phiếu xuất hàng và ghi nhận tiền mặt đã nộp"
         actions={
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                setReceiptEmpId("");
-                setReceiptModalOpen(true);
-              }}
-              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition-colors"
-            >
-              <Plus size={16} /> Thu tiền mặt
-            </button>
-            <button
-              onClick={() => {
-                setTransferEmpId("");
-                setTransferModalOpen(true);
-              }}
-              className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition-colors"
-            >
-              <ArrowRightLeft size={16} /> Chuyển nợ Cửa hàng
-            </button>
-          </div>
+          <button
+            onClick={() => {
+              setReceiptEmpId("");
+              setReceiptModalOpen(true);
+            }}
+            className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            <Plus size={16} /> Thu tiền mặt
+          </button>
         }
       />
 
@@ -583,127 +470,6 @@ export default function EmployeeDebtsPage() {
         </div>
       )}
 
-      {/* Modal: Chuyển nợ sang Cửa hàng */}
-      {transferModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 space-y-4">
-            <h3 className="text-lg font-bold text-gray-900">Đề Nghị Chuyển Nợ Sang Cửa Hàng</h3>
-            <p className="text-xs text-gray-500">
-              Trường hợp thu thiếu tiền và nhân viên xác nhận Cửa hàng nợ tiền, tạo đề nghị này để kế toán duyệt chuyển công nợ từ nhân viên sang cửa hàng tương ứng.
-            </p>
-            <form onSubmit={handleCreateTransfer} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Nhân viên giao hàng *</label>
-                <select
-                  value={transferEmpId}
-                  onChange={(e) => setTransferEmpId(Number(e.target.value))}
-                  required
-                  className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white"
-                >
-                  <option value="">-- Chọn nhân viên --</option>
-                  {employees.map((e) => (
-                    <option key={e.employee_id} value={e.employee_id}>
-                      {e.code} - {e.name} (Dư nợ: {formatVND(e.current_debt)})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs font-medium text-gray-700">Cửa hàng nhận nợ *</label>
-                  <button
-                    type="button"
-                    onClick={() => setShowQuickStore(!showQuickStore)}
-                    className="text-xs text-sky-600 hover:underline flex items-center gap-1"
-                  >
-                    {showQuickStore ? "Chọn từ danh sách có sẵn" : "+ Tạo nhanh Cửa hàng mới"}
-                  </button>
-                </div>
-
-                {!showQuickStore ? (
-                  <select
-                    value={transferStoreId}
-                    onChange={(e) => setTransferStoreId(Number(e.target.value))}
-                    required={!showQuickStore}
-                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white"
-                  >
-                    <option value="">-- Chọn cửa hàng --</option>
-                    {stores.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.code} - {s.name}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="grid grid-cols-2 gap-2 bg-sky-50/50 p-2.5 rounded-lg border border-sky-100">
-                    <div>
-                      <input
-                        type="text"
-                        placeholder="Mã CH (VD: CH_ANH_LAM)"
-                        value={quickStoreCode}
-                        onChange={(e) => setQuickStoreCode(e.target.value)}
-                        className="w-full text-xs border rounded p-2 bg-white"
-                      />
-                    </div>
-                    <div>
-                      <input
-                        type="text"
-                        placeholder="Tên Cửa hàng (VD: Cửa hàng Ánh Lâm)"
-                        value={quickStoreName}
-                        onChange={(e) => setQuickStoreName(e.target.value)}
-                        className="w-full text-xs border rounded p-2 bg-white"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Số tiền chuyển sang Cửa hàng (VNĐ) *</label>
-                <input
-                  type="number"
-                  min="1000"
-                  step="1000"
-                  value={transferAmount}
-                  onChange={(e) => setTransferAmount(Number(e.target.value))}
-                  required
-                  placeholder="Ví dụ: 2500000"
-                  className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Lý do / Giải trình</label>
-                <input
-                  type="text"
-                  value={transferReason}
-                  onChange={(e) => setTransferReason(e.target.value)}
-                  placeholder="Ví dụ: Cửa hàng hẹn chuyển khoản sau 3 ngày"
-                  className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setTransferModalOpen(false)}
-                  className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
-                >
-                  Hủy
-                </button>
-                <button
-                  type="submit"
-                  disabled={submittingTransfer}
-                  className="px-4 py-2 text-sm bg-amber-600 hover:bg-amber-700 text-white font-medium rounded-lg disabled:opacity-50"
-                >
-                  {submittingTransfer ? "Đang gửi..." : "Gửi đề nghị chuyển nợ"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

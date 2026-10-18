@@ -1,284 +1,312 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { ArrowRightLeft, CheckCircle2, XCircle, Clock, Plus } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { Plus, RefreshCw, X } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
-import DataTable, { Column } from "@/components/ui/DataTable";
-import Badge from "@/components/ui/Badge";
-import { formatVND, formatDateTime } from "@/lib/format";
+import { formatDateTime, formatVND } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
+
+type PartyType = "EMPLOYEE" | "STORE";
+
+interface DebtParty {
+  id: number;
+  code: string;
+  name: string;
+}
 
 interface DebtTransferItem {
   id: number;
   code: string;
-  from_employee_id: number;
-  to_store_id: number;
+  from_party_type: PartyType;
+  from_party_id: number;
+  to_party_type: PartyType;
+  to_party_id: number;
   amount: number;
   reason: string | null;
-  status: "PENDING" | "APPROVED" | "REJECTED";
-  requested_by: string | null;
-  approved_by: string | null;
-  approved_at: string | null;
   created_at: string;
 }
 
-interface EmployeeItem {
-  id: number;
-  code: string;
-  name: string;
+function partyLabel(type: PartyType): string {
+  return type === "EMPLOYEE" ? "Nhân viên" : "Cửa hàng";
 }
 
-interface StoreItem {
-  id: number;
-  code: string;
-  name: string;
-}
-
-function statusBadge(status: string) {
-  switch (status) {
-    case "APPROVED":
-      return <Badge variant="success">Đã duyệt</Badge>;
-    case "REJECTED":
-      return <Badge variant="danger">Đã từ chối</Badge>;
-    case "PENDING":
-    default:
-      return <Badge variant="warning">Chờ duyệt</Badge>;
-  }
+function partyMapKey(type: PartyType, id: number): string {
+  return `${type}:${id}`;
 }
 
 export default function DebtTransfersPage() {
   const [transfers, setTransfers] = useState<DebtTransferItem[]>([]);
-  const [employees, setEmployees] = useState<Map<number, EmployeeItem>>(new Map());
-  const [stores, setStores] = useState<Map<number, StoreItem>>(new Map());
-  const [statusFilter, setStatusFilter] = useState<string>("ALL");
+  const [employees, setEmployees] = useState<DebtParty[]>([]);
+  const [stores, setStores] = useState<DebtParty[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [fromPartyType, setFromPartyType] = useState<PartyType>("EMPLOYEE");
+  const [fromPartyId, setFromPartyId] = useState("");
+  const [toPartyType, setToPartyType] = useState<PartyType>("STORE");
+  const [toPartyId, setToPartyId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  const fetchTransfers = useCallback(async () => {
+  const partyOptions = useMemo(() => {
+    const entries: Array<[string, string]> = [];
+    for (const employee of employees) {
+      entries.push([partyMapKey("EMPLOYEE", employee.id), `Nhân viên · ${employee.code} - ${employee.name}`]);
+    }
+    for (const store of stores) {
+      entries.push([partyMapKey("STORE", store.id), `Cửa hàng · ${store.code} - ${store.name}`]);
+    }
+    return new Map(entries);
+  }, [employees, stores]);
+
+  const loadData = useCallback(async () => {
     try {
-      setLoading(true);
-      const url = statusFilter === "ALL" ? `${API_URL}/debt-transfers` : `${API_URL}/debt-transfers?status=${statusFilter}`;
-      const res = await apiFetch(url);
-      if (!res.ok) throw new Error("Không thể tải danh sách chuyển nợ.");
-      const data = await res.json();
-      setTransfers(data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Lỗi khi tải dữ liệu.");
+      const [transfersResponse, employeesResponse, storesResponse] = await Promise.all([
+        apiFetch(`${API_URL}/debt-transfers`),
+        apiFetch(`${API_URL}/employees/?limit=5000`),
+        apiFetch(`${API_URL}/stores/?limit=5000`),
+      ]);
+      if (!transfersResponse.ok) throw new Error("Không thể tải danh sách chuyển công nợ.");
+      if (!employeesResponse.ok) throw new Error("Không thể tải danh sách nhân viên.");
+      if (!storesResponse.ok) throw new Error("Không thể tải danh sách cửa hàng.");
+      const [transferRows, employeeRows, storeRows] = await Promise.all([
+        transfersResponse.json() as Promise<DebtTransferItem[]>,
+        employeesResponse.json() as Promise<DebtParty[]>,
+        storesResponse.json() as Promise<DebtParty[]>,
+      ]);
+      setTransfers(transferRows);
+      setEmployees(employeeRows);
+      setStores(storeRows);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Không thể tải dữ liệu chuyển công nợ.");
     } finally {
       setLoading(false);
-    }
-  }, [statusFilter]);
-
-  const fetchLookups = useCallback(async () => {
-    try {
-      const [empRes, storeRes] = await Promise.all([
-        apiFetch(`${API_URL}/employees/?limit=500`),
-        apiFetch(`${API_URL}/stores/?limit=500`),
-      ]);
-      if (empRes.ok) {
-        const empData: EmployeeItem[] = await empRes.json();
-        setEmployees(new Map(empData.map((e) => [e.id, e])));
-      }
-      if (storeRes.ok) {
-        const storeData: StoreItem[] = await storeRes.json();
-        setStores(new Map(storeData.map((s) => [s.id, s])));
-      }
-    } catch {
-      // ignore
     }
   }, []);
 
   useEffect(() => {
-    fetchLookups();
-  }, [fetchLookups]);
+    // The callback updates React state only after its network requests complete.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadData();
+  }, [loadData]);
 
-  useEffect(() => {
-    fetchTransfers();
-  }, [fetchTransfers]);
-
-  const handleApprove = async (id: number) => {
-    if (!confirm("Bạn có chắc chắn muốn DUYỆT chuyển công nợ này? Bút toán giảm nợ NV và tăng nợ Cửa hàng sẽ được ghi ngay lập tức.")) return;
-    setActionLoading(id);
-    setError("");
-    setMessage("");
-    try {
-      const res = await apiFetch(`${API_URL}/debt-approvals/transfers/${id}/approve`, {
-        method: "POST",
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Không thể duyệt chuyển nợ.");
-      setMessage("Đã duyệt chuyển công nợ thành công!");
-      fetchTransfers();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Lỗi khi duyệt.");
-    } finally {
-      setActionLoading(null);
+  async function handleCreateTransfer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!fromPartyId || !toPartyId || Number(amount) <= 0) {
+      setError("Vui lòng chọn đủ bên chuyển, bên nhận và số tiền hợp lệ.");
+      return;
     }
-  };
-
-  const handleReject = async (id: number) => {
-    const reason = prompt("Nhập lý do từ chối (tùy chọn):");
-    if (reason === null) return;
-    setActionLoading(id);
+    setSaving(true);
     setError("");
     setMessage("");
     try {
-      const res = await apiFetch(`${API_URL}/debt-approvals/transfers/${id}/reject`, {
+      const response = await apiFetch(`${API_URL}/debt-transfers`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({
+          from_party_type: fromPartyType,
+          from_party_id: Number(fromPartyId),
+          to_party_type: toPartyType,
+          to_party_id: Number(toPartyId),
+          amount: Number(amount),
+          reason: reason.trim() || undefined,
+        }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Không thể từ chối.");
-      setMessage("Đã từ chối đề nghị chuyển nợ.");
-      fetchTransfers();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Lỗi khi từ chối.");
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Không thể tạo phiếu chuyển công nợ.");
+      setMessage(`Đã chuyển công nợ ${formatVND(Number(amount))}; số dư hai bên đã được cập nhật.`);
+      setModalOpen(false);
+      setFromPartyId("");
+      setToPartyId("");
+      setAmount("");
+      setReason("");
+      setLoading(true);
+      await loadData();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "Không thể tạo phiếu chuyển công nợ.");
     } finally {
-      setActionLoading(null);
+      setSaving(false);
     }
-  };
+  }
 
-  const columns: Column<DebtTransferItem>[] = [
-    {
-      key: "code",
-      title: "Mã đề nghị",
-      render: (_, r) => <span className="font-semibold text-gray-900 font-mono text-xs">{r.code}</span>,
-    },
-    {
-      key: "from_employee_id",
-      title: "NV chuyển nợ",
-      render: (_, r) => {
-        const emp = employees.get(r.from_employee_id);
-        return (
-          <div>
-            <div className="font-medium text-gray-800">{emp ? `${emp.code} - ${emp.name}` : `NV #${r.from_employee_id}`}</div>
-            <div className="text-xs text-gray-400">Người lập: {r.requested_by || "—"}</div>
-          </div>
-        );
-      },
-    },
-    {
-      key: "to_store_id",
-      title: "Cửa hàng nhận nợ",
-      render: (_, r) => {
-        const st = stores.get(r.to_store_id);
-        return <span className="font-medium text-gray-800">{st ? `${st.code} - ${st.name}` : `CH #${r.to_store_id}`}</span>;
-      },
-    },
-    {
-      key: "amount",
-      title: "Số tiền chuyển",
-      align: "right",
-      render: (_, r) => <span className="font-mono font-bold text-gray-900">{formatVND(r.amount)}</span>,
-    },
-    {
-      key: "reason",
-      title: "Lý do / Giải trình",
-      render: (_, r) => <span className="text-xs text-gray-600">{r.reason || "—"}</span>,
-    },
-    {
-      key: "status",
-      title: "Trạng thái",
-      align: "center",
-      render: (_, r) => statusBadge(r.status),
-    },
-    {
-      key: "created_at",
-      title: "Thời gian",
-      render: (_, r) => <span className="text-xs text-gray-500">{formatDateTime(r.created_at)}</span>,
-    },
-    {
-      key: "actions",
-      title: "Duyệt (Kế toán)",
-      align: "right",
-      render: (_, r) => {
-        if (r.status !== "PENDING") {
-          return (
-            <span className="text-xs text-gray-400">
-              {r.approved_by ? `Bởi: ${r.approved_by}` : "Đã xử lý"}
-            </span>
-          );
-        }
-        return (
-          <div className="flex items-center justify-end gap-1.5">
-            <button
-              disabled={actionLoading === r.id}
-              onClick={() => handleApprove(r.id)}
-              className="p-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 rounded flex items-center gap-1 border border-emerald-300 disabled:opacity-50"
-              title="Duyệt chuyển nợ"
-            >
-              <CheckCircle2 size={13} /> Duyệt
-            </button>
-            <button
-              disabled={actionLoading === r.id}
-              onClick={() => handleReject(r.id)}
-              className="p-1.5 text-xs font-medium text-red-700 hover:bg-red-50 rounded flex items-center gap-1 border border-red-200 disabled:opacity-50"
-              title="Từ chối chuyển nợ"
-            >
-              <XCircle size={13} /> Từ chối
-            </button>
-          </div>
-        );
-      },
-    },
-  ];
+  function partySelect(
+    label: string,
+    type: PartyType,
+    id: string,
+    onChange: (value: string) => void,
+  ) {
+    const options = type === "EMPLOYEE" ? employees : stores;
+    return (
+      <label className="block text-sm font-medium text-gray-700">
+        {label} · {partyLabel(type)}
+        <select
+          required
+          value={id}
+          onChange={(event) => onChange(event.target.value)}
+          className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2"
+        >
+          <option value="">Chọn {type === "EMPLOYEE" ? "nhân viên" : "cửa hàng"}</option>
+          {options.map((party) => (
+            <option key={party.id} value={party.id}>
+              {party.code} - {party.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  }
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Quản lý Chuyển Công nợ (NVGH → Cửa hàng)"
-        subtitle="Quy trình kế toán duyệt chuyển công nợ khi nhân viên giao hàng xác nhận cửa hàng nợ tiền hàng"
+        title="Quản lý Chuyển Công nợ"
+        subtitle="Kế toán lập phiếu và chuyển công nợ trực tiếp giữa nhân viên và cửa hàng"
+        actions={
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setError("");
+                setLoading(true);
+                void loadData();
+              }}
+              disabled={loading}
+              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+              Làm mới
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setError("");
+                setMessage("");
+                setModalOpen(true);
+              }}
+              className="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-700"
+            >
+              <Plus size={16} />
+              Tạo chuyển công nợ
+            </button>
+          </div>
+        }
       />
 
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
-          {error}
-        </div>
-      )}
-      {message && (
-        <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg px-4 py-3 text-sm">
-          {message}
-        </div>
-      )}
+      {error && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+      {message && <div role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
 
-      {/* Filter Tabs */}
-      <div className="flex gap-2 border-b border-gray-200 pb-2">
-        {[
-          { key: "ALL", label: "Tất cả đề nghị" },
-          { key: "PENDING", label: "Chờ duyệt" },
-          { key: "APPROVED", label: "Đã duyệt" },
-          { key: "REJECTED", label: "Đã từ chối" },
-        ].map((tab) => (
-          <button
-            key={tab.key}
-            onClick={() => setStatusFilter(tab.key)}
-            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-              statusFilter === tab.key
-                ? "bg-sky-500 text-white"
-                : "text-gray-600 hover:bg-gray-100"
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
+            <tr>
+              <th className="px-4 py-3 text-left">Mã Chuyển</th>
+              <th className="px-4 py-3 text-left">Mã Nhận</th>
+              <th className="px-4 py-3 text-right">Số tiền</th>
+              <th className="px-4 py-3 text-left">Lý do</th>
+              <th className="px-4 py-3 text-left">Thời gian</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {loading && <tr><td colSpan={5} className="px-4 py-10 text-center text-gray-500">Đang tải lịch sử chuyển công nợ...</td></tr>}
+            {!loading && transfers.length === 0 && <tr><td colSpan={5} className="px-4 py-10 text-center text-gray-500">Chưa có giao dịch chuyển công nợ.</td></tr>}
+            {!loading && transfers.map((transfer) => (
+              <tr key={transfer.id} className="hover:bg-gray-50">
+                <td className="px-4 py-3 font-mono font-medium text-gray-900">
+                  {partyOptions.get(partyMapKey(transfer.from_party_type, transfer.from_party_id)) ?? `#${transfer.from_party_id}`}
+                </td>
+                <td className="px-4 py-3 font-mono font-medium text-gray-900">
+                  {partyOptions.get(partyMapKey(transfer.to_party_type, transfer.to_party_id)) ?? `#${transfer.to_party_id}`}
+                </td>
+                <td className="px-4 py-3 text-right font-semibold tabular-nums">{formatVND(transfer.amount)}</td>
+                <td className="px-4 py-3 text-gray-600">{transfer.reason || "—"}</td>
+                <td className="px-4 py-3 whitespace-nowrap text-gray-600">{formatDateTime(transfer.created_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-        {loading ? (
-          <div className="py-8 text-center text-sm text-gray-500">Đang tải danh sách đề nghị chuyển nợ...</div>
-        ) : (
-          <DataTable
-            columns={columns}
-            data={transfers}
-            searchable={true}
-            searchPlaceholder="Tìm kiếm theo mã đề nghị hoặc lý do..."
-            searchKeys={["code", "reason"]}
-          />
-        )}
-      </div>
+      {modalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <form onSubmit={handleCreateTransfer} className="w-full max-w-2xl space-y-5 rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">Tạo phiếu chuyển công nợ</h2>
+                <p className="mt-1 text-xs text-gray-500">Lưu phiếu xong, công nợ hai bên được điều chuyển ngay.</p>
+              </div>
+              <button type="button" onClick={() => setModalOpen(false)} className="rounded p-1 text-gray-400 hover:text-gray-700" aria-label="Đóng">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block text-sm font-medium text-gray-700">
+                Loại bên chuyển
+                <select
+                  value={fromPartyType}
+                  onChange={(event) => {
+                    setFromPartyType(event.target.value as PartyType);
+                    setFromPartyId("");
+                  }}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2"
+                >
+                  <option value="EMPLOYEE">Nhân viên</option>
+                  <option value="STORE">Cửa hàng</option>
+                </select>
+              </label>
+              <label className="block text-sm font-medium text-gray-700">
+                Loại bên nhận
+                <select
+                  value={toPartyType}
+                  onChange={(event) => {
+                    setToPartyType(event.target.value as PartyType);
+                    setToPartyId("");
+                  }}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2"
+                >
+                  <option value="EMPLOYEE">Nhân viên</option>
+                  <option value="STORE">Cửa hàng</option>
+                </select>
+              </label>
+              {partySelect("Mã Chuyển", fromPartyType, fromPartyId, setFromPartyId)}
+              {partySelect("Mã Nhận", toPartyType, toPartyId, setToPartyId)}
+              <label className="block text-sm font-medium text-gray-700">
+                Số tiền
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  required
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-right tabular-nums"
+                />
+              </label>
+              <label className="block text-sm font-medium text-gray-700 sm:col-span-2">
+                Lý do
+                <textarea
+                  rows={3}
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2"
+                  placeholder="Nhập lý do điều chuyển công nợ"
+                />
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t pt-4">
+              <button type="button" onClick={() => setModalOpen(false)} disabled={saving} className="rounded-lg border px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">
+                Hủy
+              </button>
+              <button type="submit" disabled={saving} className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50">
+                {saving ? "Đang lưu..." : "Tạo phiếu & điều chuyển"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

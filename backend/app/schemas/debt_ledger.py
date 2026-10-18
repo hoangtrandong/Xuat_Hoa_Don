@@ -87,8 +87,10 @@ class CashReceiptOut(BaseModel):
 
 
 class DebtTransferCreate(BaseModel):
-    from_employee_id: int
-    to_store_id: int
+    from_party_type: str = Field(description="EMPLOYEE or STORE")
+    from_party_id: int = Field(gt=0)
+    to_party_type: str = Field(description="EMPLOYEE or STORE")
+    to_party_id: int = Field(gt=0)
     amount: float = Field(gt=0, description="Amount must be positive")
     reason: Optional[str] = None
 
@@ -97,19 +99,13 @@ class DebtTransferOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     code: str
-    from_employee_id: int
-    to_store_id: int
+    from_party_type: str
+    from_party_id: int
+    to_party_type: str
+    to_party_id: int
     amount: float
     reason: Optional[str] = None
-    status: str
-    requested_by: Optional[str] = None
-    approved_by: Optional[str] = None
-    approved_at: Optional[datetime] = None
     created_at: datetime
-
-
-class DebtTransferAction(BaseModel):
-    reason: Optional[str] = None
 
 
 class DeliveryReturnItemBase(BaseModel):

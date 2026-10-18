@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useRef } from "react";
-import { Printer, X, Box, Boxes, Package, CheckCircle2 } from "lucide-react";
-import { formatNumber, formatDate, splitCartons } from "@/lib/format";
+import { Printer, X } from "lucide-react";
+import { formatNumber, formatDate, formatVND, splitCartons } from "@/lib/format";
 
 interface DeliveryItem {
   id?: number;
@@ -14,6 +14,7 @@ interface DeliveryItem {
   cartons?: number;
   loose_boxes?: number;
   requested_quantity_raw?: string | null;
+  employee_allocations?: Record<string, unknown> | null;
   allocations?: {
     location_code?: string | null;
     lot_number?: string | null;
@@ -29,11 +30,26 @@ interface DeliveryItem {
 }
 
 interface EmployeeSummary {
+  employee_id?: number | null;
   employee_code: string;
   employee_name?: string | null;
   weight_ton?: number;
   order_count?: number;
   amount?: number;
+}
+
+interface DeliveryOrder {
+  id: number;
+  order_date?: string | null;
+  order_number: string;
+  employee_code: string;
+  employee_name?: string | null;
+  customer_code?: string | null;
+  customer_name?: string | null;
+  amount: number;
+  payment_status?: string;
+  payment_method?: string | null;
+  note?: string | null;
 }
 
 interface DeliveryRequestData {
@@ -46,6 +62,7 @@ interface DeliveryRequestData {
   created_at: string;
   items: DeliveryItem[];
   employee_summaries?: EmployeeSummary[];
+  orders?: DeliveryOrder[];
   total_cartons?: number;
   total_loose_boxes?: number;
   total_quantity?: number;
@@ -56,6 +73,14 @@ interface Props {
   onClose: () => void;
   request: DeliveryRequestData | null;
   warehouseName?: string;
+}
+
+function paymentMethodLabel(order: DeliveryOrder): string {
+  if (order.payment_method === "BANK" || order.payment_status === "PAID_BANK") return "Chuyển khoản";
+  if (order.payment_method === "CASH" || order.payment_status === "PAID_CASH") return "Tiền mặt";
+  if (order.payment_method === "DEBT" || order.payment_status === "TRANSFERRED_DEBT") return "Ghi nợ";
+  if (order.payment_method === "RETURN" || order.payment_status === "RETURNED") return "Trả hàng";
+  return "Chưa thanh toán";
 }
 
 export default function DeliveryDispatchPrintModal({ open, onClose, request, warehouseName }: Props) {
@@ -74,6 +99,62 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
   }, 0);
 
   const totalQuantity = request.total_quantity ?? request.items.reduce((sum, item) => sum + item.quantity, 0);
+
+  const employeePrintPages = new Map<string, {
+    employee_code: string;
+    employee_name: string;
+    summary?: EmployeeSummary;
+    orders: DeliveryOrder[];
+    products: Array<DeliveryItem & { employee_quantity: number }>;
+  }>();
+  for (const summary of request.employee_summaries ?? []) {
+    const employeeCode = summary.employee_code.trim().toUpperCase();
+    if (!employeeCode) continue;
+    employeePrintPages.set(employeeCode, {
+      employee_code: summary.employee_code,
+      employee_name: summary.employee_name || "",
+      summary,
+      orders: [],
+      products: [],
+    });
+  }
+  for (const order of request.orders ?? []) {
+    const employeeCode = order.employee_code.trim().toUpperCase();
+    if (!employeeCode) continue;
+    const page = employeePrintPages.get(employeeCode) ?? {
+      employee_code: order.employee_code,
+      employee_name: order.employee_name || "",
+      orders: [],
+      products: [],
+    };
+    if (!page.employee_name && order.employee_name) page.employee_name = order.employee_name;
+    page.orders.push(order);
+    employeePrintPages.set(employeeCode, page);
+  }
+  for (const item of request.items) {
+    for (const [rawEmployeeCode, rawAllocation] of Object.entries(item.employee_allocations ?? {})) {
+      const employeeCode = rawEmployeeCode.trim().toUpperCase();
+      const allocation = typeof rawAllocation === "object" && rawAllocation !== null
+        ? rawAllocation as { quantity?: unknown }
+        : null;
+      const quantity = typeof rawAllocation === "number"
+        ? rawAllocation
+        : typeof allocation?.quantity === "number"
+          ? allocation.quantity
+          : 0;
+      if (!employeeCode || !Number.isFinite(quantity) || quantity <= 0) continue;
+      const page = employeePrintPages.get(employeeCode) ?? {
+        employee_code: rawEmployeeCode,
+        employee_name: "",
+        orders: [],
+        products: [],
+      };
+      page.products.push({ ...item, employee_quantity: quantity });
+      employeePrintPages.set(employeeCode, page);
+    }
+  }
+  const sortedEmployeePrintPages = [...employeePrintPages.values()]
+    .sort((a, b) => a.employee_code.localeCompare(b.employee_code, "vi"));
 
   const handlePrint = () => {
     window.print();
@@ -252,39 +333,6 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
               </table>
             </div>
 
-            {/* Employee Breakdown if available */}
-            {request.employee_summaries && request.employee_summaries.length > 0 && (
-              <div className="mb-6 page-break-inside-avoid">
-                <h2 className="text-xs font-bold uppercase tracking-wider text-gray-700 mb-2">
-                  Phân bổ giao hàng theo Nhân viên giao hàng (NVGH)
-                </h2>
-                <table className="w-full text-left text-xs border border-gray-300 border-collapse">
-                  <thead>
-                    <tr className="bg-gray-100 text-gray-800 font-semibold border-b border-gray-300">
-                      <th className="py-1.5 px-2 border-r border-gray-300">Mã NV</th>
-                      <th className="py-1.5 px-2 border-r border-gray-300">Tên nhân viên</th>
-                      <th className="py-1.5 px-2 border-r border-gray-300 text-right">Khối lượng (tấn)</th>
-                      <th className="py-1.5 px-2 border-r border-gray-300 text-right">Số đơn hàng</th>
-                      <th className="py-1.5 px-2 text-right">Tiền hàng nợ chuyến (VNĐ)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {request.employee_summaries.map((emp, idx) => (
-                      <tr key={idx}>
-                        <td className="py-1.5 px-2 border-r border-gray-300 font-mono font-medium">{emp.employee_code}</td>
-                        <td className="py-1.5 px-2 border-r border-gray-300">{emp.employee_name || "—"}</td>
-                        <td className="py-1.5 px-2 border-r border-gray-300 text-right">{emp.weight_ton ? emp.weight_ton.toFixed(3) : "—"}</td>
-                        <td className="py-1.5 px-2 border-r border-gray-300 text-right">{emp.order_count || "—"}</td>
-                        <td className="py-1.5 px-2 text-right font-semibold text-gray-900">
-                          {emp.amount ? `${formatNumber(emp.amount)} đ` : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
             {/* Handover & Signatures */}
             <div className="mt-8 pt-4 border-t-2 border-gray-800 page-break-inside-avoid">
               <p className="text-xs italic text-gray-700 mb-6">
@@ -319,6 +367,153 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
                 </div>
               </div>
             </div>
+
+            {sortedEmployeePrintPages.map((employee) => {
+              const employeeOrderTotal = employee.orders.reduce((sum, order) => sum + order.amount, 0);
+              const productTotals = employee.products.reduce((totals, item) => {
+                const key = item.product_id;
+                const current = totals.get(key) ?? { item, quantity: 0 };
+                current.quantity += item.employee_quantity;
+                totals.set(key, current);
+                return totals;
+              }, new Map<number, { item: DeliveryItem & { employee_quantity: number }; quantity: number }>());
+              const products = [...productTotals.values()];
+              const employeeTotalQuantity = products.reduce((sum, product) => sum + product.quantity, 0);
+
+              return (
+                <section key={employee.employee_code} className="employee-dispatch-page">
+                  <div className="border-b-2 border-gray-800 pb-3 mb-5">
+                    <p className="text-xs uppercase tracking-widest text-gray-500 font-semibold">PHIẾU CHI TIẾT GIAO HÀNG THEO NHÂN VIÊN</p>
+                    <h2 className="mt-1 text-xl font-black text-gray-900">
+                      {employee.employee_code} · {employee.employee_name || "Chưa có tên nhân viên"}
+                    </h2>
+                    <p className="mt-1 text-xs text-gray-600">
+                      Phiếu xuất kho {request.code} · Ngày lập {formatDate(request.created_at)}
+                    </p>
+                  </div>
+
+                  <div className="mb-5 grid grid-cols-3 gap-3 text-center text-xs">
+                    <div className="rounded border border-gray-300 p-2">
+                      <p className="text-gray-500">Số đơn hàng</p>
+                      <p className="mt-1 text-lg font-bold">{employee.orders.length || employee.summary?.order_count || 0}</p>
+                    </div>
+                    <div className="rounded border border-gray-300 p-2">
+                      <p className="text-gray-500">Tổng số lượng giao</p>
+                      <p className="mt-1 text-lg font-bold">{formatNumber(employeeTotalQuantity)} hộp</p>
+                    </div>
+                    <div className="rounded border border-gray-300 p-2">
+                      <p className="text-gray-500">Tiền hàng theo đơn</p>
+                      <p className="mt-1 text-lg font-bold">{formatVND(employeeOrderTotal || employee.summary?.amount || 0)}</p>
+                    </div>
+                  </div>
+
+                  <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-gray-700">Đơn hàng phụ trách</h3>
+                  {employee.orders.length > 0 ? (
+                    <table className="mb-5 w-full border-collapse border border-gray-300 text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-gray-300 bg-gray-100 font-semibold">
+                          <th className="border-r border-gray-300 px-2 py-2 text-center">STT</th>
+                          <th className="border-r border-gray-300 px-2 py-2">Mã đơn</th>
+                          <th className="border-r border-gray-300 px-2 py-2">Cửa hàng</th>
+                          <th className="border-r border-gray-300 px-2 py-2 text-center">Ngày đơn</th>
+                          <th className="border-r border-gray-300 px-2 py-2 text-right">Tiền hàng</th>
+                          <th className="px-2 py-2">Thanh toán</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {employee.orders.map((order, index) => (
+                          <tr key={order.id} className="border-b border-gray-200">
+                            <td className="border-r border-gray-300 px-2 py-2 text-center">{index + 1}</td>
+                            <td className="border-r border-gray-300 px-2 py-2 font-mono font-semibold">{order.order_number}</td>
+                            <td className="border-r border-gray-300 px-2 py-2">
+                              <span className="font-medium">{order.customer_name || "Chưa rõ cửa hàng"}</span>
+                              {order.customer_code && <span className="ml-1 text-gray-500">({order.customer_code})</span>}
+                            </td>
+                            <td className="border-r border-gray-300 px-2 py-2 text-center">{order.order_date ? formatDate(order.order_date) : "—"}</td>
+                            <td className="border-r border-gray-300 px-2 py-2 text-right font-semibold">{formatVND(order.amount)}</td>
+                            <td className="px-2 py-2">{paymentMethodLabel(order)}</td>
+                          </tr>
+                        ))}
+                        <tr className="bg-gray-100 font-bold">
+                          <td colSpan={4} className="border-r border-gray-300 px-2 py-2 text-right">TỔNG TIỀN ĐƠN:</td>
+                          <td className="border-r border-gray-300 px-2 py-2 text-right">{formatVND(employeeOrderTotal)}</td>
+                          <td />
+                        </tr>
+                      </tbody>
+                    </table>
+                  ) : (
+                    <p className="mb-5 border border-gray-300 px-3 py-4 text-center text-xs text-gray-500">
+                      Không có chi tiết đơn hàng được lưu cho nhân viên này.
+                    </p>
+                  )}
+
+                  <h3 className="mb-1 text-xs font-bold uppercase tracking-wider text-gray-700">Hàng phân bổ cho nhân viên trong chuyến</h3>
+                  <p className="mb-2 text-[10px] text-gray-500">
+                    Số lượng SKU là tổng phân bổ cho nhân viên trong chuyến, không phải chi tiết SKU của từng đơn.
+                  </p>
+                  {products.length > 0 ? (
+                    <table className="w-full border-collapse border border-gray-300 text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-gray-300 bg-gray-100 font-semibold">
+                          <th className="border-r border-gray-300 px-2 py-2 text-center">STT</th>
+                          <th className="border-r border-gray-300 px-2 py-2">Mã SKU</th>
+                          <th className="border-r border-gray-300 px-2 py-2">Tên sản phẩm</th>
+                          <th className="border-r border-gray-300 px-2 py-2 text-center">Quy cách</th>
+                          <th className="border-r border-gray-300 px-2 py-2 text-right">Thùng</th>
+                          <th className="border-r border-gray-300 px-2 py-2 text-right">Hộp lẻ</th>
+                          <th className="px-2 py-2 text-right">Tổng hộp</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {products.map(({ item, quantity }, index) => {
+                          const { cartons, looseBoxes, bpc } = splitCartons(quantity, item.boxes_per_carton);
+                          return (
+                            <tr key={item.product_id} className="border-b border-gray-200">
+                              <td className="border-r border-gray-300 px-2 py-2 text-center">{index + 1}</td>
+                              <td className="border-r border-gray-300 px-2 py-2 font-mono">{item.sku}</td>
+                              <td className="border-r border-gray-300 px-2 py-2 font-medium">{item.product_name}</td>
+                              <td className="border-r border-gray-300 px-2 py-2 text-center">{bpc} H/T</td>
+                              <td className="border-r border-gray-300 px-2 py-2 text-right">{formatNumber(cartons)}</td>
+                              <td className="border-r border-gray-300 px-2 py-2 text-right">{formatNumber(looseBoxes)}</td>
+                              <td className="px-2 py-2 text-right font-bold">{formatNumber(quantity)}</td>
+                            </tr>
+                          );
+                        })}
+                        <tr className="bg-gray-100 font-bold">
+                          <td colSpan={4} className="border-r border-gray-300 px-2 py-2 text-right">TỔNG:</td>
+                          <td className="border-r border-gray-300 px-2 py-2 text-right">
+                            {formatNumber(products.reduce((sum, product) => sum + splitCartons(product.quantity, product.item.boxes_per_carton).cartons, 0))}
+                          </td>
+                          <td className="border-r border-gray-300 px-2 py-2 text-right">
+                            {formatNumber(products.reduce((sum, product) => sum + splitCartons(product.quantity, product.item.boxes_per_carton).looseBoxes, 0))}
+                          </td>
+                          <td className="px-2 py-2 text-right">{formatNumber(employeeTotalQuantity)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  ) : (
+                    <p className="border border-gray-300 px-3 py-4 text-center text-xs text-gray-500">
+                      Không có số lượng phân bổ chi tiết theo nhân viên trong dữ liệu phiếu.
+                    </p>
+                  )}
+
+                  <div className="mt-10 grid grid-cols-2 gap-8 text-center text-xs page-break-inside-avoid">
+                    <div>
+                      <p className="font-bold uppercase">Người giao hàng</p>
+                      <p className="mt-1 text-gray-500">(Ký và ghi rõ họ tên)</p>
+                      <div className="h-20" />
+                      <p className="font-semibold">{employee.employee_name || employee.employee_code}</p>
+                    </div>
+                    <div>
+                      <p className="font-bold uppercase">Người nhận hàng</p>
+                      <p className="mt-1 text-gray-500">(Ký và ghi rõ họ tên)</p>
+                      <div className="h-20" />
+                      <p>........................................</p>
+                    </div>
+                  </div>
+                </section>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -343,6 +538,19 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
           }
           .no-print {
             display: none !important;
+          }
+          .employee-dispatch-page {
+            break-before: page;
+            page-break-before: always;
+          }
+          .employee-dispatch-page tr,
+          .employee-dispatch-page th,
+          .employee-dispatch-page td {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+          .employee-dispatch-page thead {
+            display: table-header-group;
           }
         }
       `}</style>

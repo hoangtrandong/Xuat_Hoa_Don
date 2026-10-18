@@ -631,6 +631,94 @@ export default function BankReceiptsPage() {
     );
   }, [cashReceiptEmployees, cashReceiptEmployeeSearch]);
 
+  const loadCashReceiptRemaining = useCallback(async (
+    employeeId: string,
+    settlementDate: string,
+    fillAmountWithRemaining = false,
+  ) => {
+    setCashReceiptRemaining(null);
+    setCashReceiptError("");
+    if (!employeeId || !settlementDate) return;
+    setCashReceiptLoading(true);
+    try {
+      const params = new URLSearchParams({ from_date: settlementDate, to_date: settlementDate });
+      const response = await apiFetch(`${API_URL}/delivery-requests/daily-settlements?${params.toString()}`);
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail || "Không thể tải công nợ quyết toán ngày.");
+      }
+      const settlement = (result as Array<{ employee_id: number; remaining_employee_debt: number }>)
+        .find((row) => row.employee_id === Number(employeeId));
+      const remaining = settlement?.remaining_employee_debt ?? 0;
+      setCashReceiptRemaining(remaining);
+      if (fillAmountWithRemaining) setCashReceiptAmount(remaining > 0 ? remaining : "");
+    } catch (err) {
+      setCashReceiptError(err instanceof Error ? err.message : "Không thể tải công nợ quyết toán ngày.");
+    } finally {
+      setCashReceiptLoading(false);
+    }
+  }, []);
+
+  const openCashReceiptModal = useCallback(async (prefill?: {
+    employeeId?: string;
+    settlementDate?: string;
+    fillAmountWithRemaining?: boolean;
+  }) => {
+    const settlementDate = prefill?.settlementDate || formatDateKey(new Date());
+    setCashReceiptEmployees([]);
+    setCashReceiptEmployeeId(prefill?.employeeId || "");
+    setCashReceiptEmployeeSearch("");
+    setCashReceiptAmount("");
+    setCashReceiptNote("");
+    setCashReceiptRemaining(null);
+    setCashReceiptError("");
+    setCashReceiptDate(settlementDate);
+    setCashReceiptModalOpen(true);
+    setCashReceiptEmployeesLoading(true);
+    try {
+      const employeeQuery = prefill?.employeeId ? "?limit=5000" : "?limit=5000&status=active";
+      const response = await apiFetch(`${API_URL}/employees/${employeeQuery}`);
+      if (!response.ok) {
+        const result = await response.json();
+        throw new Error(result.detail || "Không thể tải danh sách nhân viên.");
+      }
+      setCashReceiptEmployees(await response.json() as EmployeeOption[]);
+      if (prefill?.employeeId) {
+        await loadCashReceiptRemaining(
+          prefill.employeeId,
+          settlementDate,
+          prefill.fillAmountWithRemaining,
+        );
+      }
+    } catch (err) {
+      setCashReceiptError(err instanceof Error ? err.message : "Không thể tải danh sách nhân viên.");
+    } finally {
+      setCashReceiptEmployeesLoading(false);
+    }
+  }, [loadCashReceiptRemaining]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("openCashReceipt") !== "1") return;
+
+    const employeeId = url.searchParams.get("employeeId") || undefined;
+    const settlementDate = url.searchParams.get("settlementDate") || undefined;
+    if (employeeId && !/^\d+$/.test(employeeId)) return;
+    if (settlementDate && !/^\d{4}-\d{2}-\d{2}$/.test(settlementDate)) return;
+
+    // The URL deep link represents a user navigation that should open the prefilled receipt form.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void openCashReceiptModal({
+      employeeId,
+      settlementDate,
+      fillAmountWithRemaining: true,
+    });
+    url.searchParams.delete("openCashReceipt");
+    url.searchParams.delete("employeeId");
+    url.searchParams.delete("settlementDate");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [openCashReceiptModal]);
+
   function handleAddAllocation() {
     if (!selectedReceipt) return;
     const amount = Number(allocationAmountInput);
@@ -787,53 +875,6 @@ export default function BankReceiptsPage() {
       alert(err instanceof Error ? err.message : "Lỗi tạo phiếu.");
     } finally {
       setSubmittingAdd(false);
-    }
-  }
-
-  async function openCashReceiptModal() {
-    setCashReceiptEmployees([]);
-    setCashReceiptEmployeeId("");
-    setCashReceiptEmployeeSearch("");
-    setCashReceiptAmount("");
-    setCashReceiptNote("");
-    setCashReceiptRemaining(null);
-    setCashReceiptError("");
-    setCashReceiptDate(formatDateKey(new Date()));
-    setCashReceiptModalOpen(true);
-    setCashReceiptEmployeesLoading(true);
-    try {
-      const response = await apiFetch(`${API_URL}/employees/?limit=5000&status=active`);
-      if (!response.ok) {
-        const result = await response.json();
-        throw new Error(result.detail || "Không thể tải danh sách nhân viên.");
-      }
-      setCashReceiptEmployees(await response.json() as EmployeeOption[]);
-    } catch (err) {
-      setCashReceiptError(err instanceof Error ? err.message : "Không thể tải danh sách nhân viên.");
-    } finally {
-      setCashReceiptEmployeesLoading(false);
-    }
-  }
-
-  async function loadCashReceiptRemaining(employeeId: string, settlementDate: string) {
-    setCashReceiptRemaining(null);
-    setCashReceiptError("");
-    if (!employeeId || !settlementDate) return;
-    setCashReceiptLoading(true);
-    try {
-      const params = new URLSearchParams({ from_date: settlementDate, to_date: settlementDate });
-      const response = await apiFetch(`${API_URL}/delivery-requests/daily-settlements?${params.toString()}`);
-      const result = await response.json();
-      if (!response.ok) {
-        throw new Error(result.detail || "Không thể tải công nợ quyết toán ngày.");
-      }
-      const settlement = (result as Array<{ employee_id: number; remaining_employee_debt: number }>)
-        .find((row) => row.employee_id === Number(employeeId));
-      setCashReceiptRemaining(settlement?.remaining_employee_debt ?? 0);
-    } catch (err) {
-      setCashReceiptError(err instanceof Error ? err.message : "Không thể tải công nợ quyết toán ngày.");
-    } finally {
-      setCashReceiptLoading(false);
     }
   }
 
@@ -1377,6 +1418,7 @@ export default function BankReceiptsPage() {
                   <input
                     type="date"
                     required
+                    disabled={cashReceiptEmployeesLoading || cashReceiptLoading}
                     value={cashReceiptDate}
                     onChange={(event) => {
                       const settlementDate = event.target.value;
@@ -1406,6 +1448,7 @@ export default function BankReceiptsPage() {
                   min={1}
                   max={cashReceiptRemaining ?? undefined}
                   step={1}
+                  disabled={cashReceiptEmployeesLoading || cashReceiptLoading}
                   value={cashReceiptAmount}
                   onChange={(event) => setCashReceiptAmount(event.target.value === "" ? "" : Number(event.target.value))}
                   placeholder="Nhập số tiền nhận"

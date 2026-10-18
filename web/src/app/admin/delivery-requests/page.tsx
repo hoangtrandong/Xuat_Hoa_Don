@@ -8,9 +8,9 @@ import StatCard from "@/components/ui/StatCard";
 import DeliveryRequestExcelCreate from "@/components/delivery-requests/DeliveryRequestExcelCreate";
 import DeliverySettlementModal from "@/components/delivery-requests/DeliverySettlementModal";
 import DeliveryDispatchPrintModal from "@/components/delivery-requests/DeliveryDispatchPrintModal";
-import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload, CreditCard, Printer, RotateCcw } from "lucide-react";
+import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload, Printer, RotateCcw } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
-import { splitCartons, formatNumber, formatDateTime, formatDateKey } from "@/lib/format";
+import { splitCartons, formatDateTime, formatDateKey } from "@/lib/format";
 
 
 type Item = {
@@ -23,8 +23,22 @@ type Item = {
   cartons?: number;
   loose_boxes?: number;
   requested_quantity_raw: string | null;
+  employee_allocations?: Record<string, unknown> | null;
 };
 type EmployeeDebtSummary = { employee_id: number | null; employee_code: string; employee_name: string | null; amount: number; };
+type DeliveryOrder = {
+  id: number;
+  order_date: string | null;
+  order_number: string;
+  employee_code: string;
+  employee_name: string | null;
+  customer_code: string | null;
+  customer_name: string | null;
+  amount: number;
+  payment_status: string;
+  payment_method: string | null;
+  note: string | null;
+};
 type StockPick = {
   lot_id: number | null;
   location_code: string | null;
@@ -62,6 +76,7 @@ type DeliveryRequest = {
   created_at: string;
   items: Item[];
   employee_summaries?: EmployeeDebtSummary[];
+  orders?: DeliveryOrder[];
   total_cartons?: number;
   total_loose_boxes?: number;
   total_quantity?: number;
@@ -105,6 +120,7 @@ export default function AdminDeliveryRequestsPage() {
   const [stockPlan, setStockPlan] = useState<StockPlanItem[] | null>(null); const [checkingStock, setCheckingStock] = useState(false);
   const [settlementRow, setSettlementRow] = useState<DeliveryRequest | null>(null);
   const [printRow, setPrintRow] = useState<DeliveryRequest | null>(null);
+  const [loadingPrint, setLoadingPrint] = useState(false);
   const [activeTab, setActiveTab] = useState<"list" | "create">(() => {
     if (typeof window === "undefined") return "list";
     return new URLSearchParams(window.location.search).get("tab") === "create" ? "create" : "list";
@@ -168,6 +184,23 @@ export default function AdminDeliveryRequestsPage() {
       setMessage("Đã hủy yêu cầu thành công."); setSelected(null); setEditing(false); setStockPlan(null);
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : "Lỗi khi hủy."); } finally { setLoading(false); }
+  }
+
+  async function openPrintPreview(request: DeliveryRequest) {
+    setLoadingPrint(true);
+    setError("");
+    try {
+      const response = await apiFetch(`${API_URL}/delivery-requests/${request.id}`);
+      const result = await response.json() as DeliveryRequest | { detail?: string };
+      if (!response.ok) {
+        throw new Error("detail" in result ? result.detail : "Không thể tải chi tiết phiếu để in.");
+      }
+      setPrintRow(result as DeliveryRequest);
+    } catch (printError) {
+      setError(printError instanceof Error ? printError.message : "Không thể tải chi tiết phiếu để in.");
+    } finally {
+      setLoadingPrint(false);
+    }
   }
 
   async function transition(action: "submit" | "receive" | "complete") {
@@ -539,12 +572,11 @@ export default function AdminDeliveryRequestsPage() {
                   </div>
                 )}
                 <button
-                  onClick={() => {
-                    setPrintRow(selected);
-                  }}
+                  onClick={() => void openPrintPreview(selected)}
+                  disabled={loadingPrint}
                   className="flex items-center justify-center gap-2 w-full rounded-lg bg-gray-900 hover:bg-gray-800 text-white py-2.5 text-sm font-semibold transition-colors shadow-xs mt-3"
                 >
-                  <Printer size={16} /> In Phiếu Bốc Xếp & Xuất Kho
+                  <Printer size={16} /> {loadingPrint ? "Đang tải chi tiết phiếu..." : "In Phiếu Bốc Xếp & Xuất Kho"}
                 </button>
                 {selected.status === "COMPLETED" && (
                   <button

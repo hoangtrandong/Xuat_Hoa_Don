@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, ChevronDown, ChevronRight, RefreshCw, Receipt, ShoppingBag, Truck, Package } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
@@ -168,10 +168,6 @@ export default function AdminDailySettlementsPage() {
   const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [employeeTab, setEmployeeTab] = useState<Record<string, "ORDERS" | "PRODUCTS">>({});
-  const [remittanceRow, setRemittanceRow] = useState<EmployeeDailySettlement | null>(null);
-  const [remittanceAmount, setRemittanceAmount] = useState("");
-  const [remittanceError, setRemittanceError] = useState("");
-  const [savingRemittance, setSavingRemittance] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -221,38 +217,6 @@ export default function AdminDailySettlementsPage() {
     return matchesEmployee && matchesStatus;
   }), [rows, employeeFilter, statusFilter]);
 
-  const submitRemittance = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!remittanceRow?.employee_id) {
-      setRemittanceError("Không xác định được nhân viên của quyết toán ngày.");
-      return;
-    }
-    setSavingRemittance(true);
-    setRemittanceError("");
-    try {
-      const response = await apiFetch(`${API_URL}/cash-receipts`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          party_type: "EMPLOYEE",
-          party_id: remittanceRow.employee_id,
-          settlement_date: remittanceRow.settlement_date,
-          amount: Number(remittanceAmount),
-          note: `Nộp tiền mặt quyết toán ngày ${remittanceRow.settlement_date}`,
-        }),
-      });
-      const payload = await response.json() as { detail?: string };
-      if (!response.ok) throw new Error(payload.detail || "Không thể ghi nhận tiền nộp.");
-      setRemittanceRow(null);
-      setRemittanceAmount("");
-      await loadData();
-    } catch (submitError) {
-      setRemittanceError(submitError instanceof Error ? submitError.message : "Không thể ghi nhận tiền nộp.");
-    } finally {
-      setSavingRemittance(false);
-    }
-  };
-
   function toggleRow(row: EmployeeDailySettlement) {
     const key = `${row.settlement_date}:${row.employee_id ?? row.employee_code}`;
     setExpandedRows((current) => {
@@ -288,7 +252,7 @@ export default function AdminDailySettlementsPage() {
               className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 shadow-sm"
             >
               <Receipt size={16} />
-              Thu & Phân bổ chuyển khoản
+              Sổ thu & Phân bổ
             </Link>
           </div>
         }
@@ -296,7 +260,8 @@ export default function AdminDailySettlementsPage() {
 
       <div className="rounded-xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-900">
         Bảng chính tổng hợp công nợ theo ngày và nhân viên. Chọn <strong>Chi tiết</strong> để xem khoản thu,
-        hàng trả, tiền mặt đã nộp và các đơn được gom theo cửa hàng qua nhiều chuyến.
+        hàng trả, tiền khách trả nhân viên và tiền nhân viên nộp công ty. Ghi nhận tiền nộp tại sổ thu để
+        lịch sử và số dư quyết toán được cập nhật đồng nhất.
       </div>
 
       {error && (
@@ -344,10 +309,10 @@ export default function AdminDailySettlementsPage() {
               <th className="px-4 py-3 text-left">Nhân viên</th>
               <th className="px-4 py-3 text-right">Tổng công nợ</th>
               <th className="px-4 py-3 text-right">Chuyển khoản</th>
-              <th className="px-4 py-3 text-right">Tiền mặt đã nộp</th>
+              <th className="px-4 py-3 text-right">NV nộp công ty</th>
               <th className="px-4 py-3 text-right">Hàng trả</th>
               <th className="px-4 py-3 text-right">Còn công nợ NV</th>
-              <th className="px-4 py-3 text-center">Xác nhận tiền mặt</th>
+              <th className="px-4 py-3 text-center">Nộp tiền mặt</th>
               <th className="px-4 py-3 text-center">Chi tiết</th>
             </tr>
           </thead>
@@ -375,18 +340,16 @@ export default function AdminDailySettlementsPage() {
                     <td className="px-4 py-3 text-right tabular-nums text-rose-700 font-medium">{formatVND(row.returned)}</td>
                     <td className="px-4 py-3 text-right tabular-nums text-gray-600 font-medium">{formatVND(row.remaining_employee_debt)}</td>
                     <td className="px-4 py-3 text-center">
-                      <button
-                        type="button"
-                        disabled={!row.employee_id || row.cash_pending_remittance <= 0}
-                        onClick={() => {
-                          setRemittanceError("");
-                          setRemittanceRow(row);
-                          setRemittanceAmount(String(row.cash_pending_remittance));
-                        }}
-                        className="whitespace-nowrap rounded-md border border-emerald-200 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Ghi nhận nộp
-                      </button>
+                      {row.employee_id && row.cash_pending_remittance > 0 ? (
+                        <Link
+                          href={`/debt/bank-receipts?openCashReceipt=1&employeeId=${row.employee_id}&settlementDate=${encodeURIComponent(row.settlement_date)}`}
+                          className="inline-flex whitespace-nowrap rounded-md border border-emerald-200 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                        >
+                          Ghi nhận nộp
+                        </Link>
+                      ) : (
+                        <span className="text-xs text-gray-400">Đã nộp đủ</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <button
@@ -718,56 +681,6 @@ export default function AdminDailySettlementsPage() {
         </table>
       </div>
 
-      {remittanceRow && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" role="presentation">
-          <form
-            onSubmit={submitRemittance}
-            className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="cash-remittance-title"
-          >
-            <h2 id="cash-remittance-title" className="text-lg font-bold text-gray-900">Ghi nhận nộp tiền mặt</h2>
-            <p className="mt-1 text-sm text-gray-600">
-              {remittanceRow.employee_name || remittanceRow.employee_code} · Ngày {formatDate(remittanceRow.settlement_date)}
-              {" "}· Tiền mặt còn phải nộp {formatVND(remittanceRow.cash_pending_remittance)}
-            </p>
-            <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="remittance-amount">
-              Số tiền nộp
-            </label>
-            <input
-              id="remittance-amount"
-              type="number"
-              min="1"
-              max={remittanceRow.cash_pending_remittance}
-              step="1"
-              required
-              autoFocus
-              value={remittanceAmount}
-              onChange={(event) => setRemittanceAmount(event.target.value)}
-              className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-right font-semibold tabular-nums focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-            />
-            {remittanceError && <p className="mt-3 text-sm text-red-600" role="alert">{remittanceError}</p>}
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                disabled={savingRemittance}
-                onClick={() => setRemittanceRow(null)}
-                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-              >
-                Hủy
-              </button>
-              <button
-                type="submit"
-                disabled={savingRemittance || Number(remittanceAmount) <= 0}
-                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {savingRemittance ? "Đang lưu..." : "Xác nhận nộp"}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
     </div>
   );
 }

@@ -12,6 +12,11 @@ type CompanyAssignment = { id: number; company_id: number; company_name: string;
 type ProductCompanyRow = { product_group_id: number; group_name: string; representative_sku: string; representative_name: string; member_skus: string[]; member_names: string[]; companies: CompanyAssignment[] };
 type Company = { id: number; code: string; name: string; status: string };
 
+function uniqueValues(values: Array<string | null | undefined>): string[] {
+  const unique = [...new Set(values.map((value) => value?.trim()).filter((value): value is string => !!value))];
+  return unique.length ? unique : ["—"];
+}
+
 export default function ProductCompanyManagementPage() {
   const [rows, setRows] = useState<ProductCompanyRow[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -114,8 +119,8 @@ export default function ProductCompanyManagementPage() {
     { key: "member_skus", title: "Mã SKU", render: (_, row) => <div className="space-y-1">{(row.member_skus ?? []).map((sku) => <p key={sku}>{sku}</p>)}</div> },
     { key: "member_names", title: "Tên sản phẩm", render: (_, row) => <div className="space-y-1">{(row.member_names ?? []).map((name, index) => <p key={`${name}-${index}`}>{name}</p>)}</div> },
     { key: "companies", title: "Công ty quản lý", render: (_, row) => row.companies.length ? row.companies.map((company) => company.company_name).join(", ") : <span className="text-gray-400">Chưa gán</span> },
-    { key: "distributor_sku", title: "Mã NPP", render: (_, row) => row.companies.length ? <div className="space-y-1">{row.companies.map((company) => <p key={company.company_id} className="font-medium text-emerald-700">{company.distributor_sku ?? "—"}</p>)}</div> : <span className="text-gray-400">—</span> },
-    { key: "distributor_name", title: "Tên sản phẩm NPP", render: (_, row) => row.companies.length ? <div className="space-y-1">{row.companies.map((company) => <p key={company.company_id}>{company.distributor_name ?? "—"}</p>)}</div> : <span className="text-gray-400">—</span> },
+    { key: "distributor_sku", title: "Mã NPP", render: (_, row) => row.companies.length ? <div className="space-y-1">{uniqueValues(row.companies.map((company) => company.distributor_sku)).map((value) => <p key={value} className="font-medium text-emerald-700">{value}</p>)}</div> : <span className="text-gray-400">—</span> },
+    { key: "distributor_name", title: "Tên sản phẩm NPP", render: (_, row) => row.companies.length ? <div className="space-y-1">{uniqueValues(row.companies.map((company) => company.distributor_name)).map((value) => <p key={value}>{value}</p>)}</div> : <span className="text-gray-400">—</span> },
     { key: "company_count", title: "Số công ty", render: (_, row) => row.companies.length },
     { key: "id", title: "Thao tác", render: (_, row) => <button onClick={() => { setSelected(row); setError(""); setMessage(""); }} className="inline-flex items-center gap-1 rounded-lg bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-100"><Link2 size={14} />Quản lý</button> },
   ];

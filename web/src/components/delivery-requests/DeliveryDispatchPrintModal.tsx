@@ -129,7 +129,7 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
               <div className="text-right">
                 <p className="font-mono text-base font-bold text-sky-800">{request.code}</p>
                 <p className="text-xs text-gray-500 mt-1">
-                  Ngày lập: {new Date(request.created_at).toLocaleDateString("vi-VN")}
+                  Ngày lập: {formatDate(request.created_at)}
                 </p>
                 <p className="text-xs text-gray-500">
                   Người lập: <span className="font-medium text-gray-700">{request.created_by || "Sales Admin"}</span>

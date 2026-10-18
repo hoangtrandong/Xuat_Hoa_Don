@@ -249,10 +249,43 @@ def create_cash_receipt(
     return receipt
 
 
-def list_cash_receipts(db: Session, limit: int = 50) -> list[CashReceipt]:
-    return db.scalars(
+def list_cash_receipts(db: Session, limit: int = 50) -> list[dict]:
+    receipts = db.scalars(
         select(CashReceipt).order_by(CashReceipt.created_at.desc()).limit(limit)
     ).all()
+    employee_ids = {
+        receipt.party_id for receipt in receipts if receipt.party_type == "EMPLOYEE"
+    }
+    store_ids = {
+        receipt.party_id for receipt in receipts if receipt.party_type == "STORE"
+    }
+    employees = {
+        employee.id: employee
+        for employee in db.scalars(select(Employee).where(Employee.id.in_(employee_ids))).all()
+    } if employee_ids else {}
+    stores = {
+        store.id: store
+        for store in db.scalars(select(Store).where(Store.id.in_(store_ids))).all()
+    } if store_ids else {}
+
+    result = []
+    for receipt in receipts:
+        party = employees.get(receipt.party_id) if receipt.party_type == "EMPLOYEE" else stores.get(receipt.party_id)
+        result.append({
+            "id": receipt.id,
+            "code": receipt.code,
+            "party_type": receipt.party_type,
+            "party_id": receipt.party_id,
+            "party_code": party.code if party else None,
+            "party_name": party.name if party else None,
+            "settlement_date": receipt.settlement_date,
+            "amount": receipt.amount,
+            "receipt_date": receipt.receipt_date,
+            "note": receipt.note,
+            "created_by": receipt.created_by,
+            "created_at": receipt.created_at,
+        })
+    return result
 
 
 def create_debt_transfer(

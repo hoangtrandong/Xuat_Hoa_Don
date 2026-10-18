@@ -84,14 +84,14 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
             DeliveryRequestEmployeeSummary(
                 employee_id=emp1.id,
                 employee_code=emp1.code,
-                employee_name=emp1.name,
+                employee_name=None,
                 order_count=1,
                 amount=8000000.0,
             ),
             DeliveryRequestEmployeeSummary(
                 employee_id=emp2.id,
                 employee_code=emp2.code,
-                employee_name=emp2.name,
+                employee_name=None,
                 order_count=1,
                 amount=12000000.0,
             ),
@@ -104,7 +104,7 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
                 customer_name=cust.name,
                 employee_id=emp1.id,
                 employee_code=emp1.code,
-                employee_name=emp1.name,
+                employee_name=None,
                 amount=8000000.0,
                 payment_status="UNPAID",
             ),
@@ -115,7 +115,7 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
                 customer_name=cust.name,
                 employee_id=emp2.id,
                 employee_code=emp2.code,
-                employee_name=emp2.name,
+                employee_name=None,
                 amount=12000000.0,
                 payment_status="UNPAID",
             ),
@@ -129,6 +129,10 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
     assert len(allocatable_days) == 2
     assert allocatable_days[0]["settlement_date"] == date(2026, 10, 14)
     assert {row["employee_code"] for row in allocatable_days} == {"NV001", "NV002"}
+    assert {row["employee_name"] for row in allocatable_days} == {
+        emp1.name,
+        emp2.name,
+    }
     assert {row["remaining_employee_debt"] for row in allocatable_days} == {
         8000000.0,
         12000000.0,
@@ -140,7 +144,17 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
     assert allocatable[0]["remaining_amount"] == 8000000.0
     assert allocatable[1]["remaining_amount"] == 12000000.0
 
-    # 2. Store transfers 20,000,000 VND in one lump sum
+    session.add(DebtLedgerEntry(
+        party_type="STORE",
+        party_id=store.id,
+        entry_type="TRANSFER_IN",
+        amount=4000000.0,
+        source_type="MANUAL",
+        source_code="STORE-DEBT-COMBINED",
+    ))
+    session.commit()
+
+    # 2. Allocate one bank transfer to two employees and the store.
     receipt = create_bank_receipt(
         session,
         BankReceiptCreate(
@@ -148,13 +162,13 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
             ref_number="FT261014-9999",
             transaction_date=datetime(2026, 10, 14, 11, 30),
             store_id=store.id,
-            amount=20000000.0,
+            amount=24000000.0,
             description="CH HOA MAI THANH TOAN TIEN SUA NGAY 14/10",
         ),
         created_by="ketoan_lan",
     )
     assert receipt.status == "UNALLOCATED"
-    assert float(receipt.unallocated_amount) == 20000000.0
+    assert float(receipt.unallocated_amount) == 24000000.0
 
     # 3. Accountant allocates by employee and settlement date.
     updated_receipt = allocate_bank_receipt(
@@ -171,24 +185,33 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
                 settlement_date=date(2026, 10, 14),
                 amount=12000000.0,
             ),
+            PaymentAllocationItemCreate(
+                store_id=store.id,
+                amount=4000000.0,
+            ),
         ],
         created_by="ketoan_lan",
     )
 
     assert updated_receipt.status == "FULLY_ALLOCATED"
-    assert float(updated_receipt.allocated_amount) == 20000000.0
+    assert float(updated_receipt.allocated_amount) == 24000000.0
     assert float(updated_receipt.unallocated_amount) == 0.0
-    assert len(updated_receipt.allocations) == 2
+    assert len(updated_receipt.allocations) == 3
 
     # Employee/day allocations do not require finding or marking individual orders.
     assert all(allocation.order_id is None for allocation in updated_receipt.allocations)
     assert {
         (allocation.employee_id, allocation.settlement_date)
         for allocation in updated_receipt.allocations
+        if allocation.employee_id is not None
     } == {
         (emp1.id, date(2026, 10, 14)),
         (emp2.id, date(2026, 10, 14)),
     }
+    assert next(
+        allocation for allocation in updated_receipt.allocations
+        if allocation.store_id == store.id and allocation.employee_id is None
+    ).amount == 4000000.0
 
     # 5. Verify DebtLedgerEntry generated for both employees
     ledger_emp1 = session.scalars(
@@ -210,6 +233,15 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
     ).all()
     assert len(ledger_emp2) == 1
     assert float(ledger_emp2[0].amount) == -12000000.0
+    store_ledger = session.scalars(
+        select(DebtLedgerEntry).where(
+            DebtLedgerEntry.party_type == "STORE",
+            DebtLedgerEntry.party_id == store.id,
+            DebtLedgerEntry.source_type == "PAYMENT_ALLOCATION",
+        )
+    ).all()
+    assert len(store_ledger) == 1
+    assert float(store_ledger[0].amount) == -4000000.0
 
     # 6. Verify Daily Settlement for that date
     settlements = list_daily_settlements(
@@ -218,6 +250,7 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
         to_date=date(2026, 10, 14),
     )
     assert len(settlements) == 2
+
     row_emp1 = next(r for r in settlements if r["employee_code"] == "NV001")
     row_emp2 = next(r for r in settlements if r["employee_code"] == "NV002")
 
@@ -248,6 +281,25 @@ def test_bank_receipt_multi_employee_allocation_and_daily_settlement(db):
                 )
             ],
         )
+
+
+def test_statement_import_reference_prevents_duplicate_receipts(db):
+    session, _, _, store, _, _, _ = db
+    payload = BankReceiptCreate(
+        bank_name="VietinBank",
+        account_number="101871845954",
+        ref_number="STATEMENT-UNIQUE-ROW",
+        transaction_date=datetime(2026, 10, 17, 7, 14, 55),
+        store_id=store.id,
+        amount=5000000,
+        description="DANG THI CHUNG Chuyen tien (0973732720)",
+    )
+
+    create_bank_receipt(session, payload, created_by="accountant")
+    with pytest.raises(ValueError, match="đã được nhập trước đó"):
+        create_bank_receipt(session, payload, created_by="accountant")
+
+    assert session.query(BankReceipt).count() == 1
 
 
 def test_partial_allocation_and_cancellation(db):

@@ -15,6 +15,7 @@ import {
   PackageCheck,
 } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
+import { formatDateTime } from "@/lib/format";
 
 type DeliveryOrder = {
   id: number;
@@ -536,7 +537,7 @@ export default function DeliverySettlementModal({
                         <tr key={ret.id} className="hover:bg-gray-50/60">
                           <td className="px-4 py-3 font-mono font-bold text-rose-700">{ret.code}</td>
                           <td className="px-4 py-3 text-gray-500">
-                            {new Date(ret.created_at).toLocaleString("vi-VN")}
+                            {formatDateTime(ret.created_at)}
                           </td>
                           <td className="px-4 py-3">
                             <span className="font-semibold text-gray-900">{ret.employee_code}</span>

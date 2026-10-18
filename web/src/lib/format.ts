@@ -1,5 +1,32 @@
 // src/lib/format.ts
 
+const VIETNAM_TIME_ZONE = "Asia/Ho_Chi_Minh";
+
+function parseDateTime(value: string | number | Date): Date {
+  if (typeof value !== "string") return new Date(value);
+  const normalizedValue = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(value)
+    && !/(Z|[+-]\d{2}:?\d{2})$/i.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  return new Date(normalizedValue);
+}
+
+function dateParts(value: string | number | Date): Record<string, string> {
+  return Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: VIETNAM_TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(parseDateTime(value)).map(({ type, value }) => [type, value]),
+  );
+}
+
+export function formatDateKey(value: string | number | Date): string {
+  const parts = dateParts(value);
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
 export function formatVND(value: number): string {
   if (value >= 1_000_000_000) {
     return `${(value / 1_000_000_000).toFixed(1)} Tỷ`;
@@ -26,17 +53,30 @@ export function formatPercent(value: number): string {
 }
 
 export function formatDate(iso: string | number | Date): string {
-  const d = new Date(iso);
+  if (typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    const [year, month, day] = iso.split("-");
+    return `${day}/${month}/${year}`;
+  }
+  const d = parseDateTime(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" });
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: VIETNAM_TIME_ZONE,
+  }).format(d);
 }
 
 export function formatDateTime(iso: string | number | Date): string {
-  const d = new Date(iso);
+  const d = parseDateTime(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  const date = d.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" });
-  const time = d.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
-  return `${date} ${time}`;
+  const time = new Intl.DateTimeFormat("vi-VN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: VIETNAM_TIME_ZONE,
+  }).format(d);
+  return `${formatDate(d)} ${time}`;
 }
 
 export function getInitials(name: string): string {

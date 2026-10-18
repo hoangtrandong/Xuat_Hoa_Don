@@ -562,7 +562,8 @@ def test_daily_settlement_groups_completed_requests_by_vietnam_business_date(db)
     session.commit()
 
     from app.crud import delivery_request as crud_obj
-    from app.crud.debt_ledger import create_cash_receipt
+    from app.crud.debt_ledger import create_cash_receipt, list_cash_receipts
+    from app.schemas.debt_ledger import CashReceiptOut
 
     assert hasattr(crud_obj, "list_daily_settlements")
     results = crud_obj.list_daily_settlements(
@@ -623,6 +624,10 @@ def test_daily_settlement_groups_completed_requests_by_vietnam_business_date(db)
         note="Nộp tiền mặt quyết toán ngày",
     )
     assert receipt.settlement_date == date(2026, 10, 13)
+    listed_receipt = list_cash_receipts(session)[0]
+    assert listed_receipt["party_code"] == employee.code
+    assert listed_receipt["party_name"] == employee.name
+    CashReceiptOut.model_validate(listed_receipt)
     assert session.scalar(
         select(func.count(DebtLedgerEntry.id)).where(
             DebtLedgerEntry.source_type == "CASH_RECEIPT",

@@ -10,7 +10,7 @@ import DeliverySettlementModal from "@/components/delivery-requests/DeliverySett
 import DeliveryDispatchPrintModal from "@/components/delivery-requests/DeliveryDispatchPrintModal";
 import { ClipboardList, Pencil, X, PackageSearch, CheckCircle2, AlertTriangle, FileDown, Send, Truck, Ban, Upload, CreditCard, Printer, RotateCcw } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
-import { splitCartons, formatNumber } from "@/lib/format";
+import { splitCartons, formatNumber, formatDateTime, formatDateKey } from "@/lib/format";
 
 
 type Item = {
@@ -241,7 +241,7 @@ export default function AdminDeliveryRequestsPage() {
 
   const filteredRows = useMemo(() => enrichedRows.filter((r) => {
     if (statusFilter !== "ALL" && r.status !== statusFilter) return false;
-    if (dateFilter && new Date(r.created_at).toISOString().split("T")[0] !== dateFilter) return false;
+    if (dateFilter && formatDateKey(r.created_at) !== dateFilter) return false;
     return true;
   }), [enrichedRows, statusFilter, dateFilter]);
 
@@ -255,7 +255,7 @@ export default function AdminDeliveryRequestsPage() {
       row.warehouse_id,
       row.created_by ?? "",
       statusLabel[row.status] ?? row.status,
-      new Date(row.created_at).toLocaleString("vi-VN"),
+      formatDateTime(row.created_at),
       row.items.length,
       row.totalQuantity,
       row.note ?? "",
@@ -294,7 +294,7 @@ export default function AdminDeliveryRequestsPage() {
       ),
     },
     { key: "created_by", title: "Người tạo", render: (val) => <span className="text-gray-600">{val ? String(val) : "—"}</span> },
-    { key: "created_at", title: "Ngày tạo", sortable: true, render: (_, row) => <span className="text-gray-600 text-xs">{new Date(row.created_at).toLocaleString("vi-VN")}</span> },
+    { key: "created_at", title: "Ngày tạo", sortable: true, render: (_, row) => <span className="text-gray-600 text-xs">{formatDateTime(row.created_at)}</span> },
     { key: "status", title: "Trạng thái", sortable: true, render: (val) => <Badge variant={statusVariant[String(val)] ?? "default"}>{statusLabel[String(val)] ?? String(val)}</Badge> },
     {
       key: "actions",
@@ -421,7 +421,7 @@ export default function AdminDeliveryRequestsPage() {
 
                 <div className="rounded-xl bg-gray-50 px-4 py-3 space-y-2">
                   <div className="flex justify-between text-sm"><span className="text-gray-400">Người tạo</span><span className="text-gray-700 font-medium">{selected.created_by || "—"}</span></div>
-                  <div className="flex justify-between text-sm"><span className="text-gray-400">Ngày tạo</span><span className="text-gray-700">{new Date(selected.created_at).toLocaleString("vi-VN")}</span></div>
+                  <div className="flex justify-between text-sm"><span className="text-gray-400">Ngày tạo</span><span className="text-gray-700">{formatDateTime(selected.created_at)}</span></div>
                   {selected.note && <div className="flex justify-between text-sm"><span className="text-gray-400">Ghi chú</span><span className="text-gray-700 text-right max-w-[60%]">{selected.note}</span></div>}
                 </div>
 
@@ -440,7 +440,7 @@ export default function AdminDeliveryRequestsPage() {
                         </div>
                         <div className="flex-1">
                           <p className={`text-sm ${step.done ? "text-gray-800 font-medium" : "text-gray-400"}`}>{step.label}</p>
-                          {step.time && <p className="text-xs text-gray-400">{new Date(step.time).toLocaleString("vi-VN")}</p>}
+                          {step.time && <p className="text-xs text-gray-400">{formatDateTime(step.time)}</p>}
                         </div>
                       </div>
                     ))}

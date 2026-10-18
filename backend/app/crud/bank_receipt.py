@@ -15,6 +15,10 @@ from app.schemas.bank_receipt import (
 )
 
 
+class DuplicateBankReceiptError(ValueError):
+    """Raised when an imported bank statement transaction already exists."""
+
+
 def _code(prefix: str) -> str:
     return f"{prefix}-{datetime.utcnow():%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}"
 
@@ -37,6 +41,16 @@ def create_bank_receipt(
         cust = db.get(Customer, payload.customer_id)
         if not cust:
             raise ValueError(f"Không tìm thấy Khách hàng ID {payload.customer_id}.")
+
+    if payload.account_number and payload.ref_number:
+        duplicate = db.scalar(
+            select(BankReceipt.id).where(
+                BankReceipt.account_number == payload.account_number,
+                BankReceipt.ref_number == payload.ref_number,
+            )
+        )
+        if duplicate:
+            raise DuplicateBankReceiptError("Giao dịch sao kê này đã được nhập trước đó.")
 
     receipt = BankReceipt(
         code=_code("BR"),
@@ -208,17 +222,27 @@ def get_allocatable_employee_days_for_store(
     utc_offset = timedelta(hours=7)
     from_date = (min_completed_at.replace(tzinfo=timezone.utc) + utc_offset).date()
     to_date = (max_completed_at.replace(tzinfo=timezone.utc) + utc_offset).date()
+    settlements = list_daily_settlements(db, from_date, to_date)
+    employee_ids = {
+        row["employee_id"]
+        for row in settlements
+        if row["employee_id"] is not None and row["remaining_employee_debt"] > 0.01
+    }
+    employee_names = {
+        employee.id: employee.name
+        for employee in db.scalars(select(Employee).where(Employee.id.in_(employee_ids))).all()
+    } if employee_ids else {}
     return [
         {
             "employee_id": row["employee_id"],
             "employee_code": row["employee_code"],
-            "employee_name": row["employee_name"],
+            "employee_name": row["employee_name"] or employee_names.get(row["employee_id"]),
             "settlement_date": row["settlement_date"],
             "allocated_amount": row["allocated_amount"],
             "paid_bank": row["paid_bank"],
             "remaining_employee_debt": row["remaining_employee_debt"],
         }
-        for row in list_daily_settlements(db, from_date, to_date)
+        for row in settlements
         if row["employee_id"] is not None
         and row["remaining_employee_debt"] > 0.01
     ]

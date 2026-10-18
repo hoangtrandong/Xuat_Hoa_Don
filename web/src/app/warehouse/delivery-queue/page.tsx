@@ -10,7 +10,7 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { API_URL, apiFetch } from "@/lib/api";
-import { splitCartons, formatNumber } from "@/lib/format";
+import { splitCartons, formatNumber, formatDateTime } from "@/lib/format";
 import DeliveryDispatchPrintModal from "@/components/delivery-requests/DeliveryDispatchPrintModal";
 
 type DeliveryRequest = {
@@ -188,7 +188,7 @@ export default function DeliveryQueuePage() {
       sortable: true,
       render: (_, row) => (
         <span className="text-gray-600 text-xs">
-          {row.submitted_at ? new Date(row.submitted_at).toLocaleString("vi-VN") : "—"}
+          {row.submitted_at ? formatDateTime(row.submitted_at) : "—"}
         </span>
       ),
     },

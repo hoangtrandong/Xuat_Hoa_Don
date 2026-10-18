@@ -50,13 +50,13 @@ export default function DebtTransfersPage() {
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const partyOptions = useMemo(() => {
-    const entries: Array<[string, string]> = [];
+  const partiesByKey = useMemo(() => {
+    const entries: Array<[string, DebtParty]> = [];
     for (const employee of employees) {
-      entries.push([partyMapKey("EMPLOYEE", employee.id), `Nhân viên · ${employee.code} - ${employee.name}`]);
+      entries.push([partyMapKey("EMPLOYEE", employee.id), employee]);
     }
     for (const store of stores) {
-      entries.push([partyMapKey("STORE", store.id), `Cửa hàng · ${store.code} - ${store.name}`]);
+      entries.push([partyMapKey("STORE", store.id), store]);
     }
     return new Map(entries);
   }, [employees, stores]);
@@ -94,7 +94,8 @@ export default function DebtTransfersPage() {
 
   async function handleCreateTransfer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!fromPartyId || !toPartyId || Number(amount) <= 0) {
+    const numericAmount = Number(amount.replace(/\D/g, ""));
+    if (!fromPartyId || !toPartyId || numericAmount <= 0) {
       setError("Vui lòng chọn đủ bên chuyển, bên nhận và số tiền hợp lệ.");
       return;
     }
@@ -110,13 +111,13 @@ export default function DebtTransfersPage() {
           from_party_id: Number(fromPartyId),
           to_party_type: toPartyType,
           to_party_id: Number(toPartyId),
-          amount: Number(amount),
+          amount: numericAmount,
           reason: reason.trim() || undefined,
         }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "Không thể tạo phiếu chuyển công nợ.");
-      setMessage(`Đã chuyển công nợ ${formatVND(Number(amount))}; số dư hai bên đã được cập nhật.`);
+      setMessage(`Đã chuyển công nợ ${formatVND(numericAmount)}; số dư hai bên đã được cập nhật.`);
       setModalOpen(false);
       setFromPartyId("");
       setToPartyId("");
@@ -201,23 +202,39 @@ export default function DebtTransfersPage() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-500">
             <tr>
-              <th className="px-4 py-3 text-left">Mã Chuyển</th>
-              <th className="px-4 py-3 text-left">Mã Nhận</th>
+              <th className="px-4 py-3 text-left">Loại chuyển</th>
+              <th className="px-4 py-3 text-left">Mã chuyển</th>
+              <th className="px-4 py-3 text-left">Tên bên chuyển</th>
+              <th className="px-4 py-3 text-left">Loại nhận</th>
+              <th className="px-4 py-3 text-left">Mã nhận</th>
+              <th className="px-4 py-3 text-left">Tên bên nhận</th>
               <th className="px-4 py-3 text-right">Số tiền</th>
               <th className="px-4 py-3 text-left">Lý do</th>
               <th className="px-4 py-3 text-left">Thời gian</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {loading && <tr><td colSpan={5} className="px-4 py-10 text-center text-gray-500">Đang tải lịch sử chuyển công nợ...</td></tr>}
-            {!loading && transfers.length === 0 && <tr><td colSpan={5} className="px-4 py-10 text-center text-gray-500">Chưa có giao dịch chuyển công nợ.</td></tr>}
+            {loading && <tr><td colSpan={9} className="px-4 py-10 text-center text-gray-500">Đang tải lịch sử chuyển công nợ...</td></tr>}
+            {!loading && transfers.length === 0 && <tr><td colSpan={9} className="px-4 py-10 text-center text-gray-500">Chưa có giao dịch chuyển công nợ.</td></tr>}
             {!loading && transfers.map((transfer) => (
               <tr key={transfer.id} className="hover:bg-gray-50">
-                <td className="px-4 py-3 font-mono font-medium text-gray-900">
-                  {partyOptions.get(partyMapKey(transfer.from_party_type, transfer.from_party_id)) ?? `#${transfer.from_party_id}`}
+                <td className="px-4 py-3 text-gray-600">
+                  {partyLabel(transfer.from_party_type)}
                 </td>
                 <td className="px-4 py-3 font-mono font-medium text-gray-900">
-                  {partyOptions.get(partyMapKey(transfer.to_party_type, transfer.to_party_id)) ?? `#${transfer.to_party_id}`}
+                  {partiesByKey.get(partyMapKey(transfer.from_party_type, transfer.from_party_id))?.code ?? `#${transfer.from_party_id}`}
+                </td>
+                <td className="px-4 py-3 text-gray-900">
+                  {partiesByKey.get(partyMapKey(transfer.from_party_type, transfer.from_party_id))?.name ?? "—"}
+                </td>
+                <td className="px-4 py-3 text-gray-600">
+                  {partyLabel(transfer.to_party_type)}
+                </td>
+                <td className="px-4 py-3 font-mono font-medium text-gray-900">
+                  {partiesByKey.get(partyMapKey(transfer.to_party_type, transfer.to_party_id))?.code ?? `#${transfer.to_party_id}`}
+                </td>
+                <td className="px-4 py-3 text-gray-900">
+                  {partiesByKey.get(partyMapKey(transfer.to_party_type, transfer.to_party_id))?.name ?? "—"}
                 </td>
                 <td className="px-4 py-3 text-right font-semibold tabular-nums">{formatVND(transfer.amount)}</td>
                 <td className="px-4 py-3 text-gray-600">{transfer.reason || "—"}</td>
@@ -275,13 +292,16 @@ export default function DebtTransfersPage() {
               <label className="block text-sm font-medium text-gray-700">
                 Số tiền
                 <input
-                  type="number"
-                  min="1"
-                  step="1"
+                  type="text"
+                  inputMode="numeric"
                   required
                   value={amount}
-                  onChange={(event) => setAmount(event.target.value)}
+                  onChange={(event) => {
+                    const digits = event.target.value.replace(/\D/g, "");
+                    setAmount(digits ? Number(digits).toLocaleString("vi-VN") : "");
+                  }}
                   className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-right tabular-nums"
+                  placeholder="Ví dụ: 1.500.000"
                 />
               </label>
               <label className="block text-sm font-medium text-gray-700 sm:col-span-2">

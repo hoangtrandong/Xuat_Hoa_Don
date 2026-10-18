@@ -78,6 +78,8 @@ class CashReceiptOut(BaseModel):
     code: str
     party_type: str
     party_id: int
+    party_code: Optional[str] = None
+    party_name: Optional[str] = None
     settlement_date: Optional[date] = None
     amount: float
     receipt_date: datetime

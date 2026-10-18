@@ -6,7 +6,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, RefreshCw, Receipt, ShoppingB
 import PageHeader from "@/components/ui/PageHeader";
 import Badge from "@/components/ui/Badge";
 import { API_URL, apiFetch } from "@/lib/api";
-import { formatVND } from "@/lib/format";
+import { formatVND, formatDate, formatDateTime } from "@/lib/format";
 
 interface SettlementProduct {
   product_id: number;
@@ -364,7 +364,7 @@ export default function AdminDailySettlementsPage() {
               return (
                 <Fragment key={key}>
                   <tr className="hover:bg-sky-50/50 transition-colors">
-                    <td className="px-4 py-3 whitespace-nowrap">{new Date(`${row.settlement_date}T00:00:00`).toLocaleDateString("vi-VN")}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">{formatDate(row.settlement_date)}</td>
                     <td className="px-4 py-3">
                       <p className="font-semibold text-gray-900">{row.employee_name || "—"}</p>
                       <p className="text-xs text-gray-500">{row.employee_code} · {storeGroups.length} cửa hàng · {row.orders_count} đơn</p>
@@ -439,7 +439,7 @@ export default function AdminDailySettlementsPage() {
                               </button>
                             </div>
                             <div className="text-xs text-gray-500 font-medium">
-                              Nhân viên: <strong className="text-gray-900">{row.employee_name || "—"}</strong> ({row.employee_code}) · Ngày {new Date(`${row.settlement_date}T00:00:00`).toLocaleDateString("vi-VN")}
+                              Nhân viên: <strong className="text-gray-900">{row.employee_name || "—"}</strong> ({row.employee_code}) · Ngày {formatDate(row.settlement_date)}
                             </div>
                             <div className="flex items-center gap-2">
                               <Badge variant={needsFollowUp ? "warning" : "success"}>{reconciliationLabel(row)}</Badge>
@@ -698,7 +698,7 @@ export default function AdminDailySettlementsPage() {
                                     <tr key={request.request_id} className="hover:bg-gray-50">
                                       <td className="px-3 py-2 font-semibold text-gray-800">{request.request_code}</td>
                                       <td className="px-3 py-2 text-gray-600">
-                                        {request.warehouse_name} · {new Date(request.completed_at).toLocaleString("vi-VN")}
+                                        {request.warehouse_name} · {formatDateTime(request.completed_at)}
                                       </td>
                                       <td className="px-3 py-2 text-right">{request.orders_count}</td>
                                     </tr>
@@ -729,7 +729,7 @@ export default function AdminDailySettlementsPage() {
           >
             <h2 id="cash-remittance-title" className="text-lg font-bold text-gray-900">Ghi nhận nộp tiền mặt</h2>
             <p className="mt-1 text-sm text-gray-600">
-              {remittanceRow.employee_name || remittanceRow.employee_code} · Ngày {new Date(`${remittanceRow.settlement_date}T00:00:00`).toLocaleDateString("vi-VN")}
+              {remittanceRow.employee_name || remittanceRow.employee_code} · Ngày {formatDate(remittanceRow.settlement_date)}
               {" "}· Tiền mặt còn phải nộp {formatVND(remittanceRow.cash_pending_remittance)}
             </p>
             <label className="mt-4 block text-sm font-medium text-gray-700" htmlFor="remittance-amount">

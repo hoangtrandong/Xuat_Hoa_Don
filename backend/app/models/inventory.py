@@ -261,11 +261,11 @@ class DeliveryRequestItem(Base):
 
     @property
     def sku(self) -> str:
-        return self.product.sku
+        return self.product.npp_code
 
     @property
     def product_name(self) -> str:
-        return self.product.name
+        return self.product.npp_name
 
     @property
     def boxes_per_carton(self) -> int:

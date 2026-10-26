@@ -153,11 +153,11 @@ class DeliveryReturnItem(Base):
 
     @property
     def sku(self) -> str | None:
-        return self.product.sku if self.product else None
+        return self.product.npp_code if self.product else None
 
     @property
     def product_name(self) -> str | None:
-        return self.product.name if self.product else None
+        return self.product.npp_name if self.product else None
 
     @property
     def location_code(self) -> str | None:

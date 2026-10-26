@@ -259,6 +259,49 @@ def _parse_orders_from_excel(content: bytes, db: Session) -> list[dict]:
     return parsed_orders
 
 
+def _group_items_by_npp(db: Session, items: list[dict]) -> list[dict]:
+    """Gộp các dòng SKU cùng nhóm thành một dòng theo mã NPP; chặn SKU chưa có nhóm."""
+    from app.crud.npp import NppDirectory
+    from app.models.product import Product
+
+    directory = NppDirectory(db)
+    grouped: dict[object, dict] = {}
+    unmapped: list[str] = []
+    for item in items:
+        product_id = item.get("product_id")
+        if not product_id:
+            grouped[("unknown", item.get("sku"))] = item
+            continue
+        canonical_id = directory.canonical(product_id)
+        if canonical_id is None:
+            product = db.get(Product, product_id)
+            unmapped.append(item.get("sku") or (product.sku if product else str(product_id)))
+            continue
+        existing = grouped.get(canonical_id)
+        if existing is None:
+            grouped[canonical_id] = {**item, "product_id": canonical_id}
+            continue
+        existing["quantity"] += item["quantity"]
+        existing["requested_quantity_raw"] = None
+        for code, allocation in (item.get("employee_allocations") or {}).items():
+            target = existing.setdefault("employee_allocations", None) or {}
+            current = target.get(code)
+            if current is None:
+                target[code] = dict(allocation)
+            else:
+                current["quantity"] += allocation["quantity"]
+                current["cartons"] = current.get("cartons", 0) + allocation.get("cartons", 0)
+                current["boxes"] = current.get("boxes", 0) + allocation.get("boxes", 0)
+                current["raw"] = f"{current.get('raw', '')} + {allocation.get('raw', '')}"
+            existing["employee_allocations"] = target
+    if unmapped:
+        raise ValueError(
+            "Các SKU chưa thuộc nhóm mã NPP, hãy gán mã NPP trước khi tải lên: "
+            + ", ".join(sorted(set(unmapped))[:20])
+        )
+    return list(grouped.values())
+
+
 @router.post("/upload", response_model=DeliveryPreviewResponse)
 def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | None = None,
                    db: Session = Depends(get_db)):
@@ -444,15 +487,21 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                 if quantity < 1:
                     raise ValueError(f"Dòng {number}: quantity phải lớn hơn 0.")
                 items.append({"product_id": product.id, "quantity": quantity})
+        items = _group_items_by_npp(db, items)
+        from app.crud.npp import NppDirectory
+        directory = NppDirectory(db)
         preview = []
         for item in items:
             product = db.get(Product, item["product_id"]) if item["product_id"] else None
             bpc = max(1, product.boxes_per_carton or 1) if product else (item.get("boxes_per_carton") or 1)
             qty = item["quantity"]
+            npp_code, npp_name = (
+                directory.label(product.id, product.sku, product.name) if product else (item["sku"], item["product_name"])
+            )
             preview.append(DeliveryPreviewItem(
                 product_id=product.id if product else 0,
-                sku=product.sku if product else item["sku"],
-                product_name=product.name if product else item["product_name"],
+                sku=npp_code,
+                product_name=npp_name,
                 quantity=qty,
                 boxes_per_carton=bpc,
                 cartons=qty // bpc,

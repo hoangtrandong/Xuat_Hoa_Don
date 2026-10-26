@@ -16,7 +16,7 @@ from app.models.inventory import (
     DeliveryRequest, DeliveryRequestEmployeeSummary, DeliveryRequestItem,
     DeliveryRequestOrder, Warehouse, WarehouseLocation,
 )
-from app.models.product import Product, ProductCategory, ProductUnit
+from app.models.product import Product, ProductCategory, ProductGroup, ProductGroupItem, ProductUnit
 from app.schemas.delivery_request import (
     DeliveryRequestCreate, DeliveryRequestItemCreate, DeliveryRequestEmployeeSummaryCreate,
     DeliveryRequestOrderCreate, BankStatementItem, DailyEmployeeSettlement,
@@ -54,6 +54,8 @@ def db():
             boxes_per_carton=12,
         )
         session.add(product)
+        session.flush()
+        session.add(ProductGroup(name=product.name, representative_product_id=product.id, items=[ProductGroupItem(product_id=product.id)]))
         session.commit()
 
         yield session, warehouse, product, employee

@@ -11,7 +11,7 @@ export const menuItems: MenuItem[] = [
   { key: "dashboard", label: "Dashboard", icon: "LayoutDashboard", href: "/" },
   {
     key: "products",
-    label: "Hàng hóa",
+    label: "Sản phẩm",
     icon: "Package",
     href: "/products",
     children: [
@@ -34,7 +34,7 @@ export const menuItems: MenuItem[] = [
   },
   {
     key: "sales",
-    label: "Bán hàng",
+    label: "Đơn Hàng DMS",
     icon: "ShoppingCart",
     href: "/sales",
     children: [

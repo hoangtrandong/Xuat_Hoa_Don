@@ -259,7 +259,7 @@ export default function ProductsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Danh sách Hàng hóa"
+        title="Danh sách Sản phẩm"
         actions={
           <div className="flex gap-2">
           <AuthenticatedDownloadLink href={`${API_URL}/products/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</AuthenticatedDownloadLink>

@@ -52,6 +52,21 @@ class Product(Base):
     company_links: Mapped[List["ProductCompany"]] = relationship(back_populates="product")
 
     @property
+    def npp_code(self) -> str:
+        group = self.group_items[0].group if self.group_items else None
+        if group:
+            for link in group.company_links:
+                if link.distributor_sku:
+                    return link.distributor_sku
+            return group.representative_product.sku
+        return self.sku
+
+    @property
+    def npp_name(self) -> str:
+        group = self.group_items[0].group if self.group_items else None
+        return group.name if group else self.name
+
+    @property
     def representative_product(self) -> "Product | None":
         if not self.group_items:
             return None

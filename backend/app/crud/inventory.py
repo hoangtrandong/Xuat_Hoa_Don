@@ -12,6 +12,7 @@ from app.models.inventory import (
 from app.models.product import Product, ProductUnit, ProductCategory
 from app.schemas.inventory import StockAdjust, StockLevel
 from app.crud.finance import record_debt_on_sales_export
+from app.crud.npp import NppDirectory, canonical_product_id
 
 
 def _generate_code() -> str:
@@ -135,9 +136,7 @@ def confirm_location_transfer(db: Session, transfer_id: int) -> InventoryTransfe
 
 
 def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -> InventoryTransaction:
-    product = db.get(Product, obj_in.product_id)
-    if not product:
-        raise ValueError("Không tìm thấy sản phẩm.")
+    obj_in = obj_in.model_copy(update={"product_id": canonical_product_id(db, obj_in.product_id)})
     if not db.get(Warehouse, obj_in.warehouse_id):
         raise ValueError("Không tìm thấy kho.")
     if obj_in.quantity < 1:
@@ -294,16 +293,21 @@ def get_stock_levels(
     stmt = stmt.order_by(Product.sku)
     result = db.execute(stmt)
 
+    directory = NppDirectory(db)
     levels = []
     for row in result.all():
+        # Chỉ SKU đại diện của nhóm đứng đại diện cho mã NPP trong tồn kho.
+        if directory.is_secondary(row.product_id):
+            continue
+        npp_code, npp_name = directory.label(row.product_id, row.product_code, row.product_name)
         on_hand = int(row.on_hand or 0)
         locked = int(row.locked_qty or 0)
         reserved = int(row.reserved_qty or 0)
         available = max(0, on_hand - locked - reserved)
         levels.append(StockLevel(
             product_id=row.product_id,
-            product_code=row.product_code,
-            product_name=row.product_name,
+            product_code=npp_code,
+            product_name=npp_name,
             category_id=row.category_id,
             category_name=row.category_name,
             category=row.category_name,

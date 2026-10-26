@@ -16,6 +16,7 @@ from app.models.inventory import (
 from app.models.finance import CashReceipt, DebtLedgerEntry, DeliveryReturn, DeliveryReturnItem, PaymentAllocation
 from app.models.employee import Employee
 from app.models.product import Product
+from app.crud.npp import NppDirectory, canonical_product_id, npp_eager_options
 
 from app.schemas.delivery_request import DeliveryRequestCreate, FefoPlanItem, FefoPlanPick
 
@@ -279,13 +280,12 @@ def create(
     employee_allocations = {}
     planned_allocations = {}
     for row in payload.items:
-        if not db.get(Product, row.product_id):
-            raise ValueError(f"Không tìm thấy sản phẩm {row.product_id}.")
+        row_product_id = canonical_product_id(db, row.product_id)
         if row.quantity <= 0 and not row.requested_quantity_raw:
             raise ValueError("Số lượng phải lớn hơn 0.")
-        merged[row.product_id] = merged.get(row.product_id, 0) + row.quantity
+        merged[row_product_id] = merged.get(row_product_id, 0) + row.quantity
         if row.employee_allocations:
-            target = employee_allocations.setdefault(row.product_id, {})
+            target = employee_allocations.setdefault(row_product_id, {})
             for employee, allocation in row.employee_allocations.items():
                 if isinstance(allocation, dict):
                     existing = target.setdefault(employee, {})
@@ -296,7 +296,7 @@ def create(
                 else:
                     target[employee] = target.get(employee, 0) + int(allocation)
         if row.planned_allocations:
-            planned_allocations.setdefault(row.product_id, []).extend(row.planned_allocations)
+            planned_allocations.setdefault(row_product_id, []).extend(row.planned_allocations)
     employee_summaries = _validated_employee_summaries(db, payload.employee_summaries)
     request = DeliveryRequest(
         code=_code(),
@@ -307,7 +307,9 @@ def create(
     try:
         db.add(request)
         db.flush()
-        raw_quantities = {row.product_id: row.requested_quantity_raw for row in payload.items}
+        raw_quantities = {
+            canonical_product_id(db, row.product_id): row.requested_quantity_raw for row in payload.items
+        }
         for product_id, quantity in merged.items():
             item = DeliveryRequestItem(request_id=request.id, product_id=product_id, quantity=quantity,
                                        requested_quantity_raw=raw_quantities.get(product_id),
@@ -361,20 +363,23 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
         raise ValueError("Không tìm thấy kho.")
     merged: dict[int, int] = {}
     for row in payload.items:
-        if not db.get(Product, row.product_id):
-            raise ValueError(f"Không tìm thấy sản phẩm {row.product_id}.")
+        row_product_id = canonical_product_id(db, row.product_id)
         if row.quantity <= 0 and not row.requested_quantity_raw:
             raise ValueError("Số lượng phải lớn hơn 0.")
-        merged[row.product_id] = merged.get(row.product_id, 0) + row.quantity
+        merged[row_product_id] = merged.get(row_product_id, 0) + row.quantity
 
     products = {
         product.id: product
         for product in db.scalars(select(Product).where(Product.id.in_(merged.keys()))).all()
     }
+    directory = NppDirectory(db)
     result: list[FefoPlanItem] = []
     for product_id, quantity in merged.items():
         product = products.get(product_id)
         bpc = max(1, product.boxes_per_carton or 1) if product else 1
+        npp_code, npp_name = (
+            directory.label(product_id, product.sku, product.name) if product else (str(product_id), "Chưa đăng ký")
+        )
         pick_rows: list[FefoPlanPick] = []
         picks, remaining = _fefo_picks(db, payload.warehouse_id, product_id, quantity)
         for location_id, lot_id, expiry_date, take, strategy in picks:
@@ -393,8 +398,8 @@ def plan(db: Session, payload: DeliveryRequestCreate) -> list[FefoPlanItem]:
             ))
         result.append(FefoPlanItem(
             product_id=product_id,
-            sku=product.sku if product else str(product_id),
-            product_name=product.name if product else "Chưa đăng ký",
+            sku=npp_code,
+            product_name=npp_name,
             quantity=quantity,
             boxes_per_carton=bpc,
             cartons=quantity // bpc,
@@ -414,6 +419,7 @@ def get(db: Session, request_id: int):
             selectinload(DeliveryAllocation.location),
             selectinload(DeliveryAllocation.lot),
         ),
+        selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.product).options(npp_eager_options()),
         selectinload(DeliveryRequest.employee_summaries),
         selectinload(DeliveryRequest.orders),
     ).where(DeliveryRequest.id == request_id))
@@ -430,7 +436,7 @@ def list_(db: Session, status: str | None = None):
     endpoint via get()).
     """
     stmt = select(DeliveryRequest).options(
-        selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.product),
+        selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.product).options(npp_eager_options()),
         selectinload(DeliveryRequest.employee_summaries),
     ).order_by(DeliveryRequest.created_at.desc())
     if status:
@@ -571,13 +577,12 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
     employee_allocations = {}
     planned_allocations = {}
     for row in payload.items:
-        if not db.get(Product, row.product_id):
-            raise ValueError(f"Không tìm thấy sản phẩm {row.product_id}.")
+        row_product_id = canonical_product_id(db, row.product_id)
         if row.quantity <= 0 and not row.requested_quantity_raw:
             raise ValueError("Số lượng phải lớn hơn 0.")
-        merged[row.product_id] = merged.get(row.product_id, 0) + row.quantity
+        merged[row_product_id] = merged.get(row_product_id, 0) + row.quantity
         if row.employee_allocations:
-            target = employee_allocations.setdefault(row.product_id, {})
+            target = employee_allocations.setdefault(row_product_id, {})
             for employee, allocation in row.employee_allocations.items():
                 if isinstance(allocation, dict):
                     existing = target.setdefault(employee, {})
@@ -588,7 +593,7 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
                 else:
                     target[employee] = target.get(employee, 0) + int(allocation)
         if row.planned_allocations:
-            planned_allocations.setdefault(row.product_id, []).extend(row.planned_allocations)
+            planned_allocations.setdefault(row_product_id, []).extend(row.planned_allocations)
 
     try:
         request.warehouse_id = payload.warehouse_id
@@ -601,7 +606,9 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
             request.employee_summaries.clear()
         
         # Create new items
-        raw_quantities = {row.product_id: row.requested_quantity_raw for row in payload.items}
+        raw_quantities = {
+            canonical_product_id(db, row.product_id): row.requested_quantity_raw for row in payload.items
+        }
         for product_id, quantity in merged.items():
             request.items.append(DeliveryRequestItem(
                 product_id=product_id,
@@ -818,6 +825,7 @@ def list_daily_settlements(
             selectinload(DeliveryRequest.orders),
             selectinload(DeliveryRequest.warehouse),
             selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.product).selectinload(Product.unit),
+        selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.product).options(npp_eager_options()),
         )
         .where(
             DeliveryRequest.status == "COMPLETED",

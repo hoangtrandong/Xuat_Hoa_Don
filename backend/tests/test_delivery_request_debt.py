@@ -20,7 +20,7 @@ from app.models.inventory import (
     Warehouse,
     WarehouseLocation,
 )
-from app.models.product import Product, ProductCategory, ProductUnit
+from app.models.product import Product, ProductCategory, ProductGroup, ProductGroupItem, ProductUnit
 from app.schemas.delivery_request import (
     DeliveryRequestCreate,
     DeliveryRequestEmployeeSummaryCreate,
@@ -64,6 +64,8 @@ def db():
             is_active=True,
         )
         session.add_all([product, location])
+        session.flush()
+        session.add(ProductGroup(name=product.name, representative_product_id=product.id, items=[ProductGroupItem(product_id=product.id)]))
         session.commit()
         yield session, warehouse, product, location, employee
     Base.metadata.drop_all(engine)

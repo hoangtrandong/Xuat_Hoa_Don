@@ -22,7 +22,7 @@ from app.models.inventory import (
     SupplierGoodsDiscrepancy,
     SupplierGoodsDiscrepancyOffset,
 )
-from app.models.product import Product, ProductCategory, ProductUnit
+from app.models.product import Product, ProductCategory, ProductGroup, ProductGroupItem, ProductUnit
 from app.models.inventory import Warehouse, WarehouseLocation
 from app.models.user import Permission, Role, User
 from starlette.datastructures import UploadFile
@@ -59,6 +59,8 @@ def db():
             warehouse_id=warehouse.id, code="A01", name="A01", is_active=True
         )
         session.add_all([product, location])
+        session.flush()
+        session.add(ProductGroup(name=product.name, representative_product_id=product.id, items=[ProductGroupItem(product_id=product.id)]))
         session.commit()
         yield session, warehouse, product, location
     Base.metadata.drop_all(engine)
@@ -306,3 +308,19 @@ def test_offset_suggestions_confirmation_and_history_release_locked_excess(
     assert [offset.quantity for offset in offsets] == [1, 2]
     from app.crud.delivery_request import available_for_product
     assert available_for_product(session, warehouse.id, product.id) == 15
+
+
+def test_npp_canonical_product_maps_group_and_rejects_unmapped(db):
+    from app.crud.npp import canonical_product_id
+    session, warehouse, product, location = db
+    other = Product(sku="TEST002", name="Other", category_id=product.category_id, unit_id=product.unit_id)
+    loose = Product(sku="LOOSE", name="Loose", category_id=product.category_id, unit_id=product.unit_id)
+    session.add_all([other, loose])
+    session.flush()
+    group = session.query(ProductGroupItem).filter_by(product_id=product.id).one().group
+    session.add(ProductGroupItem(product_group_id=group.id, product_id=other.id))
+    session.commit()
+    assert canonical_product_id(session, other.id) == product.id
+    assert canonical_product_id(session, product.id) == product.id
+    with pytest.raises(Exception, match="nhóm mã NPP"):
+        canonical_product_id(session, loose.id)

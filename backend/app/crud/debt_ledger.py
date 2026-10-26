@@ -9,6 +9,7 @@ from app.models.customer import Store, Customer
 from app.models.finance import DebtLedgerEntry, DebtTransfer, CashReceipt, DeliveryReturn, DeliveryReturnItem
 from app.models.inventory import DeliveryRequest, DeliveryRequestEmployeeSummary, DeliveryRequestOrder, InventoryTransaction, WarehouseLocation
 from app.models.product import Product
+from app.crud.npp import canonical_product_id
 
 
 def _code(prefix: str) -> str:
@@ -436,6 +437,7 @@ def create_delivery_return(
             prod = db.get(Product, p_id)
             if not prod:
                 raise ValueError(f"Không tìm thấy sản phẩm {p_id}.")
+            p_id = canonical_product_id(db, p_id)
 
             if item_amt <= 0 and unit_price > 0:
                 item_amt = qty * unit_price

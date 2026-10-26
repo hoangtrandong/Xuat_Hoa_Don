@@ -28,6 +28,7 @@ from app.models.inventory import (
 )
 from app.models.product import Product, ProductUnit
 from app.crud import inventory as crud
+from app.crud.npp import NppDirectory, canonical_product_id
 from app.crud import supplier_discrepancy as discrepancy_crud
 from uuid import uuid4
 
@@ -141,7 +142,9 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
         invoice_number = invoice_number or None
         document_date = _parse_import_datetime(rows[7][7] if len(rows) > 7 and len(rows[7]) > 7 else None)
         products = {product.sku.upper(): product for product in db.scalars(select(Product)).all()}
-        grouped: dict[tuple[str, str, datetime], dict[str, Any]] = {}
+        products_by_id = {product.id: product for product in products.values()}
+        directory = NppDirectory(db)
+        grouped: dict[tuple[int, str, datetime], dict[str, Any]] = {}
         for row_number, values in enumerate(rows[15:], 16):
             if not any(value is not None and str(value).strip() for value in values):
                 continue
@@ -152,6 +155,11 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
             product = products.get(sku)
             if not product:
                 raise ValueError(f"Dòng {row_number}: không tìm thấy mã sản phẩm {sku}.")
+            canonical_id = directory.canonical(product.id)
+            if canonical_id is None:
+                raise ValueError(f"Dòng {row_number}: SKU {sku} chưa thuộc nhóm mã NPP. Hãy gán mã NPP trước.")
+            npp_product = products_by_id[canonical_id]
+            npp_code, npp_name = directory.label(canonical_id, npp_product.sku, npp_product.name)
             try:
                 quantity = int(values[indexes["số lượng"]])
             except (TypeError, ValueError) as exc:
@@ -166,9 +174,9 @@ def upload_inventory_import(warehouse_id: int, file: UploadFile = File(...), db:
                 row_number,
             )
             expiry_date = _parse_expiry(values[indexes["hạn sử dụng"]], lot_number)
-            key = (sku, lot_number, expiry_date)
+            key = (canonical_id, lot_number, expiry_date)
             item = grouped.setdefault(key, {
-                "product_id": product.id, "sku": product.sku, "product_name": product.name,
+                "product_id": canonical_id, "sku": npp_code, "product_name": npp_name,
                 "unit": values[unit_index] if unit_index is not None and unit_index < len(values) else None,
                 "lot_number": lot_number, "expiry_date": expiry_date,
                 "boxes_per_carton": max(1, int(product.boxes_per_carton or 1)),
@@ -206,8 +214,7 @@ def confirm_inventory_import(
     created: list[TransactionModel] = []
     try:
         for item in payload.items:
-            if not db.get(Product, item.product_id):
-                raise ValueError(f"Không tìm thấy sản phẩm {item.sku}.")
+            item = item.model_copy(update={"product_id": canonical_product_id(db, item.product_id)})
             actual_quantity = item.actual_qty if item.actual_qty is not None else item.quantity
             total_allocated = sum(allocation.quantity for allocation in item.allocations)
             if total_allocated != actual_quantity:
@@ -414,6 +421,7 @@ def list_lot_details(
         for location in db.query(LocationModel).filter(LocationModel.id.in_(location_ids)).all()
     } if location_ids else {}
 
+    directory = NppDirectory(db)
     return [
         InventoryLotDetail(
             id=lot.id,
@@ -422,8 +430,10 @@ def list_lot_details(
             location_code=locations[lot.location_id].code if lot.location_id in locations else None,
             location_name=locations[lot.location_id].name if lot.location_id in locations else None,
             product_id=lot.product_id,
-            product_code=products[lot.product_id].sku if lot.product_id in products else str(lot.product_id),
-            product_name=products[lot.product_id].name if lot.product_id in products else "Sản phẩm",
+            product_code=directory.label(lot.product_id, products[lot.product_id].sku, products[lot.product_id].name)[0]
+            if lot.product_id in products else str(lot.product_id),
+            product_name=directory.label(lot.product_id, products[lot.product_id].sku, products[lot.product_id].name)[1]
+            if lot.product_id in products else "Sản phẩm",
             unit=units[products[lot.product_id].unit_id].name
             if lot.product_id in products and products[lot.product_id].unit_id in units else "",
             lot_number=lot.lot_number,

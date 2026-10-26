@@ -1,3 +1,4 @@
+from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
@@ -268,7 +269,13 @@ def link_group_company(group_id: int, payload: ProductGroupCompanyLinkCreate, db
     _load_group(db, group_id)
     if not db.get(Company, payload.company_id):
         raise HTTPException(status_code=404, detail="Company not found")
-    link = ProductGroupCompany(product_group_id=group_id, company_id=payload.company_id, role=payload.role.strip().upper(), distributor_sku=payload.distributor_sku, distributor_name=payload.distributor_name)
+    npp_code = (payload.distributor_sku or '').strip()
+    if not npp_code:
+        npp_code = db.execute(text("SELECT MIN(distributor_sku) FROM product_group_companies WHERE product_group_id = :g AND distributor_sku <> ''"), {'g': group_id}).scalar()
+    if not npp_code:
+        top = db.execute(text("SELECT MAX(CAST(distributor_sku AS INTEGER)) FROM product_group_companies WHERE distributor_sku ~ '^[0-9]{4}$'")).scalar()
+        npp_code = f'{(top or 0) + 1:04d}'
+    link = ProductGroupCompany(product_group_id=group_id, company_id=payload.company_id, role=payload.role.strip().upper(), distributor_sku=npp_code, distributor_name=payload.distributor_name)
     db.add(link)
     try:
         db.commit()

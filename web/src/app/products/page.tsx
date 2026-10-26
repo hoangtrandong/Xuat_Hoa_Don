@@ -1,7 +1,6 @@
 ﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Package, CheckCircle, FolderOpen, Truck, Plus, Download, Upload, Pencil, Trash2 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
@@ -32,7 +31,6 @@ type ProductRow = {
   status: string;
 };
 export default function ProductsPage() {
-  const router = useRouter();
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [categoryFilter, setCategoryFilter] = useState("Tất cả");
@@ -287,7 +285,6 @@ export default function ProductsPage() {
         columns={columns}
         searchKeys={["code", "name", "supplier"]}
         searchPlaceholder="Tìm mã, tên, nhà cung cấp..."
-        onRowClick={(row) => router.push(`/products/${row.id}`)}
         toolbar={
           <>
             {selectedIds.size > 0 && (

@@ -117,16 +117,14 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
   normalized["_local_id"] = order["_local_id"] ?? null;
   normalized["_replaced_by_order_numbers"] = order["_replaced_by_order_numbers"] ?? null;
   normalized["_warehouse_updated"] = order["_warehouse_updated"] ?? null;
-  normalized["_returned"] = order["_returned"] ?? null;
   return normalized;
 }
 
-/** Mỗi trạng thái được theo dõi là một dòng độc lập; chỉ tách ở chế độ dữ liệu đồng bộ. */
-function expandProcessingStates(order: RemoteOrder): RemoteOrder[] {
-  const states: string[] = [];
-  if (order["_warehouse_updated"] === true) states.push("Đã cập nhật kho");
-  if (order["_returned"] === true) states.push("Đã trả");
-  return states.map((state, index) => ({ ...order, "Trạng thái xử lý": state, _state_copy: index > 0 }));
+function addProcessingStatus(order: RemoteOrder): RemoteOrder {
+  return {
+    ...order,
+    "Trạng thái xử lý": order["_warehouse_updated"] === true ? "Đã cập nhật kho" : "",
+  };
 }
 
 function hasRemoteValue(value: unknown) {
@@ -218,7 +216,7 @@ export default function SalesOrdersPage() {
       if (snapshotCount < LOCAL_PAGE_SIZE) break;
     }
     const normalizedRows = allRows.map(normalizeRemoteOrder);
-    setRemoteOrders(normalizedRows.flatMap(expandProcessingStates));
+    setRemoteOrders(normalizedRows.map(addProcessingStatus));
     setLastSyncedAt(lastSynced);
   }, [fromDate, toDate]);
 
@@ -425,7 +423,7 @@ export default function SalesOrdersPage() {
     XLSX.writeFile(workbook, `don-hang-vinamilk-${fromDate}-den-${toDate}.xlsx`);
   }
 
-  const primaryOrders = filteredRemoteOrders.filter((order) => order["_state_copy"] !== true);
+  const primaryOrders = filteredRemoteOrders;
   const totalValue = primaryOrders.reduce((sum, order) => sum + numericValue(order["Giá trị"]), 0);
   const totalDiscount = primaryOrders.reduce((sum, order) => sum + numericValue(order["Số tiền CK"]), 0);
   const confirmedDeliveries = primaryOrders.filter((order) => hasRemoteValue(order["Thời gian xác nhận giao hàng"])).length;
@@ -450,7 +448,7 @@ export default function SalesOrdersPage() {
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Tổng bản ghi" value={remoteOrders.filter((order) => order["_state_copy"] !== true).length} icon={<ShoppingCart size={20} />} color="bg-sky-50 text-sky-600" />
+        <StatCard label="Tổng bản ghi" value={remoteOrders.length} icon={<ShoppingCart size={20} />} color="bg-sky-50 text-sky-600" />
         <StatCard label="Tổng giá trị" value={formatVND(totalValue)} icon={<CircleCheck size={20} />} color="bg-emerald-50 text-emerald-600" />
         <StatCard label="Đã xác nhận giao" value={confirmedDeliveries} icon={<Clock3 size={20} />} color="bg-amber-50 text-amber-600" />
         <StatCard label="Tổng chiết khấu" value={formatVND(totalDiscount)} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />

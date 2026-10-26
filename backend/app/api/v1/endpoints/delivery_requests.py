@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
+import hashlib
 import re
 from typing import Any, List
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -17,7 +18,10 @@ from app.crud import delivery_request as crud
 from app.models.employee import Employee
 from app.models.finance import DebtLedgerEntry
 from app.models.inventory import DeliveryRequest as DeliveryRequestModel, DeliveryRequestEmployeeSummary, DeliveryRequestOrder as DeliveryRequestOrderModel
+from app.models.product import Product
 from app.models.user import User
+from app.crud import employee_borrow as borrow_crud
+from app.crud.npp import canonical_product_id
 from app.schemas.delivery_request import (
     DeliveryRequest, DeliveryRequestList, DeliveryRequestCreate, DeliveryPreviewItem,
     DeliveryPreviewResponse, FefoPlanItem, DeliveryRequestOrder,
@@ -27,6 +31,7 @@ from app.schemas.delivery_request import (
 )
 
 router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
+borrow_router = APIRouter(prefix="/employee-borrowing", tags=["employee-borrowing"])
 
 
 
@@ -108,6 +113,190 @@ def download_template():
 def _error(db, exc):
     db.rollback()
     raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _borrow_employee_code(value: Any) -> str:
+    return str(value).split("(", 1)[0].strip().upper()
+
+
+@borrow_router.get("/")
+def list_borrowed_goods(db: Session = Depends(get_db)):
+    return borrow_crud.list_ledger(db)
+
+
+@borrow_router.post("/import")
+def import_borrowed_goods(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
+    try:
+        content = file.file.read()
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        rows = list(workbook.worksheets[0].iter_rows(values_only=True))
+        if len(rows) < 11:
+            raise ValueError("File không đúng mẫu phiếu tổng hợp giao hàng.")
+        code_header = str(rows[8][1] if len(rows[8]) > 1 else "").strip().lower()
+        quantity_header = str(rows[8][3] if len(rows[8]) > 3 else "").strip().lower()
+        if code_header not in {"sku", "mã sku", "ma sku", "mã hàng", "ma hang"} and not (
+            "số lượng tổng" in quantity_header or "tong xuat" in quantity_header
+        ):
+            raise ValueError("Không nhận diện được cấu trúc phiếu tổng hợp giao hàng.")
+
+        employee_row = rows[9]
+        borrowed_columns: dict[int, str] = {}
+        for column, raw_value in enumerate(employee_row[4:], 4):
+            if not raw_value:
+                continue
+            raw = str(raw_value).strip()
+            if not re.search(r"-X\s*$", raw, re.IGNORECASE):
+                continue
+            code = _borrow_employee_code(raw)
+            if not code:
+                raise ValueError(f"Cột nhân viên {column + 1} không có mã nhân viên.")
+            if code in borrowed_columns.values():
+                raise ValueError(f"Mã nhân viên vay mượn {code} xuất hiện nhiều lần.")
+            borrowed_columns[column] = code
+        if not borrowed_columns:
+            raise ValueError("File không có cột nhân viên được đánh dấu -X.")
+
+        products = {product.sku.upper(): product for product in db.query(Product).all()}
+        employees = {
+            employee.code.upper(): employee
+            for employee in db.scalars(select(Employee)).all()
+        }
+        quantities: dict[tuple[int, int], int] = {}
+        product_by_id = {}
+        amount_by_code: dict[str, Decimal] = {}
+        amount_row_found = False
+        for number, values in enumerate(rows[10:], 11):
+            col_b = str(values[1]).strip().lower() if len(values) > 1 and values[1] is not None else ""
+            col_c = str(values[2]).strip().lower() if len(values) > 2 and values[2] is not None else ""
+            footer = f"{col_b} {col_c}"
+            if "ngàn đồng" in footer or "ngan dong" in footer:
+                if amount_row_found:
+                    raise ValueError(f"Dòng {number}: file có nhiều dòng tổng tiền công nợ.")
+                amount_row_found = True
+                for column, code in borrowed_columns.items():
+                    amount_by_code[code] = Decimal(str(_employee_amount(
+                        values[column] if column < len(values) else None, code, number
+                    )))
+                continue
+            if "tấn" in footer or "(tấn)" in footer or "đơn" in footer or "(đơn)" in footer:
+                continue
+            raw_sku = values[1] if len(values) > 1 else None
+            sku = str(raw_sku).strip().upper() if raw_sku is not None else ""
+            if not sku or sku not in products:
+                if sku and any(values[column] not in (None, "") for column in borrowed_columns):
+                    raise ValueError(f"Dòng {number}: không tìm thấy SKU {sku}.")
+                continue
+            product = products[sku]
+            product_id = canonical_product_id(db, product.id)
+            canonical_product = db.get(Product, product_id)
+            per_carton = max(1, canonical_product.boxes_per_carton or 1)
+            product_by_id[product_id] = canonical_product
+            for column, code in borrowed_columns.items():
+                cell = values[column] if column < len(values) else None
+                if cell in (None, ""):
+                    continue
+                quantity, _, _, _ = _quantity(cell, per_carton)
+                if quantity:
+                    employee = employees.get(code)
+                    if not employee:
+                        raise ValueError(f"Không tìm thấy nhân viên {code} trong hệ thống.")
+                    key = (employee.id, product_id)
+                    quantities[key] = quantities.get(key, 0) + quantity
+        if not amount_row_found:
+            raise ValueError("File thiếu dòng tổng tiền công nợ theo nhân viên (ngàn đồng).")
+
+        totals_by_employee: dict[int, int] = {}
+        for (employee_id, _), quantity in quantities.items():
+            totals_by_employee[employee_id] = totals_by_employee.get(employee_id, 0) + quantity
+        employee_by_id = {employee.id: employee for employee in employees.values()}
+        for code, amount in amount_by_code.items():
+            employee = employees.get(code)
+            if amount > 0 and (not employee or employee.id not in totals_by_employee):
+                raise ValueError(f"Nhân viên {code} có tiền vay nhưng không có số lượng -X.")
+        entries = []
+        for employee_id, total_quantity in totals_by_employee.items():
+            employee = employee_by_id[employee_id]
+            total_amount = amount_by_code.get(employee.code.upper(), Decimal("0"))
+            if total_quantity <= 0:
+                raise ValueError(f"Nhân viên {employee.code} có tiền vay nhưng không có số lượng -X.")
+            remaining_amount = total_amount
+            employee_products = [
+                (product_id, quantity)
+                for (entry_employee_id, product_id), quantity in quantities.items()
+                if entry_employee_id == employee_id
+            ]
+            for index, (product_id, quantity) in enumerate(employee_products):
+                if index == len(employee_products) - 1:
+                    amount = remaining_amount
+                else:
+                    amount = (total_amount * Decimal(quantity) / Decimal(total_quantity)).quantize(
+                        Decimal("0.01")
+                    )
+                    remaining_amount -= amount
+                entries.append({
+                    "employee_id": employee_id,
+                    "employee_code": employee.code,
+                    "employee_name": employee.name,
+                    "product_id": product_id,
+                    "product_code": product_by_id[product_id].npp_code,
+                    "product_name": product_by_id[product_id].npp_name,
+                    "quantity": -quantity,
+                    "amount": float(-amount),
+                })
+        if not entries:
+            raise ValueError("Các cột -X không có số lượng vay mượn.")
+        try:
+            batch = borrow_crud.create_pending_batch(
+                db,
+                import_hash=hashlib.sha256(content).hexdigest(),
+                filename=file.filename,
+                entries=entries,
+                created_by=current_user.username,
+            )
+            db.commit()
+            db.refresh(batch)
+            return {
+                "batch_id": batch.id,
+                "status": batch.status,
+                "filename": batch.filename,
+                "entries": entries,
+                "message": "Đã tạo bản chờ xác nhận. Số dư vay chỉ được ghi nhận sau khi admin xác nhận.",
+            }
+        except ValueError as exc:
+            return _error(db, exc)
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ValueError, TypeError, InvalidFileException, BadZipFile, OSError) as exc:
+        return _error(db, exc)
+
+
+@borrow_router.post("/{batch_id}/confirm")
+def confirm_borrowed_goods(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        batch = borrow_crud.confirm_batch(db, batch_id)
+        return {"id": batch.id, "status": batch.status, "posted_at": batch.posted_at}
+    except ValueError as exc:
+        return _error(db, exc)
+
+
+@borrow_router.delete("/{batch_id}", status_code=204)
+def cancel_borrowed_goods(batch_id: int, db: Session = Depends(get_db)):
+    try:
+        borrow_crud.cancel_batch(db, batch_id)
+        return None
+    except ValueError as exc:
+        return _error(db, exc)
 
 
 @router.get("/", response_model=List[DeliveryRequestList])
@@ -336,13 +525,27 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                 cell_val = raw_emp_row[col]
                 if cell_val:
                     raw_str = str(cell_val).strip()
-                    code = raw_str[:5].strip().upper()
+                    code = _borrow_employee_code(raw_str)
                     if not code:
                         raise ValueError(f"Cột nhân viên {col + 1} không có mã nhân viên.")
                     if any(existing["code"] == code for existing in employee_cols.values()):
                         raise ValueError(f"Mã nhân viên {code} xuất hiện nhiều lần trong file.")
                     name = raw_str.split("(", 1)[1].split(")", 1)[0].strip() if "(" in raw_str and ")" in raw_str else ""
-                    employee_cols[col] = {"code": code, "raw": raw_str, "name": name}
+                    employee_cols[col] = {
+                        "code": code,
+                        "raw": raw_str,
+                        "name": name,
+                        "is_borrowed": bool(re.search(r"-X\s*$", raw_str, re.IGNORECASE)),
+                    }
+
+            borrowed_employee_codes = {
+                emp["code"] for emp in employee_cols.values() if emp["is_borrowed"]
+            }
+            if borrowed_employee_codes:
+                warnings.append(
+                    "Các cột nhân viên có hậu tố -X không được đưa vào yêu cầu xuất thật; "
+                    "hãy xác nhận riêng tại mục Hàng vay mượn NVBH."
+                )
 
             weights = {}
             order_counts = {}
@@ -380,6 +583,8 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                         raise ValueError(f"Dòng {number}: file có nhiều dòng tổng tiền công nợ.")
                     amount_row_found = True
                     for col, emp in employee_cols.items():
+                        if emp["is_borrowed"]:
+                            continue
                         amounts[emp["code"]] = _employee_amount(
                             values[col] if col < len(values) else None,
                             emp["code"],
@@ -402,6 +607,7 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                 if total < 1:
                     raise ValueError(f"Dòng {number}: tổng số lượng phải lớn hơn 0.")
                 allocations = {}
+                borrowed_quantity = 0
                 for column in range(4, len(values)):
                     emp_info = employee_cols.get(column)
                     if not emp_info or values[column] in (None, ""):
@@ -409,17 +615,32 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                     raw_employee = str(values[column]).strip()
                     if raw_employee:
                         employee_quantity, employee_cartons, employee_boxes, _ = _quantity(raw_employee, per_carton)
+                        if emp_info["is_borrowed"]:
+                            borrowed_quantity += employee_quantity
+                            continue
                         allocations[emp_info["code"]] = {
                             "quantity": employee_quantity,
                             "cartons": employee_cartons,
                             "boxes": employee_boxes,
                             "raw": raw_employee,
                         }
-                items.append({"product_id": product.id if product else 0, "sku": sku,
-                              "product_name": product.name if product else "Chưa đăng ký",
-                              "quantity": total,
-                              "requested_quantity_raw": raw_total,
-                              "employee_allocations": allocations or None})
+                if borrowed_quantity > total:
+                    raise ValueError(
+                        f"Dòng {number}: tổng số lượng -X vượt tổng số lượng của sản phẩm {sku}."
+                    )
+                actual_quantity = total - borrowed_quantity
+                if actual_quantity > 0:
+                    items.append({
+                        "product_id": product.id if product else 0,
+                        "sku": sku,
+                        "product_name": product.name if product else "Chưa đăng ký",
+                        "quantity": actual_quantity,
+                        "requested_quantity_raw": (
+                            f"{actual_quantity // per_carton}/{actual_quantity % per_carton}"
+                            if "/" in raw_total else str(actual_quantity)
+                        ),
+                        "employee_allocations": allocations or None,
+                    })
 
             if employee_cols and not amount_row_found:
                 raise ValueError("File thiếu dòng tổng tiền công nợ theo nhân viên (ngàn đồng).")
@@ -427,6 +648,8 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
             emp_by_code = {e.code.upper(): e for e in db.query(Employee).all()}
             for col, emp in employee_cols.items():
                 code = emp["code"]
+                if emp["is_borrowed"]:
+                    continue
                 db_emp = emp_by_code.get(code)
                 amt = amounts.get(code, 0.0)
                 w_ton = weights.get(code, 0.0)
@@ -527,7 +750,7 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
             summaries_are_nv_sequential = any(
                 s.get("employee_code") in ("NV001", "NV002", "NV003", "NV004", "NV005", "NV006", "NV007")
                 for s in employee_summaries
-            )
+            ) or bool(borrowed_employee_codes)
             emp_by_code = {e.code.upper(): e for e in db.query(Employee).all()}
             emp_by_name = {e.name.strip().lower(): e for e in db.query(Employee).all() if e.name}
             summary_by_code = {s.get("employee_code", "").upper(): s for s in employee_summaries}
@@ -535,6 +758,11 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
             for row_data in parsed_order_rows:
                 emp_code = (row_data.get("employee_code") or "").strip().upper()
                 emp_name = (row_data.get("employee_name") or "").strip()
+                if (
+                    summaries_are_nv_sequential
+                    and col_to_nv_map.get(emp_code) in borrowed_employee_codes
+                ):
+                    continue
 
                 target_emp_id = None
                 target_emp_code = emp_code
@@ -562,6 +790,9 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
                         target_emp_id = emp_obj.id
                         target_emp_code = emp_obj.code
                         target_emp_name = emp_obj.name
+
+                if target_emp_code.strip().upper() in borrowed_employee_codes:
+                    continue
 
                 orders.append(DeliveryRequestOrderCreate(
                     order_date=row_data.get("order_date"),
@@ -856,4 +1087,3 @@ def import_settlement_orders(
         )
     except Exception as exc:
         return _error(db, exc)
-

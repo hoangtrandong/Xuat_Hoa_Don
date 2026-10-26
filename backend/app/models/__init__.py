@@ -19,6 +19,7 @@ from app.models.finance import (
 )
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
+from app.models.employee_borrow import EmployeeBorrowBatch, EmployeeBorrowEntry
 
 __all__ = [
     "User", "Role", "Permission", "AuditLog",
@@ -36,4 +37,5 @@ __all__ = [
     "DeliveryReturn", "DeliveryReturnItem", "BankReceipt", "PaymentAllocation",
     "VinamilkOrderSnapshot", "VinamilkSyncRun", "VinamilkOrderReplacement",
     "VinamilkOrderAllocation",
+    "EmployeeBorrowBatch", "EmployeeBorrowEntry",
 ]

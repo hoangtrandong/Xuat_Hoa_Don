@@ -64,6 +64,7 @@ export const menuItems: MenuItem[] = [
     href: "/admin",
     children: [
       { key: "admin-delivery-requests", label: "Yêu cầu xuất hàng", icon: "ClipboardList", href: "/admin/delivery-requests" },
+      { key: "admin-employee-borrowing", label: "Hàng vay mượn NVBH", icon: "ClipboardList", href: "/admin/employee-borrowing" },
       { key: "admin-daily-settlements", label: "Quyết toán ngày", icon: "ClipboardCheck", href: "/admin/daily-settlements" },
     ],
   },

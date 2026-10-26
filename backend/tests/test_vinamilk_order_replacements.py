@@ -54,24 +54,26 @@ def test_order_numbers_reads_api_and_excel_columns():
     assert _order_numbers(payload) == {"A1", "B2"}
 
 
-def test_scoped_queries_set_states_per_day(db):
+def test_warehouse_query_sets_only_warehouse_state_per_day(db):
     day = date(2026, 10, 1)
     for number in ("VM-1", "VM-2", "VM-3"):
         add_order(db, number)
 
-    _apply_scoped_states(db, day, {"VM-1", "VM-2"}, {"VM-2"})
+    _apply_scoped_states(db, day, {"VM-1", "VM-2"})
 
     states = {s.order_number: (s.warehouse_updated, s.returned) for s in db.query(VinamilkOrderSnapshot)}
-    assert states == {"VM-1": (True, False), "VM-2": (True, True), "VM-3": (False, False)}
+    assert states == {"VM-1": (True, None), "VM-2": (True, None), "VM-3": (False, None)}
 
 
 def test_failed_scoped_query_keeps_previous_state(db):
     day = date(2026, 10, 1)
     add_order(db, "VM-1")
-    _apply_scoped_states(db, day, {"VM-1"}, set())
+    snapshot = db.query(VinamilkOrderSnapshot).one()
+    snapshot.returned = True
+    db.flush()
+    _apply_scoped_states(db, day, {"VM-1"})
 
-    _apply_scoped_states(db, day, None, None)
-    _apply_scoped_states(db, day, None, {"VM-1"})
+    _apply_scoped_states(db, day, None)
 
     snapshot = db.query(VinamilkOrderSnapshot).one()
     assert snapshot.warehouse_updated is True

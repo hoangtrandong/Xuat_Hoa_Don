@@ -13,7 +13,7 @@ RESOURCES = (
     "sales-orders", "inventory", "employees", "payments", "debt",
     "delivery-requests", "sync", "users",
     "employee-debts", "store-debts", "cash-receipts", "debt-transfers",
-    "delivery-returns", "bank-receipts",
+    "delivery-returns", "bank-receipts", "employee-borrowing",
 )
 ENVIRONMENT_VARIABLES = (
     "INITIAL_ADMIN_USERNAME",
@@ -54,7 +54,7 @@ def _ensure_admin_role_with_all_permissions(db: Session) -> Role:
 
 
 DEFAULT_STAFF_READ_ONLY_RESOURCES = tuple(
-    resource for resource in RESOURCES if resource != "users"
+    resource for resource in RESOURCES if resource not in {"users", "employee-borrowing"}
 )
 
 

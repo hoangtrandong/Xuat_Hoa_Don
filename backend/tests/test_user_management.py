@@ -201,7 +201,9 @@ def test_sync_default_roles_creates_admin_and_staff_with_expected_permissions(mo
             f"{resource}:{action}" for resource in RESOURCES for action in ("read", "write")
         }
         assert {permission.code for permission in staff_role.permissions} == {
-            f"{resource}:read" for resource in RESOURCES if resource != "users"
+            f"{resource}:read"
+            for resource in RESOURCES
+            if resource not in {"users", "employee-borrowing"}
         }
         assert db.query(Role).filter_by(name="admin").count() == 1
         assert db.query(Role).filter_by(name="staff").count() == 1

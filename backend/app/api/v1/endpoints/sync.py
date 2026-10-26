@@ -100,10 +100,9 @@ def _apply_scoped_states(
     db: Session,
     day: date,
     warehouse_orders: set[str] | None,
-    returned_orders: set[str] | None,
 ) -> None:
     """Đặt true/false theo kết quả truy vấn đã lọc; truy vấn lỗi (None) thì giữ nguyên giá trị cũ."""
-    if warehouse_orders is None and returned_orders is None:
+    if warehouse_orders is None:
         return
     snapshots = db.scalars(select(VinamilkOrderSnapshot).where(
         VinamilkOrderSnapshot.synced_from == day,
@@ -111,10 +110,7 @@ def _apply_scoped_states(
         VinamilkOrderSnapshot.order_number.is_not(None),
     )).all()
     for snapshot in snapshots:
-        if warehouse_orders is not None:
-            snapshot.warehouse_updated = snapshot.order_number in warehouse_orders
-        if returned_orders is not None:
-            snapshot.returned = snapshot.order_number in returned_orders
+        snapshot.warehouse_updated = snapshot.order_number in warehouse_orders
 
 
 def _update_order_replacement(
@@ -388,9 +384,6 @@ def _fetch_vinamilk_sync(session_cookie: str, form: dict[str, str]) -> dict[str,
     if scope == "warehouse":
         del export_form["saleOrderType"]
         export_form.update({"approved": "1", "approvedStep": "3"})
-    elif scope == "returned":
-        export_form["saleOrderType"] = "0"
-
     configure_playwright_browser_path()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=_PLAYWRIGHT_LAUNCH_ARGS)
@@ -487,19 +480,17 @@ async def _fetch_vinamilk_payload(session_cookie: str, form: dict[str, str]) -> 
 async def sync_vinamilk_day(
     db: Session, day_form: dict[str, str], day: date, session_cookie: str
 ) -> tuple[str, int]:
-    """Đồng bộ 1 ngày: dòng đơn + trạng thái kho/trả. Dùng chung cho API và cron."""
+    """Đồng bộ 1 ngày: dòng đơn và trạng thái cập nhật kho."""
     session_cookie, payload = await _fetch_vinamilk_payload(session_cookie, day_form)
     row_count = _save_snapshot(db, payload, day, day)
-    scoped: dict[str, set[str] | None] = {}
-    for scope in ("warehouse", "returned"):
-        try:
-            session_cookie, scoped_payload = await _fetch_vinamilk_payload(
-                session_cookie, {**day_form, "scope": scope}
-            )
-            scoped[scope] = _order_numbers(scoped_payload)
-        except (RuntimeError, ValueError):
-            scoped[scope] = None
-    _apply_scoped_states(db, day, scoped["warehouse"], scoped["returned"])
+    try:
+        session_cookie, scoped_payload = await _fetch_vinamilk_payload(
+            session_cookie, {**day_form, "scope": "warehouse"}
+        )
+        warehouse_orders = _order_numbers(scoped_payload)
+    except (RuntimeError, ValueError):
+        warehouse_orders = None
+    _apply_scoped_states(db, day, warehouse_orders)
     db.commit()
     return session_cookie, row_count
 
@@ -638,7 +629,6 @@ def list_local_vinamilk_orders(
             "_synced_at": _iso_utc(row.synced_at),
             "_allocation_id": None,
             "_warehouse_updated": row.warehouse_updated,
-            "_returned": row.returned,
             "_replaced_order_number": replaced_order_for.get(row.order_number or ""),
             "_replaced_by_order_numbers": replaced_by.get(row.order_number or "", []),
         }

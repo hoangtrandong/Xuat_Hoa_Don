@@ -17,6 +17,7 @@ from app.models.finance import CashReceipt, DebtLedgerEntry, DeliveryReturn, Del
 from app.models.employee import Employee
 from app.models.product import Product
 from app.crud.npp import NppDirectory, canonical_product_id, npp_eager_options
+from app.crud.employee_borrow import offset_completed_delivery
 
 from app.schemas.delivery_request import DeliveryRequestCreate, FefoPlanItem, FefoPlanPick
 
@@ -518,6 +519,8 @@ def transition(db: Session, request_id: int, action: str):
                         quantity=-qty, lot_id=allocation.lot_id, location_id=allocation.location_id,
                         expiry_date=allocation.expiry_date, ref_type="DR", ref_code=request.code,
                         note=request.note, created_by=request.created_by))
+
+            offset_completed_delivery(db, request, now)
 
             # Record debt into ledger for each employee summary
             for summary in summaries:

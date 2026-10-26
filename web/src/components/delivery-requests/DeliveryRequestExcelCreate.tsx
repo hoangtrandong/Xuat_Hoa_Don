@@ -167,6 +167,10 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
 
   async function confirmPreview() {
     setError("");
+    if (preview.length === 0) {
+      setError("File không có số lượng cần xuất thực tế. Các dòng -X được quản lý riêng tại mục Hàng vay mượn NVBH.");
+      return;
+    }
     const items = preview.map((item) => {
       const matched = productOptionsBySku.get(item.sku.trim().toUpperCase());
       const productId = matched ? matched.id : (item.product_id > 0 ? item.product_id : 0);

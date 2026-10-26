@@ -235,7 +235,7 @@ export default function WarehouseInventoryPage() {
     ])
   ).filter((c) => c && c.trim() !== "");
   const stockColumns: Column<StockLevel>[] = [
-    { key: "productCode", title: "Mã SKU", sortable: true },
+    { key: "productCode", title: "Mã NPP", sortable: true },
     {
       key: "productName",
       title: "Sản phẩm",
@@ -394,7 +394,7 @@ export default function WarehouseInventoryPage() {
 
   function exportStock() {
     downloadExcel(filteredStock.map((stock) => ({
-      "Mã SKU": stock.productCode,
+      "Mã NPP": stock.productCode,
       "Sản phẩm": stock.productName,
       "Danh mục": stock.category,
       "ĐVT": stock.unit,
@@ -413,7 +413,7 @@ export default function WarehouseInventoryPage() {
       "Mã giao dịch": entry.code,
       "Thời gian": entry.createdAt,
       "Loại": ledgerLabels[entry.type],
-      "Mã SKU": entry.productCode,
+      "Mã NPP": entry.productCode,
       "Sản phẩm": entry.productName,
       "Kho": entry.warehouse,
       "Số lượng": entry.quantity,
@@ -426,7 +426,7 @@ export default function WarehouseInventoryPage() {
 
   function exportLots() {
     downloadExcel(filteredLotDetails.map((lot) => ({
-      "Mã SKU": lot.product_code,
+      "Mã NPP": lot.product_code,
       "Sản phẩm": lot.product_name,
       "ĐVT": lot.unit,
       "Kho": lot.warehouse_id,
@@ -594,7 +594,7 @@ export default function WarehouseInventoryPage() {
         <DataTable
           data={filteredLotDetails}
           columns={[
-            { key: "product_code", title: "Mã SKU", sortable: true },
+            { key: "product_code", title: "Mã NPP", sortable: true },
             {
               key: "product_name",
               title: "Sản phẩm",

@@ -136,7 +136,7 @@ export default function ExportPage() {
       "Mã phiếu xuất": entry.code,
       "Thời gian": entry.createdAt,
       "Loại": ledgerLabels[entry.type as "OUT"],
-      "Mã SKU": entry.productCode,
+      "Mã NPP": entry.productCode,
       "Sản phẩm": entry.productName,
       "Kho": entry.warehouse,
       "Số lượng xuất": Math.abs(entry.quantity),

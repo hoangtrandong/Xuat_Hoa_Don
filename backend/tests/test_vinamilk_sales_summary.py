@@ -21,7 +21,31 @@ def db():
     engine.dispose()
 
 
-def line(db, order, day, sku="SKU1", qty=10, value=1000, warehouse=True, returned=None, customer="C1"):
+def line(
+    db,
+    order,
+    day,
+    sku="SKU1",
+    qty=10,
+    value=1000,
+    warehouse=True,
+    returned=None,
+    customer="C1",
+    promotion_code=None,
+    promotion_name=None,
+    promotion_alias=False,
+):
+    payload = {
+        "Số lượng": qty,
+        "Số lượng KM": 0,
+        "Giá trị": value,
+        "Mã NVBH": "S1",
+        "Tên NVBH": "Staff",
+    }
+    if promotion_code is not None:
+        payload["promotionCode" if promotion_alias else "Mã CTKM"] = promotion_code
+    if promotion_name is not None:
+        payload["promotionName" if promotion_alias else "Tên CTKM"] = promotion_name
     db.add(VinamilkOrderSnapshot(
         remote_key=f"{order}-{sku}",
         order_number=order,
@@ -34,7 +58,7 @@ def line(db, order, day, sku="SKU1", qty=10, value=1000, warehouse=True, returne
         returned=returned,
         synced_from=day,
         synced_to=day,
-        raw_payload={"Số lượng": qty, "Số lượng KM": 0, "Giá trị": value, "Mã NVBH": "S1", "Tên NVBH": "Staff"},
+        raw_payload=payload,
     ))
     db.flush()
 
@@ -134,6 +158,33 @@ def test_group_by_and_filters(db):
     assert [group["key"] for group in by_day["groups"]] == ["2026-10-01", "2026-09-30"]
     assert [group["code"] for group in filtered["groups"]] == ["C2"]
     assert filtered["totals"]["net_value"] == 0
+
+
+def test_group_by_promotion_uses_code_and_name_and_deducts_returned_lines(db):
+    line(
+        db, "PROMO-1", D1, qty=4, value=400, promotion_code="CTKM01",
+        promotion_name="Mua 4 tặng 1",
+    )
+    line(
+        db, "PROMO-2", D1, sku="SKU2", qty=3, value=300, returned=True,
+        promotion_code="CTKM02", promotion_name="Giảm giá sản phẩm",
+    )
+    line(db, "NO-PROMO", D1, sku="SKU3", qty=2, value=200)
+    line(
+        db, "ALIAS", D1, sku="SKU4", qty=1, value=100,
+        promotion_code="CTKM03", promotion_name="CTKM alias", promotion_alias=True,
+    )
+
+    result = build_sales_summary(db, D1, D1, group_by="promotion")
+
+    groups = {item["code"]: item for item in result["groups"]}
+    assert groups["CTKM01"]["name"] == "Mua 4 tặng 1"
+    assert groups["CTKM01"]["net_qty"] == 4
+    assert groups["CTKM02"]["deducted_qty"] == 3
+    assert groups["CTKM02"]["net_value"] == 0
+    assert groups["Không có CTKM"]["net_qty"] == 2
+    assert groups["CTKM03"]["net_value"] == 100
+    assert result["totals"]["net_value"] == 700
 
 
 def test_invalid_group_by_is_rejected(db):

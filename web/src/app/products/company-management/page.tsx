@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Building2, Link2, Trash2, Download, Upload, UsersRound } from "lucide-react";
+import { Building2, Link2, Trash2, Download, Upload, UsersRound, Pencil } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -24,6 +24,8 @@ export default function ProductCompanyManagementPage() {
   const [companyId, setCompanyId] = useState("");
   const [distributorSku, setDistributorSku] = useState("");
   const [distributorName, setDistributorName] = useState("");
+  const [editDistributorSku, setEditDistributorSku] = useState("");
+  const [editDistributorName, setEditDistributorName] = useState("");
   const [role, setRole] = useState("MANAGER");
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
@@ -87,6 +89,36 @@ export default function ProductCompanyManagementPage() {
     setMessage("Đã gỡ công ty khỏi SKU.");
   }
 
+  function openManagement(row: ProductCompanyRow) {
+    setSelected(row);
+    setEditDistributorSku(row.companies.find((company) => company.distributor_sku)?.distributor_sku ?? "");
+    setEditDistributorName(row.companies.find((company) => company.distributor_name)?.distributor_name ?? "");
+    setError("");
+    setMessage("");
+  }
+
+  async function saveDistributorCode() {
+    if (!selected) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const response = await apiFetch(`${API_URL}/product-groups/${selected.product_group_id}/companies/distributor-code`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ distributor_sku: editDistributorSku.trim(), distributor_name: editDistributorName.trim() || null }),
+      });
+      const result = await response.json() as { detail?: string };
+      if (!response.ok) throw new Error(result.detail ?? "Không thể cập nhật mã NPP.");
+      const loadedRows = await load();
+      const updated = loadedRows.find((row) => row.product_group_id === selected.product_group_id);
+      setSelected(updated ?? selected);
+      setMessage("Đã cập nhật mã và tên NPP cho tất cả công ty trong nhóm SKU.");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Không thể cập nhật mã NPP.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function uploadAssignments(file: File) {
     setBusy(true); setError(""); setMessage("");
     try {
@@ -122,7 +154,7 @@ export default function ProductCompanyManagementPage() {
     { key: "distributor_sku", title: "Mã NPP", render: (_, row) => row.companies.length ? <div className="space-y-1">{uniqueValues(row.companies.map((company) => company.distributor_sku)).map((value) => <p key={value} className="font-medium text-emerald-700">{value}</p>)}</div> : <span className="text-gray-400">—</span> },
     { key: "distributor_name", title: "Tên sản phẩm NPP", render: (_, row) => row.companies.length ? <div className="space-y-1">{uniqueValues(row.companies.map((company) => company.distributor_name)).map((value) => <p key={value}>{value}</p>)}</div> : <span className="text-gray-400">—</span> },
     { key: "company_count", title: "Số công ty", render: (_, row) => row.companies.length },
-    { key: "id", title: "Thao tác", render: (_, row) => <button onClick={() => { setSelected(row); setError(""); setMessage(""); }} className="inline-flex items-center gap-1 rounded-lg bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-100"><Link2 size={14} />Quản lý</button> },
+    { key: "id", title: "Thao tác", render: (_, row) => <button onClick={() => openManagement(row)} className="inline-flex items-center gap-1 rounded-lg bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-100"><Link2 size={14} />Quản lý</button> },
   ];
 
   return (
@@ -142,6 +174,22 @@ export default function ProductCompanyManagementPage() {
           <div className="w-full max-w-xl rounded-xl bg-white shadow-xl" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-start justify-between border-b border-gray-100 p-5"><div><p className="text-xs text-gray-500">SKU dùng chung: {selected.group_name}</p><h2 className="text-lg font-semibold text-gray-900">Mã SKU: {selected.member_skus.join(", ")}</h2></div><Building2 className="text-sky-500" size={22} /></div>
             <div className="space-y-4 p-5">
+              {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+              {message && <div className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{message}</div>}
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-gray-800"><Pencil size={15} />Sửa cặp mã sản phẩm ↔ mã NPP</div>
+                <div className="mb-3 rounded-md bg-white px-3 py-2 text-sm text-gray-700">
+                  <span className="font-medium">Mã sản phẩm:</span> {selected.member_skus.join(", ")}
+                  <span className="mx-2 text-gray-400">↔</span>
+                  <span className="font-medium">Mã NPP hiện tại:</span> {uniqueValues(selected.companies.map((link) => link.distributor_sku)).join(", ")}
+                </div>
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_auto]">
+                  <input value={editDistributorSku} onChange={(event) => setEditDistributorSku(event.target.value)} placeholder="Mã NPP mới (4 chữ số)" maxLength={50} className="rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+                  <input value={editDistributorName} onChange={(event) => setEditDistributorName(event.target.value)} placeholder="Tên sản phẩm NPP" maxLength={200} className="rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+                  <button onClick={saveDistributorCode} disabled={busy || !selected.companies.length || !editDistributorSku.trim()} className="inline-flex items-center justify-center gap-1 rounded-lg bg-amber-500 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"><Pencil size={14} />Lưu cặp mã</button>
+                </div>
+                <p className="mt-1 text-xs text-gray-500">Mã NPP mới sẽ được ghép với các mã sản phẩm trên và cập nhật đồng bộ cho tất cả công ty trong nhóm.</p>
+              </div>
               <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_1fr_150px_auto]"><select value={companyId} onChange={(event) => setCompanyId(event.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm"><option value="">Chọn công ty</option>{companies.filter((company) => !selected.companies.some((link) => link.company_id === company.id)).map((company) => <option key={company.id} value={company.id}>{company.code} - {company.name}</option>)}</select><input value={distributorSku} onChange={(event) => setDistributorSku(event.target.value)} placeholder="Mã NPP nội bộ" className="rounded-lg border border-gray-200 px-3 py-2 text-sm" /><input value={distributorName} onChange={(event) => setDistributorName(event.target.value)} placeholder="Tên sản phẩm NPP" className="rounded-lg border border-gray-200 px-3 py-2 text-sm" /><select value={role} onChange={(event) => setRole(event.target.value)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm"><option value="MANAGER">MANAGER</option><option value="DISTRIBUTOR">DISTRIBUTOR</option><option value="SUPPLIER">SUPPLIER</option></select><button onClick={addCompany} disabled={!companyId || !distributorSku.trim()} className="rounded-lg bg-sky-500 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Gán</button></div>
               <div className="divide-y divide-gray-100 rounded-lg border border-gray-100">{selected.companies.map((link) => <div key={link.company_id} className="flex items-center justify-between px-3 py-3"><div><p className="text-sm font-medium text-gray-800">{link.company_name}</p><p className="text-sm text-emerald-700">{link.distributor_sku ?? "Chưa có mã NPP nội bộ"}</p><p className="text-xs text-gray-500">{link.distributor_name ?? "Chưa có tên sản phẩm NPP"}</p><Badge variant="info">{link.role}</Badge></div><button onClick={() => removeCompany(link)} title="Gỡ công ty" className="rounded-lg p-2 text-gray-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={16} /></button></div>)}{selected.companies.length === 0 && <p className="px-3 py-5 text-center text-sm text-gray-400">SKU dùng chung chưa được gán công ty nào.</p>}</div>
             </div>

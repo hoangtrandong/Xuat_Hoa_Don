@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot
 
-GROUP_BY_VALUES = ("product", "customer", "staff", "day")
+GROUP_BY_VALUES = ("product", "customer", "staff", "day", "promotion")
 METRICS = ("sold_qty", "sold_promo_qty", "sold_value", "deducted_qty", "deducted_promo_qty", "deducted_value")
 
 
@@ -64,6 +64,14 @@ def _group_key(row: VinamilkOrderSnapshot, payload: dict[str, Any], group_by: st
     if group_by == "staff":
         code = str(_first(payload, ("Mã NVBH", "staffCode")) or "")
         return (code, code, str(_first(payload, ("Tên NVBH", "staffName")) or ""))
+    if group_by == "promotion":
+        code = str(_first(payload, ("Mã CTKM", "ma ctkm", "promotionCode", "promotion_code", "campaignCode")) or "").strip()
+        name = str(_first(payload, ("Tên CTKM", "ten ctkm", "promotionName", "promotion_name", "campaignName")) or "").strip()
+        if not code and not name:
+            return ("NO_PROMOTION", "Không có CTKM", "Không có CTKM")
+        if not code:
+            code = name
+        return (code.casefold(), code, name or "Chưa có tên CTKM")
     day = row.order_created_date.isoformat() if row.order_created_date else ""
     return (day, day, "")
 

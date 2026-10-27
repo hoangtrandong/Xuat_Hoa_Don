@@ -9,7 +9,7 @@ import { formatVND } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
 import * as XLSX from "xlsx";
 
-type GroupBy = "product" | "customer" | "staff" | "day";
+type GroupBy = "product" | "customer" | "staff" | "day" | "promotion";
 type Tab = GroupBy | "pairs" | "review";
 
 type Totals = {
@@ -37,6 +37,7 @@ const GROUP_TABS: { key: GroupBy; label: string; codeTitle: string; nameTitle: s
   { key: "customer", label: "Theo khách hàng", codeTitle: "Mã KH", nameTitle: "Tên KH" },
   { key: "staff", label: "Theo NVBH", codeTitle: "Mã NVBH", nameTitle: "Tên NVBH" },
   { key: "day", label: "Theo ngày", codeTitle: "Ngày", nameTitle: "" },
+  { key: "promotion", label: "Theo chương trình khuyến mại", codeTitle: "Mã CTKM", nameTitle: "Tên CTKM" },
 ];
 
 const REVIEW_LABELS: Record<string, string> = {

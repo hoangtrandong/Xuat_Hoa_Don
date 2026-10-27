@@ -25,6 +25,11 @@ class ProductGroupCompanyLinkCreate(BaseModel):
     distributor_name: Optional[str] = None
 
 
+class ProductGroupDistributorCodeUpdate(BaseModel):
+    distributor_sku: str = Field(min_length=4, max_length=50)
+    distributor_name: Optional[str] = Field(default=None, max_length=200)
+
+
 class ProductGroupItemView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

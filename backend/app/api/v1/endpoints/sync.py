@@ -670,7 +670,7 @@ def list_local_vinamilk_orders(
 def summarize_vinamilk_sales(
     from_date: date,
     to_date: date,
-    group_by: str = Query(default="product", pattern="^(product|customer|staff|day)$"),
+    group_by: str = Query(default="product", pattern="^(product|customer|staff|day|promotion)$"),
     customer: str | None = Query(default=None, max_length=120),
     staff: str | None = Query(default=None, max_length=120),
     product: str | None = Query(default=None, max_length=120),

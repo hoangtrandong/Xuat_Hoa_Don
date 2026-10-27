@@ -16,6 +16,7 @@ from app.schemas.product_group import (
     ProductCompanyManagementView,
     ProductGroupCompanyLinkCreate,
     ProductGroupCompanyLinkView,
+    ProductGroupDistributorCodeUpdate,
     ProductGroupCreate,
     ProductGroupItemAdd,
     ProductGroupItemView,
@@ -294,6 +295,52 @@ def unlink_group_company(group_id: int, company_id: int, db: Session = Depends(g
     db.delete(link)
     db.commit()
     return {"success": True}
+
+
+@router.patch("/{group_id}/companies/distributor-code")
+def update_group_distributor_code(
+    group_id: int,
+    payload: ProductGroupDistributorCodeUpdate,
+    db: Session = Depends(get_db),
+):
+    group = _load_group(db, group_id)
+    code = payload.distributor_sku.strip()
+    name = payload.distributor_name.strip() if payload.distributor_name else None
+    if not code:
+        raise HTTPException(status_code=422, detail="Mã NPP không được để trống.")
+    if code.isdigit() and len(code) != 4:
+        raise HTTPException(status_code=422, detail="Mã NPP số phải gồm đúng 4 chữ số.")
+
+    duplicate = db.scalar(
+        select(ProductGroupCompany.product_group_id)
+        .where(
+            ProductGroupCompany.distributor_sku == code,
+            ProductGroupCompany.product_group_id != group_id,
+        )
+        .limit(1)
+    )
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail=f"Mã NPP {code} đã được gán cho nhóm SKU khác.")
+
+    links = db.scalars(
+        select(ProductGroupCompany).where(ProductGroupCompany.product_group_id == group_id)
+    ).all()
+    if not links:
+        raise HTTPException(status_code=400, detail="Nhóm SKU chưa được gán công ty; hãy gán công ty trước khi sửa mã NPP.")
+    for link in links:
+        link.distributor_sku = code
+        link.distributor_name = name
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Mã NPP {code} không thể lưu do bị trùng.") from None
+    return {
+        "product_group_id": group_id,
+        "distributor_sku": code,
+        "distributor_name": name,
+        "companies_updated": len(links),
+    }
 
 
 @router.post("/products/{product_id}/companies", response_model=ProductCompanyLinkView, status_code=201)

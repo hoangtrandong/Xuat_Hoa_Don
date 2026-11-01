@@ -9,6 +9,8 @@ on:
 jobs:
   sync-and-report:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: backend

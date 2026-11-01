@@ -202,8 +202,18 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
         SplitOrderRequest(
             order_number="PO-100",
             splits=[
-                SplitOrderTarget(items=[SplitOrderItemAllocation(snapshot_id=line1.id, quantity=4, promo_quantity=1)]),
-                SplitOrderTarget(items=[SplitOrderItemAllocation(snapshot_id=line1.id, quantity=6, promo_quantity=1)]),
+                SplitOrderTarget(
+                    customer_code="000101",
+                    customer_name="KH A - CN1",
+                    customer_address="Địa chỉ 1",
+                    items=[SplitOrderItemAllocation(snapshot_id=line1.id, quantity=4, promo_quantity=1)],
+                ),
+                SplitOrderTarget(
+                    customer_code="000999",
+                    customer_name="KH B - CN2",
+                    customer_address="Địa chỉ 2",
+                    items=[SplitOrderItemAllocation(snapshot_id=line1.id, quantity=6, promo_quantity=1)],
+                ),
             ],
         ),
     )
@@ -225,8 +235,15 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
     assert by_order["PO-100"]["_replacement_display"] == "BTT: TD-PO-100-01, TD-PO-100-02"
     assert by_order["TD-PO-100-01"]["_processing_status"] == "Đơn Tách"
     assert by_order["TD-PO-100-01"]["_replacement_display"] == "TT: PO-100"
+    assert by_order["TD-PO-100-01"]["customerCode"] == "000101"
+    assert by_order["TD-PO-100-01"]["customerName"] == "KH A - CN1"
     assert by_order["TD-PO-100-01"]["totalValue"] == 40000.0
+    assert by_order["TD-PO-100-01"]["totalDiscount"] == 4000.0
+    assert by_order["TD-PO-100-02"]["customerCode"] == "000999"
+    assert by_order["TD-PO-100-02"]["customerName"] == "KH B - CN2"
+    assert by_order["TD-PO-100-02"]["address"] == "Địa chỉ 2"
     assert by_order["TD-PO-100-02"]["totalValue"] == 60000.0
+    assert by_order["TD-PO-100-02"]["totalDiscount"] == 6000.0
 
     # Kiểm tra tổng hợp bán hàng không tính trùng đơn gốc
     summary = build_sales_summary(
@@ -241,6 +258,51 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
     rev = _revert_split_or_merge_order(db, "PO-100")
     db.commit()
     assert rev["deleted_synthetic_orders"] == ["TD-PO-100-01", "TD-PO-100-02"]
+
+    # Tách lại đơn với Số tiền CK chỉnh sửa thủ công (dồn 8.500 sang Đơn tách 1 và 1.500 sang Đơn tách 2)
+    res_custom_disc = _split_vinamilk_order(
+        db,
+        SplitOrderRequest(
+            order_number="PO-100",
+            splits=[
+                SplitOrderTarget(
+                    items=[
+                        SplitOrderItemAllocation(
+                            snapshot_id=line1.id,
+                            quantity=4,
+                            promo_quantity=1,
+                            discount_amount=8500,
+                        )
+                    ]
+                ),
+                SplitOrderTarget(
+                    items=[
+                        SplitOrderItemAllocation(
+                            snapshot_id=line1.id,
+                            quantity=6,
+                            promo_quantity=1,
+                            discount_amount=1500,
+                        )
+                    ]
+                ),
+            ],
+        ),
+    )
+    db.commit()
+    assert res_custom_disc["new_order_numbers"] == ["TD-PO-100-01", "TD-PO-100-02"]
+    listed_after = list_local_vinamilk_orders(
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 1),
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=2000,
+        db=db,
+    )
+    by_order_after = {row["orderNumber"]: row for row in listed_after["rows"]}
+    assert by_order_after["TD-PO-100-01"]["totalDiscount"] == 8500.0
+    assert by_order_after["TD-PO-100-02"]["totalDiscount"] == 1500.0
 
 
 def test_merge_orders_creates_gd_order_and_aggregates_lines(db):

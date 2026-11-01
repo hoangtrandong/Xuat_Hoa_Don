@@ -1,17 +1,12 @@
 from datetime import datetime
-from io import BytesIO
-from types import SimpleNamespace
-
-import openpyxl
-import pytest
-from fastapi import UploadFile
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
+import pytest
 
 from app.core.database import Base
-from app.crud.delivery_request import transition
-from app.crud.employee_borrow import confirm_batch, create_pending_batch, list_ledger
+from app.crud.delivery_request import create as create_delivery_request, delete as delete_delivery_request, transition
+from app.crud.employee_borrow import create_pending_batch, create_posted_batch, list_ledger
 from app.models.employee import Employee
 from app.models.employee_borrow import EmployeeBorrowBatch, EmployeeBorrowEntry
 from app.models.inventory import (
@@ -21,10 +16,10 @@ from app.models.inventory import (
     Warehouse,
 )
 from app.models.product import Product, ProductCategory, ProductGroup, ProductGroupItem, ProductUnit
-from app.api.v1.endpoints.delivery_requests import (
-    confirm_borrowed_goods,
-    import_borrowed_goods,
-    upload_request,
+from app.schemas.delivery_request import (
+    DeliveryRequestCreate,
+    DeliveryRequestItemCreate,
+    EmployeeBorrowEntryCreate,
 )
 
 
@@ -44,7 +39,7 @@ def db():
             code="NV001", name="Regular employee", position="SALES", phone="0001"
         )
         borrow_employee = Employee(
-            code="NV002", name="Borrow employee", position="SALES", phone="0002"
+            code="NV002", vinamilk_code="0000032253", name="Borrow employee", position="SALES", phone="0002"
         )
         session.add_all([category, unit, warehouse, regular_employee, borrow_employee])
         session.flush()
@@ -68,64 +63,7 @@ def db():
     engine.dispose()
 
 
-def workbook_bytes(db, *, regular_quantity=12, borrowed_quantity=8):
-    _, _, product, _, _ = db
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "PhieuGiaoHang"
-    for _ in range(8):
-        sheet.append([""] * 6)
-    sheet.append(["STT", "Mã hàng", "Tên SP", "Số lượng tổng", "NV001", "NV002"])
-    sheet.append(["", "", "", "", "NV001 (Regular)", "NV002(Borrow)-X"])
-    total = regular_quantity + borrowed_quantity
-    sheet.append(["1", product.sku, product.name, str(total), str(regular_quantity), str(borrowed_quantity)])
-    sheet.append(["", "TỔNG CỘNG (ngàn đồng)", "", "", 1000, 500])
-    output = BytesIO()
-    workbook.save(output)
-    return output.getvalue()
-
-
-def upload_file(content: bytes):
-    return UploadFile(file=BytesIO(content), filename="borrow-test.xlsx")
-
-
-def test_import_borrow_columns_posts_negative_ledger_without_delivery_request(db):
-    session, _, product, _, borrow_employee = db
-    content = workbook_bytes(db)
-    result = import_borrowed_goods(
-        file=upload_file(content),
-        db=session,
-        current_user=SimpleNamespace(username="admin"),
-    )
-    assert result["status"] == "PENDING"
-    assert len(result["entries"]) == 1
-    assert result["entries"][0]["quantity"] == -8
-    assert result["entries"][0]["amount"] == -500000.0
-    assert session.scalar(select(DeliveryRequest.id)) is None
-    assert list_ledger(session)["balances"] == []
-
-    import_borrowed_goods(
-        file=upload_file(content),
-        db=session,
-        current_user=SimpleNamespace(username="admin"),
-    )
-    result_batch = session.get(EmployeeBorrowBatch, result["batch_id"])
-    session.refresh(result_batch)
-    assert result_batch.status == "PENDING"
-
-    confirm_borrowed_goods(result["batch_id"], db=session, current_user=SimpleNamespace(username="admin"))
-    balance = list_ledger(session)["balances"][0]
-    assert (balance["employee_id"], balance["product_id"]) == (borrow_employee.id, product.id)
-    assert (balance["quantity"], balance["amount"]) == (-8, -500000.0)
-    with pytest.raises(Exception, match="đã được ghi nhận"):
-        import_borrowed_goods(
-            file=upload_file(content),
-            db=session,
-            current_user=SimpleNamespace(username="admin"),
-        )
-
-
-def test_dms_borrow_identity_can_be_added_without_internal_employee(db):
+def test_dms_borrow_identity_is_posted_immediately_on_creation(db):
     session, _, product, _, _ = db
     batch = create_pending_batch(
         session,
@@ -142,11 +80,11 @@ def test_dms_borrow_identity_can_be_added_without_internal_employee(db):
         }],
         created_by="admin",
     )
+    session.commit()
+
+    assert batch.status == "POSTED"
     assert batch.entries[0].employee_id is None
     assert batch.entries[0].external_employee_code == "0000032253"
-    assert list_ledger(session)["balances"] == []
-
-    confirm_batch(session, batch.id)
 
     balance = list_ledger(session)["balances"][0]
     assert balance["employee_id"] is None
@@ -157,127 +95,22 @@ def test_dms_borrow_identity_can_be_added_without_internal_employee(db):
     assert (balance["quantity"], balance["amount"]) == (-2, -40000.0)
 
 
-def test_regular_delivery_upload_excludes_x_quantity_and_employee_debt(db):
-    session, warehouse, _, _, _ = db
-    result = upload_request(
-        warehouse_id=warehouse.id,
-        file=upload_file(workbook_bytes(db)),
-        db=session,
-    )
-    assert len(result.items) == 1
-    assert result.items[0].quantity == 12
-    assert [summary.employee_code for summary in result.employee_summaries] == ["NV001"]
-    assert result.employee_summaries[0].amount == 1000000.0
-    assert any("-X" in warning for warning in result.warnings)
-
-
-def test_real_completed_delivery_offsets_only_borrowed_quantity(db):
-    session, warehouse, product, _, employee = db
-    batch = EmployeeBorrowBatch(
-        import_hash="a" * 64,
-        filename="borrow.xlsx",
-        status="POSTED",
-        created_by="admin",
-        posted_at=datetime.utcnow(),
-    )
-    entry = EmployeeBorrowEntry(
-        employee=employee,
-        product=product,
-        entry_type="BORROW",
-        quantity=-8,
-        amount=-500000,
-        created_by="admin",
-    )
-    batch.entries.append(entry)
-    request = DeliveryRequest(
-        code="DR-BORROW-TEST",
-        warehouse_id=warehouse.id,
-        status="RECEIVED",
-        created_by="admin",
-    )
-    item = DeliveryRequestItem(
-        product=product,
-        quantity=10,
-        employee_allocations={"NV002": {"quantity": 10}},
-        allocations=[DeliveryAllocation(allocated_quantity=10, allocation_sequence=1)],
-    )
-    request.items.append(item)
-    session.add_all([batch, request])
-    session.commit()
-
-    transition(session, request.id, "complete")
-
-    entries = session.scalars(
-        select(EmployeeBorrowEntry).order_by(EmployeeBorrowEntry.id)
-    ).all()
-    assert [(row.entry_type, row.quantity, float(row.amount)) for row in entries] == [
-        ("BORROW", -8, -500000.0),
-        ("OFFSET", 8, 500000.0),
-    ]
-    balance = list_ledger(session)["balances"]
-    assert balance == []
-
-
-def test_partial_actual_delivery_offsets_only_shipped_borrowed_quantity(db):
-    session, warehouse, product, _, employee = db
-    batch = EmployeeBorrowBatch(
-        import_hash="b" * 64,
-        filename="borrow-partial.xlsx",
-        status="POSTED",
-        created_by="admin",
-        posted_at=datetime.utcnow(),
-    )
-    batch.entries.append(EmployeeBorrowEntry(
-        employee=employee,
-        product=product,
-        entry_type="BORROW",
-        quantity=-8,
-        amount=-500000,
-        created_by="admin",
-    ))
-    request = DeliveryRequest(
-        code="DR-BORROW-PARTIAL",
-        warehouse_id=warehouse.id,
-        status="RECEIVED",
-        created_by="admin",
-        items=[DeliveryRequestItem(
-            product=product,
-            quantity=3,
-            employee_allocations={"NV002": {"quantity": 10}},
-            allocations=[DeliveryAllocation(allocated_quantity=3, allocation_sequence=1)],
-        )],
-    )
-    session.add_all([batch, request])
-    session.commit()
-
-    transition(session, request.id, "complete")
-
-    offsets = session.scalars(
-        select(EmployeeBorrowEntry).where(EmployeeBorrowEntry.entry_type == "OFFSET")
-    ).all()
-    assert [(row.quantity, float(row.amount)) for row in offsets] == [(3, 187500.0)]
-    balance = list_ledger(session)["balances"][0]
-    assert (balance["quantity"], balance["amount"]) == (-5, -312500.0)
-
-
-def test_return_shipment_offsets_dms_salesperson_borrow_without_internal_employee(db):
+def test_return_shipment_offsets_dms_salesperson_borrow_on_warehouse_completion(db):
     session, warehouse, product, _, _ = db
-    batch = EmployeeBorrowBatch(
+    batch = create_posted_batch(
+        session,
         import_hash="c" * 64,
         filename="dms-borrow.xlsx",
-        status="POSTED",
+        entries=[{
+            "employee_id": None,
+            "external_employee_code": "0000032253",
+            "external_employee_name": "Nguyễn Thị Thúy Hằng",
+            "product_id": product.id,
+            "quantity": -8,
+            "amount": -500000,
+            "note": "Mượn Số theo đơn BOR-01",
+        }],
         created_by="admin",
-        posted_at=datetime.utcnow(),
-        entries=[EmployeeBorrowEntry(
-            employee_id=None,
-            external_employee_code="0000032253",
-            external_employee_name="Nguyễn Thị Thúy Hằng",
-            product=product,
-            entry_type="BORROW",
-            quantity=-8,
-            amount=-500000,
-            created_by="admin",
-        )],
     )
     request = DeliveryRequest(
         code="DR-DMS-RETURN",
@@ -296,9 +129,13 @@ def test_return_shipment_offsets_dms_salesperson_borrow_without_internal_employe
             }],
         )],
     )
-    session.add_all([batch, request])
+    session.add(request)
     session.commit()
 
+    # Trước khi Thủ kho bấm Hoàn tất, số dư vẫn là -8 (chỉ có Mượn Số)
+    assert list_ledger(session)["balances"][0]["quantity"] == -8
+
+    # Khi Thủ kho bấm Hoàn tất xuất kho thực tế, Trả Số (+3) được ghi nhận và bù trừ
     transition(session, request.id, "complete")
 
     entries = session.scalars(
@@ -317,3 +154,36 @@ def test_return_shipment_offsets_dms_salesperson_borrow_without_internal_employe
         "Nguyễn Thị Thúy Hằng",
     )
     assert (balance["quantity"], balance["amount"]) == (-5, -312500.0)
+
+
+def test_cancelling_or_deleting_request_rolls_back_borrow_entries(db):
+    session, warehouse, product, _, salesperson = db
+    req = create_delivery_request(
+        session,
+        DeliveryRequestCreate(
+            warehouse_id=warehouse.id,
+            items=[DeliveryRequestItemCreate(product_id=product.id, quantity=2)],
+            borrow_entries=[
+                EmployeeBorrowEntryCreate(
+                    employee_id=salesperson.id,
+                    external_employee_code="0000032253",
+                    external_employee_name="Borrow employee",
+                    product_id=product.id,
+                    quantity=-4,
+                    amount=-200000,
+                    note="Mượn Số theo đơn BOR-02",
+                )
+            ],
+            borrow_import_hash="e" * 64,
+            borrow_filename="dsdonhang.xlsx",
+        ),
+        created_by="admin",
+    )
+    # Ngay khi tạo yêu cầu, Mượn Số đã xuất hiện trong số dư
+    assert len(list_ledger(session)["balances"]) == 1
+    assert list_ledger(session)["balances"][0]["quantity"] == -4
+
+    # Khi xóa phiếu ở trạng thái DRAFT, dòng Mượn Số của phiếu đó được hoàn tác
+    delete_delivery_request(session, req.id)
+    assert list_ledger(session)["balances"] == []
+    assert session.scalars(select(EmployeeBorrowBatch)).all() == []

@@ -16,11 +16,11 @@ from pydantic import BaseModel, Field
 from playwright.sync_api import sync_playwright
 from dotenv import dotenv_values, set_key
 from sqlalchemy import delete, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
 from app.core.database import get_db
 from app.services.vinamilk_sales_summary import build_sales_summary
-from app.models.customer import Company
+from app.models.customer import Company, Customer
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 from app.services.vinamilk_dates import iter_inclusive_dates
@@ -92,9 +92,13 @@ class SplitOrderItemAllocation(BaseModel):
     snapshot_id: int
     quantity: float = Field(default=0, ge=0)
     promo_quantity: float = Field(default=0, ge=0)
+    discount_amount: float | None = Field(default=None, ge=0)
 
 
 class SplitOrderTarget(BaseModel):
+    customer_code: str | None = None
+    customer_name: str | None = None
+    customer_address: str | None = None
     items: list[SplitOrderItemAllocation] = Field(default_factory=list)
 
 
@@ -273,6 +277,7 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
 
     source_by_id = {row.id: row for row in source_rows}
     alloc_by_split: list[dict[int, tuple[float, float]]] = []
+    custom_disc_by_split_item: dict[tuple[int, int], float] = {}
     sum_qty: dict[int, float] = defaultdict(float)
     sum_promo: dict[int, float] = defaultdict(float)
 
@@ -293,6 +298,13 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
                 has_positive = True
             prev_q, prev_p = split_map.get(item.snapshot_id, (0.0, 0.0))
             split_map[item.snapshot_id] = (prev_q + qty, prev_p + promo)
+            if item.discount_amount is not None:
+                if item.discount_amount < 0:
+                    raise HTTPException(status_code=400, detail="Số tiền CK không được âm.")
+                custom_disc_by_split_item[(split_idx, item.snapshot_id)] = (
+                    custom_disc_by_split_item.get((split_idx, item.snapshot_id), 0.0)
+                    + float(item.discount_amount)
+                )
             sum_qty[item.snapshot_id] += qty
             sum_promo[item.snapshot_id] += promo
         if not has_positive:
@@ -332,6 +344,7 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
 
     # Tính toán giá trị/chiết khấu theo tỷ lệ cho từng dòng gốc qua các đơn tách
     line_financials: dict[tuple[int, int], tuple[float, float, float]] = {}
+    total_orig_disc = 0.0
     for s_id, s_row in source_by_id.items():
         raw = s_row.raw_payload if isinstance(s_row.raw_payload, dict) else {}
         orig_qty = _float_from_payload(raw, ("Số lượng", "quantity", "qty"))
@@ -339,6 +352,7 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
         orig_val = _float_from_payload(raw, ("Giá trị", "totalValue", "total", "amount"))
         orig_disc = _float_from_payload(raw, ("Số tiền CK", "totalDiscount", "discountAmount"))
         orig_voucher = _float_from_payload(raw, ("Giảm giá voucher", "voucherAmount", "voucherDiscount"))
+        total_orig_disc += orig_disc
 
         active_indices = [
             idx for idx, split_map in enumerate(alloc_by_split)
@@ -354,7 +368,10 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
         for pos, idx in enumerate(active_indices):
             q, p = alloc_by_split[idx].get(s_id, (0.0, 0.0))
             if idx not in weight_indices:
-                line_financials[(idx, s_id)] = (0.0, 0.0, 0.0)
+                auto_disc = 0.0
+                if (idx, s_id) in custom_disc_by_split_item:
+                    auto_disc = round(custom_disc_by_split_item[(idx, s_id)])
+                line_financials[(idx, s_id)] = (0.0, auto_disc, 0.0)
                 continue
             if idx == weight_indices[-1]:
                 val = round(orig_val - used_val)
@@ -370,11 +387,43 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
                 used_val += val
                 used_disc += disc
                 used_voucher += voucher
+            if (idx, s_id) in custom_disc_by_split_item:
+                disc = round(custom_disc_by_split_item[(idx, s_id)])
             line_financials[(idx, s_id)] = (val, disc, voucher)
+
+    if custom_disc_by_split_item:
+        total_split_disc = sum(fin[1] for fin in line_financials.values())
+        if abs(total_split_disc - round(total_orig_disc)) > max(1.0, float(len(source_by_id))):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Tổng Số tiền CK của các đơn tách ({total_split_disc:,.0f}) "
+                    f"phải khớp với Tổng Số tiền CK đơn gốc ({round(total_orig_disc):,.0f})."
+                ),
+            )
 
     now = datetime.utcnow()
     for split_idx, new_order_num in enumerate(new_order_numbers):
         split_map = alloc_by_split[split_idx]
+        split_target = payload.splits[split_idx]
+        chosen_cust_code = (split_target.customer_code or "").strip()
+        chosen_cust_name = (split_target.customer_name or "").strip()
+        chosen_cust_addr = (split_target.customer_address or "").strip()
+
+        if chosen_cust_code and not chosen_cust_name:
+            snap_cust = db.scalar(
+                select(VinamilkOrderSnapshot)
+                .where(VinamilkOrderSnapshot.customer_code == chosen_cust_code)
+                .order_by(VinamilkOrderSnapshot.id.desc())
+                .limit(1)
+            )
+            if snap_cust:
+                chosen_cust_name = (snap_cust.customer_name or "").strip()
+                if not chosen_cust_addr and isinstance(snap_cust.raw_payload, dict):
+                    chosen_cust_addr = (
+                        _field(snap_cust.raw_payload, ("address", "customerAddress", "shipTo", "Địa chỉ")) or ""
+                    ).strip()
+
         for s_id, s_row in source_by_id.items():
             q, p = split_map.get(s_id, (0.0, 0.0))
             if q <= 0 and p <= 0:
@@ -387,8 +436,24 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
             fmt_disc = _format_qty_value(disc)
             fmt_voucher = _format_qty_value(voucher)
 
+            final_cust_code = chosen_cust_code or s_row.customer_code
+            final_cust_name = chosen_cust_name or s_row.customer_name
+
             base_raw["Số đơn hàng"] = new_order_num
             base_raw["orderNumber"] = new_order_num
+            if final_cust_code:
+                base_raw["Mã KH"] = final_cust_code
+                base_raw["customerCode"] = final_cust_code
+                base_raw["shopCode"] = final_cust_code
+            if final_cust_name:
+                base_raw["Tên KH"] = final_cust_name
+                base_raw["customerName"] = final_cust_name
+                base_raw["shopName"] = final_cust_name
+            if chosen_cust_addr:
+                base_raw["Địa chỉ"] = chosen_cust_addr
+                base_raw["address"] = chosen_cust_addr
+                base_raw["customerAddress"] = chosen_cust_addr
+                base_raw["shipTo"] = chosen_cust_addr
             base_raw["Số lượng"] = fmt_q
             base_raw["quantity"] = fmt_q
             base_raw["qty"] = fmt_q
@@ -408,8 +473,8 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
                 remote_key=remote_key,
                 order_number=new_order_num,
                 original_order_number=source_order_number,
-                customer_code=s_row.customer_code,
-                customer_name=s_row.customer_name,
+                customer_code=final_cust_code,
+                customer_name=final_cust_name,
                 product_code=s_row.product_code,
                 product_name=s_row.product_name,
                 status="Đơn Tách",
@@ -1193,6 +1258,79 @@ def list_vinamilk_order_options(
         query = query.where(VinamilkOrderSnapshot.order_number.ilike(f"%{search.strip()}%"))
     order_numbers = db.scalars(query.distinct().order_by(VinamilkOrderSnapshot.order_number.desc()).limit(limit)).all()
     return {"order_numbers": order_numbers}
+
+
+@router.get("/vinamilk-orders/customer-options")
+def list_vinamilk_customer_options(
+    search: str = Query(default="", max_length=120),
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    """Trả về danh sách khách hàng từ bảng customers (kèm cửa hàng/công ty) và từ các đơn DMS đã đồng bộ."""
+    term = search.strip()
+    options_by_code: dict[str, dict[str, Any]] = {}
+
+    cust_stmt = select(Customer).options(
+        joinedload(Customer.store),
+        joinedload(Customer.company),
+        joinedload(Customer.addresses),
+    )
+    if term:
+        like_term = f"%{term}%"
+        cust_stmt = cust_stmt.where(or_(Customer.code.ilike(like_term), Customer.name.ilike(like_term)))
+    cust_rows = db.scalars(cust_stmt.order_by(Customer.code).limit(limit)).unique().all()
+    for c in cust_rows:
+        code = (c.code or "").strip()
+        if not code:
+            continue
+        default_addr = next((a.address for a in (c.addresses or []) if a.is_default), None)
+        if not default_addr and c.addresses:
+            default_addr = c.addresses[0].address
+        if not default_addr and c.store:
+            default_addr = c.store.address
+        options_by_code[code.upper()] = {
+            "customer_code": code,
+            "customer_name": c.name or "",
+            "customer_address": default_addr or "",
+            "store_code": c.store.code if c.store else None,
+            "store_name": c.store.name if c.store else None,
+            "company_code": c.company.code if c.company else None,
+            "company_name": c.company.name if c.company else None,
+        }
+
+    snap_stmt = (
+        select(
+            VinamilkOrderSnapshot.customer_code,
+            VinamilkOrderSnapshot.customer_name,
+        )
+        .where(VinamilkOrderSnapshot.customer_code.is_not(None))
+        .distinct()
+    )
+    if term:
+        like_term = f"%{term}%"
+        snap_stmt = snap_stmt.where(
+            or_(
+                VinamilkOrderSnapshot.customer_code.ilike(like_term),
+                VinamilkOrderSnapshot.customer_name.ilike(like_term),
+            )
+        )
+    for s_code, s_name in db.execute(snap_stmt.limit(limit)).all():
+        clean_code = (s_code or "").strip()
+        if not clean_code:
+            continue
+        key = clean_code.upper()
+        if key not in options_by_code:
+            options_by_code[key] = {
+                "customer_code": clean_code,
+                "customer_name": (s_name or "").strip(),
+                "customer_address": "",
+                "store_code": None,
+                "store_name": None,
+                "company_code": None,
+                "company_name": None,
+            }
+
+    return {"customers": list(options_by_code.values())[:limit]}
 
 
 @router.patch("/vinamilk-orders/{new_order_number}/replacement")

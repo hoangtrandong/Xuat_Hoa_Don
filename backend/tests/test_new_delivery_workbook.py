@@ -462,7 +462,8 @@ def test_delivery_creation_records_borrow_rows_in_pending_batch_atomically(workb
     batch = db.query(EmployeeBorrowBatch).one()
     entry = db.query(EmployeeBorrowEntry).one()
     assert request.status == "DRAFT"
-    assert batch.status == "PENDING"
+    assert batch.status == "POSTED"
+    assert entry.source_request_id == request.id
     assert entry.quantity == -2
     assert float(entry.amount) == -80
     assert request.items[0].borrowed_employee_offsets == [{

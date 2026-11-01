@@ -316,7 +316,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         return;
       }
       clearPreview();
-      setMessage(`Đã chuyển các đơn Mượn Số sang Hàng vay mượn NVBH (lần import #${result.batch_id}).`);
+      setMessage("Đã ghi nhận các đơn Mượn Số vào sổ Hàng vay mượn NVBH.");
       return;
     }
     if (preview.length === 0) {
@@ -773,6 +773,92 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                     </td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {(borrowEntries.length > 0 || preview.some((item) => (item.borrowed_employee_offsets?.length ?? 0) > 0)) && (
+        <div className="bg-white rounded-xl border border-rose-100 overflow-hidden shadow-sm">
+          <div className="px-5 py-4 border-b border-rose-100 bg-rose-50/40 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h4 className="font-semibold text-gray-900">Tổng hợp Mượn Số & Trả Số (chuyển sang Hàng vay mượn NVBH)</h4>
+              <p className="text-xs text-gray-600">
+                Đơn <span className="font-semibold text-rose-700">Mượn Số</span> ghi nhận âm ngay khi tạo yêu cầu; đơn{" "}
+                <span className="font-semibold text-emerald-700">Trả Số</span> sẽ tự động ghi nhận dương và bù trừ khi Thủ kho hoàn tất xuất kho thực tế.
+              </p>
+            </div>
+            <span className="text-xs font-medium px-2.5 py-1 bg-rose-100 text-rose-800 rounded-full">
+              {borrowEntries.length} dòng Mượn Số ·{" "}
+              {preview.reduce((sum, item) => sum + (item.borrowed_employee_offsets?.length ?? 0), 0)} dòng Trả Số
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50/80 text-gray-500 border-b border-gray-100">
+                <tr>
+                  <th className="text-left px-4 py-2.5">Trạng thái</th>
+                  <th className="text-left px-4 py-2.5">Mã NVBH (DMS)</th>
+                  <th className="text-left px-4 py-2.5">Tên NVBH</th>
+                  <th className="text-left px-4 py-2.5">Sản phẩm (NPP)</th>
+                  <th className="text-right px-4 py-2.5">Số lượng (hộp)</th>
+                  <th className="text-right px-4 py-2.5">Thành tiền</th>
+                  <th className="text-left px-4 py-2.5">Ghi chú / Thời điểm ghi nhận</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {borrowEntries.map((entry, idx) => {
+                  const prod = productOptions.find((p) => p.id === entry.product_id);
+                  return (
+                    <tr key={`borrow-${idx}`} className="hover:bg-rose-50/20">
+                      <td className="px-4 py-2">
+                        <span className="rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-700 border border-rose-200">
+                          Mượn Số
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 font-mono font-medium text-gray-900">{entry.external_employee_code || "—"}</td>
+                      <td className="px-4 py-2 text-gray-800">{entry.external_employee_name || "—"}</td>
+                      <td className="px-4 py-2 text-gray-700">
+                        {prod ? `${prod.sku} — ${prod.name}` : `ID #${entry.product_id}`}
+                      </td>
+                      <td className="px-4 py-2 text-right font-semibold text-rose-700">
+                        {entry.quantity.toLocaleString("vi-VN")}
+                      </td>
+                      <td className="px-4 py-2 text-right font-semibold text-rose-700">
+                        {entry.amount.toLocaleString("vi-VN")} đ
+                      </td>
+                      <td className="px-4 py-2 text-gray-600">
+                        {entry.note || "Ghi nhận ngay khi tạo yêu cầu"}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {preview.flatMap((item) =>
+                  (item.borrowed_employee_offsets ?? []).map((offset, idx) => (
+                    <tr key={`offset-${item.product_id}-${idx}`} className="hover:bg-emerald-50/20">
+                      <td className="px-4 py-2">
+                        <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 border border-emerald-200">
+                          Trả Số
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 font-mono font-medium text-gray-900">{offset.external_employee_code}</td>
+                      <td className="px-4 py-2 text-gray-800">{offset.external_employee_name || "—"}</td>
+                      <td className="px-4 py-2 text-gray-700">
+                        <span className="font-mono font-semibold text-emerald-700">{item.sku}</span> — {item.product_name}
+                      </td>
+                      <td className="px-4 py-2 text-right font-semibold text-emerald-700">
+                        +{offset.quantity.toLocaleString("vi-VN")}
+                      </td>
+                      <td className="px-4 py-2 text-right font-semibold text-emerald-700">
+                        +{offset.amount.toLocaleString("vi-VN")} đ
+                      </td>
+                      <td className="px-4 py-2 text-gray-600">
+                        Ghi nhận & bù trừ khi Thủ kho hoàn tất xuất kho
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

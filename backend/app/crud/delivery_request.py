@@ -17,7 +17,11 @@ from app.models.finance import CashReceipt, DebtLedgerEntry, DeliveryReturn, Del
 from app.models.employee import Employee
 from app.models.product import Product
 from app.crud.npp import NppDirectory, canonical_product_id, npp_eager_options
-from app.crud.employee_borrow import offset_completed_delivery
+from app.crud.employee_borrow import (
+    create_posted_batch,
+    offset_completed_delivery,
+    rollback_request_borrows,
+)
 
 from app.schemas.delivery_request import DeliveryRequestCreate, FefoPlanItem, FefoPlanPick
 
@@ -387,14 +391,13 @@ def create(
         if payload.borrow_entries:
             if not payload.borrow_import_hash or not payload.borrow_filename:
                 raise ValueError("Thiếu thông tin file nguồn cho phần hàng mượn.")
-            from app.crud.employee_borrow import create_pending_batch
-
-            create_pending_batch(
+            create_posted_batch(
                 db,
                 import_hash=payload.borrow_import_hash,
                 filename=payload.borrow_filename,
                 entries=[entry.model_dump() for entry in payload.borrow_entries],
                 created_by=created_by if created_by is not None else payload.created_by,
+                source_request_id=request.id,
             )
 
         db.commit()
@@ -533,6 +536,7 @@ def transition(db: Session, request_id: int, action: str):
         elif action == "receive":
             request.status, request.received_at = "RECEIVED", now
         elif action == "cancel":
+            rollback_request_borrows(db, request.id)
             request.status, request.cancelled_at = "CANCELLED", now
         else:
             summaries = db.scalars(
@@ -624,6 +628,7 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
 
     merged = {}
     employee_allocations = {}
+    borrowed_employee_offsets = {}
     planned_allocations = {}
     for row in payload.items:
         row_product_id = canonical_product_id(db, row.product_id)
@@ -641,6 +646,21 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
                             existing[key] = allocation[key]
                 else:
                     target[employee] = target.get(employee, 0) + int(allocation)
+        if row.borrowed_employee_offsets:
+            target = borrowed_employee_offsets.setdefault(row_product_id, {})
+            for offset in row.borrowed_employee_offsets:
+                offset_data = offset.model_dump()
+                staff_code = offset_data["external_employee_code"].strip().upper()
+                staff_key = staff_code.casefold()
+                current = target.setdefault(staff_key, {
+                    "external_employee_code": staff_code,
+                    "external_employee_name": offset_data.get("external_employee_name"),
+                    "employee_id": offset_data.get("employee_id"),
+                    "quantity": 0,
+                    "amount": 0.0,
+                })
+                current["quantity"] += int(offset_data["quantity"])
+                current["amount"] += float(offset_data["amount"])
         if row.planned_allocations:
             planned_allocations.setdefault(row_product_id, []).extend(row.planned_allocations)
 
@@ -664,6 +684,9 @@ def update(db: Session, request_id: int, payload: DeliveryRequestCreate) -> Deli
                 quantity=quantity,
                 requested_quantity_raw=raw_quantities.get(product_id),
                 employee_allocations=employee_allocations.get(product_id),
+                borrowed_employee_offsets=list(
+                    borrowed_employee_offsets.get(product_id, {}).values()
+                ) or None,
                 planned_allocations=planned_allocations.get(product_id),
             ))
         if payload.employee_summaries is not None:
@@ -711,6 +734,7 @@ def delete(db: Session, request_id: int):
         raise ValueError(f"Chỉ có thể xóa yêu cầu ở trạng thái DRAFT. Trạng thái hiện tại: {request.status}")
     
     try:
+        rollback_request_borrows(db, request.id)
         db.delete(request)
         db.commit()
         return True

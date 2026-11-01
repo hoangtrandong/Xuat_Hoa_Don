@@ -71,18 +71,43 @@ type ReplacementEditForm = {
   search: string;
 };
 
-type SplitAllocMap = Record<number, { quantity: number; promoQuantity: number }[]>;
+type SplitAllocCell = {
+  quantity: number;
+  promoQuantity: number;
+  customDiscount?: number | null;
+};
+
+type SplitAllocMap = Record<number, SplitAllocCell[]>;
+
+type CustomerOption = {
+  customer_code: string;
+  customer_name: string;
+  customer_address: string;
+  store_code?: string;
+  store_name?: string;
+  company_code?: string;
+  company_name?: string;
+};
+
+type SplitCustomerSelection = {
+  customer_code: string;
+  customer_name: string;
+  customer_address: string;
+};
 
 type GroupedOrderSummary = {
   orderNumber: string;
   customerCode: string;
   customerName: string;
+  customerAddress: string;
   staffCode: string;
   staffName: string;
   createdAt: string;
   deliveryDate: string;
   totalValue: number;
+  totalDiscount: number;
   totalQty: number;
+  totalPromoQty: number;
   lines: RemoteOrder[];
 };
 
@@ -231,6 +256,9 @@ export default function SalesOrdersPage() {
   const [selectedSplitOrderNumber, setSelectedSplitOrderNumber] = useState("");
   const [splitCount, setSplitCount] = useState(2);
   const [splitAllocs, setSplitAllocs] = useState<SplitAllocMap>({});
+  const [splitCustomers, setSplitCustomers] = useState<SplitCustomerSelection[]>([]);
+  const [splitCustomerSearches, setSplitCustomerSearches] = useState<string[]>([]);
+  const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([]);
   const [isSubmittingSplit, setIsSubmittingSplit] = useState(false);
   const [splitError, setSplitError] = useState("");
 
@@ -285,6 +313,47 @@ export default function SalesOrdersPage() {
     loadLocalOrders().catch((error) => setRemoteError(error instanceof Error ? error.message : "Không thể tải dữ liệu."));
   }, [loadLocalOrders]);
 
+  const loadCustomerOptions = useCallback(async () => {
+    try {
+      const response = await apiFetch(
+        `${API_URL}/sync/vinamilk-orders/customer-options?limit=1000`
+      );
+      if (!response.ok) return;
+      const payload = (await response.json()) as { customers?: CustomerOption[] };
+      if (Array.isArray(payload.customers)) {
+        setCustomerOptions(payload.customers);
+      }
+    } catch {
+      // Bỏ qua lỗi mạng, vẫn dùng danh sách khách hàng gom từ remoteOrders
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isSplitDrawerOpen) {
+      void loadCustomerOptions();
+    }
+  }, [isSplitDrawerOpen, loadCustomerOptions]);
+
+  // Danh sách khách hàng tổng hợp (từ API customer-options + từ các đơn hàng trên màn hình)
+  const allCustomerOptions = useMemo<CustomerOption[]>(() => {
+    const map = new Map<string, CustomerOption>();
+    for (const item of customerOptions) {
+      const code = (item.customer_code || "").trim();
+      if (!code) continue;
+      map.set(code, item);
+    }
+    for (const row of remoteOrders) {
+      const code = displayRemoteValue(row["Mã KH"]).trim();
+      if (!code || map.has(code)) continue;
+      map.set(code, {
+        customer_code: code,
+        customer_name: displayRemoteValue(row["Tên KH"]).trim(),
+        customer_address: displayRemoteValue(row["Địa chỉ"]).trim(),
+      });
+    }
+    return Array.from(map.values());
+  }, [customerOptions, remoteOrders]);
+
   // Gom nhóm các đơn đủ điều kiện để Tách hoặc Gộp (chưa là đơn tách/gộp, chưa bị thay thế)
   const eligibleOrderGroups = useMemo<GroupedOrderSummary[]>(() => {
     const map = new Map<string, GroupedOrderSummary>();
@@ -301,19 +370,24 @@ export default function SalesOrdersPage() {
           orderNumber: orderNum,
           customerCode: displayRemoteValue(row["Mã KH"]).trim(),
           customerName: displayRemoteValue(row["Tên KH"]).trim(),
+          customerAddress: displayRemoteValue(row["Địa chỉ"]).trim(),
           staffCode: displayRemoteValue(row["Mã NVBH"]).trim(),
           staffName: displayRemoteValue(row["Tên NVBH"]).trim(),
           createdAt: displayRemoteValue(row["Ngày tạo"]).trim(),
           deliveryDate: displayRemoteValue(row["Ngày giao"]).trim(),
           totalValue: 0,
+          totalDiscount: 0,
           totalQty: 0,
+          totalPromoQty: 0,
           lines: [],
         };
         map.set(orderNum, group);
       }
       group.lines.push(row);
       group.totalValue += numericValue(row["Giá trị"]);
+      group.totalDiscount += numericValue(row["Số tiền CK"]);
       group.totalQty += numericValue(row["Số lượng"]);
+      group.totalPromoQty += numericValue(row["Số lượng KM"]);
     }
     return Array.from(map.values());
   }, [remoteOrders]);
@@ -323,10 +397,12 @@ export default function SalesOrdersPage() {
     [eligibleOrderGroups, selectedSplitOrderNumber]
   );
 
-  // Khởi tạo bảng phân bổ số lượng khi chọn đơn cần tách hoặc đổi số lượng đơn tách
+  // Khởi tạo bảng phân bổ số lượng và khách hàng khi chọn đơn cần tách
   function initializeSplitAllocations(group: GroupedOrderSummary | null, count: number) {
     if (!group) {
       setSplitAllocs({});
+      setSplitCustomers([]);
+      setSplitCustomerSearches([]);
       return;
     }
     const next: SplitAllocMap = {};
@@ -341,6 +417,14 @@ export default function SalesOrdersPage() {
       next[localId] = arr;
     }
     setSplitAllocs(next);
+    setSplitCustomers(
+      Array.from({ length: count }, () => ({
+        customer_code: group.customerCode,
+        customer_name: group.customerName,
+        customer_address: group.customerAddress,
+      }))
+    );
+    setSplitCustomerSearches(Array.from({ length: count }, () => ""));
   }
 
   function handleSelectSplitOrder(orderNumber: string) {
@@ -367,16 +451,55 @@ export default function SalesOrdersPage() {
       }
       return next;
     });
+    setSplitCustomers((prev) =>
+      Array.from({ length: clamped }, (_, idx) =>
+        prev[idx] ?? {
+          customer_code: selectedSplitOrderGroup.customerCode,
+          customer_name: selectedSplitOrderGroup.customerName,
+          customer_address: selectedSplitOrderGroup.customerAddress,
+        }
+      )
+    );
+    setSplitCustomerSearches((prev) =>
+      Array.from({ length: clamped }, (_, idx) => prev[idx] ?? "")
+    );
+  }
+
+  function handleSelectSplitCustomer(splitIdx: number, customerCode: string) {
+    const found = allCustomerOptions.find((c) => c.customer_code === customerCode);
+    setSplitCustomers((prev) => {
+      const next = [...prev];
+      if (found) {
+        next[splitIdx] = {
+          customer_code: found.customer_code,
+          customer_name: found.customer_name,
+          customer_address: found.customer_address,
+        };
+      } else if (selectedSplitOrderGroup && customerCode === selectedSplitOrderGroup.customerCode) {
+        next[splitIdx] = {
+          customer_code: selectedSplitOrderGroup.customerCode,
+          customer_name: selectedSplitOrderGroup.customerName,
+          customer_address: selectedSplitOrderGroup.customerAddress,
+        };
+      } else {
+        next[splitIdx] = {
+          ...(next[splitIdx] ?? { customer_code: "", customer_name: "", customer_address: "" }),
+          customer_code: customerCode,
+        };
+      }
+      return next;
+    });
   }
 
   function updateSplitCell(localId: number, splitIndex: number, field: "quantity" | "promoQuantity", value: number) {
     const cleanValue = Math.max(0, Number.isFinite(value) ? value : 0);
     setSplitAllocs((prev) => {
-      const currentArr = prev[localId] ? [...prev[localId]] : [];
+      const currentArr = prev[localId] ? prev[localId].map((c) => ({ ...c, customDiscount: null })) : [];
       if (!currentArr[splitIndex]) return prev;
       currentArr[splitIndex] = {
         ...currentArr[splitIndex],
         [field]: cleanValue,
+        customDiscount: null,
       };
       return {
         ...prev,
@@ -393,14 +516,26 @@ export default function SalesOrdersPage() {
         const localId = Number(line["_local_id"]);
         const origQty = numericValue(line["Số lượng"]);
         const origPromo = numericValue(line["Số lượng KM"]);
+        const origDisc = Math.round(numericValue(line["Số tiền CK"]));
         const currentArr = prev[localId]
           ? prev[localId].map((item) => ({ ...item }))
-          : Array.from({ length: splitCount }, () => ({ quantity: 0, promoQuantity: 0 }));
+          : Array.from({ length: splitCount }, () => ({ quantity: 0, promoQuantity: 0, customDiscount: null }));
         const sumOtherQty = currentArr.slice(0, splitCount - 1).reduce((s, a) => s + a.quantity, 0);
         const sumOtherPromo = currentArr.slice(0, splitCount - 1).reduce((s, a) => s + a.promoQuantity, 0);
+        const hasAnyCustomDisc = currentArr.some(
+          (item) => item.customDiscount !== null && item.customDiscount !== undefined
+        );
+        let lastCustomDisc: number | null = null;
+        if (hasAnyCustomDisc) {
+          const sumOtherDisc = currentArr
+            .slice(0, splitCount - 1)
+            .reduce((s, a) => s + Math.round(a.customDiscount ?? 0), 0);
+          lastCustomDisc = Math.max(0, origDisc - sumOtherDisc);
+        }
         currentArr[splitCount - 1] = {
           quantity: Math.max(0, Number((origQty - sumOtherQty).toFixed(4))),
           promoQuantity: Math.max(0, Number((origPromo - sumOtherPromo).toFixed(4))),
+          customDiscount: lastCustomDisc,
         };
         next[localId] = currentArr;
       }
@@ -420,9 +555,229 @@ export default function SalesOrdersPage() {
       next[localId] = Array.from({ length: splitCount }, (_, idx) => ({
         quantity: idx === splitCount - 1 ? Number((origQty - baseQty * (splitCount - 1)).toFixed(4)) : baseQty,
         promoQuantity: idx === splitCount - 1 ? Number((origPromo - basePromo * (splitCount - 1)).toFixed(4)) : basePromo,
+        customDiscount: null,
       }));
     }
     setSplitAllocs(next);
+  }
+
+  function resetSplitDiscountsToAuto() {
+    setSplitAllocs((prev) => {
+      const next: SplitAllocMap = {};
+      for (const [k, arr] of Object.entries(prev)) {
+        next[Number(k)] = arr.map((c) => ({ ...c, customDiscount: null }));
+      }
+      return next;
+    });
+  }
+
+  // Tính toán Giá trị và Số tiền CK theo từng dòng & tổng hợp theo từng đơn tách (khớp 100% công thức backend)
+  const splitFinancials = useMemo(() => {
+    const lineBreakdown: Record<number, { value: number; discount: number; autoDiscount: number }[]> = {};
+    const splitTotals = Array.from({ length: splitCount }, () => ({
+      lineCount: 0,
+      totalQty: 0,
+      totalPromoQty: 0,
+      totalValue: 0,
+      totalDiscount: 0,
+    }));
+
+    if (!selectedSplitOrderGroup) {
+      return { lineBreakdown, splitTotals };
+    }
+
+    for (const line of selectedSplitOrderGroup.lines) {
+      const localId = Number(line["_local_id"]);
+      const origQty = numericValue(line["Số lượng"]);
+      const origPromo = numericValue(line["Số lượng KM"]);
+      const origVal = numericValue(line["Giá trị"]);
+      const origDisc = numericValue(line["Số tiền CK"]);
+      const allocs = splitAllocs[localId] ?? [];
+
+      const sumQty = allocs.reduce((s, a) => s + a.quantity, 0);
+      const sumPromo = allocs.reduce((s, a) => s + a.promoQuantity, 0);
+      const isLineMatched =
+        Math.abs(sumQty - origQty) <= 1e-4 && Math.abs(sumPromo - origPromo) <= 1e-4;
+
+      const activeIndices: number[] = [];
+      for (let idx = 0; idx < splitCount; idx += 1) {
+        const cell = allocs[idx];
+        if (cell && (cell.quantity > 0 || cell.promoQuantity > 0)) {
+          activeIndices.push(idx);
+        }
+      }
+
+      const rowResult = Array.from({ length: splitCount }, () => ({
+        value: 0,
+        discount: 0,
+        autoDiscount: 0,
+      }));
+      let usedVal = 0;
+      let usedDisc = 0;
+
+      for (const idx of activeIndices) {
+        const cell = allocs[idx] ?? { quantity: 0, promoQuantity: 0 };
+        let val = 0;
+        let autoDisc = 0;
+
+        if (isLineMatched && idx === activeIndices[activeIndices.length - 1]) {
+          val = Math.round(origVal - usedVal);
+          autoDisc = Math.round(origDisc - usedDisc);
+        } else {
+          const ratio =
+            origQty > 0
+              ? cell.quantity / origQty
+              : origPromo > 0
+                ? cell.promoQuantity / origPromo
+                : 0;
+          val = Math.round(origVal * ratio);
+          autoDisc = Math.round(origDisc * ratio);
+          usedVal += val;
+          usedDisc += autoDisc;
+        }
+
+        const finalDisc =
+          cell.customDiscount !== null && cell.customDiscount !== undefined
+            ? Math.round(cell.customDiscount)
+            : autoDisc;
+
+        rowResult[idx] = { value: val, discount: finalDisc, autoDiscount: autoDisc };
+        splitTotals[idx].lineCount += 1;
+        splitTotals[idx].totalQty = Number((splitTotals[idx].totalQty + cell.quantity).toFixed(4));
+        splitTotals[idx].totalPromoQty = Number(
+          (splitTotals[idx].totalPromoQty + cell.promoQuantity).toFixed(4)
+        );
+        splitTotals[idx].totalValue += val;
+        splitTotals[idx].totalDiscount += finalDisc;
+      }
+
+      lineBreakdown[localId] = rowResult;
+    }
+
+    return { lineBreakdown, splitTotals };
+  }, [selectedSplitOrderGroup, splitAllocs, splitCount]);
+
+  // Chỉnh sửa Số tiền CK trực tiếp trên 1 dòng sản phẩm của 1 đơn tách
+  function updateSplitCellDiscount(localId: number, splitIndex: number, value: number) {
+    if (!selectedSplitOrderGroup) return;
+    const line = selectedSplitOrderGroup.lines.find((l) => Number(l["_local_id"]) === localId);
+    const origDisc = line ? Math.round(numericValue(line["Số tiền CK"])) : 0;
+    const cleanDisc = Math.max(0, Math.round(Number.isFinite(value) ? value : 0));
+    const currentFin = splitFinancials.lineBreakdown[localId] ?? [];
+
+    setSplitAllocs((prev) => {
+      const currentArr = (prev[localId] ?? []).map((cell, idx) => ({
+        ...cell,
+        customDiscount:
+          cell.customDiscount !== null && cell.customDiscount !== undefined
+            ? Math.round(cell.customDiscount)
+            : (currentFin[idx]?.discount ?? 0),
+      }));
+      if (!currentArr[splitIndex]) return prev;
+      currentArr[splitIndex].customDiscount = cleanDisc;
+
+      // Tự động cân bằng phần CK còn lại trên dòng này vào đơn tách đang hoạt động cuối cùng (hoặc đơn còn lại nếu có 2 đơn)
+      const activeIndices = currentArr
+        .map((c, idx) => (c.quantity > 0 || c.promoQuantity > 0 ? idx : -1))
+        .filter((idx) => idx !== -1);
+
+      if (activeIndices.length >= 2 && origDisc > 0) {
+        const balanceTargetIdx =
+          splitIndex !== activeIndices[activeIndices.length - 1]
+            ? activeIndices[activeIndices.length - 1]
+            : activeIndices.length === 2
+              ? activeIndices[0]
+              : -1;
+        if (balanceTargetIdx !== -1 && balanceTargetIdx !== splitIndex) {
+          const sumOther = activeIndices
+            .filter((idx) => idx !== balanceTargetIdx)
+            .reduce((s, idx) => s + (currentArr[idx]?.customDiscount ?? 0), 0);
+          currentArr[balanceTargetIdx].customDiscount = Math.max(0, origDisc - sumOther);
+        }
+      }
+
+      return {
+        ...prev,
+        [localId]: currentArr,
+      };
+    });
+  }
+
+  // Chỉnh sửa Tổng Số tiền CK của cả 1 đơn tách (tự động phân bổ xuống các dòng sản phẩm của đơn tách đó)
+  function updateSplitOrderTotalDiscount(splitIndex: number, targetTotalDisc: number) {
+    if (!selectedSplitOrderGroup) return;
+    const cleanTotalDisc = Math.max(0, Math.round(Number.isFinite(targetTotalDisc) ? targetTotalDisc : 0));
+
+    setSplitAllocs((prev) => {
+      const next: SplitAllocMap = {};
+      // Khởi tạo bản sao có customDiscount hiện hành cho tất cả các dòng
+      for (const line of selectedSplitOrderGroup.lines) {
+        const localId = Number(line["_local_id"]);
+        const finRow = splitFinancials.lineBreakdown[localId] ?? [];
+        const arr = (prev[localId] ?? []).map((cell, idx) => ({
+          ...cell,
+          customDiscount:
+            cell.customDiscount !== null && cell.customDiscount !== undefined
+              ? Math.round(cell.customDiscount)
+              : (finRow[idx]?.discount ?? 0),
+        }));
+        next[localId] = arr;
+      }
+
+      // Tìm các dòng đang có số lượng > 0 trong đơn tách splitIndex
+      const activeLines = selectedSplitOrderGroup.lines.filter((line) => {
+        const localId = Number(line["_local_id"]);
+        const cell = next[localId]?.[splitIndex];
+        return cell && (cell.quantity > 0 || cell.promoQuantity > 0);
+      });
+
+      if (activeLines.length === 0) return prev;
+
+      // Trọng số phân bổ theo Giá trị của dòng trong đơn tách (hoặc CK gốc của dòng)
+      const weights = activeLines.map((line) => {
+        const localId = Number(line["_local_id"]);
+        const val = splitFinancials.lineBreakdown[localId]?.[splitIndex]?.value ?? 0;
+        const origDisc = numericValue(line["Số tiền CK"]);
+        return val > 0 ? val : origDisc > 0 ? origDisc : 1;
+      });
+      const totalWeight = weights.reduce((s, w) => s + w, 0) || 1;
+
+      let allocated = 0;
+      activeLines.forEach((line, idx) => {
+        const localId = Number(line["_local_id"]);
+        const origDisc = Math.round(numericValue(line["Số tiền CK"]));
+        const lineDisc =
+          idx === activeLines.length - 1
+            ? Math.max(0, cleanTotalDisc - allocated)
+            : Math.round((cleanTotalDisc * weights[idx]) / totalWeight);
+        allocated += lineDisc;
+        if (next[localId]?.[splitIndex]) {
+          next[localId][splitIndex].customDiscount = lineDisc;
+        }
+
+        // Nếu dòng này có nhiều đơn tách hoạt động, tự động cân bằng phần CK còn lại của dòng sang đơn hoạt động cuối
+        const rowArr = next[localId] ?? [];
+        const rowActiveIndices = rowArr
+          .map((c, i) => (c.quantity > 0 || c.promoQuantity > 0 ? i : -1))
+          .filter((i) => i !== -1);
+        if (rowActiveIndices.length >= 2 && origDisc > 0) {
+          const balanceIdx =
+            splitIndex !== rowActiveIndices[rowActiveIndices.length - 1]
+              ? rowActiveIndices[rowActiveIndices.length - 1]
+              : rowActiveIndices.length === 2
+                ? rowActiveIndices[0]
+                : -1;
+          if (balanceIdx !== -1 && balanceIdx !== splitIndex) {
+            const sumOther = rowActiveIndices
+              .filter((i) => i !== balanceIdx)
+              .reduce((s, i) => s + (rowArr[i]?.customDiscount ?? 0), 0);
+            rowArr[balanceIdx].customDiscount = Math.max(0, origDisc - sumOther);
+          }
+        }
+      });
+
+      return next;
+    });
   }
 
   async function submitSplitOrder() {
@@ -450,19 +805,40 @@ export default function SalesOrdersPage() {
       }
     }
 
+    const totalSplitDisc = splitFinancials.splitTotals.reduce((s, t) => s + t.totalDiscount, 0);
+    const totalOrigDisc = Math.round(selectedSplitOrderGroup.totalDiscount);
+    if (Math.abs(totalSplitDisc - totalOrigDisc) > Math.max(1, selectedSplitOrderGroup.lines.length)) {
+      setSplitError(
+        `Tổng Số tiền CK của các đơn tách (${formatVND(totalSplitDisc)}) phải khớp với Tổng Số tiền CK đơn gốc (${formatVND(totalOrigDisc)}).`
+      );
+      return;
+    }
+
     const splitsPayload = Array.from({ length: splitCount }, (_, splitIdx) => {
       const items = selectedSplitOrderGroup.lines
         .map((line) => {
           const localId = Number(line["_local_id"]);
           const cell = splitAllocs[localId]?.[splitIdx];
+          const cellDisc = splitFinancials.lineBreakdown[localId]?.[splitIdx]?.discount ?? 0;
           return {
             snapshot_id: localId,
             quantity: cell?.quantity ?? 0,
             promo_quantity: cell?.promoQuantity ?? 0,
+            discount_amount: cellDisc,
           };
         })
         .filter((item) => item.quantity > 0 || item.promo_quantity > 0);
-      return { items };
+      const chosenCust = splitCustomers[splitIdx] ?? {
+        customer_code: selectedSplitOrderGroup.customerCode,
+        customer_name: selectedSplitOrderGroup.customerName,
+        customer_address: selectedSplitOrderGroup.customerAddress,
+      };
+      return {
+        customer_code: chosenCust.customer_code,
+        customer_name: chosenCust.customer_name,
+        customer_address: chosenCust.customer_address,
+        items,
+      };
     });
 
     const emptySplitIndex = splitsPayload.findIndex((s) => s.items.length === 0);
@@ -1143,16 +1519,32 @@ export default function SalesOrdersPage() {
                   <div>
                     <strong>Đơn gốc:</strong> <span className="font-mono text-purple-700">{selectedSplitOrderGroup.orderNumber}</span>
                     {" | "}
-                    <strong>Khách hàng:</strong> {selectedSplitOrderGroup.customerName} ({selectedSplitOrderGroup.customerCode})
+                    <strong>Khách hàng gốc:</strong> {selectedSplitOrderGroup.customerName} ({selectedSplitOrderGroup.customerCode})
                     {" | "}
                     <strong>NVBH:</strong> {selectedSplitOrderGroup.staffName}
                   </div>
                   <div>
-                    <strong>Mã đơn mới dự kiến:</strong>{" "}
-                    {Array.from({ length: splitCount }, (_, idx) => `TD-${selectedSplitOrderGroup.orderNumber}-${String(idx + 1).padStart(2, "0")}`).join(", ")}
+                    <strong>Tổng đơn gốc:</strong>{" "}
+                    SL: <strong>{selectedSplitOrderGroup.totalQty}</strong>
+                    {" | "}
+                    KM: <strong>{selectedSplitOrderGroup.totalPromoQty}</strong>
+                    {" | "}
+                    Giá trị: <strong className="text-emerald-700">{formatVND(selectedSplitOrderGroup.totalValue)}</strong>
+                    {" | "}
+                    Số tiền CK: <strong className="text-rose-700">{formatVND(selectedSplitOrderGroup.totalDiscount)}</strong>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  {selectedSplitOrderGroup.totalDiscount > 0 && (
+                    <button
+                      type="button"
+                      onClick={resetSplitDiscountsToAuto}
+                      className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
+                      title="Tính lại Số tiền CK tự động theo tỷ lệ Số lượng"
+                    >
+                      Chia lại CK theo SL
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={distributeEvenlyAcrossSplits}
@@ -1170,6 +1562,146 @@ export default function SalesOrdersPage() {
                 </div>
               </div>
 
+              {/* Chọn Mã KH và xem Tổng hợp Giá trị / Số tiền CK cho từng đơn tách */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-600">
+                  4. Chọn Khách hàng & Tổng hợp theo từng đơn tách
+                </h3>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {Array.from({ length: splitCount }, (_, splitIdx) => {
+                    const splitOrderCode = `TD-${selectedSplitOrderGroup.orderNumber}-${String(splitIdx + 1).padStart(2, "0")}`;
+                    const selectedCust = splitCustomers[splitIdx] ?? {
+                      customer_code: selectedSplitOrderGroup.customerCode,
+                      customer_name: selectedSplitOrderGroup.customerName,
+                      customer_address: selectedSplitOrderGroup.customerAddress,
+                    };
+                    const custSearch = (splitCustomerSearches[splitIdx] ?? "").trim().toLocaleLowerCase("vi");
+                    const filteredCustomers = allCustomerOptions
+                      .filter((c) => {
+                        if (!custSearch) return true;
+                        return (
+                          c.customer_code.toLocaleLowerCase("vi").includes(custSearch) ||
+                          c.customer_name.toLocaleLowerCase("vi").includes(custSearch) ||
+                          (c.store_name ?? "").toLocaleLowerCase("vi").includes(custSearch) ||
+                          (c.company_name ?? "").toLocaleLowerCase("vi").includes(custSearch)
+                        );
+                      })
+                      .slice(0, 100);
+                    const hasSelectedInFiltered = filteredCustomers.some(
+                      (c) => c.customer_code === selectedCust.customer_code
+                    );
+                    const totals = splitFinancials.splitTotals[splitIdx] ?? {
+                      lineCount: 0,
+                      totalQty: 0,
+                      totalPromoQty: 0,
+                      totalValue: 0,
+                      totalDiscount: 0,
+                    };
+
+                    return (
+                      <div
+                        key={splitIdx}
+                        className="rounded-xl border border-purple-200 bg-white p-3 shadow-sm space-y-2.5 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2 border-b border-gray-100 pb-2">
+                          <div>
+                            <span className="font-semibold text-purple-700">Đơn tách {splitIdx + 1}</span>
+                            <span className="ml-2 font-mono text-[11px] text-gray-500">{splitOrderCode}</span>
+                          </div>
+                          <span className="rounded-full bg-purple-50 px-2 py-0.5 text-[11px] font-medium text-purple-700">
+                            {totals.lineCount} dòng SP
+                          </span>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium text-gray-700">Khách hàng đơn tách {splitIdx + 1}:</span>
+                            {selectedCust.customer_code !== selectedSplitOrderGroup.customerCode && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSelectSplitCustomer(splitIdx, selectedSplitOrderGroup.customerCode)
+                                }
+                                className="text-[11px] text-purple-600 hover:underline"
+                              >
+                                Đặt lại KH gốc
+                              </button>
+                            )}
+                          </div>
+                          <input
+                            type="text"
+                            value={splitCustomerSearches[splitIdx] ?? ""}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setSplitCustomerSearches((prev) => {
+                                const next = [...prev];
+                                next[splitIdx] = val;
+                                return next;
+                              });
+                            }}
+                            placeholder="Tìm Mã KH, Tên KH, Cửa hàng..."
+                            className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:border-purple-500 focus:outline-none"
+                          />
+                          <select
+                            value={selectedCust.customer_code}
+                            onChange={(e) => handleSelectSplitCustomer(splitIdx, e.target.value)}
+                            className="block w-full rounded-lg border border-gray-200 bg-gray-50/70 px-2.5 py-1.5 text-xs font-medium text-gray-800 focus:border-purple-500 focus:outline-none"
+                          >
+                            {!hasSelectedInFiltered && selectedCust.customer_code && (
+                              <option value={selectedCust.customer_code}>
+                                {selectedCust.customer_code} ({selectedCust.customer_code.slice(-3)}) — {selectedCust.customer_name || "Khách hàng hiện tại"}
+                              </option>
+                            )}
+                            {filteredCustomers.map((c) => (
+                              <option key={c.customer_code} value={c.customer_code}>
+                                {c.customer_code} ({c.customer_code.slice(-3)}) — {c.customer_name}
+                                {c.company_name ? ` [${c.company_name}]` : ""}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="text-[11px] text-gray-500 truncate">
+                            Đang chọn: <strong className="text-gray-800">{selectedCust.customer_code}</strong> —{" "}
+                            <span className="text-gray-700">{selectedCust.customer_name}</span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 rounded-lg bg-gray-50 p-2 text-[11px]">
+                          <div className="flex items-center">
+                            <span className="text-gray-500">Tổng SL / KM:</span>{" "}
+                            <strong className="ml-1 text-gray-900">{totals.totalQty}</strong>
+                            {totals.totalPromoQty > 0 && (
+                              <span className="ml-1 text-amber-700 font-semibold">(+{totals.totalPromoQty} KM)</span>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <span className="text-gray-500">Số tiền CK:</span>
+                            {selectedSplitOrderGroup.totalDiscount > 0 ? (
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                value={totals.totalDiscount}
+                                onChange={(e) =>
+                                  updateSplitOrderTotalDiscount(splitIdx, Number(e.target.value))
+                                }
+                                title="Có thể chỉnh sửa tổng Số tiền CK của đơn tách này"
+                                className="w-28 rounded border border-rose-200 bg-white px-2 py-0.5 text-right text-xs font-semibold text-rose-700 focus:border-rose-500 focus:outline-none"
+                              />
+                            ) : (
+                              <strong className="text-rose-700">{formatVND(totals.totalDiscount)}</strong>
+                            )}
+                          </div>
+                          <div className="col-span-2 flex items-center justify-between border-t border-gray-200/70 pt-1">
+                            <span className="font-medium text-gray-600">Tổng giá trị đơn tách {splitIdx + 1}:</span>
+                            <strong className="text-xs text-emerald-700">{formatVND(totals.totalValue)}</strong>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="overflow-x-auto rounded-xl border border-gray-200">
                 <table className="min-w-full divide-y divide-gray-200 text-xs">
                   <thead className="bg-gray-50">
@@ -1178,14 +1710,22 @@ export default function SalesOrdersPage() {
                       <th className="px-2 py-2.5 text-center font-semibold text-gray-700">ĐVT</th>
                       <th className="px-2.5 py-2.5 text-right font-semibold text-gray-700">SL gốc</th>
                       <th className="px-2.5 py-2.5 text-right font-semibold text-gray-700">SL KM gốc</th>
-                      {Array.from({ length: splitCount }, (_, idx) => (
-                        <th key={idx} className="px-2.5 py-2.5 text-center font-semibold text-purple-700 bg-purple-50/40">
-                          Đơn tách {idx + 1}
-                          <div className="text-[10px] font-normal text-gray-500">
-                            TD-{selectedSplitOrderGroup.orderNumber}-{String(idx + 1).padStart(2, "0")}
-                          </div>
-                        </th>
-                      ))}
+                      {Array.from({ length: splitCount }, (_, idx) => {
+                        const cust = splitCustomers[idx];
+                        return (
+                          <th key={idx} className="px-2.5 py-2.5 text-center font-semibold text-purple-700 bg-purple-50/40">
+                            Đơn tách {idx + 1}
+                            <div className="text-[10px] font-normal text-gray-500">
+                              TD-{selectedSplitOrderGroup.orderNumber}-{String(idx + 1).padStart(2, "0")}
+                            </div>
+                            {cust?.customer_code && (
+                              <div className="text-[10px] font-medium text-purple-600 truncate max-w-[150px] mx-auto" title={`${cust.customer_code} - ${cust.customer_name}`}>
+                                KH: {cust.customer_code.slice(-3)} — {cust.customer_name}
+                              </div>
+                            )}
+                          </th>
+                        );
+                      })}
                       <th className="px-2.5 py-2.5 text-right font-semibold text-gray-700">Còn lại</th>
                     </tr>
                   </thead>
@@ -1198,25 +1738,37 @@ export default function SalesOrdersPage() {
                       const unit = displayRemoteValue(line["ĐVT"]);
                       const origQty = numericValue(line["Số lượng"]);
                       const origPromo = numericValue(line["Số lượng KM"]);
+                      const origVal = numericValue(line["Giá trị"]);
+                      const origDisc = numericValue(line["Số tiền CK"]);
                       const allocs = splitAllocs[localId] ?? [];
+                      const finRow = splitFinancials.lineBreakdown[localId] ?? [];
                       const sumQty = allocs.reduce((s, a) => s + a.quantity, 0);
                       const sumPromo = allocs.reduce((s, a) => s + a.promoQuantity, 0);
+                      const sumDisc = finRow.reduce((s, f) => s + f.discount, 0);
                       const remQty = Number((origQty - sumQty).toFixed(4));
                       const remPromo = Number((origPromo - sumPromo).toFixed(4));
-                      const isMatched = Math.abs(remQty) <= 1e-4 && Math.abs(remPromo) <= 1e-4;
+                      const remDisc = Math.round(origDisc - sumDisc);
+                      const isMatched =
+                        Math.abs(remQty) <= 1e-4 &&
+                        Math.abs(remPromo) <= 1e-4 &&
+                        Math.abs(remDisc) <= 1;
 
                       return (
                         <tr key={localId} className="hover:bg-gray-50/60">
                           <td className="px-3 py-2 align-top">
                             <div className="font-medium text-gray-900">{prodCode} — {prodName}</div>
                             {promoCode && <div className="text-[11px] text-gray-500">CTKM: {promoCode}</div>}
-                            <div className="text-[11px] text-emerald-700">Giá trị gốc: {formatVND(numericValue(line["Giá trị"]))}</div>
+                            <div className="text-[11px] text-emerald-700">
+                              Giá trị gốc: {formatVND(origVal)}
+                              {origDisc > 0 ? ` | CK gốc: ${formatVND(origDisc)}` : ""}
+                            </div>
                           </td>
                           <td className="px-2 py-2 text-center align-middle text-gray-600">{unit}</td>
                           <td className="px-2.5 py-2 text-right align-middle font-semibold text-gray-900">{origQty}</td>
                           <td className="px-2.5 py-2 text-right align-middle font-semibold text-amber-700">{origPromo}</td>
                           {Array.from({ length: splitCount }, (_, splitIdx) => {
                             const cell = allocs[splitIdx] ?? { quantity: 0, promoQuantity: 0 };
+                            const cellFin = finRow[splitIdx] ?? { value: 0, discount: 0, autoDiscount: 0 };
                             return (
                               <td key={splitIdx} className="px-2 py-2 align-middle bg-purple-50/15">
                                 <div className="flex flex-col gap-1">
@@ -1248,6 +1800,33 @@ export default function SalesOrdersPage() {
                                       />
                                     </label>
                                   )}
+                                  {(cell.quantity > 0 || cell.promoQuantity > 0) && (
+                                    <div className="mt-0.5 rounded bg-white/80 px-1.5 py-1 text-[10px] leading-tight border border-purple-100 space-y-1">
+                                      <div className="flex justify-between text-emerald-700 font-medium">
+                                        <span>GT:</span>
+                                        <span>{formatVND(cellFin.value)}</span>
+                                      </div>
+                                      {selectedSplitOrderGroup.totalDiscount > 0 && (
+                                        <label className="flex items-center justify-between gap-1 text-rose-700">
+                                          <span>CK:</span>
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            step={1}
+                                            value={cellFin.discount}
+                                            onChange={(e) =>
+                                              updateSplitCellDiscount(
+                                                localId,
+                                                splitIdx,
+                                                Number(e.target.value)
+                                              )
+                                            }
+                                            className="w-20 rounded border border-rose-200 bg-rose-50/20 px-1.5 py-0.5 text-right text-[11px] font-medium text-rose-800 focus:border-rose-500 focus:outline-none"
+                                          />
+                                        </label>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
                               </td>
                             );
@@ -1260,12 +1839,60 @@ export default function SalesOrdersPage() {
                             >
                               SL: {remQty}
                               {origPromo > 0 ? ` | KM: ${remPromo}` : ""}
+                              {Math.abs(remDisc) > 1 ? ` | CK: ${formatVND(remDisc)}` : ""}
                             </span>
                           </td>
                         </tr>
                       );
                     })}
                   </tbody>
+                  <tfoot className="bg-gray-50 font-semibold text-gray-900 border-t border-gray-200">
+                    <tr>
+                      <td colSpan={2} className="px-3 py-2.5 text-right align-top">
+                        <div>Tổng cộng:</div>
+                        <div className="text-[11px] font-normal text-emerald-700">
+                          GT gốc: {formatVND(selectedSplitOrderGroup.totalValue)}
+                        </div>
+                        <div className="text-[11px] font-normal text-rose-700">
+                          CK gốc: {formatVND(selectedSplitOrderGroup.totalDiscount)}
+                        </div>
+                      </td>
+                      <td className="px-2.5 py-2.5 text-right align-top">{selectedSplitOrderGroup.totalQty}</td>
+                      <td className="px-2.5 py-2.5 text-right align-top text-amber-700">
+                        {selectedSplitOrderGroup.totalPromoQty}
+                      </td>
+                      {Array.from({ length: splitCount }, (_, splitIdx) => {
+                        const totals = splitFinancials.splitTotals[splitIdx] ?? {
+                          totalQty: 0,
+                          totalPromoQty: 0,
+                          totalValue: 0,
+                          totalDiscount: 0,
+                        };
+                        return (
+                          <td key={splitIdx} className="px-2.5 py-2.5 text-right align-top bg-purple-50/30">
+                            <div className="text-gray-900">
+                              SL: {totals.totalQty}
+                              {totals.totalPromoQty > 0 ? ` | KM: ${totals.totalPromoQty}` : ""}
+                            </div>
+                            <div className="text-[11px] text-emerald-700">
+                              GT: {formatVND(totals.totalValue)}
+                            </div>
+                            <div className="text-[11px] text-rose-700">
+                              CK: {formatVND(totals.totalDiscount)}
+                            </div>
+                          </td>
+                        );
+                      })}
+                      <td className="px-2.5 py-2.5 text-right align-top text-[11px]">
+                        <div className="text-emerald-700">
+                          ∑GT: {formatVND(splitFinancials.splitTotals.reduce((s, t) => s + t.totalValue, 0))}
+                        </div>
+                        <div className="text-rose-700">
+                          ∑CK: {formatVND(splitFinancials.splitTotals.reduce((s, t) => s + t.totalDiscount, 0))}
+                        </div>
+                      </td>
+                    </tr>
+                  </tfoot>
                 </table>
               </div>
 

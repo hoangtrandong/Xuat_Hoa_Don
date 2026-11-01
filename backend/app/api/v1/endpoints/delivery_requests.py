@@ -803,7 +803,7 @@ def import_borrowed_preview(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        batch = borrow_crud.create_pending_batch(
+        batch = borrow_crud.create_posted_batch(
             db,
             import_hash=payload.import_hash,
             filename=payload.filename,
@@ -815,7 +815,7 @@ def import_borrowed_preview(
         return {
             "batch_id": batch.id,
             "status": batch.status,
-            "message": "Đã chuyển các đơn Mượn Số sang hàng chờ xác nhận tại Hàng vay mượn NVBH.",
+            "message": "Đã ghi nhận các đơn Mượn Số vào sổ Hàng vay mượn NVBH.",
         }
     except ValueError as exc:
         return _error(db, exc)

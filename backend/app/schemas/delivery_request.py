@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from app.schemas.debt_ledger import DeliveryReturnOut
 
@@ -165,12 +165,21 @@ class DailyEmployeeSettlement(BaseModel):
     requests: List[DailySettlementRequestBreakdown] = Field(default_factory=list)
 
 
+class BorrowedEmployeeOffsetCreate(BaseModel):
+    external_employee_code: str = Field(min_length=1, max_length=50)
+    external_employee_name: Optional[str] = Field(default=None, max_length=120)
+    employee_id: Optional[int] = None
+    quantity: int = Field(gt=0)
+    amount: float = Field(ge=0, allow_inf_nan=False)
+
+
 
 class DeliveryRequestItemCreate(BaseModel):
     product_id: int
     quantity: int = Field(ge=0)
     requested_quantity_raw: Optional[str] = None
     employee_allocations: Optional[Dict[str, Any]] = None
+    borrowed_employee_offsets: Optional[List[BorrowedEmployeeOffsetCreate]] = None
     planned_allocations: Optional[List[Dict[str, Any]]] = None
 
 
@@ -193,6 +202,28 @@ class DeliveryRequestEmployeeSummaryCreate(DeliveryRequestEmployeeSummaryBase):
     pass
 
 
+class EmployeeBorrowEntryCreate(BaseModel):
+    employee_id: Optional[int] = None
+    external_employee_code: Optional[str] = Field(default=None, max_length=50)
+    external_employee_name: Optional[str] = Field(default=None, max_length=120)
+    product_id: int
+    quantity: int = Field(lt=0)
+    amount: float = Field(le=0, allow_inf_nan=False)
+    note: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_employee_identity(self):
+        if self.employee_id is None and not (self.external_employee_code or "").strip():
+            raise ValueError("Thiếu mã nhân viên nội bộ hoặc mã NVBH trên DMS.")
+        return self
+
+
+class EmployeeBorrowBatchCreate(BaseModel):
+    import_hash: str = Field(min_length=64, max_length=64)
+    filename: str = Field(min_length=1, max_length=255)
+    entries: List[EmployeeBorrowEntryCreate] = Field(min_length=1)
+
+
 class DeliveryRequestEmployeeSummary(DeliveryRequestEmployeeSummaryBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -205,6 +236,9 @@ class DeliveryRequestCreate(BaseModel):
     items: List[DeliveryRequestItemCreate] = Field(min_length=1)
     employee_summaries: Optional[List[DeliveryRequestEmployeeSummaryCreate]] = None
     orders: Optional[List[DeliveryRequestOrderCreate]] = None
+    borrow_entries: Optional[List[EmployeeBorrowEntryCreate]] = None
+    borrow_import_hash: Optional[str] = Field(default=None, min_length=64, max_length=64)
+    borrow_filename: Optional[str] = Field(default=None, max_length=255)
     note: Optional[str] = None
     created_by: Optional[str] = None
 
@@ -221,13 +255,24 @@ class DeliveryPreviewItem(BaseModel):
     available_quantity: int = 0
     shortage_quantity: int = 0
     employee_allocations: Optional[Dict[str, Any]] = None
+    borrowed_employee_offsets: List[BorrowedEmployeeOffsetCreate] = Field(default_factory=list)
     allocations: List["DeliveryAllocation"] = Field(default_factory=list)
+    dms_skus: List[str] = Field(default_factory=list)
 
 
 class DeliveryPreviewResponse(BaseModel):
     items: List[DeliveryPreviewItem]
     employee_summaries: List[DeliveryRequestEmployeeSummaryBase] = Field(default_factory=list)
     orders: List[DeliveryRequestOrderCreate] = Field(default_factory=list)
+    order_reconciliation: List[Dict[str, Any]] = Field(default_factory=list)
+    borrow_entries: List[EmployeeBorrowEntryCreate] = Field(default_factory=list)
+    import_hash: Optional[str] = None
+    filename: Optional[str] = None
+    amount_source: Optional[str] = None
+    statuses: Dict[str, int] = Field(default_factory=dict)
+    issues: List[str] = Field(default_factory=list)
+    can_create: bool = True
+    send_order_candidates: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
     total_cartons: int = 0
     total_loose_boxes: int = 0

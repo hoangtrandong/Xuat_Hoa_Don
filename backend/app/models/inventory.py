@@ -251,6 +251,7 @@ class DeliveryRequestItem(Base):
     quantity: Mapped[int] = mapped_column(Integer)
     requested_quantity_raw: Mapped[str | None] = mapped_column(String(40), nullable=True)
     employee_allocations: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    borrowed_employee_offsets: Mapped[list | None] = mapped_column(JSON, nullable=True)
     planned_allocations: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     request: Mapped["DeliveryRequest"] = relationship(back_populates="items")

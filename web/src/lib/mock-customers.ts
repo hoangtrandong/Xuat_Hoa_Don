@@ -25,6 +25,7 @@ export interface Customer {
   companyId?: string;
   storeCode?: string;
   storeName?: string;
+  storeRoute?: string;
   companyCode?: string;
   companyName?: string;
 }

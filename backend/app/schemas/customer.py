@@ -20,7 +20,7 @@ class CustomerBase(BaseModel):
 
 
 class CustomerCreate(CustomerBase):
-    pass
+    store_route: Optional[str] = None
 
 
 class CustomerUpdate(BaseModel):
@@ -34,6 +34,7 @@ class CustomerUpdate(BaseModel):
     status: Optional[str] = None
     store_id: Optional[int] = None
     company_id: Optional[int] = None
+    store_route: Optional[str] = None
 
 
 class Customer(CustomerBase):
@@ -44,5 +45,6 @@ class Customer(CustomerBase):
     # Chỉ đọc: điền từ quan hệ store / company để giao diện hiển thị nhanh.
     store_code: Optional[str] = None
     store_name: Optional[str] = None
+    store_route: Optional[str] = None
     company_code: Optional[str] = None
     company_name: Optional[str] = None

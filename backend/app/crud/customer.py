@@ -2,7 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional
 
-from app.models.customer import Customer
+from app.models.customer import Customer, Store
 from app.schemas.customer import CustomerCreate, CustomerUpdate
 
 
@@ -28,16 +28,28 @@ def list_(db: Session, skip: int = 0, limit: int = 100, status: Optional[str] = 
 
 
 def create(db: Session, obj_in: CustomerCreate) -> Customer:
-    customer = Customer(**obj_in.model_dump())
+    data = obj_in.model_dump()
+    store_route = data.pop("store_route", None)
+    customer = Customer(**data)
     db.add(customer)
+    if customer.store_id and store_route is not None:
+        store = db.get(Store, customer.store_id)
+        if store:
+            store.route = store_route.strip() or None
     db.commit()
     db.refresh(customer)
     return customer
 
 
 def update(db: Session, customer: Customer, obj_in: CustomerUpdate) -> Customer:
-    for field, value in obj_in.model_dump(exclude_unset=True).items():
+    data = obj_in.model_dump(exclude_unset=True)
+    store_route = data.pop("store_route", None)
+    for field, value in data.items():
         setattr(customer, field, value)
+    if customer.store_id and store_route is not None:
+        store = db.get(Store, customer.store_id)
+        if store:
+            store.route = store_route.strip() or None
     db.commit()
     db.refresh(customer)
     return customer

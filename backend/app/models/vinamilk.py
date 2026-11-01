@@ -27,6 +27,8 @@ class VinamilkOrderSnapshot(Base):
     product_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    processing_status: Mapped[str | None] = mapped_column(String(40), nullable=True, default=None)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     warehouse_updated: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     returned: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     order_created_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -54,5 +56,6 @@ class VinamilkOrderReplacement(Base):
     __tablename__ = "vinamilk_order_replacements"
 
     new_order_number: Mapped[str] = mapped_column(String(120), primary_key=True)
-    replaced_order_number: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    replaced_order_number: Mapped[str] = mapped_column(String(1000), nullable=False, index=True)
+    replacement_type: Mapped[str] = mapped_column(String(20), nullable=False, default="MANUAL")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

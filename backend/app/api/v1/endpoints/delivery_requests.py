@@ -2,14 +2,17 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 import hashlib
+import json
 import re
+import unicodedata
+from collections import defaultdict
 from typing import Any, List
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from zipfile import BadZipFile
 
 from app.core.database import get_db
@@ -17,8 +20,10 @@ from app.core.auth import get_current_user
 from app.crud import delivery_request as crud
 from app.models.employee import Employee
 from app.models.finance import DebtLedgerEntry
-from app.models.inventory import DeliveryRequest as DeliveryRequestModel, DeliveryRequestEmployeeSummary, DeliveryRequestOrder as DeliveryRequestOrderModel
+from app.models.inventory import DeliveryRequest as DeliveryRequestModel, DeliveryRequestEmployeeSummary, DeliveryRequestOrder as DeliveryRequestOrderModel, Warehouse
 from app.models.product import Product
+from app.models.sales import SalesOrder, SalesOrderItem
+from app.models.vinamilk import VinamilkOrderSnapshot
 from app.models.user import User
 from app.crud import employee_borrow as borrow_crud
 from app.crud.npp import canonical_product_id
@@ -28,6 +33,7 @@ from app.schemas.delivery_request import (
     DeliveryRequestOrderCreate, SettlementOrderPayRequest,
     SettlementMatchStatementRequest, SettlementMatchStatementResponse,
     DeliverySettlementOverview, DailyEmployeeSettlement, BankStatementItem,
+    EmployeeBorrowBatchCreate,
 )
 
 router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
@@ -119,9 +125,700 @@ def _borrow_employee_code(value: Any) -> str:
     return str(value).split("(", 1)[0].strip().upper()
 
 
+def _normalized_label(value: Any) -> str:
+    text = unicodedata.normalize("NFD", str(value or "").strip().casefold())
+    return "".join(char for char in text if unicodedata.category(char) != "Mn").replace("đ", "d")
+
+
+def _numeric_value(value: Any) -> Decimal:
+    if value in (None, ""):
+        return Decimal("0")
+    try:
+        result = Decimal(str(value).replace(",", "").strip())
+    except InvalidOperation as exc:
+        raise ValueError(f"Giá trị số không hợp lệ: {value}") from exc
+    if not result.is_finite():
+        raise ValueError(f"Giá trị số không hợp lệ: {value}")
+    return result
+
+
+def _date_value(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not value:
+        return None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(str(value).strip(), fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"Ngày đơn hàng không hợp lệ: {value}")
+
+
+def _new_workbook_sheets(workbook):
+    normalized = {
+        _normalized_label(re.sub(r"\s+", "", sheet.title)): sheet
+        for sheet in workbook.worksheets
+    }
+    return next(
+        (sheet for name, sheet in normalized.items() if name in {"dsdonhang", "danhsachdonhang"}),
+        None,
+    )
+
+
+def _read_new_workbook_order_rows(workbook):
+    orders_sheet = _new_workbook_sheets(workbook)
+    if not orders_sheet:
+        return None
+
+    orders_rows = list(orders_sheet.iter_rows(values_only=True))
+    header_index = next(
+        (
+            index for index, row in enumerate(orders_rows[:15])
+            if any(_normalized_label(cell) in {"so don hang", "ma don hang"} for cell in row if cell is not None)
+        ),
+        None,
+    )
+    if header_index is None:
+        raise ValueError("Không tìm thấy tiêu đề cột trong sheet DSDonHang.")
+    headers = [_normalized_label(cell) for cell in orders_rows[header_index]]
+    aliases = {
+        "order_number": {"so don hang", "ma don hang"},
+        "order_date": {"ngay don hang", "ngay don", "ngay"},
+        "employee_code": {"ma nvgh", "ma nv"},
+        "employee_name": {"ten nvgh", "ten nv"},
+        "customer_code": {"ma khach hang", "ma kh"},
+        "customer_name": {"ten khach hang", "ten kh"},
+        "status": {"trang thai"},
+    }
+    columns = {
+        key: next((index for index, header in enumerate(headers) if header in values), None)
+        for key, values in aliases.items()
+    }
+    missing_columns = [key for key, index in columns.items() if index is None]
+    if missing_columns:
+        raise ValueError("Sheet DSDonHang thiếu các cột bắt buộc: " + ", ".join(missing_columns))
+
+    orders = []
+    seen_orders = set()
+    for row_number, row in enumerate(orders_rows[header_index + 1:], header_index + 2):
+        order_number = str(row[columns["order_number"]] or "").strip()
+        if not order_number:
+            continue
+        key = order_number.casefold()
+        if key in seen_orders:
+            raise ValueError(f"Dòng {row_number}: số đơn {order_number} xuất hiện nhiều lần.")
+        seen_orders.add(key)
+        status_text = str(row[columns["status"]] or "").strip()
+        status_key = _normalized_label(status_text)
+        status = {
+            "xuat hang": "Xuất Hàng",
+            "gui so": "Gửi Số",
+            "muon so": "Mượn Số",
+            "tra so": "Trả Số",
+        }.get(status_key)
+        if not status:
+            raise ValueError(f"Dòng {row_number}: trạng thái '{status_text}' không được hỗ trợ.")
+        orders.append({
+            "order_number": order_number,
+            "order_date": _date_value(row[columns["order_date"]]),
+            "employee_code": str(row[columns["employee_code"]] or "").strip().upper(),
+            "employee_name": str(row[columns["employee_name"]] or "").strip(),
+            "customer_code": str(row[columns["customer_code"]] or "").strip(),
+            "customer_name": str(row[columns["customer_name"]] or "").strip(),
+            "status": status,
+            "row_number": row_number,
+        })
+
+    return orders
+
+
+def _is_sales_employee(employee: Employee) -> bool:
+    position = _normalized_label(employee.position)
+    return (
+        position.startswith("nvkd ")
+        or position in {"sales", "ban hang", "nhan vien kinh doanh", "nhan vien ban hang"}
+    )
+
+
+def _resolve_employee(db: Session, code: str, name: str, row_number: int, role: str) -> Employee | None:
+    def role_matches(employees: list[Employee]) -> list[Employee]:
+        if role == "NVBH":
+            return [employee for employee in employees if _is_sales_employee(employee)]
+        return employees
+
+    if code:
+        matches = role_matches(db.scalars(
+            select(Employee).where(func.upper(Employee.code) == code.upper())
+        ).all())
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"Dòng {row_number}: mã {role} {code} trùng trong danh sách nhân viên.")
+        matches = role_matches(db.scalars(
+            select(Employee).where(func.upper(Employee.vinamilk_code) == code.upper())
+        ).all())
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"Dòng {row_number}: mã Vinamilk {role} {code} trùng trong danh sách nhân viên.")
+    if name:
+        matches = role_matches(db.scalars(
+            select(Employee).where(func.lower(Employee.name) == name.casefold())
+        ).all())
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"Dòng {row_number}: tên {role} {name} trùng trong danh sách nhân viên.")
+    return None
+
+
+def _line_quantity_and_amount(snapshot: VinamilkOrderSnapshot) -> tuple[int, Decimal]:
+    payload = snapshot.raw_payload or {}
+    quantity = _numeric_value(
+        next((payload[key] for key in ("Số lượng", "quantity", "qty") if payload.get(key) not in (None, "")), 0)
+    )
+    promo_quantity = _numeric_value(
+        next((payload[key] for key in ("Số lượng KM", "promotionQuantity", "freeQuantity") if payload.get(key) not in (None, "")), 0)
+    )
+    amount = _numeric_value(
+        next((payload[key] for key in ("Giá trị", "totalValue", "amount") if payload.get(key) not in (None, "")), 0)
+    )
+    total_quantity = quantity + promo_quantity
+    if total_quantity < 0 or total_quantity != total_quantity.to_integral_value():
+        raise ValueError(f"Đơn {snapshot.order_number}, mã DMS {snapshot.product_code}: số lượng không nguyên hoặc âm.")
+    return int(total_quantity), amount
+
+
+def _preview_new_workbook(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    warehouse_id: int,
+    db: Session,
+    send_order_mappings: dict[str, int] | None = None,
+) -> DeliveryPreviewResponse | None:
+    workbook = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+    parsed = _read_new_workbook_order_rows(workbook)
+    if parsed is None:
+        return None
+    order_rows = parsed
+    if not order_rows:
+        raise ValueError("Sheet DSDonHang không có đơn hàng.")
+    if not db.get(Warehouse, warehouse_id):
+        raise ValueError("Không tìm thấy kho.")
+    amount_source = "DMS"
+    send_order_mappings = send_order_mappings or {}
+
+    active_orders = [
+        row for row in order_rows
+        if row["status"] in {"Xuất Hàng", "Mượn Số", "Trả Số"}
+    ]
+    send_orders = [row for row in order_rows if row["status"] == "Gửi Số"]
+    export_order_numbers = [
+        row["order_number"] for row in order_rows
+        if row["status"] in {"Xuất Hàng", "Gửi Số", "Trả Số"}
+    ]
+    existing_order_numbers = set(db.scalars(
+        select(DeliveryRequestOrderModel.order_number)
+        .join(
+            DeliveryRequestModel,
+            DeliveryRequestModel.id == DeliveryRequestOrderModel.delivery_request_id,
+        )
+        .where(
+            func.upper(DeliveryRequestOrderModel.order_number).in_(
+                [number.upper() for number in export_order_numbers]
+            ),
+            DeliveryRequestModel.status != "CANCELLED",
+        )
+    ).all()) if export_order_numbers else set()
+    dms_order_numbers = [row["order_number"] for row in active_orders]
+    snapshots = db.scalars(
+        select(VinamilkOrderSnapshot).where(
+            func.upper(VinamilkOrderSnapshot.order_number).in_([number.upper() for number in dms_order_numbers])
+        )
+    ).all() if dms_order_numbers else []
+    snapshots_by_order: dict[str, list[VinamilkOrderSnapshot]] = defaultdict(list)
+    for snapshot in snapshots:
+        if snapshot.order_number:
+            snapshots_by_order[snapshot.order_number.casefold()].append(snapshot)
+
+    send_codes = [row["order_number"] for row in send_orders]
+    mapped_order_ids = list(send_order_mappings.values())
+    sales_orders = db.scalars(
+        select(SalesOrder)
+        .options(
+            joinedload(SalesOrder.customer),
+            joinedload(SalesOrder.employee),
+            selectinload(SalesOrder.items).joinedload(SalesOrderItem.product),
+        )
+        .where(
+            func.upper(SalesOrder.code).in_([code.upper() for code in send_codes])
+            if not mapped_order_ids
+            else (
+                func.upper(SalesOrder.code).in_([code.upper() for code in send_codes])
+                | SalesOrder.id.in_(mapped_order_ids)
+            )
+        )
+    ).all() if send_codes or mapped_order_ids else []
+    sales_order_by_code = {order.code.casefold(): order for order in sales_orders}
+    sales_order_by_id = {order.id: order for order in sales_orders}
+    candidate_sales_orders = db.scalars(
+        select(SalesOrder)
+        .options(
+            joinedload(SalesOrder.customer),
+            selectinload(SalesOrder.items).joinedload(SalesOrderItem.product),
+        )
+        .where(SalesOrder.status != "CANCELLED")
+        .order_by(SalesOrder.created_at.desc())
+        .limit(2000)
+    ).all() if send_orders else []
+    send_order_candidates: dict[str, list[dict[str, Any]]] = {}
+    for send_order in send_orders:
+        mapped_order = sales_order_by_id.get(send_order_mappings.get(send_order["order_number"].casefold()))
+        if send_order["order_number"].casefold() in sales_order_by_code or (
+            mapped_order
+            and mapped_order.customer
+            and (
+                (
+                    send_order["customer_code"]
+                    and mapped_order.customer.code.casefold() == send_order["customer_code"].casefold()
+                )
+                or (
+                    send_order["customer_name"]
+                    and _normalized_label(mapped_order.customer.name) == _normalized_label(send_order["customer_name"])
+                )
+            )
+        ):
+            continue
+        candidates = [
+            order for order in candidate_sales_orders
+            if (
+                send_order["customer_code"]
+                and order.customer
+                and order.customer.code.casefold() == send_order["customer_code"].casefold()
+            )
+            or (
+                send_order["customer_name"]
+                and order.customer
+                and _normalized_label(order.customer.name) == _normalized_label(send_order["customer_name"])
+            )
+        ]
+        if not candidates:
+            candidates = candidate_sales_orders
+        if send_order["order_date"]:
+            candidates.sort(
+                key=lambda order: abs((order.created_at.date() - send_order["order_date"]).days)
+                if order.created_at else 99999
+            )
+        send_order_candidates[send_order["order_number"]] = [
+            {
+                "id": order.id,
+                "code": order.code,
+                "status": order.status,
+                "customer_code": order.customer.code if order.customer else "",
+                "customer_name": order.customer.name if order.customer else "",
+                "total": float(order.total or 0),
+                "created_at": order.created_at.isoformat() if order.created_at else None,
+                "products": [f"{item.product.sku} × {item.quantity}" for item in order.items],
+            }
+            for order in candidates[:30]
+        ]
+
+    products = {
+        product.sku.upper(): product
+        for product in db.scalars(select(Product)).all()
+    }
+    from app.crud.npp import NppDirectory
+    directory = NppDirectory(db)
+    issues: list[str] = []
+    warnings: list[str] = []
+    status_counts = defaultdict(int)
+    aggregate: dict[int, dict[str, Any]] = {}
+    order_reconciliation = []
+    delivery_orders = []
+    employee_summaries: dict[int, dict[str, Any]] = {}
+    borrowed_lines: dict[tuple[str, int], dict[str, Any]] = {}
+    used_sales_order_ids: set[int] = set()
+
+    for row in order_rows:
+        order_number = row["order_number"]
+        status = row["status"]
+        status_counts[status] += 1
+        if status in {"Xuất Hàng", "Gửi Số", "Trả Số"} and order_number.upper() in {
+            existing.upper() for existing in existing_order_numbers
+        }:
+            issues.append(f"Đơn {order_number} đã có trong một yêu cầu xuất kho trước đó.")
+        employee = None
+        if status in {"Xuất Hàng", "Gửi Số", "Trả Số"}:
+            employee = _resolve_employee(
+                db, row["employee_code"], row["employee_name"], row["row_number"], "NVGH"
+            )
+        if status in {"Xuất Hàng", "Gửi Số", "Trả Số"} and not employee:
+            issues.append(
+                f"Dòng {row['row_number']}: không tìm thấy NVGH {row['employee_code']} ({row['employee_name']})."
+            )
+        line_rows: list[dict[str, Any]] = []
+        dms_amount = Decimal("0")
+        source_order_code = None
+        if status in {"Xuất Hàng", "Mượn Số", "Trả Số"}:
+            dms_lines = snapshots_by_order.get(order_number.casefold(), [])
+            if not dms_lines:
+                issues.append(f"Đơn {order_number} ({status}) không tìm thấy chi tiết trong dữ liệu DMS đã đồng bộ.")
+            if status in {"Mượn Số", "Trả Số"} and dms_lines:
+                dms_staff = {}
+                for snapshot in dms_lines:
+                    payload = snapshot.raw_payload or {}
+                    staff_code = str(payload.get("Mã NVBH") or payload.get("staffCode") or "").strip().upper()
+                    staff_name = str(payload.get("Tên NVBH") or payload.get("staffName") or "").strip()
+                    identity_key = f"{staff_code.casefold()}|{_normalized_label(staff_name)}"
+                    if staff_code or staff_name:
+                        dms_staff[identity_key] = (staff_code, staff_name)
+
+                if len(dms_staff) > 1:
+                    issues.append(f"Đơn {order_number}: dữ liệu DMS có nhiều NVBH khác nhau trong các dòng sản phẩm.")
+                dms_staff_code, dms_staff_name = next(iter(dms_staff.values()), ("", ""))
+                sales_employee = None
+                if not dms_staff_code and not dms_staff_name:
+                    issues.append(f"Đơn {order_number}: dữ liệu DMS không có mã/tên NVBH để ghi nhận {status}.")
+                else:
+                    file_code = row["employee_code"].strip().upper()
+                    file_name = row["employee_name"].strip()
+                    if status == "Mượn Số":
+                        mismatches = []
+                        if file_code and dms_staff_code and file_code.casefold() != dms_staff_code.casefold():
+                            mismatches.append(f"mã file {file_code} ≠ mã DMS {dms_staff_code}")
+                        if file_name and dms_staff_name and (
+                            _normalized_label(file_name) != _normalized_label(dms_staff_name)
+                        ):
+                            mismatches.append(f"tên file {file_name} ≠ tên DMS {dms_staff_name}")
+                        if mismatches:
+                            warnings.append(
+                                f"Đơn {order_number} ({status}): NVBH ưu tiên theo DMS "
+                                f"{dms_staff_code} ({dms_staff_name}); " + "; ".join(mismatches) + "."
+                            )
+
+                    sales_employee = _resolve_employee(
+                        db, dms_staff_code, dms_staff_name, row["row_number"], "NVBH"
+                    )
+                    if sales_employee and (
+                        sales_employee.status != "active" or not _is_sales_employee(sales_employee)
+                    ):
+                        sales_employee = None
+                    if not dms_staff_code:
+                        issues.append(
+                            f"Đơn {order_number}: cần mã NVBH trên DMS để ghi nhận Mượn Số hoặc bù trừ Trả Số."
+                        )
+            else:
+                sales_employee = None
+            for snapshot in dms_lines:
+                dms_sku = (snapshot.product_code or "").strip().upper()
+                product = products.get(dms_sku)
+                if not product:
+                    issues.append(f"Đơn {order_number}: không tìm thấy mã DMS {dms_sku} trong danh mục sản phẩm.")
+                    continue
+                try:
+                    canonical_id = canonical_product_id(db, product.id)
+                except ValueError:
+                    issues.append(f"Đơn {order_number}: mã DMS {dms_sku} chưa được ghép mã NPP.")
+                    continue
+                quantity, line_amount = _line_quantity_and_amount(snapshot)
+                if quantity <= 0:
+                    continue
+                npp_product = db.get(Product, canonical_id)
+                npp_code, npp_name = directory.label(canonical_id, npp_product.sku, npp_product.name)
+                line_rows.append({
+                    "product_id": canonical_id,
+                    "dms_sku": dms_sku,
+                    "dms_name": snapshot.product_name or product.name,
+                    "npp_code": npp_code,
+                    "npp_name": npp_name,
+                    "quantity": quantity,
+                    "dms_amount": line_amount,
+                    "staff_code": str((snapshot.raw_payload or {}).get("Mã NVBH") or (snapshot.raw_payload or {}).get("staffCode") or "").strip().upper(),
+                    "staff_name": str((snapshot.raw_payload or {}).get("Tên NVBH") or (snapshot.raw_payload or {}).get("staffName") or "").strip(),
+                })
+                dms_amount += line_amount
+        elif status == "Gửi Số":
+            mapped_sales_order_id = send_order_mappings.get(order_number.casefold())
+            sales_order = sales_order_by_id.get(mapped_sales_order_id) if mapped_sales_order_id else None
+            if sales_order is None:
+                sales_order = sales_order_by_code.get(order_number.casefold())
+            if not sales_order:
+                issues.append(f"Đơn Gửi Số {order_number} chưa được tạo trong phần đơn hàng nội bộ.")
+            else:
+                source_order_code = sales_order.code
+                if sales_order.status == "CANCELLED":
+                    issues.append(f"Đơn nội bộ {sales_order.code} đã bị hủy, không thể dùng cho Gửi Số.")
+                if sales_order.id in used_sales_order_ids:
+                    issues.append(f"Đơn nội bộ {sales_order.code} đã được ghép cho một dòng Gửi Số khác.")
+                used_sales_order_ids.add(sales_order.id)
+                if (
+                    row["customer_code"]
+                    and sales_order.customer
+                    and row["customer_code"].casefold() != sales_order.customer.code.casefold()
+                ):
+                    warnings.append(
+                        f"Đơn Gửi Số {order_number} ghép với đơn {sales_order.code} nhưng mã khách hàng không khớp."
+                    )
+                if (
+                    row["customer_name"]
+                    and sales_order.customer
+                    and _normalized_label(row["customer_name"]) != _normalized_label(sales_order.customer.name)
+                ):
+                    warnings.append(
+                        f"Đơn Gửi Số {order_number} ghép với đơn {sales_order.code} nhưng tên khách hàng không khớp."
+                    )
+                dms_amount = Decimal(str(sales_order.total or 0))
+                for order_item in sales_order.items:
+                    product = order_item.product
+                    try:
+                        canonical_id = canonical_product_id(db, product.id)
+                    except ValueError:
+                        issues.append(f"Đơn {order_number}: mã DMS {product.sku} chưa được ghép mã NPP.")
+                        continue
+                    npp_product = db.get(Product, canonical_id)
+                    npp_code, npp_name = directory.label(canonical_id, npp_product.sku, npp_product.name)
+                    line_rows.append({
+                        "product_id": canonical_id,
+                        "dms_sku": product.sku,
+                        "dms_name": product.name,
+                        "npp_code": npp_code,
+                        "npp_name": npp_name,
+                        "quantity": int(order_item.quantity),
+                        "dms_amount": Decimal(str(order_item.line_total or 0)),
+                        "staff_code": row["employee_code"],
+                        "staff_name": row["employee_name"],
+                    })
+
+        if status in {"Xuất Hàng", "Trả Số"} and not line_rows:
+            issues.append(f"Đơn {order_number} không có sản phẩm/số lượng để xuất.")
+        selected_amount = dms_amount
+        for line in line_rows:
+            product_id = line["product_id"]
+            if status in {"Xuất Hàng", "Gửi Số", "Trả Số"}:
+                entry = aggregate.setdefault(product_id, {
+                    "product_id": product_id,
+                    "sku": line["npp_code"],
+                    "product_name": line["npp_name"],
+                    "quantity": 0,
+                    "dms_skus": set(),
+                    "employee_allocations": {},
+                    "borrowed_employee_offsets": {},
+                })
+                entry["quantity"] += line["quantity"]
+                entry["dms_skus"].add(line["dms_sku"])
+                if employee:
+                    allocation = entry["employee_allocations"].setdefault(employee.code, {
+                        "quantity": 0, "cartons": 0, "boxes": 0,
+                    })
+                    allocation["quantity"] += line["quantity"]
+                    bpc = max(1, db.get(Product, product_id).boxes_per_carton or 1)
+                    allocation["cartons"] = allocation["quantity"] // bpc
+                    allocation["boxes"] = allocation["quantity"] % bpc
+
+            if status in {"Mượn Số", "Trả Số"}:
+                staff_code = dms_staff_code.strip().upper()
+                staff_name = dms_staff_name.strip()
+                if not staff_code:
+                    continue
+                amount_weight = (
+                    (selected_amount * line["dms_amount"] / dms_amount)
+                    if dms_amount else Decimal(line["quantity"])
+                )
+                staff_key = staff_code.casefold()
+                if status == "Mượn Số":
+                    key = (staff_key, product_id)
+                    borrowed = borrowed_lines.setdefault(key, {
+                        "employee_id": sales_employee.id if sales_employee else None,
+                        "external_employee_code": staff_code,
+                        "external_employee_name": staff_name,
+                        "product_id": product_id,
+                        "quantity": 0,
+                        "amount": Decimal("0"),
+                        "orders": [],
+                    })
+                    borrowed["quantity"] += line["quantity"]
+                    borrowed["amount"] += amount_weight
+                    borrowed["orders"].append(order_number)
+                else:
+                    item_offsets = entry["borrowed_employee_offsets"]
+                    item_offset = item_offsets.setdefault(staff_key, {
+                        "external_employee_code": staff_code,
+                        "external_employee_name": staff_name,
+                        "employee_id": sales_employee.id if sales_employee else None,
+                        "quantity": 0,
+                        "amount": 0.0,
+                    })
+                    item_offset["quantity"] += line["quantity"]
+                    item_offset["amount"] += float(amount_weight)
+
+        if status in {"Xuất Hàng", "Gửi Số", "Trả Số"}:
+            order_employee_code = employee.code if employee else row["employee_code"]
+            order_employee_name = employee.name if employee else row["employee_name"]
+            order_id = DeliveryRequestOrderCreate(
+                order_date=row["order_date"],
+                order_number=order_number,
+                employee_id=employee.id if employee else None,
+                employee_code=order_employee_code,
+                employee_name=order_employee_name,
+                customer_code=row["customer_code"],
+                customer_name=row["customer_name"],
+                amount=float(selected_amount),
+                payment_status="UNPAID",
+                payment_method="UNKNOWN",
+                note=(
+                    f"Trạng thái file: {status}; nguồn thành tiền: {amount_source}"
+                    + (f"; đơn nội bộ: {source_order_code}" if source_order_code else "")
+                ),
+            )
+            delivery_orders.append(order_id)
+            if employee:
+                summary = employee_summaries.setdefault(employee.id, {
+                    "employee_id": employee.id,
+                    "employee_code": employee.code,
+                    "employee_name": employee.name,
+                    "column_key": employee.code,
+                    "weight_ton": 0,
+                    "order_count": 0,
+                    "amount": 0,
+                })
+                summary["order_count"] += 1
+                summary["amount"] += float(selected_amount)
+
+        order_reconciliation.append({
+            "order_number": order_number,
+            "status": status,
+            "order_date": row["order_date"].isoformat() if row["order_date"] else None,
+            "employee_code": row["employee_code"],
+            "employee_name": employee.name if employee else row["employee_name"],
+            "customer_code": row["customer_code"],
+            "customer_name": row["customer_name"],
+            "source_order_code": source_order_code,
+            "dms_amount": float(dms_amount),
+            "nvgh_amount": None,
+            "selected_amount": float(selected_amount),
+            "amount_source": amount_source,
+            "difference": None,
+            "products": [
+                {
+                    "product_id": line["product_id"],
+                    "dms_sku": line["dms_sku"],
+                    "dms_name": line["dms_name"],
+                    "npp_code": line["npp_code"],
+                    "npp_name": line["npp_name"],
+                    "quantity": line["quantity"],
+                }
+                for line in line_rows
+            ],
+        })
+
+    for summary in employee_summaries.values():
+        employee = db.get(Employee, summary["employee_id"])
+        debt_limit = float(employee.debt_limit if employee.debt_limit is not None else 500000000)
+        current_debt = float(db.scalar(
+            select(func.coalesce(func.sum(DebtLedgerEntry.amount), 0)).where(
+                DebtLedgerEntry.party_type == "EMPLOYEE",
+                DebtLedgerEntry.party_id == employee.id,
+            )
+        ) or 0)
+        pending_debt = float(db.scalar(
+            select(func.coalesce(func.sum(DeliveryRequestEmployeeSummary.amount), 0))
+            .join(DeliveryRequestModel, DeliveryRequestModel.id == DeliveryRequestEmployeeSummary.delivery_request_id)
+            .where(
+                DeliveryRequestEmployeeSummary.employee_id == employee.id,
+                DeliveryRequestModel.status.in_(("SUBMITTED", "RECEIVED")),
+            )
+        ) or 0)
+        summary.update({
+            "debt_limit": debt_limit,
+            "current_debt": current_debt,
+            "pending_debt": pending_debt,
+            "projected_debt": current_debt + pending_debt + summary["amount"],
+            "is_over_limit": current_debt + pending_debt + summary["amount"] > debt_limit,
+        })
+
+    preview_items = []
+    for aggregate_row in aggregate.values():
+        product = db.get(Product, aggregate_row["product_id"])
+        quantity = aggregate_row["quantity"]
+        bpc = max(1, product.boxes_per_carton or 1)
+        preview_items.append(DeliveryPreviewItem(
+            product_id=product.id,
+            sku=aggregate_row["sku"],
+            product_name=aggregate_row["product_name"],
+            quantity=quantity,
+            boxes_per_carton=bpc,
+            cartons=quantity // bpc,
+            loose_boxes=quantity % bpc,
+            requested_quantity_raw=None,
+            employee_allocations=aggregate_row["employee_allocations"] or None,
+            borrowed_employee_offsets=list(aggregate_row["borrowed_employee_offsets"].values()),
+            dms_skus=sorted(aggregate_row["dms_skus"]),
+        ))
+
+    borrow_entries = []
+    for entry in borrowed_lines.values():
+        borrow_entries.append({
+            "employee_id": entry["employee_id"],
+            "external_employee_code": entry["external_employee_code"],
+            "external_employee_name": entry["external_employee_name"] or None,
+            "product_id": entry["product_id"],
+            "quantity": -entry["quantity"],
+            "amount": float(-entry["amount"]),
+            "note": "Mượn Số theo đơn: " + ", ".join(sorted(set(entry["orders"]))),
+        })
+
+    return DeliveryPreviewResponse(
+        items=preview_items,
+        employee_summaries=list(employee_summaries.values()),
+        orders=delivery_orders,
+        order_reconciliation=order_reconciliation,
+        borrow_entries=borrow_entries,
+        import_hash=hashlib.sha256(file_bytes).hexdigest(),
+        filename=filename,
+        amount_source=amount_source,
+        statuses=dict(status_counts),
+        warnings=list(dict.fromkeys(warnings)),
+        issues=list(dict.fromkeys(issues)),
+        can_create=not issues and (bool(preview_items) or bool(borrow_entries)),
+        send_order_candidates=send_order_candidates,
+        total_cartons=sum(item.cartons for item in preview_items),
+        total_loose_boxes=sum(item.loose_boxes for item in preview_items),
+        total_quantity=sum(item.quantity for item in preview_items),
+    )
+
+
 @borrow_router.get("/")
 def list_borrowed_goods(db: Session = Depends(get_db)):
     return borrow_crud.list_ledger(db)
+
+
+@borrow_router.post("/import-preview")
+def import_borrowed_preview(
+    payload: EmployeeBorrowBatchCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        batch = borrow_crud.create_pending_batch(
+            db,
+            import_hash=payload.import_hash,
+            filename=payload.filename,
+            entries=[entry.model_dump() for entry in payload.entries],
+            created_by=getattr(current_user, "username", None),
+        )
+        db.commit()
+        db.refresh(batch)
+        return {
+            "batch_id": batch.id,
+            "status": batch.status,
+            "message": "Đã chuyển các đơn Mượn Số sang hàng chờ xác nhận tại Hàng vay mượn NVBH.",
+        }
+    except ValueError as exc:
+        return _error(db, exc)
 
 
 @borrow_router.post("/import")
@@ -493,12 +1190,22 @@ def _group_items_by_npp(db: Session, items: list[dict]) -> list[dict]:
 
 @router.post("/upload", response_model=DeliveryPreviewResponse)
 def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | None = None,
+                   send_order_mappings: str | None = None,
                    db: Session = Depends(get_db)):
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
     try:
         file_bytes = file.file.read()
         workbook = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        new_format = _preview_new_workbook(
+            file_bytes=file_bytes,
+            filename=file.filename,
+            warehouse_id=warehouse_id,
+            send_order_mappings=_parse_id_mapping(send_order_mappings, "đơn Gửi Số"),
+            db=db,
+        )
+        if new_format is not None:
+            return new_format
         rows = list(workbook.worksheets[0].iter_rows(values_only=True))
         if not rows:
             raise ValueError("File Excel không có dữ liệu.")
@@ -825,6 +1532,23 @@ def upload_request(warehouse_id: int, file: UploadFile = File(...), note: str | 
         raise
     except (ValueError, TypeError, InvalidFileException, BadZipFile, OSError) as exc:
         return _error(db, exc)
+
+
+def _parse_id_mapping(raw: str | None, label: str) -> dict[str, int]:
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Dữ liệu ghép {label} không hợp lệ.") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"Dữ liệu ghép {label} phải là một đối tượng.")
+        mapping = {}
+        for key, identifier in value.items():
+            if not isinstance(key, str) or not key.strip() or isinstance(identifier, bool) or not isinstance(identifier, int) or identifier <= 0:
+                raise ValueError(f"Dữ liệu ghép {label} chứa mã hoặc ID không hợp lệ.")
+            mapping[key.casefold()] = identifier
+        return mapping
 
 
 @router.get("/daily-settlements", response_model=List[DailyEmployeeSettlement])

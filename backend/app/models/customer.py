@@ -42,6 +42,10 @@ class Customer(Base):
         return self.store.name if self.store else None
 
     @property
+    def store_route(self) -> str | None:
+        return self.store.route if self.store else None
+
+    @property
     def company_code(self) -> str | None:
         return self.company.code if self.company else None
 
@@ -65,6 +69,7 @@ class Store(Base):
     address: Mapped[str | None] = mapped_column(String(255))
     district: Mapped[str | None] = mapped_column(String(80))
     city: Mapped[str | None] = mapped_column(String(80))
+    route: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

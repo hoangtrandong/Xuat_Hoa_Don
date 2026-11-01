@@ -36,6 +36,10 @@ class EmployeeBorrowEntry(Base):
     __table_args__ = (
         CheckConstraint("quantity != 0", name="ck_employee_borrow_entry_quantity_nonzero"),
         CheckConstraint(
+            "employee_id IS NOT NULL OR external_employee_code IS NOT NULL",
+            name="ck_employee_borrow_entry_employee_identity",
+        ),
+        CheckConstraint(
             "(entry_type = 'BORROW' AND quantity < 0 AND amount <= 0) OR "
             "(entry_type = 'OFFSET' AND quantity > 0 AND amount >= 0)",
             name="ck_employee_borrow_entry_sign",
@@ -47,7 +51,9 @@ class EmployeeBorrowEntry(Base):
     batch_id: Mapped[int | None] = mapped_column(
         ForeignKey("employee_borrow_batches.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True, index=True)
+    external_employee_code: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    external_employee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     entry_type: Mapped[str] = mapped_column(String(10), index=True)
     quantity: Mapped[int] = mapped_column(Integer)
@@ -63,7 +69,7 @@ class EmployeeBorrowEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     batch: Mapped[EmployeeBorrowBatch | None] = relationship(back_populates="entries")
-    employee: Mapped["Employee"] = relationship()
+    employee: Mapped["Employee | None"] = relationship()
     product: Mapped["Product"] = relationship()
     source_entry: Mapped["EmployeeBorrowEntry | None"] = relationship(
         remote_side=[id], foreign_keys=[source_entry_id]

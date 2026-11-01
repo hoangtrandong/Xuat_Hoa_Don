@@ -277,8 +277,23 @@ def create(
 ) -> DeliveryRequest:
     if not db.get(Warehouse, payload.warehouse_id):
         raise ValueError("Không tìm thấy kho.")
+    order_numbers = [order.order_number.strip() for order in payload.orders or []]
+    normalized_order_numbers = [number.casefold() for number in order_numbers]
+    if len(normalized_order_numbers) != len(set(normalized_order_numbers)):
+        raise ValueError("Danh sách yêu cầu có số đơn hàng bị lặp.")
+    existing_orders = db.scalars(
+        select(DeliveryRequestOrder.order_number).where(
+            func.upper(DeliveryRequestOrder.order_number).in_([number.upper() for number in order_numbers])
+        )
+    ).all() if order_numbers else []
+    if existing_orders:
+        raise ValueError(
+            "Các đơn đã được đưa vào yêu cầu xuất kho trước đó: "
+            + ", ".join(sorted(set(existing_orders))[:20])
+        )
     merged = {}
     employee_allocations = {}
+    borrowed_employee_offsets = {}
     planned_allocations = {}
     for row in payload.items:
         row_product_id = canonical_product_id(db, row.product_id)
@@ -296,6 +311,21 @@ def create(
                             existing[key] = allocation[key]
                 else:
                     target[employee] = target.get(employee, 0) + int(allocation)
+        if row.borrowed_employee_offsets:
+            target = borrowed_employee_offsets.setdefault(row_product_id, {})
+            for offset in row.borrowed_employee_offsets:
+                offset_data = offset.model_dump()
+                staff_code = offset_data["external_employee_code"].strip().upper()
+                staff_key = staff_code.casefold()
+                current = target.setdefault(staff_key, {
+                    "external_employee_code": staff_code,
+                    "external_employee_name": offset_data.get("external_employee_name"),
+                    "employee_id": offset_data.get("employee_id"),
+                    "quantity": 0,
+                    "amount": 0.0,
+                })
+                current["quantity"] += int(offset_data["quantity"])
+                current["amount"] += float(offset_data["amount"])
         if row.planned_allocations:
             planned_allocations.setdefault(row_product_id, []).extend(row.planned_allocations)
     employee_summaries = _validated_employee_summaries(db, payload.employee_summaries)
@@ -315,6 +345,9 @@ def create(
             item = DeliveryRequestItem(request_id=request.id, product_id=product_id, quantity=quantity,
                                        requested_quantity_raw=raw_quantities.get(product_id),
                                        employee_allocations=employee_allocations.get(product_id),
+                                       borrowed_employee_offsets=list(
+                                           borrowed_employee_offsets.get(product_id, {}).values()
+                                       ) or None,
                                        planned_allocations=planned_allocations.get(product_id))
             db.add(item)
             db.flush()
@@ -350,6 +383,19 @@ def create(
             ))
         if payload.orders:
             db.flush()
+
+        if payload.borrow_entries:
+            if not payload.borrow_import_hash or not payload.borrow_filename:
+                raise ValueError("Thiếu thông tin file nguồn cho phần hàng mượn.")
+            from app.crud.employee_borrow import create_pending_batch
+
+            create_pending_batch(
+                db,
+                import_hash=payload.borrow_import_hash,
+                filename=payload.borrow_filename,
+                entries=[entry.model_dump() for entry in payload.borrow_entries],
+                created_by=created_by if created_by is not None else payload.created_by,
+            )
 
         db.commit()
         return get(db, request.id)

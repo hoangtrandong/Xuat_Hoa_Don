@@ -88,6 +88,28 @@ class OrderReplacementUpdateRequest(BaseModel):
     replaced_order_number: str | None = Field(default=None, max_length=120)
 
 
+class SplitOrderItemAllocation(BaseModel):
+    snapshot_id: int
+    quantity: float = Field(default=0, ge=0)
+    promo_quantity: float = Field(default=0, ge=0)
+
+
+class SplitOrderTarget(BaseModel):
+    items: list[SplitOrderItemAllocation] = Field(default_factory=list)
+
+
+class SplitOrderRequest(BaseModel):
+    source_order_number: str | None = None
+    order_number: str | None = None
+    splits: list[SplitOrderTarget]
+
+
+class MergeOrdersRequest(BaseModel):
+    source_order_numbers: list[str] = Field(default_factory=list)
+    order_numbers: list[str] = Field(default_factory=list)
+    representative_order_number: str | None = None
+
+
 def _order_numbers(payload: Any) -> set[str]:
     numbers = (
         _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
@@ -109,8 +131,24 @@ def _apply_scoped_states(
         VinamilkOrderSnapshot.synced_to == day,
         VinamilkOrderSnapshot.order_number.is_not(None),
     )).all()
+    synthetic_snapshots: list[VinamilkOrderSnapshot] = []
     for snapshot in snapshots:
+        if getattr(snapshot, "is_synthetic", False):
+            synthetic_snapshots.append(snapshot)
+            continue
         snapshot.warehouse_updated = snapshot.order_number in warehouse_orders
+
+    if synthetic_snapshots:
+        replacements = {
+            item.new_order_number: item.replaced_order_number
+            for item in db.scalars(select(VinamilkOrderReplacement)).all()
+            if getattr(item, "replacement_type", "MANUAL") in ("SPLIT", "MERGE")
+        }
+        for snapshot in synthetic_snapshots:
+            replaced_str = replacements.get(snapshot.order_number or "", "")
+            old_nums = [part.strip() for part in replaced_str.split(",") if part.strip()]
+            if old_nums and any(old in warehouse_orders for old in old_nums):
+                snapshot.warehouse_updated = True
 
 
 def _update_order_replacement(
@@ -135,6 +173,11 @@ def _update_order_replacement(
     current = db.get(VinamilkOrderReplacement, new_order_number)
     if replaced_order_number is None:
         if current is not None:
+            if getattr(current, "replacement_type", "MANUAL") in ("SPLIT", "MERGE"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Đơn Tách/Gộp không thể xóa liên kết thủ công. Hãy dùng chức năng Hoàn tác Tách/Gộp.",
+                )
             db.delete(current)
         return
 
@@ -163,10 +206,453 @@ def _update_order_replacement(
         db.add(VinamilkOrderReplacement(
             new_order_number=new_order_number,
             replaced_order_number=replaced_order_number,
+            replacement_type="MANUAL",
         ))
     else:
         current.replaced_order_number = replaced_order_number
         current.updated_at = datetime.utcnow()
+
+
+def _float_from_payload(payload: dict[str, Any], keys: tuple[str, ...]) -> float:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None and str(value).strip() != "":
+            try:
+                return float(str(value).replace(",", "").strip())
+            except ValueError:
+                continue
+    return 0.0
+
+
+def _format_qty_value(value: float) -> int | float:
+    if abs(value - round(value)) < 1e-6:
+        return int(round(value))
+    return round(value, 2)
+
+
+def _check_orders_available_for_split_merge(db: Session, order_numbers: list[str]) -> None:
+    all_replacements = db.scalars(select(VinamilkOrderReplacement)).all()
+    busy_orders: set[str] = set()
+    for item in all_replacements:
+        busy_orders.add(item.new_order_number.strip())
+        for old_part in (item.replaced_order_number or "").split(","):
+            if old_part.strip():
+                busy_orders.add(old_part.strip())
+    conflicts = [num for num in order_numbers if num in busy_orders]
+    if conflicts:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Đơn hàng {', '.join(conflicts)} đã tham gia tách/gộp hoặc thay thế. "
+                "Vui lòng hoàn tác trước khi thực hiện lại."
+            ),
+        )
+
+
+def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, Any]:
+    source_order_number = (payload.source_order_number or payload.order_number or "").strip()
+    if not source_order_number:
+        raise HTTPException(status_code=400, detail="Mã đơn hàng gốc không được để trống.")
+    if len(payload.splits) < 2:
+        raise HTTPException(status_code=400, detail="Cần tách thành ít nhất 2 đơn hàng.")
+
+    source_rows = db.scalars(
+        select(VinamilkOrderSnapshot)
+        .where(
+            VinamilkOrderSnapshot.order_number == source_order_number,
+            VinamilkOrderSnapshot.product_code.is_not(None),
+        )
+        .order_by(VinamilkOrderSnapshot.id)
+    ).all()
+    if not source_rows:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng {source_order_number}.")
+    if any(getattr(row, "is_synthetic", False) for row in source_rows):
+        raise HTTPException(status_code=400, detail=f"Đơn {source_order_number} là đơn Tách/Gộp, không thể tách tiếp.")
+
+    _check_orders_available_for_split_merge(db, [source_order_number])
+
+    source_by_id = {row.id: row for row in source_rows}
+    alloc_by_split: list[dict[int, tuple[float, float]]] = []
+    sum_qty: dict[int, float] = defaultdict(float)
+    sum_promo: dict[int, float] = defaultdict(float)
+
+    for split_idx, split_target in enumerate(payload.splits):
+        split_map: dict[int, tuple[float, float]] = {}
+        has_positive = False
+        for item in split_target.items:
+            if item.snapshot_id not in source_by_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Dòng sản phẩm #{item.snapshot_id} không thuộc đơn {source_order_number}.",
+                )
+            qty = float(item.quantity or 0)
+            promo = float(item.promo_quantity or 0)
+            if qty < 0 or promo < 0:
+                raise HTTPException(status_code=400, detail="Số lượng tách không được âm.")
+            if qty > 0 or promo > 0:
+                has_positive = True
+            prev_q, prev_p = split_map.get(item.snapshot_id, (0.0, 0.0))
+            split_map[item.snapshot_id] = (prev_q + qty, prev_p + promo)
+            sum_qty[item.snapshot_id] += qty
+            sum_promo[item.snapshot_id] += promo
+        if not has_positive:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Đơn tách #{split_idx + 1} phải có ít nhất 1 sản phẩm có số lượng lớn hơn 0.",
+            )
+        alloc_by_split.append(split_map)
+
+    for s_id, s_row in source_by_id.items():
+        raw = s_row.raw_payload if isinstance(s_row.raw_payload, dict) else {}
+        orig_qty = _float_from_payload(raw, ("Số lượng", "quantity", "qty"))
+        orig_promo = _float_from_payload(raw, ("Số lượng KM", "promotionQuantity", "freeQuantity", "giftQuantity"))
+        got_qty = sum_qty.get(s_id, 0.0)
+        got_promo = sum_promo.get(s_id, 0.0)
+        if abs(got_qty - orig_qty) > 1e-6:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sản phẩm {s_row.product_code}: tổng SL tách ({got_qty:g}) phải bằng SL đơn gốc ({orig_qty:g}).",
+            )
+        if abs(got_promo - orig_promo) > 1e-6:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sản phẩm {s_row.product_code}: tổng SL KM tách ({got_promo:g}) phải bằng SL KM đơn gốc ({orig_promo:g}).",
+            )
+
+    new_order_numbers: list[str] = []
+    for idx in range(1, len(payload.splits) + 1):
+        candidate = f"TD-{source_order_number}-{idx:02d}"
+        suffix = idx
+        while candidate in new_order_numbers or db.scalar(
+            select(VinamilkOrderSnapshot.id).where(VinamilkOrderSnapshot.order_number == candidate).limit(1)
+        ) is not None:
+            suffix += 1
+            candidate = f"TD-{source_order_number}-{suffix:02d}"
+        new_order_numbers.append(candidate)
+
+    # Tính toán giá trị/chiết khấu theo tỷ lệ cho từng dòng gốc qua các đơn tách
+    line_financials: dict[tuple[int, int], tuple[float, float, float]] = {}
+    for s_id, s_row in source_by_id.items():
+        raw = s_row.raw_payload if isinstance(s_row.raw_payload, dict) else {}
+        orig_qty = _float_from_payload(raw, ("Số lượng", "quantity", "qty"))
+        orig_promo = _float_from_payload(raw, ("Số lượng KM", "promotionQuantity", "freeQuantity", "giftQuantity"))
+        orig_val = _float_from_payload(raw, ("Giá trị", "totalValue", "total", "amount"))
+        orig_disc = _float_from_payload(raw, ("Số tiền CK", "totalDiscount", "discountAmount"))
+        orig_voucher = _float_from_payload(raw, ("Giảm giá voucher", "voucherAmount", "voucherDiscount"))
+
+        active_indices = [
+            idx for idx, split_map in enumerate(alloc_by_split)
+            if (split_map.get(s_id, (0.0, 0.0))[0] > 0 or split_map.get(s_id, (0.0, 0.0))[1] > 0)
+        ]
+        qty_positive_indices = [
+            idx for idx in active_indices if alloc_by_split[idx].get(s_id, (0.0, 0.0))[0] > 0
+        ]
+        weight_indices = qty_positive_indices if qty_positive_indices else active_indices
+        used_val = 0.0
+        used_disc = 0.0
+        used_voucher = 0.0
+        for pos, idx in enumerate(active_indices):
+            q, p = alloc_by_split[idx].get(s_id, (0.0, 0.0))
+            if idx not in weight_indices:
+                line_financials[(idx, s_id)] = (0.0, 0.0, 0.0)
+                continue
+            if idx == weight_indices[-1]:
+                val = round(orig_val - used_val)
+                disc = round(orig_disc - used_disc)
+                voucher = round(orig_voucher - used_voucher)
+            else:
+                denom = orig_qty if orig_qty > 0 else (orig_promo if orig_promo > 0 else 1.0)
+                num = q if orig_qty > 0 else p
+                ratio = num / denom
+                val = round(orig_val * ratio)
+                disc = round(orig_disc * ratio)
+                voucher = round(orig_voucher * ratio)
+                used_val += val
+                used_disc += disc
+                used_voucher += voucher
+            line_financials[(idx, s_id)] = (val, disc, voucher)
+
+    now = datetime.utcnow()
+    for split_idx, new_order_num in enumerate(new_order_numbers):
+        split_map = alloc_by_split[split_idx]
+        for s_id, s_row in source_by_id.items():
+            q, p = split_map.get(s_id, (0.0, 0.0))
+            if q <= 0 and p <= 0:
+                continue
+            val, disc, voucher = line_financials.get((split_idx, s_id), (0.0, 0.0, 0.0))
+            base_raw = dict(s_row.raw_payload) if isinstance(s_row.raw_payload, dict) else {}
+            fmt_q = _format_qty_value(q)
+            fmt_p = _format_qty_value(p)
+            fmt_val = _format_qty_value(val)
+            fmt_disc = _format_qty_value(disc)
+            fmt_voucher = _format_qty_value(voucher)
+
+            base_raw["Số đơn hàng"] = new_order_num
+            base_raw["orderNumber"] = new_order_num
+            base_raw["Số lượng"] = fmt_q
+            base_raw["quantity"] = fmt_q
+            base_raw["qty"] = fmt_q
+            base_raw["Số lượng KM"] = fmt_p
+            base_raw["promotionQuantity"] = fmt_p
+            base_raw["Giá trị"] = fmt_val
+            base_raw["totalValue"] = fmt_val
+            base_raw["Số tiền CK"] = fmt_disc
+            base_raw["totalDiscount"] = fmt_disc
+            base_raw["Giảm giá voucher"] = fmt_voucher
+            base_raw["voucherAmount"] = fmt_voucher
+            base_raw["orderStatus"] = "Đơn Tách"
+            base_raw["status"] = "Đơn Tách"
+
+            remote_key = hashlib.sha256(f"SPLIT|{new_order_num}|{s_id}".encode()).hexdigest()
+            db.add(VinamilkOrderSnapshot(
+                remote_key=remote_key,
+                order_number=new_order_num,
+                original_order_number=source_order_number,
+                customer_code=s_row.customer_code,
+                customer_name=s_row.customer_name,
+                product_code=s_row.product_code,
+                product_name=s_row.product_name,
+                status="Đơn Tách",
+                processing_status="Đơn Tách",
+                is_synthetic=True,
+                warehouse_updated=s_row.warehouse_updated,
+                returned=s_row.returned,
+                order_created_date=s_row.order_created_date,
+                delivery_date=s_row.delivery_date,
+                synced_from=s_row.synced_from,
+                synced_to=s_row.synced_to,
+                synced_at=now,
+                raw_payload=base_raw,
+            ))
+        db.add(VinamilkOrderReplacement(
+            new_order_number=new_order_num,
+            replaced_order_number=source_order_number,
+            replacement_type="SPLIT",
+            updated_at=now,
+        ))
+
+    db.commit()
+    return {
+        "source_order_number": source_order_number,
+        "replaced_order_number": source_order_number,
+        "new_order_numbers": new_order_numbers,
+        "replacement_type": "SPLIT",
+    }
+
+
+def _merge_vinamilk_orders(db: Session, payload: MergeOrdersRequest) -> dict[str, Any]:
+    raw_nums = payload.source_order_numbers or payload.order_numbers or []
+    order_nums = list(dict.fromkeys(num.strip() for num in raw_nums if num and num.strip()))
+    if len(order_nums) < 2:
+        raise HTTPException(status_code=400, detail="Cần chọn ít nhất 2 đơn hàng để gộp.")
+
+    source_rows = db.scalars(
+        select(VinamilkOrderSnapshot)
+        .where(
+            VinamilkOrderSnapshot.order_number.in_(order_nums),
+            VinamilkOrderSnapshot.product_code.is_not(None),
+        )
+        .order_by(VinamilkOrderSnapshot.id)
+    ).all()
+    found_orders = {row.order_number for row in source_rows if row.order_number}
+    missing = [num for num in order_nums if num not in found_orders]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng: {', '.join(missing)}.")
+    if any(getattr(row, "is_synthetic", False) for row in source_rows):
+        raise HTTPException(status_code=400, detail="Không thể gộp các đơn đã là Đơn Tách hoặc Đơn Gộp.")
+
+    _check_orders_available_for_split_merge(db, order_nums)
+
+    rep_order_num = (payload.representative_order_number or "").strip()
+    if rep_order_num not in order_nums:
+        rep_order_num = order_nums[0]
+    rep_row = next((r for r in source_rows if r.order_number == rep_order_num), source_rows[0])
+    rep_raw = dict(rep_row.raw_payload) if isinstance(rep_row.raw_payload, dict) else {}
+
+    ref_date = rep_row.order_created_date or date.today()
+    prefix = f"GD-{ref_date:%y%m%d}-"
+    existing_gd = db.scalars(
+        select(VinamilkOrderSnapshot.order_number)
+        .where(VinamilkOrderSnapshot.order_number.like(f"{prefix}%"))
+        .distinct()
+    ).all()
+    max_seq = 0
+    for code in existing_gd:
+        if not code:
+            continue
+        tail = code[len(prefix):]
+        if tail.isdigit():
+            max_seq = max(max_seq, int(tail))
+    new_order_num = f"{prefix}{max_seq + 1:03d}"
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in source_rows:
+        raw = row.raw_payload if isinstance(row.raw_payload, dict) else {}
+        prod_code = (row.product_code or _field(raw, ("productCode", "itemCode", "sku", "Mã sản phẩm")) or "").strip().upper()
+        promo_code = (_field(raw, ("Mã CTKM", "promotionCode", "campaignCode", "ctkmCode", "promotionId")) or "").strip().upper()
+        key = (prod_code, promo_code)
+        qty = _float_from_payload(raw, ("Số lượng", "quantity", "qty"))
+        promo_qty = _float_from_payload(raw, ("Số lượng KM", "promotionQuantity", "freeQuantity", "giftQuantity"))
+        val = _float_from_payload(raw, ("Giá trị", "totalValue", "total", "amount"))
+        disc = _float_from_payload(raw, ("Số tiền CK", "totalDiscount", "discountAmount"))
+        voucher = _float_from_payload(raw, ("Giảm giá voucher", "voucherAmount", "voucherDiscount"))
+
+        if key not in grouped:
+            grouped[key] = {
+                "template_row": row,
+                "template_raw": dict(raw),
+                "qty": qty,
+                "promo_qty": promo_qty,
+                "val": val,
+                "disc": disc,
+                "voucher": voucher,
+            }
+        else:
+            grouped[key]["qty"] += qty
+            grouped[key]["promo_qty"] += promo_qty
+            grouped[key]["val"] += val
+            grouped[key]["disc"] += disc
+            grouped[key]["voucher"] += voucher
+
+    header_keys = (
+        "createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày",
+        "deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao",
+        "staffCode", "salesStaffCode", "Mã NVBH",
+        "staffName", "salesStaffName", "Tên NVBH",
+        "customerCode", "shopCode", "Mã KH",
+        "customerName", "shopName", "Tên KH",
+        "address", "customerAddress", "shipTo", "Địa chỉ",
+        "initialOrderDate", "originalOrderDate", "Ngày đơn hàng gốc",
+    )
+    warehouse_updated = (
+        True if any(r.warehouse_updated is True for r in source_rows)
+        else (False if any(r.warehouse_updated is False for r in source_rows) else None)
+    )
+    returned = (
+        all(r.returned is True for r in source_rows)
+        if any(r.returned is not None for r in source_rows)
+        else None
+    )
+    now = datetime.utcnow()
+    replaced_str = ", ".join(order_nums)
+
+    for line_idx, ((prod_code, promo_code), group_info) in enumerate(grouped.items(), start=1):
+        t_row: VinamilkOrderSnapshot = group_info["template_row"]
+        merged_raw = dict(group_info["template_raw"])
+        for h_key in header_keys:
+            if h_key in rep_raw:
+                merged_raw[h_key] = rep_raw[h_key]
+
+        fmt_q = _format_qty_value(group_info["qty"])
+        fmt_p = _format_qty_value(group_info["promo_qty"])
+        fmt_val = _format_qty_value(group_info["val"])
+        fmt_disc = _format_qty_value(group_info["disc"])
+        fmt_voucher = _format_qty_value(group_info["voucher"])
+
+        merged_raw["Số đơn hàng"] = new_order_num
+        merged_raw["orderNumber"] = new_order_num
+        merged_raw["Số lượng"] = fmt_q
+        merged_raw["quantity"] = fmt_q
+        merged_raw["qty"] = fmt_q
+        merged_raw["Số lượng KM"] = fmt_p
+        merged_raw["promotionQuantity"] = fmt_p
+        merged_raw["Giá trị"] = fmt_val
+        merged_raw["totalValue"] = fmt_val
+        merged_raw["Số tiền CK"] = fmt_disc
+        merged_raw["totalDiscount"] = fmt_disc
+        merged_raw["Giảm giá voucher"] = fmt_voucher
+        merged_raw["voucherAmount"] = fmt_voucher
+        merged_raw["orderStatus"] = "Đơn Gộp"
+        merged_raw["status"] = "Đơn Gộp"
+
+        remote_key = hashlib.sha256(f"MERGE|{new_order_num}|{prod_code}|{promo_code}|{line_idx}".encode()).hexdigest()
+        db.add(VinamilkOrderSnapshot(
+            remote_key=remote_key,
+            order_number=new_order_num,
+            original_order_number=replaced_str[:120],
+            customer_code=rep_row.customer_code,
+            customer_name=rep_row.customer_name,
+            product_code=t_row.product_code,
+            product_name=t_row.product_name,
+            status="Đơn Gộp",
+            processing_status="Đơn Gộp",
+            is_synthetic=True,
+            warehouse_updated=warehouse_updated,
+            returned=returned,
+            order_created_date=rep_row.order_created_date,
+            delivery_date=rep_row.delivery_date,
+            synced_from=rep_row.synced_from,
+            synced_to=rep_row.synced_to,
+            synced_at=now,
+            raw_payload=merged_raw,
+        ))
+
+    db.add(VinamilkOrderReplacement(
+        new_order_number=new_order_num,
+        replaced_order_number=replaced_str,
+        replacement_type="MERGE",
+        updated_at=now,
+    ))
+    db.commit()
+    return {
+        "new_order_number": new_order_num,
+        "source_order_numbers": order_nums,
+        "merged_order_numbers": order_nums,
+        "replacement_type": "MERGE",
+    }
+
+
+def _revert_split_or_merge_order(db: Session, order_number: str) -> dict[str, Any]:
+    target = order_number.strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="Mã đơn hàng không hợp lệ.")
+
+    all_replacements = [
+        item for item in db.scalars(select(VinamilkOrderReplacement)).all()
+        if getattr(item, "replacement_type", "MANUAL") in ("SPLIT", "MERGE")
+    ]
+    matched_replacements: list[VinamilkOrderReplacement] = []
+    direct = next((item for item in all_replacements if item.new_order_number == target), None)
+    if direct is not None:
+        if getattr(direct, "replacement_type", "") == "SPLIT":
+            matched_replacements = [
+                item for item in all_replacements
+                if getattr(item, "replacement_type", "") == "SPLIT"
+                and item.replaced_order_number == direct.replaced_order_number
+            ]
+        else:
+            matched_replacements = [direct]
+    else:
+        for item in all_replacements:
+            old_parts = [part.strip() for part in (item.replaced_order_number or "").split(",") if part.strip()]
+            if target in old_parts:
+                matched_replacements.append(item)
+
+    if not matched_replacements:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy thông tin Tách/Gộp cho đơn hàng {target}.")
+
+    synthetic_orders = sorted({item.new_order_number for item in matched_replacements})
+    restored_orders: list[str] = []
+    for item in matched_replacements:
+        for part in (item.replaced_order_number or "").split(","):
+            clean = part.strip()
+            if clean and clean not in restored_orders:
+                restored_orders.append(clean)
+        db.delete(item)
+
+    if synthetic_orders:
+        db.execute(
+            delete(VinamilkOrderSnapshot).where(
+                VinamilkOrderSnapshot.order_number.in_(synthetic_orders),
+                VinamilkOrderSnapshot.is_synthetic.is_(True),
+            )
+        )
+    db.commit()
+    return {
+        "reverted_orders": synthetic_orders,
+        "deleted_synthetic_orders": synthetic_orders,
+        "restored_orders": restored_orders,
+    }
 
 
 def _date_value(value: str) -> date:
@@ -237,10 +723,6 @@ def _parse_json_body(body: object) -> Any:
     except json.JSONDecodeError as exc:
         preview = " ".join(text[:200].split())
         raise RuntimeError(f"Vinamilk không trả về JSON hợp lệ: {preview}") from exc
-    try:
-        return _date_value(value)
-    except ValueError:
-        return None
 
 
 def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) -> int:
@@ -257,9 +739,7 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
         line_id = _field(row, ("lineId", "itemId", "orderItemId", "detailId", "id"))
         identity = "|".join((order_number or "", product_code or "", line_id or ""))
         if not identity.strip("|"):
-            import json
             identity = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
-        import hashlib
         remote_key = hashlib.sha256(identity.encode()).hexdigest()
         keys_to_fetch.append(remote_key)
         row_data_list.append((remote_key, row, order_number, product_code))
@@ -609,28 +1089,49 @@ def list_local_vinamilk_orders(
         for allocation in allocations:
             allocations_by_snapshot[allocation.snapshot_id].append(allocation)
     output_rows: list[dict[str, Any]] = []
-    order_numbers = {row.order_number for row in rows if row.order_number}
-    replacements = db.scalars(
-        select(VinamilkOrderReplacement).where(
-            or_(
-                VinamilkOrderReplacement.new_order_number.in_(order_numbers),
-                VinamilkOrderReplacement.replaced_order_number.in_(order_numbers),
-            )
-        )
-    ).all() if order_numbers else []
     replaced_by: dict[str, list[str]] = defaultdict(list)
-    replaced_order_for = {item.new_order_number: item.replaced_order_number for item in replacements}
-    for replacement in replacements:
-        replaced_by[replacement.replaced_order_number].append(replacement.new_order_number)
+    replaced_order_for: dict[str, str] = {}
+    replacement_type_for: dict[str, str] = {}
+    if rows:
+        all_replacements = db.scalars(select(VinamilkOrderReplacement)).all()
+        for replacement in all_replacements:
+            replaced_order_for[replacement.new_order_number] = replacement.replaced_order_number
+            rep_type = getattr(replacement, "replacement_type", "MANUAL") or "MANUAL"
+            replacement_type_for[replacement.new_order_number] = rep_type
+            for old_part in (replacement.replaced_order_number or "").split(","):
+                old_clean = old_part.strip()
+                if old_clean:
+                    if replacement.new_order_number not in replaced_by[old_clean]:
+                        replaced_by[old_clean].append(replacement.new_order_number)
+                    if old_clean not in replacement_type_for:
+                        replacement_type_for[old_clean] = rep_type
     for row in rows:
+        order_num = row.order_number or ""
+        rep_order = replaced_order_for.get(order_num)
+        rep_by_list = replaced_by.get(order_num, [])
+        if rep_order:
+            replacement_display = f"TT: {rep_order}"
+        elif rep_by_list:
+            replacement_display = f"BTT: {', '.join(rep_by_list)}"
+        else:
+            replacement_display = None
+        proc_status = (
+            row.processing_status
+            if getattr(row, "processing_status", None)
+            else ("Đã cập nhật kho" if row.warehouse_updated is True else "")
+        )
         base = {
             **row.raw_payload,
             "_local_id": row.id,
             "_synced_at": _iso_utc(row.synced_at),
             "_allocation_id": None,
             "_warehouse_updated": row.warehouse_updated,
-            "_replaced_order_number": replaced_order_for.get(row.order_number or ""),
-            "_replaced_by_order_numbers": replaced_by.get(row.order_number or "", []),
+            "_processing_status": proc_status,
+            "_is_synthetic": bool(getattr(row, "is_synthetic", False)),
+            "_replacement_type": replacement_type_for.get(order_num),
+            "_replaced_order_number": rep_order,
+            "_replaced_by_order_numbers": rep_by_list,
+            "_replacement_display": replacement_display,
         }
         if source == "sync":
             output_rows.append(base)
@@ -706,6 +1207,30 @@ def update_vinamilk_order_replacement(
         "new_order_number": new_order_number,
         "replaced_order_number": payload.replaced_order_number.strip() if payload.replaced_order_number else None,
     }
+
+
+@router.post("/vinamilk-orders/split")
+def split_vinamilk_order(
+    payload: SplitOrderRequest,
+    db: Session = Depends(get_db),
+):
+    return _split_vinamilk_order(db, payload)
+
+
+@router.post("/vinamilk-orders/merge")
+def merge_vinamilk_orders(
+    payload: MergeOrdersRequest,
+    db: Session = Depends(get_db),
+):
+    return _merge_vinamilk_orders(db, payload)
+
+
+@router.delete("/vinamilk-orders/split-merge/{order_number}")
+def revert_split_or_merge_order(
+    order_number: str,
+    db: Session = Depends(get_db),
+):
+    return _revert_split_or_merge_order(db, order_number)
 
 
 @router.get("/vinamilk-orders/allocations/template")

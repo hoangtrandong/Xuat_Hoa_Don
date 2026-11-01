@@ -19,11 +19,13 @@ interface EmployeeRow extends Employee {
   backendId: number;
   accountUsername: string | null;
   debtLimit: number;
+  vinamilkCode: string | null;
 }
 
 interface BackendEmployee {
   id: number;
   code: string;
+  vinamilk_code: string | null;
   name: string;
   nickname: string | null;
   position: string;
@@ -48,7 +50,7 @@ interface DebtLimitChange {
 }
 
 const DEFAULT_POSITION = "Nhân viên kinh doanh";
-const emptyForm = { code: "", name: "", nickname: "", position: DEFAULT_POSITION, phone: "", email: "", target: "0", debt_limit: "500000000", debt_limit_reason: "", status: "active" };
+const emptyForm = { code: "", name: "", nickname: "", position: DEFAULT_POSITION, phone: "", email: "", vinamilk_code: "", target: "0", debt_limit: "500000000", debt_limit_reason: "", status: "active" };
 
 const VALID_POSITIONS = [
   "Nhân viên kinh doanh",
@@ -73,6 +75,7 @@ function mergeWithMock(list: BackendEmployee[]): EmployeeRow[] {
     id: String(item.id),
     backendId: item.id,
     code: item.code,
+    vinamilkCode: item.vinamilk_code ?? null,
     name: item.name,
     nickname: item.nickname ?? null,
     position: normalizePosition(item.position) as Employee["position"],
@@ -160,7 +163,7 @@ export default function EmployeesPage() {
     setEditingId(employee.backendId);
     setForm({
       code: employee.code, name: employee.name, nickname: employee.nickname ?? "", position: employee.position, phone: employee.phone,
-      email: employee.email ?? "", target: String(employee.target ?? 0),
+      email: employee.email ?? "", vinamilk_code: employee.vinamilkCode ?? "", target: String(employee.target ?? 0),
       debt_limit: String(employee.debtLimit), debt_limit_reason: "", status: employee.status,
     });
     setCreateError(""); setCreateOpen(true);
@@ -177,7 +180,7 @@ export default function EmployeesPage() {
     try {
       const payload = {
         code: form.code.trim(), name: form.name.trim(), nickname: form.nickname.trim() || null, position: form.position,
-        phone: form.phone.trim(), email: form.email.trim() || null,
+        phone: form.phone.trim(), email: form.email.trim() || null, vinamilk_code: form.vinamilk_code.trim() || null,
         target: Number(form.target) || 0, debt_limit: Number(form.debt_limit) || 0, status: form.status,
         ...(changingDebtLimit ? { debt_limit_reason: form.debt_limit_reason.trim() } : {}),
         ...(editingId ? {} : { create_account: createAccount }),
@@ -453,6 +456,10 @@ export default function EmployeesPage() {
           </label>
           <label className="block text-xs font-medium text-gray-500">Tên gọi / Biệt danh (tùy chọn)
             <input placeholder="VD: Trung NPP, Tịnh xe, Hằng VNM..." value={form.nickname} onChange={(e) => setForm({ ...form, nickname: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border rounded-lg" />
+          </label>
+          <label className="block text-xs font-medium text-gray-500">Mã NVBH trên DMS (Vinamilk, tùy chọn)
+            <input placeholder="VD: 0000032253" value={form.vinamilk_code} onChange={(e) => setForm({ ...form, vinamilk_code: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border rounded-lg" />
+            <span className="mt-1 block text-[11px] font-normal text-gray-400">Dùng để tự liên kết nhân viên khi nhập đơn Mượn Số/Trả Số từ DMS.</span>
           </label>
           <label className="block text-xs font-medium text-gray-500">Vị trí
             <select value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} className="mt-1 w-full px-3 py-2 text-sm border rounded-lg">

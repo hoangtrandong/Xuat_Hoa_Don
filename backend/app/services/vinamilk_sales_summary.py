@@ -2,6 +2,8 @@
 
 Doanh số thực = dòng đã cập nhật kho − dòng của đơn đã trả. Khoản trừ được ghi nhận theo ngày
 của chính đơn bị trả (đơn cũ), nên đơn thay thế khác kỳ không làm lệch kỳ báo cáo của đơn cũ.
+Đối với đơn đã Tách / Gộp: tính doanh số theo các đơn mới (Đơn Tách / Đơn Gộp) và tự động loại trừ
+các đơn gốc đã bị tách/gộp để không bị trùng lặp số liệu.
 """
 from collections import defaultdict
 from datetime import date
@@ -92,10 +94,18 @@ def build_sales_summary(
     if group_by not in GROUP_BY_VALUES:
         raise ValueError(f"group_by phải là một trong {', '.join(GROUP_BY_VALUES)}.")
 
-    replacements = {
-        item.new_order_number: item.replaced_order_number
-        for item in db.scalars(select(VinamilkOrderReplacement)).all()
-    }
+    replacement_rows = db.scalars(select(VinamilkOrderReplacement)).all()
+    split_or_merged_originals: set[str] = set()
+    replacements: dict[str, str] = {}
+    for item in replacement_rows:
+        rep_type = getattr(item, "replacement_type", "MANUAL") or "MANUAL"
+        if rep_type in ("SPLIT", "MERGE"):
+            for old_num in (item.replaced_order_number or "").split(","):
+                if old_num.strip():
+                    split_or_merged_originals.add(old_num.strip())
+        else:
+            replacements[item.new_order_number] = item.replaced_order_number
+
     replaced_orders: dict[str, list[str]] = defaultdict(list)
     for new_number, old_number in replacements.items():
         replaced_orders[old_number].append(new_number)
@@ -132,6 +142,9 @@ def build_sales_summary(
     unknown_rows = 0
 
     for row in rows:
+        if row.order_number in split_or_merged_originals:
+            # Đơn gốc đã bị tách/gộp: doanh số được tính theo các đơn Tách / Gộp mới tạo.
+            continue
         payload = row.raw_payload if isinstance(row.raw_payload, dict) else {}
         qty, promo_qty, value = _line_amounts(payload)
         order = orders.setdefault(row.order_number, {

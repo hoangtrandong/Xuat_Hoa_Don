@@ -25,8 +25,12 @@ STORE_HEADER_ALIASES = {
     "Chủ cửa hàng": "owner_name",
     "Địa chỉ": "address",
     "Quận": "district",
+    "Quận/Huyện": "district",
     "Tỉnh/TP": "city",
     "Thành phố": "city",
+    "Tuyến": "route",
+    "Tuyến bán hàng": "route",
+    "Mã tuyến": "route",
     "Trạng thái": "status",
 }
 
@@ -41,7 +45,7 @@ def download_store_template():
 
     output = create_smart_template(
         sheet_title="Cửa hàng",
-        headers=["Mã cửa hàng", "Tên cửa hàng", "Điện thoại", "Chủ hộ", "Địa chỉ", "Quận/Huyện", "Tỉnh/TP", "Trạng thái"],
+        headers=["Mã cửa hàng", "Tên cửa hàng", "Điện thoại", "Chủ hộ", "Địa chỉ", "Quận/Huyện", "Tỉnh/TP", "Tuyến", "Trạng thái"],
         sub_guides=[
             "Bắt buộc. VD: CH-0001 (Không trùng lặp)",
             "Bắt buộc. Tên cửa hàng / điểm bán",
@@ -50,13 +54,14 @@ def download_store_template():
             "Tùy chọn. Địa chỉ chi tiết điểm bán",
             "Tùy chọn. Quận / Huyện",
             "Tùy chọn. Tỉnh / Thành phố",
+            "Tùy chọn. Tuyến bán hàng / giao hàng",
             "Chọn: active / inactive",
         ],
         sample_rows=[
-            ["CH-0001", "Tạp Hóa Mai Linh", "0912345678", "Nguyễn Thị Mai", "123 Đường 3/2", "Quận Ninh Kiều", "Cần Thơ", "active"],
-            ["CH-0002", "Đại Lý Sữa Hưng Thịnh", "0987654321", "Trần Văn Hưng", "45 Nguyễn Trãi", "TP Vinh", "Nghệ An", "active"],
+            ["CH-0001", "Tạp Hóa Mai Linh", "0912345678", "Nguyễn Thị Mai", "123 Đường 3/2", "Quận Ninh Kiều", "Cần Thơ", "Tuyến 1", "active"],
+            ["CH-0002", "Đại Lý Sữa Hưng Thịnh", "0987654321", "Trần Văn Hưng", "45 Nguyễn Trãi", "TP Vinh", "Nghệ An", "Tuyến 2", "active"],
         ],
-        col_widths=[18, 28, 18, 22, 32, 20, 20, 16],
+        col_widths=[18, 28, 18, 22, 32, 20, 20, 20, 16],
         guide_title="HƯỚNG DẪN NHẬP DANH SÁCH CỬA HÀNG / ĐIỂM BÁN",
         guide_sections=[
             ("1. Quy tắc chung:", [
@@ -69,7 +74,7 @@ def download_store_template():
                 "• Một cửa hàng có thể có nhiều Khách hàng (mã hóa đơn) gắn kèm theo.",
             ]),
         ],
-        validations=[("H3:H500", '"active,inactive"', "Chọn trạng thái", "Chỉ chọn active hoặc inactive")],
+        validations=[("I3:I500", '"active,inactive"', "Chọn trạng thái", "Chỉ chọn active hoặc inactive")],
     )
     return Response(
         content=output.getvalue(),
@@ -114,7 +119,7 @@ def upload_stores(file: UploadFile = File(...), db: Session = Depends(get_db)):
                 # Upsert: cập nhật thông tin nếu file gửi mới hơn.
                 store = db.query(StoreModel).filter(StoreModel.code == code).first()
                 if store:
-                    for field in ("name", "phone", "owner_name", "address", "district", "city", "status"):
+                    for field in ("name", "phone", "owner_name", "address", "district", "city", "route", "status"):
                         value = str(data.get(field) or "").strip()
                         if value:
                             setattr(store, field, value)
@@ -129,6 +134,7 @@ def upload_stores(file: UploadFile = File(...), db: Session = Depends(get_db)):
                     address=str(data.get("address") or "").strip() or None,
                     district=str(data.get("district") or "").strip() or None,
                     city=str(data.get("city") or "").strip() or None,
+                    route=str(data.get("route") or "").strip() or None,
                     status=str(data.get("status") or "active").strip(),
                 )
                 db.add(store)

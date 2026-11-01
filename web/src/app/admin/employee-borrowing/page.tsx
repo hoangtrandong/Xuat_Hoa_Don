@@ -9,7 +9,7 @@ import { API_URL, apiFetch } from "@/lib/api";
 import { formatVND } from "@/lib/format";
 
 type BorrowBalance = {
-  employee_id: number;
+  employee_id: number | null;
   employee_code: string;
   employee_name: string;
   product_id: number;

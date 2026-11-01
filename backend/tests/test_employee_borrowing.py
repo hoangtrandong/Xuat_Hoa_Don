@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
 from app.crud.delivery_request import transition
-from app.crud.employee_borrow import list_ledger
+from app.crud.employee_borrow import confirm_batch, create_pending_batch, list_ledger
 from app.models.employee import Employee
 from app.models.employee_borrow import EmployeeBorrowBatch, EmployeeBorrowEntry
 from app.models.inventory import (
@@ -125,6 +125,38 @@ def test_import_borrow_columns_posts_negative_ledger_without_delivery_request(db
         )
 
 
+def test_dms_borrow_identity_can_be_added_without_internal_employee(db):
+    session, _, product, _, _ = db
+    batch = create_pending_batch(
+        session,
+        import_hash="d" * 64,
+        filename="dms-borrow.xlsx",
+        entries=[{
+            "employee_id": None,
+            "external_employee_code": "0000032253",
+            "external_employee_name": "Nguyễn Thị Thúy Hằng",
+            "product_id": product.id,
+            "quantity": -2,
+            "amount": -40000,
+            "note": "Mượn Số theo đơn IN061790",
+        }],
+        created_by="admin",
+    )
+    assert batch.entries[0].employee_id is None
+    assert batch.entries[0].external_employee_code == "0000032253"
+    assert list_ledger(session)["balances"] == []
+
+    confirm_batch(session, batch.id)
+
+    balance = list_ledger(session)["balances"][0]
+    assert balance["employee_id"] is None
+    assert (balance["employee_code"], balance["employee_name"]) == (
+        "0000032253",
+        "Nguyễn Thị Thúy Hằng",
+    )
+    assert (balance["quantity"], balance["amount"]) == (-2, -40000.0)
+
+
 def test_regular_delivery_upload_excludes_x_quantity_and_employee_debt(db):
     session, warehouse, _, _, _ = db
     result = upload_request(
@@ -225,4 +257,63 @@ def test_partial_actual_delivery_offsets_only_shipped_borrowed_quantity(db):
     ).all()
     assert [(row.quantity, float(row.amount)) for row in offsets] == [(3, 187500.0)]
     balance = list_ledger(session)["balances"][0]
+    assert (balance["quantity"], balance["amount"]) == (-5, -312500.0)
+
+
+def test_return_shipment_offsets_dms_salesperson_borrow_without_internal_employee(db):
+    session, warehouse, product, _, _ = db
+    batch = EmployeeBorrowBatch(
+        import_hash="c" * 64,
+        filename="dms-borrow.xlsx",
+        status="POSTED",
+        created_by="admin",
+        posted_at=datetime.utcnow(),
+        entries=[EmployeeBorrowEntry(
+            employee_id=None,
+            external_employee_code="0000032253",
+            external_employee_name="Nguyễn Thị Thúy Hằng",
+            product=product,
+            entry_type="BORROW",
+            quantity=-8,
+            amount=-500000,
+            created_by="admin",
+        )],
+    )
+    request = DeliveryRequest(
+        code="DR-DMS-RETURN",
+        warehouse_id=warehouse.id,
+        status="RECEIVED",
+        created_by="admin",
+        items=[DeliveryRequestItem(
+            product=product,
+            quantity=3,
+            allocations=[DeliveryAllocation(allocated_quantity=3, allocation_sequence=1)],
+            borrowed_employee_offsets=[{
+                "external_employee_code": "0000032253",
+                "external_employee_name": "Nguyễn Thị Thúy Hằng",
+                "quantity": 3,
+                "amount": 187500,
+            }],
+        )],
+    )
+    session.add_all([batch, request])
+    session.commit()
+
+    transition(session, request.id, "complete")
+
+    entries = session.scalars(
+        select(EmployeeBorrowEntry).order_by(EmployeeBorrowEntry.id)
+    ).all()
+    assert [(row.entry_type, row.quantity, float(row.amount)) for row in entries] == [
+        ("BORROW", -8, -500000.0),
+        ("OFFSET", 3, 187500.0),
+    ]
+    assert entries[1].source_entry_id == entries[0].id
+    assert entries[1].source_request_id == request.id
+    balance = list_ledger(session)["balances"][0]
+    assert balance["employee_id"] is None
+    assert (balance["employee_code"], balance["employee_name"]) == (
+        "0000032253",
+        "Nguyễn Thị Thúy Hằng",
+    )
     assert (balance["quantity"], balance["amount"]) == (-5, -312500.0)

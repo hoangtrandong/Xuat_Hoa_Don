@@ -62,6 +62,7 @@ def _to_response(obj) -> Employee:
         territory_id=obj.territory_id,
         target=float(obj.target),
         debt_limit=float(obj.debt_limit if obj.debt_limit is not None else 500000000.0),
+        vinamilk_code=obj.vinamilk_code,
         status=obj.status,
         join_date=obj.join_date,
         account_username=obj.user.username if obj.user else None,

@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardList, Download, MapPin, Upload } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
-import { splitCartons, formatNumber } from "@/lib/format";
-import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
+import { splitCartons } from "@/lib/format";
+import * as XLSX from "xlsx";
 
 type Warehouse = { id: number; name: string };
 type ProductOption = { id: number; sku: string; name: string };
@@ -20,7 +20,15 @@ type PreviewItem = {
   available_quantity: number;
   reserved_quantity?: number;
   shortage_quantity: number;
-  employee_allocations?: Record<string, unknown> | null;
+  employee_allocations?: Record<string, { quantity?: number }> | null;
+  borrowed_employee_offsets?: {
+    external_employee_code: string;
+    external_employee_name?: string | null;
+    employee_id?: number | null;
+    quantity: number;
+    amount: number;
+  }[];
+  dms_skus?: string[];
 };
 
 type PickRow = {
@@ -76,6 +84,23 @@ type PlanItem = {
   shortage_quantity: number;
   picks: PickRow[];
 };
+type ReconciledOrder = {
+  order_number: string;
+  status: string;
+  order_date: string | null;
+  employee_code: string;
+  employee_name: string;
+  customer_code: string;
+  customer_name: string;
+  source_order_code?: string | null;
+  dms_amount: number;
+  nvgh_amount: number | null;
+  selected_amount: number;
+  amount_source: string;
+  difference: number | null;
+  products: { dms_sku: string; dms_name: string; npp_code: string; npp_name: string; quantity: number }[];
+};
+type SendOrderCandidate = { id: number; code: string; status: string; customer_code: string; customer_name: string; total: number; created_at: string | null; products: string[] };
 
 type DeliveryRequestExcelCreateProps = {
   embedded?: boolean;
@@ -100,6 +125,17 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
   const [orders, setOrders] = useState<DeliveryOrder[]>([]);
   const [orderSearch, setOrderSearch] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [issues, setIssues] = useState<string[]>([]);
+  const [ordersReconciliation, setOrdersReconciliation] = useState<ReconciledOrder[]>([]);
+  const [borrowEntries, setBorrowEntries] = useState<{ employee_id?: number | null; external_employee_code?: string; external_employee_name?: string | null; product_id: number; quantity: number; amount: number; note?: string }[]>([]);
+  const [importHash, setImportHash] = useState("");
+  const [importFilename, setImportFilename] = useState("");
+  const [isNewWorkbook, setIsNewWorkbook] = useState(false);
+  const [canCreate, setCanCreate] = useState(false);
+  const [acknowledgeWarnings, setAcknowledgeWarnings] = useState(false);
+  const [sendOrderCandidates, setSendOrderCandidates] = useState<Record<string, SendOrderCandidate[]>>({});
+  const [sendOrderMappings, setSendOrderMappings] = useState<Record<string, number>>({});
+  const [selectedUploadFile, setSelectedUploadFile] = useState<File | null>(null);
   const [plan, setPlan] = useState<PlanItem[] | null>(null);
   const [planning, setPlanning] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -126,12 +162,58 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
     setProductOptions(await productResponse.json());
   }
 
+  async function buildPlan(items: PreviewItem[], selectedWarehouseId: string): Promise<PlanItem[]> {
+    const response = await apiFetch(`${API_URL}/delivery-requests/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        warehouse_id: Number(selectedWarehouseId),
+        items: items.map((item) => ({ product_id: item.product_id, quantity: item.quantity })),
+      }),
+    });
+    const result = await response.json() as PlanItem[] | { detail?: string };
+    if (!response.ok) throw new Error("detail" in result ? result.detail ?? "Không thể lập kế hoạch FEFO." : "Không thể lập kế hoạch FEFO.");
+    return result as PlanItem[];
+  }
+
+  async function loadStock(items: PreviewItem[], selectedWarehouseId: string): Promise<PreviewItem[]> {
+    const response = await apiFetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${encodeURIComponent(selectedWarehouseId)}`);
+    if (!response.ok) throw new Error("Không thể kiểm tra tồn kho.");
+    const stocks = await response.json() as Array<{ product_id: number; available: number; reserved?: number }>;
+    const availableByProduct = new Map(stocks.map((stock) => [stock.product_id, stock.available]));
+    const reservedByProduct = new Map(stocks.map((stock) => [stock.product_id, stock.reserved ?? 0]));
+    return items.map((item) => ({
+      ...item,
+      available_quantity: availableByProduct.get(item.product_id) ?? 0,
+      reserved_quantity: reservedByProduct.get(item.product_id) ?? 0,
+      shortage_quantity: Math.max(0, item.quantity - (availableByProduct.get(item.product_id) ?? 0)),
+    }));
+  }
+
+  function clearPreview() {
+    setPreview([]);
+    setEmployeeSummaries([]);
+    setOrders([]);
+    setWarnings([]);
+    setIssues([]);
+    setOrdersReconciliation([]);
+    setBorrowEntries([]);
+    setImportHash("");
+    setImportFilename("");
+    setPlan(null);
+    setCanCreate(false);
+    setAcknowledgeWarnings(false);
+    setSendOrderCandidates({});
+    setSendOrderMappings({});
+    setIsNewWorkbook(false);
+  }
+
   useEffect(() => {
     const timer = window.setTimeout(() => load().catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Không thể tải dữ liệu.")), 0);
     return () => window.clearTimeout(timer);
   }, []);
 
-  async function upload(file: File) {
+  async function upload(file: File, selectedSendMappings: Record<string, number> = {}) {
     if (!warehouseId) {
       setError("Vui lòng chọn kho trước khi upload file Excel.");
       return;
@@ -141,23 +223,52 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       const body = new FormData();
       body.append("file", file);
       body.append("warehouse_id", warehouseId);
-      const response = await apiFetch(`${API_URL}/delivery-requests/upload?warehouse_id=${encodeURIComponent(warehouseId)}`, { method: "POST", body });
-      const result = await response.json();
+      clearPreview();
+      const query = new URLSearchParams({ warehouse_id: warehouseId });
+      if (Object.keys(selectedSendMappings).length) query.set("send_order_mappings", JSON.stringify(selectedSendMappings));
+      const response = await apiFetch(`${API_URL}/delivery-requests/upload?${query.toString()}`, { method: "POST", body });
+      const result = await response.json() as {
+        items?: PreviewItem[];
+        employee_summaries?: EmployeeSummary[];
+        orders?: DeliveryOrder[];
+        warnings?: string[];
+        issues?: string[];
+        order_reconciliation?: ReconciledOrder[];
+        borrow_entries?: { employee_id?: number | null; external_employee_code?: string; external_employee_name?: string | null; product_id: number; quantity: number; amount: number; note?: string }[];
+        import_hash?: string;
+        filename?: string;
+        can_create?: boolean;
+        send_order_candidates?: Record<string, SendOrderCandidate[]>;
+        detail?: string;
+      };
       if (!response.ok) throw new Error(result.detail ?? "Không thể upload yêu cầu giao hàng.");
-
-      if (Array.isArray(result)) {
-        setPreview(result);
-        setEmployeeSummaries([]);
-        setOrders([]);
-        setWarnings([]);
-      } else if (result && typeof result === "object" && "items" in result) {
-        setPreview((result.items as PreviewItem[]) || []);
-        setEmployeeSummaries((result.employee_summaries as EmployeeSummary[]) || []);
-        setOrders((result.orders as DeliveryOrder[]) || []);
-        setWarnings((result.warnings as string[]) || []);
+      const items = result.items ?? [];
+      setPreview(items);
+      setEmployeeSummaries(result.employee_summaries ?? []);
+      setOrders(result.orders ?? []);
+      setWarnings(result.warnings ?? []);
+      setAcknowledgeWarnings(false);
+      setIssues(result.issues ?? []);
+      setOrdersReconciliation(result.order_reconciliation ?? []);
+      setBorrowEntries(result.borrow_entries ?? []);
+      setImportHash(result.import_hash ?? "");
+      setImportFilename(result.filename ?? file.name);
+      setCanCreate(result.can_create ?? items.length > 0);
+      setIsNewWorkbook(Array.isArray(result.order_reconciliation));
+      setSendOrderCandidates(result.send_order_candidates ?? {});
+      setSendOrderMappings(selectedSendMappings);
+      if (items.length) {
+        const [planned, stockedItems] = await Promise.all([
+          buildPlan(items, warehouseId),
+          loadStock(items, warehouseId),
+        ]);
+        setPlan(planned);
+        setPreview(stockedItems.map((item) => {
+          const itemPlan = planned.find((entry) => entry.product_id === item.product_id);
+          return { ...item, shortage_quantity: itemPlan?.shortage_quantity ?? item.quantity };
+        }));
       }
-      setPlan(null);
-      setMessage("Đã tải bản xem trước. Chưa tạo yêu cầu giao hàng.");
+      setMessage("Đã đọc danh sách đơn, tra dữ liệu DMS và tổng hợp phân bổ theo NVGH. Kiểm tra tồn kho trước khi xác nhận.");
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Không thể upload file.");
     } finally {
@@ -165,10 +276,55 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
     }
   }
 
+  function reanalyzeWithMappings() {
+    if (!selectedUploadFile) {
+      setError("Hãy chọn lại file yêu cầu trước khi phân tích các ghép nối.");
+      return;
+    }
+    upload(selectedUploadFile, sendOrderMappings);
+  }
+
+  function chooseFile(file: File) {
+    setSelectedUploadFile(file);
+    setSendOrderMappings({});
+    upload(file, {});
+  }
+
   async function confirmPreview() {
     setError("");
+    if (warnings.length > 0 && !acknowledgeWarnings) {
+      setError("Hãy xác nhận đã kiểm tra các cảnh báo/chênh lệch trước khi tiếp tục.");
+      return;
+    }
+    if (issues.length > 0 || !canCreate) {
+      setError("Hãy xử lý các lỗi đối chiếu trước khi xác nhận tạo yêu cầu.");
+      return;
+    }
+    if (!preview.length && borrowEntries.length > 0) {
+      const response = await apiFetch(`${API_URL}/employee-borrowing/import-preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          import_hash: importHash,
+          filename: importFilename,
+          entries: borrowEntries,
+        }),
+      });
+      const result = await response.json() as { detail?: string; batch_id?: number };
+      if (!response.ok) {
+        setError(result.detail ?? "Không thể đưa các đơn mượn số vào hàng chờ vay mượn.");
+        return;
+      }
+      clearPreview();
+      setMessage(`Đã chuyển các đơn Mượn Số sang Hàng vay mượn NVBH (lần import #${result.batch_id}).`);
+      return;
+    }
     if (preview.length === 0) {
-      setError("File không có số lượng cần xuất thực tế. Các dòng -X được quản lý riêng tại mục Hàng vay mượn NVBH.");
+      setError("File không có sản phẩm cần xuất hoặc ghi nhận vay mượn.");
+      return;
+    }
+    if (!plan || plan.some((item) => item.shortage_quantity > 0 || item.planned_quantity !== item.quantity)) {
+      setError("Hãy tính FEFO lại và xử lý đủ tồn kho trước khi gửi yêu cầu.");
       return;
     }
     const items = preview.map((item) => {
@@ -184,6 +340,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       return {
         product_id: productId, quantity: item.quantity, requested_quantity_raw: item.requested_quantity_raw,
         employee_allocations: item.employee_allocations,
+        borrowed_employee_offsets: item.borrowed_employee_offsets,
         planned_allocations: planned?.picks.map((pick) => ({
           lot_id: pick.lot_id,
           location_code: pick.location_code,
@@ -200,6 +357,9 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       items,
       employee_summaries: employeeSummaries.length > 0 ? employeeSummaries : undefined,
       orders: orders.length > 0 ? orders : undefined,
+      borrow_entries: borrowEntries.length ? borrowEntries : undefined,
+      borrow_import_hash: borrowEntries.length ? importHash : undefined,
+      borrow_filename: borrowEntries.length ? importFilename : undefined,
     };
     const response = await apiFetch(`${API_URL}/delivery-requests/`, {
       method: "POST",
@@ -222,23 +382,98 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
     }
     setPreview([]);
     setOrders([]);
+    setOrdersReconciliation([]);
+    setBorrowEntries([]);
     setPlan(null);
     setMessage(`Đã tạo yêu cầu ${result.code ?? ""}.${submitNote}`);
     await load();
     await onCreated?.(result);
   }
 
+  function downloadSummary() {
+    if (!preview.length || !plan || plan.some((item) => item.shortage_quantity > 0)) return;
+    const drivers = employeeSummaries.map((employee) => employee.employee_code);
+    const rows: (string | number)[][] = [
+      ["PHIẾU TỔNG HỢP GIAO HÀNG THEO NHÓM XE"],
+      ["Nguồn dữ liệu: DMS"],
+      ["STT", "Mã hàng", "Tên sản phẩm", "Vị trí lấy hàng", "HSD tương ứng", "Tổng xuất (thùng/hộp)", "Số lượng theo từng NVGH"],
+      ["", "", "", "", "", "", ...employeeSummaries.map((employee) => `${employee.employee_code} (${employee.employee_name ?? ""})`)],
+    ];
+    preview.forEach((item, index) => {
+      const bpc = Math.max(1, item.boxes_per_carton ?? 1);
+      const split = (quantity: number) => `${Math.floor(quantity / bpc)}/${quantity % bpc}`;
+      const allocations = item.employee_allocations ?? {};
+      const itemPlan = plan.find((planned) => (
+        planned.product_id === item.product_id
+        || planned.sku.trim().toUpperCase() === item.sku.trim().toUpperCase()
+      ));
+      const picksByLocationAndExpiry = new Map<string, { location: string; expiry: string; quantity: number }>();
+      for (const pick of itemPlan?.picks ?? []) {
+        const location = pick.location_code || "—";
+        const expiry = pick.expiry_date
+          ? formatDate(pick.expiry_date.split("T")[0])
+          : "—";
+        const key = `${location}\u0000${expiry}`;
+        const current = picksByLocationAndExpiry.get(key);
+        if (current) current.quantity += pick.quantity;
+        else picksByLocationAndExpiry.set(key, { location, expiry, quantity: pick.quantity });
+      }
+      const pickDetails = [...picksByLocationAndExpiry.values()];
+      rows.push([
+        index + 1,
+        item.sku,
+        item.product_name,
+        pickDetails.map((pick) => `${pick.location}: ${split(pick.quantity)}`).join("\n") || "—",
+        pickDetails.map((pick) => `${pick.location}: ${pick.expiry}`).join("\n") || "—",
+        split(item.quantity),
+        ...drivers.map((code) => {
+          const allocation = allocations[code];
+          return allocation?.quantity ? split(allocation.quantity) : "";
+        }),
+      ]);
+    });
+    const totalQuantities = [
+      "",
+      "",
+      "TỔNG SỐ LƯỢNG (đơn vị)",
+      "",
+      "",
+      preview.reduce((sum, item) => sum + item.quantity, 0),
+      ...employeeSummaries.map((employee) => preview.reduce((sum, item) => (
+        sum + (item.employee_allocations?.[employee.employee_code]?.quantity ?? 0)
+      ), 0)),
+    ];
+    rows.push(totalQuantities);
+    rows.push(["", "", "TỔNG ĐƠN HÀNG (đơn)", "", "", orders.length, ...employeeSummaries.map((employee) => employee.order_count)]);
+    rows.push([
+      "",
+      "",
+      "TỔNG CỘNG (ngàn đồng)",
+      "",
+      "",
+      Math.round(employeeSummaries.reduce((sum, employee) => sum + employee.amount, 0) / 1000),
+      ...employeeSummaries.map((employee) => Math.round(employee.amount / 1000)),
+    ]);
+    const sheet = XLSX.utils.aoa_to_sheet(rows);
+    sheet["!cols"] = [
+      { wch: 10 },
+      { wch: 18 },
+      { wch: 38 },
+      { wch: 24 },
+      { wch: 28 },
+      { wch: 24 },
+      { wch: 28 },
+      ...drivers.map(() => ({ wch: 18 })),
+    ];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, "PhieuGiaoHang");
+    XLSX.writeFile(workbook, "BC_THGH_NhomXe.xlsx");
+  }
+
   async function checkStock() {
     setPlan(null);
-    const response = await apiFetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${encodeURIComponent(warehouseId)}`);
-    if (!response.ok) throw new Error("Không thể kiểm tra tồn kho.");
-    const stocks = await response.json() as Array<{ product_id: number; available: number; reserved?: number }>;
-    const availableByProduct = new Map(stocks.map((stock) => [stock.product_id, stock.available]));
-    const reservedByProduct = new Map(stocks.map((stock) => [stock.product_id, stock.reserved ?? 0]));
-    setPreview((items) => items.map((item) => {
-      const available = availableByProduct.get(item.product_id) ?? 0;
-      return { ...item, available_quantity: available, reserved_quantity: reservedByProduct.get(item.product_id) ?? 0, shortage_quantity: Math.max(0, item.quantity - available) };
-    }));
+    const updatedItems = await loadStock(preview, warehouseId);
+    setPreview(updatedItems);
     setMessage("Đã kiểm tra tồn kho (sau khi trừ lượng giữ chỗ). Chưa tìm vị trí.");
   }
 
@@ -269,6 +504,10 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       if (!response.ok) throw new Error("detail" in result ? result.detail ?? "Không thể lập kế hoạch FEFO." : "Không thể lập kế hoạch FEFO.");
       const planItems = result as PlanItem[];
       setPlan(planItems);
+      setPreview((current) => current.map((item) => {
+        const planned = planItems.find((planItem) => planItem.product_id === item.product_id);
+        return planned ? { ...item, shortage_quantity: planned.shortage_quantity } : item;
+      }));
       const totalShort = planItems.reduce((sum, planItem) => sum + planItem.shortage_quantity, 0);
       setMessage(totalShort > 0 ? `Đã lập kế hoạch lấy hàng FEFO (thiếu ${totalShort} đơn vị).` : "Đã lập kế hoạch lấy hàng FEFO.");
     } catch (planError) {
@@ -314,15 +553,15 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Yêu cầu giao hàng</h1>
             <p className="text-sm text-gray-500">Admin lập và phân bổ; thủ kho tiếp nhận và xác nhận hoàn thành</p>
+            <p className="text-xs text-amber-700">Mượn Số lấy NVBH từ DMS; Trả Số xuất hàng và ghi công nợ cho NVGH trong file, đồng thời bù trừ hàng vay của NVBH trên DMS.</p>
           </div>
           <div className="flex gap-2 items-center">
             <select value={warehouseId} onChange={(event) => { setWarehouseId(event.target.value); setPlan(null); }} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm">
               <option value="">Chọn kho xuất</option>
               {warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
             </select>
-            <AuthenticatedDownloadLink href={`${API_URL}/delivery-requests/template`} className="flex items-center gap-2 border border-gray-200 bg-white px-3 py-2 rounded-lg text-sm"><Download size={16} />Tải mẫu</AuthenticatedDownloadLink>
-            <button disabled={!warehouseId || uploading} onClick={() => fileInput.current?.click()} className="flex items-center gap-2 bg-sky-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50"><Upload size={16} />Upload Excel</button>
-            <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) upload(file); event.target.value = ""; }} />
+            <button disabled={!warehouseId || uploading} onClick={() => fileInput.current?.click()} className="flex items-center gap-2 bg-sky-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50"><Upload size={16} />Upload file yêu cầu mới</button>
+            <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) chooseFile(file); event.target.value = ""; }} />
           </div>
         </div>
       )}
@@ -330,16 +569,16 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
             <h3 className="font-semibold text-gray-900">Tạo yêu cầu từ Excel</h3>
-            <p className="text-sm text-gray-500">Chọn kho, tải mẫu, upload Excel để xem trước và tạo yêu cầu xuất hàng.</p>
+            <p className="text-sm text-gray-500">Upload file có sheet DSDonHang; hệ thống tra dữ liệu DMS, tổng hợp sản phẩm theo NVGH và lập FEFO.</p>
+            <p className="text-xs text-amber-700">Mượn Số lấy NVBH từ DMS; Trả Số ghi công nợ cho NVGH trong file và bù trừ hàng vay của NVBH trên DMS.</p>
           </div>
           <div className="flex flex-wrap gap-2 items-center">
           <select value={warehouseId} onChange={(event) => { setWarehouseId(event.target.value); setPlan(null); }} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm">
             <option value="">Chọn kho xuất</option>
             {warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
           </select>
-          <AuthenticatedDownloadLink href={`${API_URL}/delivery-requests/template`} className="flex items-center gap-2 border border-gray-200 bg-white px-3 py-2 rounded-lg text-sm"><Download size={16} />Tải mẫu</AuthenticatedDownloadLink>
-          <button disabled={!warehouseId || uploading} onClick={() => fileInput.current?.click()} className="flex items-center gap-2 bg-sky-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50"><Upload size={16} />Upload Excel</button>
-          <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) upload(file); event.target.value = ""; }} />
+          <button disabled={!warehouseId || uploading} onClick={() => fileInput.current?.click()} className="flex items-center gap-2 bg-sky-500 text-white px-3 py-2 rounded-lg text-sm disabled:opacity-50"><Upload size={16} />Upload file yêu cầu mới</button>
+          <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) chooseFile(file); event.target.value = ""; }} />
         </div>
         </div>
       )}
@@ -356,6 +595,129 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
               <li key={idx}>{w}</li>
             ))}
           </ul>
+          <label className="mt-3 flex items-start gap-2 border-t border-amber-200 pt-3 font-medium">
+            <input type="checkbox" checked={acknowledgeWarnings} onChange={(event) => setAcknowledgeWarnings(event.target.checked)} />
+            <span>Tôi đã đối chiếu các cảnh báo/chênh lệch và xác nhận tiếp tục với nguồn thành tiền đã chọn.</span>
+          </label>
+        </div>
+      )}
+
+      {issues.length > 0 && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <p className="font-semibold">Cần xử lý trước khi tạo yêu cầu</p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {issues.map((issue, index) => <li key={`${index}-${issue}`}>{issue}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {isNewWorkbook && Object.keys(sendOrderCandidates).length > 0 && (
+        <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+              <p className="text-sm font-semibold text-amber-900">Cần ghép đơn Gửi Số với đơn nội bộ</p>
+              {Object.entries(sendOrderCandidates).map(([orderNumber, candidates]) => {
+                const sourceOrder = ordersReconciliation.find((order) => order.order_number === orderNumber);
+                return (
+                  <div key={orderNumber} className="grid gap-2 md:grid-cols-[180px_1fr] md:items-center">
+                    <span className="text-xs text-gray-700">Gửi Số {orderNumber} · {sourceOrder?.customer_name ?? sourceOrder?.customer_code ?? "Khách hàng"}</span>
+                    <select
+                      value={sendOrderMappings[orderNumber.toLowerCase()] ?? ""}
+                      onChange={(event) => setSendOrderMappings((current) => ({ ...current, [orderNumber.toLowerCase()]: Number(event.target.value) || 0 }))}
+                      className="rounded border border-gray-200 bg-white px-2 py-1.5 text-xs"
+                    >
+                      <option value="">Chọn đơn hàng nội bộ</option>
+                      {candidates.map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.code} · {candidate.customer_name} · {candidate.total.toLocaleString("vi-VN")} đ · {candidate.products.join(", ")}
+                        </option>
+                      ))}
+                    </select>
+                    {candidates.length === 0 && <span className="text-xs text-red-700 md:col-start-2">Chưa có đơn nội bộ của khách hàng này. Hãy tạo đơn trước rồi tải lại file.</span>}
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                disabled={uploading || !Object.values(sendOrderMappings).some(Boolean)}
+                onClick={reanalyzeWithMappings}
+                className="rounded bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+              >
+                {uploading ? "Đang phân tích…" : "Áp dụng ghép nối và phân tích lại"}
+              </button>
+        </div>
+      )}
+
+      {isNewWorkbook && preview.length > 0 && employeeSummaries.length > 0 && (
+        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-gray-50 px-5 py-4">
+            <div>
+              <h4 className="font-semibold text-gray-900">Phiếu tổng hợp giao hàng theo nhóm xe</h4>
+              <p className="text-xs text-gray-500">Số lượng và tiền được tổng hợp từ dữ liệu DMS, phân bổ theo NVGH trong sheet DSDonHang.</p>
+            </div>
+            <span className="rounded-full bg-sky-100 px-2.5 py-1 text-xs font-medium text-sky-800">{employeeSummaries.length} NVGH</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-max text-xs">
+              <thead className="border-b bg-gray-50 text-gray-600">
+                <tr>
+                  <th rowSpan={2} className="px-3 py-2 text-left">STT</th>
+                  <th rowSpan={2} className="px-3 py-2 text-left">Mã hàng</th>
+                  <th rowSpan={2} className="px-3 py-2 text-left">Tên sản phẩm</th>
+                  <th rowSpan={2} className="px-3 py-2 text-right">Tổng xuất<br />(thùng/hộp)</th>
+                  <th colSpan={employeeSummaries.length} className="px-3 py-2 text-center">Số lượng theo từng NVGH (thùng/hộp)</th>
+                </tr>
+                <tr>
+                  {employeeSummaries.map((employee) => (
+                    <th key={employee.employee_code} className="min-w-28 px-3 py-2 text-center">
+                      <span className="block font-semibold text-gray-800">{employee.employee_code}</span>
+                      <span className="block font-normal text-gray-500">{employee.employee_name}</span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {preview.map((item, index) => {
+                  const bpc = Math.max(1, item.boxes_per_carton ?? 1);
+                  const split = (quantity: number) => {
+                    const cartons = Math.floor(quantity / bpc);
+                    return `${cartons}/${quantity % bpc}`;
+                  };
+                  return (
+                    <tr key={`${item.sku}-${index}`} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 text-gray-500">{index + 1}</td>
+                      <td className="px-3 py-2 font-mono font-medium text-gray-800">{item.sku}</td>
+                      <td className="px-3 py-2">{item.product_name}</td>
+                      <td className="px-3 py-2 text-right font-semibold">{split(item.quantity)}</td>
+                      {employeeSummaries.map((employee) => {
+                        const quantity = item.employee_allocations?.[employee.employee_code]?.quantity ?? 0;
+                        return <td key={employee.employee_code} className="px-3 py-2 text-center">{quantity > 0 ? split(quantity) : "—"}</td>;
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot className="border-t-2 border-gray-300 bg-gray-50 font-semibold text-gray-800">
+                <tr>
+                  <td colSpan={3} className="px-3 py-2 text-right">TỔNG SỐ LƯỢNG (đơn vị)</td>
+                  <td className="px-3 py-2 text-right">{preview.reduce((sum, item) => sum + item.quantity, 0).toLocaleString("vi-VN")}</td>
+                  {employeeSummaries.map((employee) => (
+                    <td key={employee.employee_code} className="px-3 py-2 text-right">
+                      {preview.reduce((sum, item) => sum + (item.employee_allocations?.[employee.employee_code]?.quantity ?? 0), 0).toLocaleString("vi-VN")}
+                    </td>
+                  ))}
+                </tr>
+                <tr>
+                  <td colSpan={3} className="px-3 py-2 text-right">TỔNG ĐƠN HÀNG (đơn)</td>
+                  <td className="px-3 py-2 text-right">{orders.length}</td>
+                  {employeeSummaries.map((employee) => <td key={employee.employee_code} className="px-3 py-2 text-right">{employee.order_count}</td>)}
+                </tr>
+                <tr>
+                  <td colSpan={3} className="px-3 py-2 text-right">TỔNG CỘNG (ngàn đồng)</td>
+                  <td className="px-3 py-2 text-right">{Math.round(employeeSummaries.reduce((sum, employee) => sum + employee.amount, 0) / 1000).toLocaleString("vi-VN")}</td>
+                  {employeeSummaries.map((employee) => <td key={employee.employee_code} className="px-3 py-2 text-right">{Math.round(employee.amount / 1000).toLocaleString("vi-VN")}</td>)}
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
       )}
 
@@ -363,8 +725,8 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
           <div className="px-5 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
             <div>
-              <h4 className="font-semibold text-gray-900">Tổng hợp phân bổ xuất hàng theo Nhân viên (Dòng 15 - 17)</h4>
-              <p className="text-xs text-gray-500">Tiền trong file tính theo ngàn đồng; hệ thống hiển thị và ghi công nợ theo đồng khi thủ kho xác nhận xuất hàng thành công.</p>
+              <h4 className="font-semibold text-gray-900">Tổng hợp thành tiền theo NVGH</h4>
+              <p className="text-xs text-gray-500">Số tiền lấy từ DMS; công nợ chỉ ghi nhận khi thủ kho xác nhận xuất hàng thành công.</p>
             </div>
             <span className="text-xs font-medium px-2.5 py-1 bg-sky-100 text-sky-800 rounded-full">
               {employeeSummaries.length} nhân viên
@@ -376,7 +738,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                 <tr>
                   <th className="text-left px-5 py-3">Mã NV</th>
                   <th className="text-left px-5 py-3">Tên NV</th>
-                  <th className="text-right px-5 py-3">Khối lượng (tấn)</th>
+                  {!isNewWorkbook && <th className="text-right px-5 py-3">Khối lượng (tấn)</th>}
                   <th className="text-right px-5 py-3">Số đơn hàng</th>
                   <th className="text-right px-5 py-3">Tiền xuất kho</th>
                   <th className="text-right px-5 py-3">Nợ hiện tại</th>
@@ -390,7 +752,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                   <tr key={`${s.employee_code}-${index}`} className={s.is_over_limit ? "bg-amber-50/40" : ""}>
                     <td className="px-5 py-2.5 font-medium text-gray-900">{s.employee_code}</td>
                     <td className="px-5 py-2.5 text-gray-700">{s.employee_name || "—"}</td>
-                    <td className="px-5 py-2.5 text-right font-mono text-gray-600">{s.weight_ton.toFixed(3)}</td>
+                    {!isNewWorkbook && <td className="px-5 py-2.5 text-right font-mono text-gray-600">{s.weight_ton.toFixed(3)}</td>}
                     <td className="px-5 py-2.5 text-right font-mono text-gray-600">{s.order_count}</td>
                     <td className="px-5 py-2.5 text-right font-semibold text-gray-900">{s.amount.toLocaleString("vi-VN")} đ</td>
                     <td className="px-5 py-2.5 text-right text-gray-600">{(s.current_debt || 0).toLocaleString("vi-VN")} đ</td>
@@ -421,7 +783,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
           <div className="px-5 py-4 border-b border-gray-100 bg-gray-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h4 className="font-semibold text-gray-900">Chi tiết đơn hàng bóc tách từ Sheet 2 (DSDonHang)</h4>
+              <h4 className="font-semibold text-gray-900">Danh sách đơn đủ điều kiện xuất kho</h4>
               <p className="text-xs text-gray-500">
                 Khớp {orders.length} đơn hàng với dữ liệu đơn hàng hệ thống. Tổng giá trị:{" "}
                 <span className="font-semibold text-gray-900">
@@ -496,24 +858,32 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
             <ClipboardList size={18} className="text-sky-500" />
             <span className="font-semibold text-gray-900">Danh sách sản phẩm upload</span>
           </div>
-          {preview.length > 0 && (
+          {(preview.length > 0 || borrowEntries.length > 0) && (
             <div className="flex flex-wrap gap-2">
-              <button
+              {preview.length > 0 && <button
                 onClick={() => checkStock().catch((e) => setError(e instanceof Error ? e.message : "Không thể kiểm tra tồn kho."))}
                 className="bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition"
               >
                 Check tồn kho
-              </button>
-              <button
+              </button>}
+              {preview.length > 0 && <button
                 disabled={planning}
                 onClick={() => findLocations()}
                 className="bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-1.5 rounded-lg text-xs font-semibold disabled:opacity-50 transition"
               >
                 {planning ? "Đang tìm…" : "Tìm vị trí (FEFO)"}
-              </button>
+              </button>}
+              {preview.length > 0 && <button
+                disabled={!plan || plan.some((item) => item.shortage_quantity > 0) || planning}
+                onClick={downloadSummary}
+                className="inline-flex items-center gap-1 bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Download size={14} /> Tải chi tiết BC_THGH_NhomXe
+              </button>}
               <button
+                disabled={!canCreate || (warnings.length > 0 && !acknowledgeWarnings) || (preview.length > 0 && (!plan || plan.some((item) => item.shortage_quantity > 0))) || planning}
                 onClick={() => confirmPreview().catch((e) => setError(e instanceof Error ? e.message : "Không thể tạo yêu cầu."))}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition shadow-xs"
+                className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition shadow-xs disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Xác nhận tạo yêu cầu
               </button>
@@ -558,12 +928,15 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                 <tr>
                   <th className="text-left px-4 py-3">Mã hàng</th>
                   <th className="text-left px-4 py-3">Tên sản phẩm</th>
+                  {isNewWorkbook && <th className="text-left px-4 py-3">Mã DMS nguồn</th>}
                   <th className="text-center px-3 py-3 w-20">Quy cách</th>
                   <th className="text-right px-3 py-3 bg-sky-50 font-bold text-sky-900 w-24">Thùng (T)</th>
                   <th className="text-right px-3 py-3 bg-amber-50 font-bold text-amber-900 w-20">Lẻ (H)</th>
                   <th className="text-right px-4 py-3">Tổng yêu cầu</th>
                   <th className="text-right px-4 py-3">Tồn khả dụng</th>
                   <th className="text-right px-4 py-3">Đã giữ chỗ</th>
+                  {isNewWorkbook && <th className="text-left px-4 py-3">Vị trí lấy</th>}
+                  {isNewWorkbook && <th className="text-left px-4 py-3">HSD theo vị trí</th>}
                   <th className="text-right px-4 py-3">Thiếu</th>
                 </tr>
               </thead>
@@ -573,16 +946,19 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                   return (
                     <tr key={`${item.sku}-${index}`} className={item.shortage_quantity > 0 ? "bg-red-50/70" : "hover:bg-gray-50/60"}>
                       <td className="px-4 py-2">
-                        <input
-                          list="delivery-product-options"
-                          value={item.sku}
-                          placeholder="Tìm SKU..."
-                          onChange={(event) => selectPreviewSku(index, event.target.value)}
-                          onBlur={(event) => replacePreviewSku(index, event.target.value).catch(() => setError("Không thể kiểm tra mã thay thế."))}
-                          className="w-36 border border-gray-200 rounded px-2 py-1 font-mono font-medium bg-white"
-                        />
+                        {isNewWorkbook
+                          ? <span className="font-mono font-semibold text-emerald-700">{item.sku}</span>
+                          : <input
+                            list="delivery-product-options"
+                            value={item.sku}
+                            placeholder="Tìm SKU..."
+                            onChange={(event) => selectPreviewSku(index, event.target.value)}
+                            onBlur={(event) => replacePreviewSku(index, event.target.value).catch(() => setError("Không thể kiểm tra mã thay thế."))}
+                            className="w-36 border border-gray-200 rounded px-2 py-1 font-mono font-medium bg-white"
+                          />}
                       </td>
                       <td className="px-4 py-2 font-medium text-gray-800">{item.product_name}</td>
+                      {isNewWorkbook && <td className="px-4 py-2 font-mono text-gray-600">{item.dms_skus?.join(", ") || "—"}</td>}
                       <td className="px-3 py-2 text-center text-gray-500">{bpc} H/T</td>
                       <td className="px-3 py-2 text-right font-black text-sky-950 bg-sky-50/40">
                         {cartons > 0 ? cartons.toLocaleString("vi-VN") : "—"}
@@ -595,6 +971,24 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                       </td>
                       <td className="px-4 py-2 text-right text-gray-600">{item.available_quantity || "-"}</td>
                       <td className="px-4 py-2 text-right text-gray-600">{item.reserved_quantity || "-"}</td>
+                      {isNewWorkbook && (() => {
+                        const planned = plan?.find((plannedItem) => plannedItem.product_id === item.product_id);
+                        return <>
+                          <td className="px-4 py-2 text-gray-700">
+                            {planned?.picks.length
+                              ? planned.picks.map((pick, pickIndex) => {
+                                const split = splitCartons(pick.quantity, item.boxes_per_carton);
+                                return <div key={`${pick.location_id}-${pickIndex}`} className="whitespace-nowrap">{pick.location_code ?? "Chưa rõ vị trí"}: {split.cartons}/{split.looseBoxes}</div>;
+                              })
+                              : <span className={planned?.shortage_quantity ? "font-medium text-red-600" : "text-gray-400"}>{planned?.shortage_quantity ? "Không đủ tồn" : "Chưa tính FEFO"}</span>}
+                          </td>
+                          <td className="px-4 py-2 text-gray-600">
+                            {planned?.picks.length
+                              ? planned.picks.map((pick, pickIndex) => <div key={`${pick.location_id}-expiry-${pickIndex}`} className="whitespace-nowrap">{pick.expiry_date ? formatDate(pick.expiry_date) : "—"}</div>)
+                              : "—"}
+                          </td>
+                        </>;
+                      })()}
                       <td className={`px-4 py-2 text-right font-semibold ${item.shortage_quantity > 0 ? "text-red-600" : "text-gray-400"}`}>
                         {item.shortage_quantity || "-"}
                       </td>
@@ -607,7 +1001,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         )}
       </div>
 
-      {plan && plan.length > 0 && (
+      {plan && plan.length > 0 && !isNewWorkbook && (
         <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-sm">
           <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
             <div className="flex items-center gap-2">
@@ -625,7 +1019,6 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                   <th className="text-left px-4 py-3">Mã hàng</th>
                   <th className="text-left px-4 py-3">Tên sản phẩm</th>
                   <th className="text-left px-4 py-3">Vị trí</th>
-                  <th className="text-left px-4 py-3">Lô</th>
                   <th className="text-left px-4 py-3">HSD</th>
                   <th className="text-right px-3 py-3 bg-sky-50 font-bold text-sky-900 w-24">Thùng (T)</th>
                   <th className="text-right px-3 py-3 bg-amber-50 font-bold text-amber-900 w-20">Lẻ (H)</th>
@@ -638,7 +1031,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                     <tr key={item.sku} className="bg-red-50">
                       <td className="px-4 py-2 font-medium font-mono">{item.sku}</td>
                       <td className="px-4 py-2">{item.product_name}</td>
-                      <td colSpan={6} className="px-4 py-2 text-red-600 font-semibold">
+                      <td colSpan={5} className="px-4 py-2 text-red-600 font-semibold">
                         Thiếu {item.shortage_quantity} đơn vị
                       </td>
                     </tr>
@@ -650,7 +1043,6 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                           {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-4 py-2 font-medium font-mono">{item.sku}</td>}
                           {pickIndex === 0 && <td rowSpan={item.picks.length} className="px-4 py-2 font-medium text-gray-800">{item.product_name}</td>}
                           <td className="px-4 py-2 font-medium text-gray-800">{pick.location_code ?? "-"}</td>
-                          <td className="px-4 py-2 text-gray-600">{pick.lot_number ?? "-"}</td>
                           <td className="px-4 py-2 text-gray-600">{pick.expiry_date ? formatDate(pick.expiry_date) : "-"}</td>
                           <td className="px-3 py-2 text-right font-black text-sky-950 bg-sky-50/40">
                             {cartons > 0 ? cartons : "—"}

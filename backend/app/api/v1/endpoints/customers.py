@@ -29,6 +29,9 @@ CUSTOMER_HEADER_ALIASES = {
     "Trạng thái": "status",
     "Mã cửa hàng": "store_code",
     "Mã CH": "store_code",
+    "Tuyến": "store_route",
+    "Tuyến bán hàng": "store_route",
+    "Mã tuyến": "store_route",
     "Mã công ty quản lý": "company_code",
     "Công ty quản lý": "company_code",
     "Mã công ty": "company_code",
@@ -51,7 +54,7 @@ def download_customer_template():
         sheet_title="Khách hàng",
         headers=[
             "Mã KH", "Tên khách hàng", "Loại", "Email", "CCCD",
-            "Mã số thuế", "Hạn mức công nợ", "Trạng thái", "Mã cửa hàng", "Mã công ty quản lý",
+            "Mã số thuế", "Hạn mức công nợ", "Trạng thái", "Mã cửa hàng", "Tuyến", "Mã công ty quản lý",
         ],
         sub_guides=[
             "Bắt buộc. VD: KH-0001 (Không trùng lặp)",
@@ -63,13 +66,14 @@ def download_customer_template():
             "VNĐ. Hạn mức công nợ cho phép",
             "Chọn: active / inactive",
             "Tùy chọn. Mã điểm bán liên kết (VD: CH-0001)",
+            "Tùy chọn. Tuyến của cửa hàng (VD: Tuyến 1)",
             "Tùy chọn. Mã công ty quản lý (VD: CT001)",
         ],
         sample_rows=[
-            ["KH-0001", "Hộ kinh doanh Mai Linh", "RETAIL", "mailinh@gmail.com", "012345678901", "8012345678", 20000000, "active", "CH-0001", "CT001"],
-            ["KH-0002", "Công ty TNHH Hưng Thịnh", "WHOLESALE", "hungthinh@gmail.com", "", "0102030405", 50000000, "active", "CH-0002", "CT001"],
+            ["KH-0001", "Hộ kinh doanh Mai Linh", "RETAIL", "mailinh@gmail.com", "012345678901", "8012345678", 20000000, "active", "CH-0001", "Tuyến 1", "CT001"],
+            ["KH-0002", "Công ty TNHH Hưng Thịnh", "WHOLESALE", "hungthinh@gmail.com", "", "0102030405", 50000000, "active", "CH-0002", "Tuyến 2", "CT001"],
         ],
-        col_widths=[18, 28, 16, 24, 18, 18, 20, 16, 18, 20],
+        col_widths=[18, 28, 16, 24, 18, 18, 20, 16, 18, 18, 20],
         guide_title="HƯỚNG DẪN NHẬP DANH SÁCH KHÁCH HÀNG / ĐỐI TÁC",
         guide_sections=[
             ("1. Quy tắc chung:", [
@@ -78,6 +82,7 @@ def download_customer_template():
             ]),
             ("2. Liên kết Cửa hàng & Công ty quản lý:", [
                 "• 'Mã cửa hàng': Giúp gom nhóm nhiều mã xuất hóa đơn của cùng 1 cửa hàng vật lý.",
+                "• 'Tuyến': Ghi nhận tuyến của cửa hàng liên kết (hiển thị sang danh sách khách hàng).",
                 "• 'Mã công ty quản lý': Chỉ định công ty nội bộ chịu trách nhiệm xuất hóa đơn cho khách hàng này.",
             ]),
         ],
@@ -132,15 +137,19 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
             # Phase 2: liên kết mã KH với cửa hàng và công ty quản lý (nếu có trong file).
             store_id = None
             store_code = str(data.get("store_code") or "").strip()
+            store_route = str(data.get("store_route") or "").strip()
             if store_code:
                 store_obj = db.query(StoreModel).filter(StoreModel.code == store_code).first()
                 if not store_obj:
                     store_obj = StoreModel(
                         code=store_code,
                         name=str(data.get("name") or store_code).strip(),
+                        route=store_route or None,
                     )
                     db.add(store_obj)
                     db.flush()
+                elif store_route:
+                    store_obj.route = store_route
                 store_id = store_obj.id
 
             company_id = None

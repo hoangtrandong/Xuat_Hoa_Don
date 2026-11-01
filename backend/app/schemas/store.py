@@ -11,6 +11,7 @@ class StoreBase(BaseModel):
     address: Optional[str] = None
     district: Optional[str] = None
     city: Optional[str] = None
+    route: Optional[str] = None
     status: str = "active"
 
 
@@ -25,6 +26,7 @@ class StoreUpdate(BaseModel):
     address: Optional[str] = None
     district: Optional[str] = None
     city: Optional[str] = None
+    route: Optional[str] = None
     status: Optional[str] = None
 
 

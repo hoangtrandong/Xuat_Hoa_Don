@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.employee import Employee
@@ -41,9 +41,14 @@ def create_pending_batch(
     for entry in entries:
         if entry["quantity"] >= 0 or entry["amount"] > 0:
             raise ValueError("Dòng vay mượn phải có số lượng và thành tiền âm.")
+        external_employee_code = (entry.get("external_employee_code") or "").strip().upper() or None
+        if entry.get("employee_id") is None and external_employee_code is None:
+            raise ValueError("Dòng vay mượn thiếu mã nhân viên nội bộ hoặc mã NVBH trên DMS.")
         db.add(EmployeeBorrowEntry(
             batch_id=batch.id,
             employee_id=entry["employee_id"],
+            external_employee_code=external_employee_code,
+            external_employee_name=(entry.get("external_employee_name") or "").strip() or None,
             product_id=entry["product_id"],
             entry_type="BORROW",
             quantity=entry["quantity"],
@@ -88,12 +93,13 @@ def cancel_batch(db: Session, batch_id: int) -> None:
 
 
 def _entry_out(entry: EmployeeBorrowEntry) -> dict:
+    employee = entry.employee
     return {
         "id": entry.id,
         "entry_type": entry.entry_type,
         "employee_id": entry.employee_id,
-        "employee_code": entry.employee.code,
-        "employee_name": entry.employee.name,
+        "employee_code": entry.external_employee_code or (employee.code if employee else ""),
+        "employee_name": entry.external_employee_name or (employee.name if employee else ""),
         "product_id": entry.product_id,
         "product_code": entry.product.npp_code,
         "product_name": entry.product.npp_name,
@@ -116,16 +122,23 @@ def list_ledger(db: Session) -> dict:
     rows = db.execute(
         select(
             EmployeeBorrowEntry.employee_id,
+            EmployeeBorrowEntry.external_employee_code,
+            EmployeeBorrowEntry.external_employee_name,
             EmployeeBorrowEntry.product_id,
             func.sum(EmployeeBorrowEntry.quantity),
             func.sum(EmployeeBorrowEntry.amount),
         )
         .outerjoin(EmployeeBorrowBatch, EmployeeBorrowBatch.id == EmployeeBorrowEntry.batch_id)
         .where(posted_batch)
-        .group_by(EmployeeBorrowEntry.employee_id, EmployeeBorrowEntry.product_id)
+        .group_by(
+            EmployeeBorrowEntry.employee_id,
+            EmployeeBorrowEntry.external_employee_code,
+            EmployeeBorrowEntry.external_employee_name,
+            EmployeeBorrowEntry.product_id,
+        )
     ).all()
-    employee_ids = {row[0] for row in rows}
-    product_ids = {row[1] for row in rows}
+    employee_ids = {row[0] for row in rows if row[0] is not None}
+    product_ids = {row[3] for row in rows}
     employees = {
         employee.id: employee for employee in db.scalars(
             select(Employee).where(Employee.id.in_(employee_ids))
@@ -137,17 +150,17 @@ def list_ledger(db: Session) -> dict:
         ).all()
     } if product_ids else {}
     balances = []
-    for employee_id, product_id, quantity, amount in rows:
+    for employee_id, external_code, external_name, product_id, quantity, amount in rows:
         quantity = int(quantity or 0)
         amount = Decimal(amount or 0)
         if quantity == 0 and amount == 0:
             continue
-        employee = employees[employee_id]
+        employee = employees.get(employee_id)
         product = products[product_id]
         balances.append({
             "employee_id": employee_id,
-            "employee_code": employee.code,
-            "employee_name": employee.name,
+            "employee_code": external_code or (employee.code if employee else ""),
+            "employee_name": external_name or (employee.name if employee else ""),
             "product_id": product_id,
             "product_code": product.npp_code,
             "product_name": product.npp_name,
@@ -271,3 +284,67 @@ def offset_completed_delivery(db: Session, request: DeliveryRequest, now: dateti
                     created_at=now,
                 ))
                 quantity_to_offset -= offset_quantity
+
+        for return_offset in item.borrowed_employee_offsets or []:
+            staff_code = str(return_offset.get("external_employee_code") or "").strip().upper()
+            employee_id = return_offset.get("employee_id")
+            quantity_to_offset = int(return_offset.get("quantity") or 0)
+            amount_to_offset = Decimal(str(return_offset.get("amount") or 0))
+            if not staff_code or quantity_to_offset <= 0:
+                continue
+            identity_filter = [EmployeeBorrowEntry.external_employee_code == staff_code]
+            if employee_id is not None:
+                identity_filter.append(EmployeeBorrowEntry.employee_id == int(employee_id))
+            borrow_entries = db.scalars(
+                select(EmployeeBorrowEntry)
+                .join(EmployeeBorrowBatch, EmployeeBorrowBatch.id == EmployeeBorrowEntry.batch_id)
+                .where(
+                    or_(*identity_filter),
+                    EmployeeBorrowEntry.product_id == item.product_id,
+                    EmployeeBorrowEntry.entry_type == "BORROW",
+                    EmployeeBorrowBatch.status == "POSTED",
+                )
+                .order_by(EmployeeBorrowEntry.created_at, EmployeeBorrowEntry.id)
+                .with_for_update()
+            ).all()
+            for borrowed in borrow_entries:
+                if quantity_to_offset <= 0:
+                    break
+                previous = db.execute(
+                    select(
+                        func.coalesce(func.sum(EmployeeBorrowEntry.quantity), 0),
+                        func.coalesce(func.sum(EmployeeBorrowEntry.amount), 0),
+                    ).where(EmployeeBorrowEntry.source_entry_id == borrowed.id)
+                ).one()
+                outstanding_quantity = abs(borrowed.quantity) - int(previous[0] or 0)
+                outstanding_amount = abs(Decimal(borrowed.amount)) - Decimal(previous[1] or 0)
+                if outstanding_quantity <= 0:
+                    continue
+                offset_quantity = min(quantity_to_offset, outstanding_quantity)
+                if offset_quantity == outstanding_quantity:
+                    offset_amount = max(Decimal("0"), outstanding_amount)
+                else:
+                    offset_amount = (
+                        abs(Decimal(borrowed.amount)) * Decimal(offset_quantity) / abs(borrowed.quantity)
+                    ).quantize(CENT, rounding=ROUND_HALF_UP)
+                    offset_amount = min(offset_amount, max(Decimal("0"), outstanding_amount))
+                offset_amount = min(offset_amount, amount_to_offset)
+                db.add(EmployeeBorrowEntry(
+                    employee_id=borrowed.employee_id,
+                    external_employee_code=borrowed.external_employee_code or staff_code,
+                    external_employee_name=(
+                        borrowed.external_employee_name
+                        or return_offset.get("external_employee_name")
+                    ),
+                    product_id=item.product_id,
+                    entry_type="OFFSET",
+                    quantity=offset_quantity,
+                    amount=offset_amount,
+                    source_entry_id=borrowed.id,
+                    source_request_id=request.id,
+                    note=f"Bù trừ đơn Trả Số khi xuất kho phiếu {request.code}",
+                    created_by=request.created_by,
+                    created_at=now,
+                ))
+                quantity_to_offset -= offset_quantity
+                amount_to_offset -= offset_amount

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Store as StoreIcon, CheckCircle2, Building2, Plus, Download, Upload,
-  Phone, MapPin, User,
+  Phone, MapPin, User, Route,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
@@ -13,6 +13,7 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { API_URL, apiFetch } from "@/lib/api";
 import { getInitials } from "@/lib/format";
+import { downloadExcel } from "@/lib/excel";
 
 interface StoreRow {
   id: string;
@@ -23,13 +24,14 @@ interface StoreRow {
   address: string;
   district: string;
   city: string;
+  route: string;
   status: "active" | "inactive";
   created_at: string;
 }
 
 const emptyForm = {
   code: "", name: "", phone: "", owner_name: "", address: "",
-  district: "", city: "", status: "active",
+  district: "", city: "", route: "", status: "active",
 };
 
 export default function StoresPage() {
@@ -51,6 +53,7 @@ export default function StoresPage() {
         phone: String(row.phone ?? ""), owner_name: String(row.owner_name ?? ""),
         address: String(row.address ?? ""),
         district: String(row.district ?? ""), city: String(row.city ?? ""),
+        route: String(row.route ?? ""),
         status: row.status === "inactive" ? "inactive" : "active",
         created_at: String(row.created_at ?? ""),
       }))))
@@ -64,7 +67,20 @@ export default function StoresPage() {
     try {
       const response = await apiFetch(`${API_URL}/stores/${store.id}`);
       if (!response.ok) throw new Error("Không thể tải chi tiết cửa hàng.");
-      setDetail(await response.json() as StoreRow);
+      const data = await response.json() as Record<string, unknown>;
+      setDetail({
+        id: String(data.id),
+        code: String(data.code ?? ""),
+        name: String(data.name ?? ""),
+        phone: String(data.phone ?? ""),
+        owner_name: String(data.owner_name ?? ""),
+        address: String(data.address ?? ""),
+        district: String(data.district ?? ""),
+        city: String(data.city ?? ""),
+        route: String(data.route ?? ""),
+        status: data.status === "inactive" ? "inactive" : "active",
+        created_at: String(data.created_at ?? ""),
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không thể tải chi tiết cửa hàng.");
     }
@@ -86,7 +102,7 @@ export default function StoresPage() {
       const response = await apiFetch(`${API_URL}/stores/${editingId ? editingId : ""}`, {
         method: editingId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, status: form.status || "active" }),
+        body: JSON.stringify({ ...form, route: form.route.trim() || null, status: form.status || "active" }),
       });
       const result = await response.json() as { detail?: string; id?: number; code?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể lưu cửa hàng.");
@@ -97,8 +113,9 @@ export default function StoresPage() {
         setRows((await updated.json() as Array<Record<string, unknown>>).map((row) => ({
           id: String(row.id), code: String(row.code ?? ""), name: String(row.name ?? ""),
           phone: String(row.phone ?? ""), owner_name: String(row.owner_name ?? ""),
-          tax_code: String(row.tax_code ?? ""), address: String(row.address ?? ""),
+          address: String(row.address ?? ""),
           district: String(row.district ?? ""), city: String(row.city ?? ""),
+          route: String(row.route ?? ""),
           status: row.status === "inactive" ? "inactive" : "active",
           created_at: String(row.created_at ?? ""),
         })));
@@ -123,9 +140,23 @@ export default function StoresPage() {
     setForm({
       code: store.code, name: store.name, phone: store.phone, owner_name: store.owner_name,
       address: store.address, district: store.district,
-      city: store.city, status: store.status,
+      city: store.city, route: store.route ?? "", status: store.status,
     });
     setCreateOpen(true);
+  }
+
+  function exportStores() {
+    downloadExcel(rows.map((store) => ({
+      "Mã cửa hàng": store.code,
+      "Tên cửa hàng": store.name,
+      "Tuyến": store.route ?? "",
+      "Điện thoại": store.phone,
+      "Chủ hộ": store.owner_name,
+      "Địa chỉ": store.address,
+      "Quận/Huyện": store.district,
+      "Tỉnh/TP": store.city,
+      "Trạng thái": store.status === "active" ? "Hoạt động" : "Ngưng giao",
+    })), `cua-hang-${new Date().toISOString().slice(0, 10)}`, "Cửa hàng");
   }
 
   const activeCount = rows.filter((s) => s.status === "active").length;
@@ -143,6 +174,13 @@ export default function StoresPage() {
         </div>
       ),
     },
+    {
+      key: "route",
+      title: "Tuyến",
+      sortable: true,
+      render: (val) =>
+        val ? <Badge variant="info">{String(val)}</Badge> : <span className="text-gray-400">—</span>,
+    },
     { key: "phone", title: "Điện thoại" },
     {
       key: "status",
@@ -152,7 +190,7 @@ export default function StoresPage() {
         val === "active" ? <Badge variant="success">Hoạt động</Badge> : <Badge variant="danger">Ngưng giao</Badge>,
     },
   ];
-return (
+  return (
     <div className="space-y-6">
       <PageHeader
         title="Cửa hàng & điểm bán"
@@ -161,6 +199,7 @@ return (
           <div className="flex gap-2">
             <AuthenticatedDownloadLink href={`${API_URL}/stores/template`} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Download size={16} />Tải mẫu Excel</AuthenticatedDownloadLink>
             <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
+            <button onClick={exportStores} disabled={rows.length === 0} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50"><Download size={16} />Tải Excel</button>
             <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadStores(file).catch((e: unknown) => setError(e instanceof Error ? e.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
             <button
               onClick={() => { setEditingId(null); setForm(emptyForm); setError(""); setCreateOpen(true); }}
@@ -184,8 +223,8 @@ return (
       <DataTable
         data={rows}
         columns={columns}
-        searchKeys={["code", "name", "phone", "address", "district"]}
-        searchPlaceholder="Tìm mã, tên cửa hàng, địa chỉ..."
+        searchKeys={["code", "name", "route", "phone", "address", "district"]}
+        searchPlaceholder="Tìm mã, tên cửa hàng, tuyến, địa chỉ..."
         onRowClick={(row) => openDetail(row)}
         emptyMessage="Chưa có cửa hàng nào"
       />
@@ -195,6 +234,7 @@ return (
           {error && <div className="bg-red-50 text-red-700 rounded-lg px-3 py-2 text-sm">{error}</div>}
           <input disabled={Boolean(editingId)} placeholder="Mã cửa hàng" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg disabled:bg-gray-100" />
           <input placeholder="Tên cửa hàng" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
+          <input placeholder="Tuyến (VD: Tuyến 1, Thứ 2...)" value={form.route} onChange={(e) => setForm({ ...form, route: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Điện thoại" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Chủ hộ / người kinh doanh" value={form.owner_name} onChange={(e) => setForm({ ...form, owner_name: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Địa chỉ" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
@@ -209,7 +249,7 @@ return (
           <button onClick={saveStore} className="w-full bg-sky-500 text-white rounded-lg py-2.5 text-sm font-medium">{editingId ? "Cập nhật cửa hàng" : "Lưu cửa hàng"}</button>
         </div>
       </Drawer>
-<Drawer open={detail !== null} onClose={() => setDetail(null)} title="Chi tiết cửa hàng" subtitle={detail?.name}>
+      <Drawer open={detail !== null} onClose={() => setDetail(null)} title="Chi tiết cửa hàng" subtitle={detail?.name}>
         {detail && (
           <div className="p-5 space-y-5">
             <div className="flex items-center gap-3">
@@ -226,6 +266,7 @@ return (
             </div>
 
             <div className="rounded-xl border border-gray-100 divide-y divide-gray-50">
+              <InfoRow icon={<Route size={14} />} label="Tuyến" value={detail.route || "—"} />
               <InfoRow icon={<Phone size={14} />} label="Điện thoại" value={detail.phone || "—"} />
               <InfoRow icon={<User size={14} />} label="Chủ hộ" value={detail.owner_name || "—"} />
               <InfoRow icon={<MapPin size={14} />} label="Địa chỉ" value={[detail.address, detail.district, detail.city].filter(Boolean).join(", ") || "—"} />

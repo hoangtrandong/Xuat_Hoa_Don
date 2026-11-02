@@ -17,7 +17,12 @@ from app.models.finance import (
     Payment, Receivable, DebtLedgerEntry, DebtTransfer, CashReceipt,
     DeliveryReturn, DeliveryReturnItem, BankReceipt, PaymentAllocation,
 )
-from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
+from app.models.vinamilk import (
+    VinamilkOrderReplacement,
+    VinamilkOrderSnapshot,
+    VinamilkOrderSplitRequest,
+    VinamilkSyncRun,
+)
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 from app.models.employee_borrow import EmployeeBorrowBatch, EmployeeBorrowEntry
 
@@ -35,7 +40,7 @@ __all__ = [
     "Employee", "EmployeeDebtLimitChange", "SalesTerritory",
     "Payment", "Receivable", "DebtLedgerEntry", "DebtTransfer", "CashReceipt",
     "DeliveryReturn", "DeliveryReturnItem", "BankReceipt", "PaymentAllocation",
-    "VinamilkOrderSnapshot", "VinamilkSyncRun", "VinamilkOrderReplacement",
+    "VinamilkOrderSnapshot", "VinamilkSyncRun", "VinamilkOrderReplacement", "VinamilkOrderSplitRequest",
     "VinamilkOrderAllocation",
     "EmployeeBorrowBatch", "EmployeeBorrowEntry",
 ]

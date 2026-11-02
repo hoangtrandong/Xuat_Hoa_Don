@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
 // src/app/sales/orders/page.tsx
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ShoppingCart,
   CircleCheck,
@@ -15,6 +15,8 @@ import {
   Split,
   Merge,
   RotateCcw,
+  ClipboardCheck,
+  XCircle,
 } from "lucide-react";
 import Link from "next/link";
 import PageHeader from "@/components/ui/PageHeader";
@@ -74,6 +76,7 @@ type ReplacementEditForm = {
 type SplitAllocCell = {
   quantity: number;
   promoQuantity: number;
+  customValue?: number | null;
   customDiscount?: number | null;
 };
 
@@ -93,6 +96,7 @@ type SplitCustomerSelection = {
   customer_code: string;
   customer_name: string;
   customer_address: string;
+  is_staff_debt?: boolean;
 };
 
 type GroupedOrderSummary = {
@@ -109,6 +113,57 @@ type GroupedOrderSummary = {
   totalQty: number;
   totalPromoQty: number;
   lines: RemoteOrder[];
+};
+
+type SplitRequestPreviewItem = {
+  snapshot_id: number;
+  product_code: string;
+  product_name: string;
+  promo_code?: string;
+  unit?: string;
+  quantity: number;
+  promo_quantity: number;
+  value_amount: number;
+  discount_amount: number;
+};
+
+type SplitRequestPreviewSplit = {
+  new_order_number: string;
+  customer_code: string;
+  customer_name: string;
+  customer_address?: string;
+  is_staff_debt?: boolean;
+  status_label: string;
+  total_qty: number;
+  total_promo_qty: number;
+  total_value: number;
+  total_discount: number;
+  items: SplitRequestPreviewItem[];
+};
+
+type SplitOrderApprovalRequest = {
+  id: number;
+  source_order_number: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  requested_by: string;
+  requested_at: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  rejection_reason: string | null;
+  result_order_numbers: string[];
+  preview: {
+    source_order_number?: string;
+    customer_code?: string;
+    customer_name?: string;
+    staff_code?: string;
+    staff_name?: string;
+    order_created_date?: string | null;
+    total_qty?: number;
+    total_promo_qty?: number;
+    total_value?: number;
+    total_discount?: number;
+    splits?: SplitRequestPreviewSplit[];
+  };
 };
 
 function orderRowKey(order: RemoteOrder, index: number): string {
@@ -148,6 +203,7 @@ const remoteColumnDefinitions: {
   { title: "Ngày đơn hàng gốc", keys: ["initialOrderDate", "originalOrderDate", "Ngày đơn hàng gốc"], width: "10.5rem" },
   { title: "Trạng thái xử lý", keys: [], width: "14rem" },
   { title: "Thay thế cho đơn", keys: ["_replacement_display", "_replaced_order_number"], width: "16rem" },
+  { title: "Người thực hiện", keys: ["_performed_by", "performedBy", "Người thực hiện"], width: "9.5rem" },
 ];
 
 type SyncDayPayload = {
@@ -172,7 +228,16 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
       : Array.isArray(order["_replaced_by_order_numbers"]) && order["_replaced_by_order_numbers"].length > 0
         ? `BTT: ${(order["_replaced_by_order_numbers"] as string[]).join(", ")}`
         : null;
+  const performedBy = hasRemoteValue(order["_performed_by"])
+    ? String(order["_performed_by"]).trim()
+    : hasRemoteValue(order["performedBy"])
+      ? String(order["performedBy"]).trim()
+      : hasRemoteValue(order["Người thực hiện"])
+        ? String(order["Người thực hiện"]).trim()
+        : "Hệ thống";
   normalized["Thay thế cho đơn"] = replacementDisplay;
+  normalized["Người thực hiện"] = performedBy;
+  normalized["_performed_by"] = performedBy;
   normalized["_local_id"] = order["_local_id"] ?? null;
   normalized["_replaced_order_number"] = order["_replaced_order_number"] ?? null;
   normalized["_replaced_by_order_numbers"] = order["_replaced_by_order_numbers"] ?? null;
@@ -220,7 +285,10 @@ function formatVinamilkDate(value: unknown, withTime: boolean): string {
 function formatRemoteColumnValue(title: string, value: unknown): string {
   if (title === "Ngày tạo") return formatVinamilkDate(value, true);
   if (title === "Ngày giao") return formatVinamilkDate(value, false);
-  if (title === "Mã KH") return displayRemoteValue(value).trim().slice(-3);
+  if (title === "Mã KH") {
+    const code = displayRemoteValue(value).trim();
+    return code.toUpperCase().startsWith("NVBH") ? code : code.slice(-3);
+  }
   return displayRemoteValue(value);
 }
 
@@ -270,13 +338,40 @@ export default function SalesOrdersPage() {
   const [isSubmittingMerge, setIsSubmittingMerge] = useState(false);
   const [mergeError, setMergeError] = useState("");
 
-  // State cho Hoàn tác tách/gộp
+  // State cho Hoàn tác tách/gộp & Duyệt tách đơn (Kế toán)
   const [revertingOrderNumber, setRevertingOrderNumber] = useState<string | null>(null);
+  const [isSplitApprovalDrawerOpen, setIsSplitApprovalDrawerOpen] = useState(false);
+  const [splitApprovalRequests, setSplitApprovalRequests] = useState<SplitOrderApprovalRequest[]>([]);
+  const [pendingSplitRequestCount, setPendingSplitRequestCount] = useState(0);
+  const [splitApprovalFilter, setSplitApprovalFilter] = useState<"PENDING" | "ALL">("PENDING");
+  const [processingSplitRequestId, setProcessingSplitRequestId] = useState<number | null>(null);
+  const [splitApprovalError, setSplitApprovalError] = useState("");
 
   useEffect(() => {
     const created = window.sessionStorage.getItem("dms-order-created");
     if (created) window.sessionStorage.removeItem("dms-order-created");
   }, []);
+
+  const loadSplitApprovalRequests = useCallback(async (filterStatus: "PENDING" | "ALL" = splitApprovalFilter) => {
+    try {
+      const response = await apiFetch(
+        `${API_URL}/sync/vinamilk-orders/split-requests?status=${encodeURIComponent(filterStatus)}&limit=100`
+      );
+      if (!response.ok) return;
+      const payload = (await response.json()) as {
+        requests?: SplitOrderApprovalRequest[];
+        pending_count?: number;
+      };
+      if (Array.isArray(payload.requests)) {
+        setSplitApprovalRequests(payload.requests);
+      }
+      if (typeof payload.pending_count === "number") {
+        setPendingSplitRequestCount(payload.pending_count);
+      }
+    } catch {
+      // Bỏ qua lỗi mạng tạm thời
+    }
+  }, [splitApprovalFilter]);
 
   const loadLocalOrders = useCallback(async () => {
     const allRows: RemoteOrder[] = [];
@@ -307,7 +402,8 @@ export default function SalesOrdersPage() {
     const normalizedRows = allRows.map(normalizeRemoteOrder);
     setRemoteOrders(normalizedRows.map(addProcessingStatus));
     setLastSyncedAt(lastSynced);
-  }, [fromDate, toDate]);
+    void loadSplitApprovalRequests();
+  }, [fromDate, toDate, loadSplitApprovalRequests]);
 
   useEffect(() => {
     loadLocalOrders().catch((error) => setRemoteError(error instanceof Error ? error.message : "Không thể tải dữ liệu."));
@@ -354,7 +450,7 @@ export default function SalesOrdersPage() {
     return Array.from(map.values());
   }, [customerOptions, remoteOrders]);
 
-  // Gom nhóm các đơn đủ điều kiện để Tách hoặc Gộp (chưa là đơn tách/gộp, chưa bị thay thế)
+  // Gom nhóm các đơn đủ điều kiện để Tách hoặc Gộp (chưa là đơn tách/gộp, chưa bị thay thế, chưa đang chờ KT duyệt tách)
   const eligibleOrderGroups = useMemo<GroupedOrderSummary[]>(() => {
     const map = new Map<string, GroupedOrderSummary>();
     for (const row of remoteOrders) {
@@ -363,6 +459,7 @@ export default function SalesOrdersPage() {
       if (row["_is_synthetic"] === true) continue;
       if (hasRemoteValue(row["_replaced_order_number"])) continue;
       if (Array.isArray(row["_replaced_by_order_numbers"]) && row["_replaced_by_order_numbers"].length > 0) continue;
+      if (hasRemoteValue(row["_pending_split_request_id"])) continue;
 
       let group = map.get(orderNum);
       if (!group) {
@@ -474,31 +571,194 @@ export default function SalesOrdersPage() {
           customer_code: found.customer_code,
           customer_name: found.customer_name,
           customer_address: found.customer_address,
+          is_staff_debt: false,
         };
       } else if (selectedSplitOrderGroup && customerCode === selectedSplitOrderGroup.customerCode) {
         next[splitIdx] = {
           customer_code: selectedSplitOrderGroup.customerCode,
           customer_name: selectedSplitOrderGroup.customerName,
           customer_address: selectedSplitOrderGroup.customerAddress,
+          is_staff_debt: false,
         };
       } else {
         next[splitIdx] = {
           ...(next[splitIdx] ?? { customer_code: "", customer_name: "", customer_address: "" }),
           customer_code: customerCode,
+          is_staff_debt: false,
         };
       }
       return next;
     });
   }
 
+  function handleSetSplitToStaffDebt(splitIdx: number) {
+    if (!selectedSplitOrderGroup) return;
+    const staffCode = selectedSplitOrderGroup.staffCode || "";
+    const staffName = selectedSplitOrderGroup.staffName || "";
+    const staffLabel = staffName && staffCode ? `${staffName} (${staffCode})` : staffName || staffCode || "Nhân viên";
+    setSplitCustomers((prev) => {
+      const next = [...prev];
+      next[splitIdx] = {
+        customer_code: staffCode ? `NVBH-${staffCode}` : "NVBH",
+        customer_name: `NVBH: ${staffLabel} — Công nợ tách thiếu`,
+        customer_address: "Đơn tách phần thiếu gắn công nợ NVBH",
+        is_staff_debt: true,
+      };
+      return next;
+    });
+  }
+
+  function assignRemainderToStaffSplit() {
+    if (!selectedSplitOrderGroup) return;
+    setSplitError("");
+    const staffCode = selectedSplitOrderGroup.staffCode || "";
+    const staffName = selectedSplitOrderGroup.staffName || "";
+    const staffLabel = staffName && staffCode ? `${staffName} (${staffCode})` : staffName || staffCode || "Nhân viên";
+    const staffCust: SplitCustomerSelection = {
+      customer_code: staffCode ? `NVBH-${staffCode}` : "NVBH",
+      customer_name: `NVBH: ${staffLabel} — Công nợ tách thiếu`,
+      customer_address: "Đơn tách phần thiếu gắn công nợ NVBH",
+      is_staff_debt: true,
+    };
+
+    // Tìm xem có đơn tách nào đã đánh dấu Nợ NVBH hoặc đang trống hoàn toàn không
+    const existingStaffIdx = splitCustomers.findIndex((c) => c?.is_staff_debt === true);
+    let targetIdx = existingStaffIdx;
+    if (targetIdx === -1) {
+      // Kiểm tra đơn tách cuối cùng có đang trống (SL = 0, KM = 0 trên mọi dòng) không
+      const lastIdx = splitCount - 1;
+      const isLastEmpty = selectedSplitOrderGroup.lines.every((line) => {
+        const localId = Number(line["_local_id"]);
+        const cell = splitAllocs[localId]?.[lastIdx];
+        return !cell || (cell.quantity === 0 && cell.promoQuantity === 0);
+      });
+      if (isLastEmpty) {
+        targetIdx = lastIdx;
+      }
+    }
+
+    if (targetIdx !== -1) {
+      // Gán phần còn lại vào đơn tách targetIdx và chuyển sang Nợ NVBH
+      setSplitCustomers((prev) => {
+        const next = [...prev];
+        next[targetIdx] = staffCust;
+        return next;
+      });
+      setSplitAllocs((prev) => {
+        const next: SplitAllocMap = {};
+        for (const line of selectedSplitOrderGroup.lines) {
+          const localId = Number(line["_local_id"]);
+          const origQty = numericValue(line["Số lượng"]);
+          const origPromo = numericValue(line["Số lượng KM"]);
+          const origVal = Math.round(numericValue(line["Giá trị"]));
+          const origDisc = Math.round(numericValue(line["Số tiền CK"]));
+          const currentArr = prev[localId]
+            ? prev[localId].map((item) => ({ ...item }))
+            : Array.from({ length: splitCount }, () => ({
+                quantity: 0,
+                promoQuantity: 0,
+                customValue: null,
+                customDiscount: null,
+              }));
+          const sumOtherQty = currentArr.reduce((s, a, idx) => (idx === targetIdx ? s : s + a.quantity), 0);
+          const sumOtherPromo = currentArr.reduce((s, a, idx) => (idx === targetIdx ? s : s + a.promoQuantity), 0);
+          const hasAnyCustomVal = currentArr.some(
+            (item) => item.customValue !== null && item.customValue !== undefined
+          );
+          let targetCustomVal: number | null = null;
+          if (hasAnyCustomVal) {
+            const sumOtherVal = currentArr.reduce(
+              (s, a, idx) => (idx === targetIdx ? s : s + Math.round(a.customValue ?? 0)),
+              0
+            );
+            targetCustomVal = Math.max(0, origVal - sumOtherVal);
+          }
+          const hasAnyCustomDisc = currentArr.some(
+            (item) => item.customDiscount !== null && item.customDiscount !== undefined
+          );
+          let targetCustomDisc: number | null = null;
+          if (hasAnyCustomDisc) {
+            const sumOtherDisc = currentArr.reduce(
+              (s, a, idx) => (idx === targetIdx ? s : s + Math.round(a.customDiscount ?? 0)),
+              0
+            );
+            targetCustomDisc = Math.max(0, origDisc - sumOtherDisc);
+          }
+          currentArr[targetIdx] = {
+            quantity: Math.max(0, Number((origQty - sumOtherQty).toFixed(4))),
+            promoQuantity: Math.max(0, Number((origPromo - sumOtherPromo).toFixed(4))),
+            customValue: targetCustomVal,
+            customDiscount: targetCustomDisc,
+          };
+          next[localId] = currentArr;
+        }
+        return next;
+      });
+    } else if (splitCount < 10) {
+      // Thêm 1 đơn tách mới ở cuối dành riêng cho Nợ NVBH và điền toàn bộ phần thiếu vào đó
+      const newCount = splitCount + 1;
+      const newIdx = newCount - 1;
+      setSplitCount(newCount);
+      setSplitCustomers((prev) => [...prev.slice(0, splitCount), staffCust]);
+      setSplitCustomerSearches((prev) => [...prev.slice(0, splitCount), ""]);
+      setSplitAllocs((prev) => {
+        const next: SplitAllocMap = {};
+        for (const line of selectedSplitOrderGroup.lines) {
+          const localId = Number(line["_local_id"]);
+          const origQty = numericValue(line["Số lượng"]);
+          const origPromo = numericValue(line["Số lượng KM"]);
+          const origVal = Math.round(numericValue(line["Giá trị"]));
+          const origDisc = Math.round(numericValue(line["Số tiền CK"]));
+          const currentArr = prev[localId]
+            ? prev[localId].slice(0, splitCount).map((item) => ({ ...item }))
+            : Array.from({ length: splitCount }, () => ({
+                quantity: 0,
+                promoQuantity: 0,
+                customValue: null,
+                customDiscount: null,
+              }));
+          const sumOtherQty = currentArr.reduce((s, a) => s + a.quantity, 0);
+          const sumOtherPromo = currentArr.reduce((s, a) => s + a.promoQuantity, 0);
+          const hasAnyCustomVal = currentArr.some(
+            (item) => item.customValue !== null && item.customValue !== undefined
+          );
+          let targetCustomVal: number | null = null;
+          if (hasAnyCustomVal) {
+            const sumOtherVal = currentArr.reduce((s, a) => s + Math.round(a.customValue ?? 0), 0);
+            targetCustomVal = Math.max(0, origVal - sumOtherVal);
+          }
+          const hasAnyCustomDisc = currentArr.some(
+            (item) => item.customDiscount !== null && item.customDiscount !== undefined
+          );
+          let targetCustomDisc: number | null = null;
+          if (hasAnyCustomDisc) {
+            const sumOtherDisc = currentArr.reduce((s, a) => s + Math.round(a.customDiscount ?? 0), 0);
+            targetCustomDisc = Math.max(0, origDisc - sumOtherDisc);
+          }
+          currentArr[newIdx] = {
+            quantity: Math.max(0, Number((origQty - sumOtherQty).toFixed(4))),
+            promoQuantity: Math.max(0, Number((origPromo - sumOtherPromo).toFixed(4))),
+            customValue: targetCustomVal,
+            customDiscount: targetCustomDisc,
+          };
+          next[localId] = currentArr;
+        }
+        return next;
+      });
+    }
+  }
+
   function updateSplitCell(localId: number, splitIndex: number, field: "quantity" | "promoQuantity", value: number) {
     const cleanValue = Math.max(0, Number.isFinite(value) ? value : 0);
     setSplitAllocs((prev) => {
-      const currentArr = prev[localId] ? prev[localId].map((c) => ({ ...c, customDiscount: null })) : [];
+      const currentArr = prev[localId]
+        ? prev[localId].map((c) => ({ ...c, customValue: null, customDiscount: null }))
+        : [];
       if (!currentArr[splitIndex]) return prev;
       currentArr[splitIndex] = {
         ...currentArr[splitIndex],
         [field]: cleanValue,
+        customValue: null,
         customDiscount: null,
       };
       return {
@@ -516,12 +776,28 @@ export default function SalesOrdersPage() {
         const localId = Number(line["_local_id"]);
         const origQty = numericValue(line["Số lượng"]);
         const origPromo = numericValue(line["Số lượng KM"]);
+        const origVal = Math.round(numericValue(line["Giá trị"]));
         const origDisc = Math.round(numericValue(line["Số tiền CK"]));
         const currentArr = prev[localId]
           ? prev[localId].map((item) => ({ ...item }))
-          : Array.from({ length: splitCount }, () => ({ quantity: 0, promoQuantity: 0, customDiscount: null }));
+          : Array.from({ length: splitCount }, () => ({
+              quantity: 0,
+              promoQuantity: 0,
+              customValue: null,
+              customDiscount: null,
+            }));
         const sumOtherQty = currentArr.slice(0, splitCount - 1).reduce((s, a) => s + a.quantity, 0);
         const sumOtherPromo = currentArr.slice(0, splitCount - 1).reduce((s, a) => s + a.promoQuantity, 0);
+        const hasAnyCustomVal = currentArr.some(
+          (item) => item.customValue !== null && item.customValue !== undefined
+        );
+        let lastCustomVal: number | null = null;
+        if (hasAnyCustomVal) {
+          const sumOtherVal = currentArr
+            .slice(0, splitCount - 1)
+            .reduce((s, a) => s + Math.round(a.customValue ?? 0), 0);
+          lastCustomVal = Math.max(0, origVal - sumOtherVal);
+        }
         const hasAnyCustomDisc = currentArr.some(
           (item) => item.customDiscount !== null && item.customDiscount !== undefined
         );
@@ -535,6 +811,7 @@ export default function SalesOrdersPage() {
         currentArr[splitCount - 1] = {
           quantity: Math.max(0, Number((origQty - sumOtherQty).toFixed(4))),
           promoQuantity: Math.max(0, Number((origPromo - sumOtherPromo).toFixed(4))),
+          customValue: lastCustomVal,
           customDiscount: lastCustomDisc,
         };
         next[localId] = currentArr;
@@ -555,6 +832,7 @@ export default function SalesOrdersPage() {
       next[localId] = Array.from({ length: splitCount }, (_, idx) => ({
         quantity: idx === splitCount - 1 ? Number((origQty - baseQty * (splitCount - 1)).toFixed(4)) : baseQty,
         promoQuantity: idx === splitCount - 1 ? Number((origPromo - basePromo * (splitCount - 1)).toFixed(4)) : basePromo,
+        customValue: null,
         customDiscount: null,
       }));
     }
@@ -565,7 +843,7 @@ export default function SalesOrdersPage() {
     setSplitAllocs((prev) => {
       const next: SplitAllocMap = {};
       for (const [k, arr] of Object.entries(prev)) {
-        next[Number(k)] = arr.map((c) => ({ ...c, customDiscount: null }));
+        next[Number(k)] = arr.map((c) => ({ ...c, customValue: null, customDiscount: null }));
       }
       return next;
     });
@@ -573,7 +851,10 @@ export default function SalesOrdersPage() {
 
   // Tính toán Giá trị và Số tiền CK theo từng dòng & tổng hợp theo từng đơn tách (khớp 100% công thức backend)
   const splitFinancials = useMemo(() => {
-    const lineBreakdown: Record<number, { value: number; discount: number; autoDiscount: number }[]> = {};
+    const lineBreakdown: Record<
+      number,
+      { value: number; autoValue: number; discount: number; autoDiscount: number }[]
+    > = {};
     const splitTotals = Array.from({ length: splitCount }, () => ({
       lineCount: 0,
       totalQty: 0,
@@ -609,6 +890,7 @@ export default function SalesOrdersPage() {
 
       const rowResult = Array.from({ length: splitCount }, () => ({
         value: 0,
+        autoValue: 0,
         discount: 0,
         autoDiscount: 0,
       }));
@@ -617,11 +899,11 @@ export default function SalesOrdersPage() {
 
       for (const idx of activeIndices) {
         const cell = allocs[idx] ?? { quantity: 0, promoQuantity: 0 };
-        let val = 0;
+        let autoVal = 0;
         let autoDisc = 0;
 
         if (isLineMatched && idx === activeIndices[activeIndices.length - 1]) {
-          val = Math.round(origVal - usedVal);
+          autoVal = Math.round(origVal - usedVal);
           autoDisc = Math.round(origDisc - usedDisc);
         } else {
           const ratio =
@@ -630,24 +912,33 @@ export default function SalesOrdersPage() {
               : origPromo > 0
                 ? cell.promoQuantity / origPromo
                 : 0;
-          val = Math.round(origVal * ratio);
+          autoVal = Math.round(origVal * ratio);
           autoDisc = Math.round(origDisc * ratio);
-          usedVal += val;
+          usedVal += autoVal;
           usedDisc += autoDisc;
         }
 
+        const finalVal =
+          cell.customValue !== null && cell.customValue !== undefined
+            ? Math.round(cell.customValue)
+            : autoVal;
         const finalDisc =
           cell.customDiscount !== null && cell.customDiscount !== undefined
             ? Math.round(cell.customDiscount)
             : autoDisc;
 
-        rowResult[idx] = { value: val, discount: finalDisc, autoDiscount: autoDisc };
+        rowResult[idx] = {
+          value: finalVal,
+          autoValue: autoVal,
+          discount: finalDisc,
+          autoDiscount: autoDisc,
+        };
         splitTotals[idx].lineCount += 1;
         splitTotals[idx].totalQty = Number((splitTotals[idx].totalQty + cell.quantity).toFixed(4));
         splitTotals[idx].totalPromoQty = Number(
           (splitTotals[idx].totalPromoQty + cell.promoQuantity).toFixed(4)
         );
-        splitTotals[idx].totalValue += val;
+        splitTotals[idx].totalValue += finalVal;
         splitTotals[idx].totalDiscount += finalDisc;
       }
 
@@ -656,6 +947,137 @@ export default function SalesOrdersPage() {
 
     return { lineBreakdown, splitTotals };
   }, [selectedSplitOrderGroup, splitAllocs, splitCount]);
+
+  // Chỉnh sửa Giá trị trực tiếp trên 1 dòng sản phẩm của 1 đơn tách
+  function updateSplitCellValue(localId: number, splitIndex: number, value: number) {
+    if (!selectedSplitOrderGroup) return;
+    const line = selectedSplitOrderGroup.lines.find((l) => Number(l["_local_id"]) === localId);
+    const origVal = line ? Math.round(numericValue(line["Giá trị"])) : 0;
+    const cleanVal = Math.max(0, Math.round(Number.isFinite(value) ? value : 0));
+    const currentFin = splitFinancials.lineBreakdown[localId] ?? [];
+
+    setSplitAllocs((prev) => {
+      const currentArr = (prev[localId] ?? []).map((cell, idx) => ({
+        ...cell,
+        customValue:
+          cell.customValue !== null && cell.customValue !== undefined
+            ? Math.round(cell.customValue)
+            : (currentFin[idx]?.value ?? 0),
+      }));
+      if (!currentArr[splitIndex]) return prev;
+      currentArr[splitIndex].customValue = cleanVal;
+
+      const activeIndices = currentArr
+        .map((c, idx) => (c.quantity > 0 || c.promoQuantity > 0 ? idx : -1))
+        .filter((idx) => idx !== -1);
+
+      const origQty = line ? numericValue(line["Số lượng"]) : 0;
+      const origPromo = line ? numericValue(line["Số lượng KM"]) : 0;
+      const sumQty = currentArr.reduce((s, a) => s + a.quantity, 0);
+      const sumPromo = currentArr.reduce((s, a) => s + a.promoQuantity, 0);
+      const isLineMatched =
+        Math.abs(sumQty - origQty) <= 1e-4 && Math.abs(sumPromo - origPromo) <= 1e-4;
+
+      if (isLineMatched && activeIndices.length >= 2 && origVal > 0) {
+        const balanceTargetIdx =
+          splitIndex !== activeIndices[activeIndices.length - 1]
+            ? activeIndices[activeIndices.length - 1]
+            : activeIndices.length === 2
+              ? activeIndices[0]
+              : -1;
+        if (balanceTargetIdx !== -1 && balanceTargetIdx !== splitIndex) {
+          const sumOther = activeIndices
+            .filter((idx) => idx !== balanceTargetIdx)
+            .reduce((s, idx) => s + (currentArr[idx]?.customValue ?? 0), 0);
+          currentArr[balanceTargetIdx].customValue = Math.max(0, origVal - sumOther);
+        }
+      }
+
+      return {
+        ...prev,
+        [localId]: currentArr,
+      };
+    });
+  }
+
+  // Chỉnh sửa Tổng giá trị của cả 1 đơn tách (tự động phân bổ xuống các dòng sản phẩm của đơn tách đó)
+  function updateSplitOrderTotalValue(splitIndex: number, targetTotalVal: number) {
+    if (!selectedSplitOrderGroup) return;
+    const cleanTotalVal = Math.max(0, Math.round(Number.isFinite(targetTotalVal) ? targetTotalVal : 0));
+
+    setSplitAllocs((prev) => {
+      const next: SplitAllocMap = {};
+      for (const line of selectedSplitOrderGroup.lines) {
+        const localId = Number(line["_local_id"]);
+        const finRow = splitFinancials.lineBreakdown[localId] ?? [];
+        const arr = (prev[localId] ?? []).map((cell, idx) => ({
+          ...cell,
+          customValue:
+            cell.customValue !== null && cell.customValue !== undefined
+              ? Math.round(cell.customValue)
+              : (finRow[idx]?.value ?? 0),
+        }));
+        next[localId] = arr;
+      }
+
+      const activeLines = selectedSplitOrderGroup.lines.filter((line) => {
+        const localId = Number(line["_local_id"]);
+        const cell = next[localId]?.[splitIndex];
+        return cell && (cell.quantity > 0 || cell.promoQuantity > 0);
+      });
+
+      if (activeLines.length === 0) return prev;
+
+      const weights = activeLines.map((line) => {
+        const localId = Number(line["_local_id"]);
+        const autoVal = splitFinancials.lineBreakdown[localId]?.[splitIndex]?.autoValue ?? 0;
+        const origVal = numericValue(line["Giá trị"]);
+        return autoVal > 0 ? autoVal : origVal > 0 ? origVal : 1;
+      });
+      const totalWeight = weights.reduce((s, w) => s + w, 0) || 1;
+
+      let allocated = 0;
+      activeLines.forEach((line, idx) => {
+        const localId = Number(line["_local_id"]);
+        const origVal = Math.round(numericValue(line["Giá trị"]));
+        const origQty = numericValue(line["Số lượng"]);
+        const origPromo = numericValue(line["Số lượng KM"]);
+        const lineVal =
+          idx === activeLines.length - 1
+            ? Math.max(0, cleanTotalVal - allocated)
+            : Math.round((cleanTotalVal * weights[idx]) / totalWeight);
+        allocated += lineVal;
+        if (next[localId]?.[splitIndex]) {
+          next[localId][splitIndex].customValue = lineVal;
+        }
+
+        const rowArr = next[localId] ?? [];
+        const sumQty = rowArr.reduce((s, a) => s + a.quantity, 0);
+        const sumPromo = rowArr.reduce((s, a) => s + a.promoQuantity, 0);
+        const isLineMatched =
+          Math.abs(sumQty - origQty) <= 1e-4 && Math.abs(sumPromo - origPromo) <= 1e-4;
+        const rowActiveIndices = rowArr
+          .map((c, i) => (c.quantity > 0 || c.promoQuantity > 0 ? i : -1))
+          .filter((i) => i !== -1);
+        if (isLineMatched && rowActiveIndices.length >= 2 && origVal > 0) {
+          const balanceIdx =
+            splitIndex !== rowActiveIndices[rowActiveIndices.length - 1]
+              ? rowActiveIndices[rowActiveIndices.length - 1]
+              : rowActiveIndices.length === 2
+                ? rowActiveIndices[0]
+                : -1;
+          if (balanceIdx !== -1 && balanceIdx !== splitIndex) {
+            const sumOther = rowActiveIndices
+              .filter((i) => i !== balanceIdx)
+              .reduce((s, i) => s + (rowArr[i]?.customValue ?? 0), 0);
+            rowArr[balanceIdx].customValue = Math.max(0, origVal - sumOther);
+          }
+        }
+      });
+
+      return next;
+    });
+  }
 
   // Chỉnh sửa Số tiền CK trực tiếp trên 1 dòng sản phẩm của 1 đơn tách
   function updateSplitCellDiscount(localId: number, splitIndex: number, value: number) {
@@ -786,7 +1208,11 @@ export default function SalesOrdersPage() {
       return;
     }
     setSplitError("");
-    // Kiểm tra tổng số lượng từng dòng và từng đơn tách
+    let hasShortage = false;
+    let totalShortageQty = 0;
+    let totalShortagePromo = 0;
+
+    // Kiểm tra tổng số lượng từng dòng (không được vượt quá đơn gốc; nếu thiếu sẽ tách phần thiếu cho NVBH)
     for (const line of selectedSplitOrderGroup.lines) {
       const localId = Number(line["_local_id"]);
       const prodCode = displayRemoteValue(line["Mã sản phẩm"]);
@@ -795,35 +1221,50 @@ export default function SalesOrdersPage() {
       const allocs = splitAllocs[localId] ?? [];
       const sumQty = allocs.reduce((s, a) => s + a.quantity, 0);
       const sumPromo = allocs.reduce((s, a) => s + a.promoQuantity, 0);
-      if (Math.abs(sumQty - origQty) > 1e-4) {
-        setSplitError(`Sản phẩm ${prodCode}: Tổng SL tách (${sumQty}) chưa khớp SL gốc (${origQty}).`);
+      if (sumQty - origQty > 1e-4) {
+        setSplitError(`Sản phẩm ${prodCode}: Tổng SL tách (${sumQty}) vượt quá SL gốc (${origQty}).`);
         return;
       }
-      if (Math.abs(sumPromo - origPromo) > 1e-4) {
-        setSplitError(`Sản phẩm ${prodCode}: Tổng SL KM tách (${sumPromo}) chưa khớp SL KM gốc (${origPromo}).`);
+      if (sumPromo - origPromo > 1e-4) {
+        setSplitError(`Sản phẩm ${prodCode}: Tổng SL KM tách (${sumPromo}) vượt quá SL KM gốc (${origPromo}).`);
         return;
+      }
+      const remQty = Number((origQty - sumQty).toFixed(4));
+      const remPromo = Number((origPromo - sumPromo).toFixed(4));
+      if (remQty > 1e-4 || remPromo > 1e-4) {
+        hasShortage = true;
+        totalShortageQty = Number((totalShortageQty + remQty).toFixed(4));
+        totalShortagePromo = Number((totalShortagePromo + remPromo).toFixed(4));
       }
     }
 
     const totalSplitDisc = splitFinancials.splitTotals.reduce((s, t) => s + t.totalDiscount, 0);
     const totalOrigDisc = Math.round(selectedSplitOrderGroup.totalDiscount);
-    if (Math.abs(totalSplitDisc - totalOrigDisc) > Math.max(1, selectedSplitOrderGroup.lines.length)) {
+    if (!hasShortage && Math.abs(totalSplitDisc - totalOrigDisc) > Math.max(1, selectedSplitOrderGroup.lines.length)) {
       setSplitError(
         `Tổng Số tiền CK của các đơn tách (${formatVND(totalSplitDisc)}) phải khớp với Tổng Số tiền CK đơn gốc (${formatVND(totalOrigDisc)}).`
       );
       return;
     }
+    if (hasShortage && totalSplitDisc - totalOrigDisc > Math.max(1, selectedSplitOrderGroup.lines.length)) {
+      setSplitError(
+        `Tổng Số tiền CK của các đơn tách (${formatVND(totalSplitDisc)}) vượt quá Tổng Số tiền CK đơn gốc (${formatVND(totalOrigDisc)}).`
+      );
+      return;
+    }
 
-    const splitsPayload = Array.from({ length: splitCount }, (_, splitIdx) => {
+    const rawSplitsPayload = Array.from({ length: splitCount }, (_, splitIdx) => {
       const items = selectedSplitOrderGroup.lines
         .map((line) => {
           const localId = Number(line["_local_id"]);
           const cell = splitAllocs[localId]?.[splitIdx];
+          const cellVal = splitFinancials.lineBreakdown[localId]?.[splitIdx]?.value ?? 0;
           const cellDisc = splitFinancials.lineBreakdown[localId]?.[splitIdx]?.discount ?? 0;
           return {
             snapshot_id: localId,
             quantity: cell?.quantity ?? 0,
             promo_quantity: cell?.promoQuantity ?? 0,
+            value_amount: cellVal,
             discount_amount: cellDisc,
           };
         })
@@ -832,47 +1273,140 @@ export default function SalesOrdersPage() {
         customer_code: selectedSplitOrderGroup.customerCode,
         customer_name: selectedSplitOrderGroup.customerName,
         customer_address: selectedSplitOrderGroup.customerAddress,
+        is_staff_debt: false,
       };
       return {
         customer_code: chosenCust.customer_code,
         customer_name: chosenCust.customer_name,
         customer_address: chosenCust.customer_address,
+        is_staff_debt: Boolean(chosenCust.is_staff_debt),
+        staff_code: selectedSplitOrderGroup.staffCode || undefined,
+        staff_name: selectedSplitOrderGroup.staffName || undefined,
         items,
       };
     });
 
-    const emptySplitIndex = splitsPayload.findIndex((s) => s.items.length === 0);
-    if (emptySplitIndex !== -1) {
-      setSplitError(`Đơn tách thứ ${emptySplitIndex + 1} chưa có sản phẩm nào có số lượng > 0.`);
+    const splitsPayload = hasShortage
+      ? rawSplitsPayload.filter((s) => s.items.length > 0)
+      : rawSplitsPayload;
+
+    if (splitsPayload.length === 0) {
+      setSplitError("Vui lòng nhập số lượng phân bổ lớn hơn 0 cho ít nhất 1 đơn tách.");
       return;
+    }
+
+    if (!hasShortage) {
+      const emptySplitIndex = rawSplitsPayload.findIndex((s) => s.items.length === 0);
+      if (emptySplitIndex !== -1) {
+        setSplitError(`Đơn tách thứ ${emptySplitIndex + 1} chưa có sản phẩm nào có số lượng > 0.`);
+        return;
+      }
+    } else {
+      const staffLabel =
+        selectedSplitOrderGroup.staffName || selectedSplitOrderGroup.staffCode || "NVBH của đơn";
+      const confirmStaffRemainder = window.confirm(
+        `Tổng số lượng phân bổ cho khách đang còn thiếu (SL thiếu: ${totalShortageQty}${
+          totalShortagePromo > 0 ? `, SL KM thiếu: ${totalShortagePromo}` : ""
+        }).\n\nHệ thống sẽ tự động tách phần thiếu này thành 1 đơn riêng gắn Công nợ cho NVBH (${staffLabel}). Bạn có đồng ý tiếp tục?`
+      );
+      if (!confirmStaffRemainder) {
+        return;
+      }
     }
 
     setIsSubmittingSplit(true);
     try {
-      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/split`, {
+      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/split-requests`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           order_number: selectedSplitOrderGroup.orderNumber,
           splits: splitsPayload,
+          auto_assign_remainder_to_staff: hasShortage,
         }),
       });
-      const result = await response.json() as {
+      const result = (await response.json()) as {
+        id?: number;
+        source_order_number?: string;
+        detail?: string;
+      };
+      if (!response.ok) throw new Error(result.detail ?? "Không thể gửi yêu cầu tách đơn hàng.");
+      setIsSplitDrawerOpen(false);
+      setSelectedSplitOrderNumber("");
+      setToast(
+        `Đã gửi yêu cầu tách đơn ${result.source_order_number ?? selectedSplitOrderGroup.orderNumber} (Mã YC #${result.id}) chờ Kế toán xác nhận.`
+      );
+      await loadLocalOrders();
+    } catch (error) {
+      setSplitError(error instanceof Error ? error.message : "Không thể gửi yêu cầu tách đơn hàng.");
+    } finally {
+      setIsSubmittingSplit(false);
+    }
+  }
+
+  async function handleApproveSplitRequest(reqItem: SplitOrderApprovalRequest) {
+    if (
+      !window.confirm(
+        `Xác nhận DUYỆT tách đơn ${reqItem.source_order_number} (Yêu cầu #${reqItem.id} do ${reqItem.requested_by} tạo)?\nHệ thống sẽ chính thức tạo các đơn tách trên DMS nội bộ.`
+      )
+    ) {
+      return;
+    }
+    setProcessingSplitRequestId(reqItem.id);
+    setSplitApprovalError("");
+    try {
+      const response = await apiFetch(
+        `${API_URL}/sync/vinamilk-orders/split-requests/${reqItem.id}/approve`,
+        { method: "POST" }
+      );
+      const result = (await response.json()) as {
         new_order_numbers?: string[];
         replaced_order_number?: string;
         detail?: string;
       };
-      if (!response.ok) throw new Error(result.detail ?? "Không thể tách đơn hàng.");
-      setIsSplitDrawerOpen(false);
-      setSelectedSplitOrderNumber("");
+      if (!response.ok) throw new Error(result.detail ?? "Không thể duyệt yêu cầu tách đơn.");
       setToast(
-        `Đã tách đơn ${result.replaced_order_number} thành ${(result.new_order_numbers ?? []).join(", ")}.`
+        `Kế toán đã duyệt tách đơn ${result.replaced_order_number ?? reqItem.source_order_number} thành ${(result.new_order_numbers ?? []).join(", ")}.`
       );
+      await loadSplitApprovalRequests(splitApprovalFilter);
       await loadLocalOrders();
     } catch (error) {
-      setSplitError(error instanceof Error ? error.message : "Không thể tách đơn hàng.");
+      setSplitApprovalError(
+        error instanceof Error ? error.message : "Không thể duyệt yêu cầu tách đơn."
+      );
     } finally {
-      setIsSubmittingSplit(false);
+      setProcessingSplitRequestId(null);
+    }
+  }
+
+  async function handleRejectSplitRequest(reqItem: SplitOrderApprovalRequest) {
+    const reason = window.prompt(
+      `Nhập lý do từ chối / hủy yêu cầu tách đơn ${reqItem.source_order_number} (#${reqItem.id}):`,
+      ""
+    );
+    if (reason === null) return;
+    setProcessingSplitRequestId(reqItem.id);
+    setSplitApprovalError("");
+    try {
+      const response = await apiFetch(
+        `${API_URL}/sync/vinamilk-orders/split-requests/${reqItem.id}/reject`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: reason.trim() || null }),
+        }
+      );
+      const result = (await response.json()) as { detail?: string };
+      if (!response.ok) throw new Error(result.detail ?? "Không thể từ chối yêu cầu tách đơn.");
+      setToast(`Đã từ chối yêu cầu tách đơn ${reqItem.source_order_number} (#${reqItem.id}).`);
+      await loadSplitApprovalRequests(splitApprovalFilter);
+      await loadLocalOrders();
+    } catch (error) {
+      setSplitApprovalError(
+        error instanceof Error ? error.message : "Không thể từ chối yêu cầu tách đơn."
+      );
+    } finally {
+      setProcessingSplitRequestId(null);
     }
   }
 
@@ -1065,7 +1599,7 @@ export default function SalesOrdersPage() {
 
   const remoteColumns = remoteColumnDefinitions
     .filter(({ title }) => (
-      ["Trạng thái xử lý", "Thay thế cho đơn"].includes(title)
+      ["Trạng thái xử lý", "Thay thế cho đơn", "Người thực hiện"].includes(title)
     ) || remoteOrders.some((order) => hasRemoteValue(order[title])))
     .map(({ title, width, align }): Column<RemoteOrder> => ({
       key: title,
@@ -1075,9 +1609,42 @@ export default function SalesOrdersPage() {
       align,
       render: (value, order) => {
         const text = formatRemoteColumnValue(title, value);
+        if (title === "Người thực hiện") {
+          const actor = text || "Hệ thống";
+          const isSystem = actor === "Hệ thống";
+          return (
+            <span
+              className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                isSystem
+                  ? "bg-gray-100 text-gray-600"
+                  : "bg-sky-50 text-sky-700 border border-sky-200"
+              }`}
+              title={actor}
+            >
+              {actor}
+            </span>
+          );
+        }
         if (title === "Thay thế cho đơn") {
           const replacementType = displayRemoteValue(order["_replacement_type"]).trim();
           const orderNum = displayRemoteValue(order["Số đơn hàng"]).trim();
+          if (replacementType === "PENDING_SPLIT") {
+            return (
+              <button
+                type="button"
+                onClick={() => {
+                  setSplitApprovalError("");
+                  setIsSplitApprovalDrawerOpen(true);
+                  void loadSplitApprovalRequests(splitApprovalFilter);
+                }}
+                className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                title="Bấm để mở danh sách Kế toán xác nhận tách đơn"
+              >
+                <Clock3 size={12} />
+                {text || "Chờ KT duyệt tách"}
+              </button>
+            );
+          }
           if (replacementType === "SPLIT" || replacementType === "MERGE") {
             const isBtt = text.startsWith("BTT:");
             return (
@@ -1116,11 +1683,34 @@ export default function SalesOrdersPage() {
         }
         if (title === "Trạng thái xử lý") {
           if (!text) return null;
-          if (text === "Đơn Tách") {
+          if (text === "Chờ KT duyệt tách") {
+            return (
+              <button
+                type="button"
+                onClick={() => {
+                  setSplitApprovalError("");
+                  setIsSplitApprovalDrawerOpen(true);
+                  void loadSplitApprovalRequests(splitApprovalFilter);
+                }}
+                className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-100"
+              >
+                <Clock3 size={12} />
+                Chờ KT duyệt tách
+              </button>
+            );
+          }
+          if (text === "Đơn Tách" || text === "Đơn Tách (Nợ NVBH)") {
+            const isStaffDebt = text === "Đơn Tách (Nợ NVBH)";
             return (
               <div className="flex flex-wrap items-center gap-1">
-                <span className="rounded-full bg-purple-50 px-2.5 py-1 text-xs font-medium text-purple-700 border border-purple-200">
-                  Đơn Tách
+                <span
+                  className={`rounded-full px-2.5 py-1 text-xs font-medium border ${
+                    isStaffDebt
+                      ? "bg-amber-50 text-amber-800 border-amber-300"
+                      : "bg-purple-50 text-purple-700 border-purple-200"
+                  }`}
+                >
+                  {text}
                 </span>
                 {order["_warehouse_updated"] === true && (
                   <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
@@ -1311,6 +1901,27 @@ export default function SalesOrdersPage() {
         subtitle="Quản lý đơn đặt hàng, phiếu bán và trạng thái xử lý"
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setSplitApprovalError("");
+                setIsSplitApprovalDrawerOpen(true);
+                void loadSplitApprovalRequests(splitApprovalFilter);
+              }}
+              className={`flex items-center gap-2 rounded-lg border px-3.5 py-2 text-sm font-medium transition-colors ${
+                pendingSplitRequestCount > 0
+                  ? "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                  : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              <ClipboardCheck size={16} />
+              Kế toán duyệt tách đơn
+              {pendingSplitRequestCount > 0 && (
+                <span className="inline-flex items-center justify-center rounded-full bg-amber-600 px-2 py-0.5 text-xs font-bold text-white">
+                  {pendingSplitRequestCount}
+                </span>
+              )}
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -1525,9 +2136,9 @@ export default function SalesOrdersPage() {
                   </div>
                   <div>
                     <strong>Tổng đơn gốc:</strong>{" "}
-                    SL: <strong>{selectedSplitOrderGroup.totalQty}</strong>
+                    Số lượng: <strong>{selectedSplitOrderGroup.totalQty}</strong>
                     {" | "}
-                    KM: <strong>{selectedSplitOrderGroup.totalPromoQty}</strong>
+                    Số lượng KM: <strong className="text-amber-700">{selectedSplitOrderGroup.totalPromoQty}</strong>
                     {" | "}
                     Giá trị: <strong className="text-emerald-700">{formatVND(selectedSplitOrderGroup.totalValue)}</strong>
                     {" | "}
@@ -1535,16 +2146,14 @@ export default function SalesOrdersPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {selectedSplitOrderGroup.totalDiscount > 0 && (
-                    <button
-                      type="button"
-                      onClick={resetSplitDiscountsToAuto}
-                      className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
-                      title="Tính lại Số tiền CK tự động theo tỷ lệ Số lượng"
-                    >
-                      Chia lại CK theo SL
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={resetSplitDiscountsToAuto}
+                    className="rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50"
+                    title="Tính lại Giá trị & Số tiền CK tự động theo tỷ lệ Số lượng"
+                  >
+                    Tính lại GT & CK theo SL
+                  </button>
                   <button
                     type="button"
                     onClick={distributeEvenlyAcrossSplits}
@@ -1555,9 +2164,17 @@ export default function SalesOrdersPage() {
                   <button
                     type="button"
                     onClick={fillRemainderToLastSplit}
-                    className="rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-700"
+                    className="rounded-lg border border-purple-300 bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-800 hover:bg-purple-100"
                   >
                     Điền phần còn lại vào Đơn tách {splitCount}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={assignRemainderToStaffSplit}
+                    className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700"
+                    title="Tự động gom phần SL & SL KM còn thiếu vào đơn tách gắn công nợ cho NVBH của đơn"
+                  >
+                    Tách phần thiếu cho NVBH ({selectedSplitOrderGroup.staffName || selectedSplitOrderGroup.staffCode || "NVBH"})
                   </button>
                 </div>
               </div>
@@ -1565,7 +2182,7 @@ export default function SalesOrdersPage() {
               {/* Chọn Mã KH và xem Tổng hợp Giá trị / Số tiền CK cho từng đơn tách */}
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-600">
-                  4. Chọn Khách hàng & Tổng hợp theo từng đơn tách
+                  4. Chọn Khách hàng (hoặc gắn Công nợ NVBH) & Tổng hợp theo từng đơn tách
                 </h3>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   {Array.from({ length: splitCount }, (_, splitIdx) => {
@@ -1574,7 +2191,9 @@ export default function SalesOrdersPage() {
                       customer_code: selectedSplitOrderGroup.customerCode,
                       customer_name: selectedSplitOrderGroup.customerName,
                       customer_address: selectedSplitOrderGroup.customerAddress,
+                      is_staff_debt: false,
                     };
+                    const isStaffDebt = Boolean(selectedCust.is_staff_debt);
                     const custSearch = (splitCustomerSearches[splitIdx] ?? "").trim().toLocaleLowerCase("vi");
                     const filteredCustomers = allCustomerOptions
                       .filter((c) => {
@@ -1601,12 +2220,23 @@ export default function SalesOrdersPage() {
                     return (
                       <div
                         key={splitIdx}
-                        className="rounded-xl border border-purple-200 bg-white p-3 shadow-sm space-y-2.5 text-xs"
+                        className={`rounded-xl border p-3 shadow-sm space-y-2.5 text-xs ${
+                          isStaffDebt
+                            ? "border-amber-300 bg-amber-50/30"
+                            : "border-purple-200 bg-white"
+                        }`}
                       >
                         <div className="flex items-center justify-between gap-2 border-b border-gray-100 pb-2">
-                          <div>
-                            <span className="font-semibold text-purple-700">Đơn tách {splitIdx + 1}</span>
-                            <span className="ml-2 font-mono text-[11px] text-gray-500">{splitOrderCode}</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className={`font-semibold ${isStaffDebt ? "text-amber-800" : "text-purple-700"}`}>
+                              Đơn tách {splitIdx + 1}
+                            </span>
+                            <span className="font-mono text-[11px] text-gray-500">{splitOrderCode}</span>
+                            {isStaffDebt && (
+                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 border border-amber-300">
+                                Nợ NVBH
+                              </span>
+                            )}
                           </div>
                           <span className="rounded-full bg-purple-50 px-2 py-0.5 text-[11px] font-medium text-purple-700">
                             {totals.lineCount} dòng SP
@@ -1614,66 +2244,120 @@ export default function SalesOrdersPage() {
                         </div>
 
                         <div className="space-y-1.5">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="font-medium text-gray-700">Khách hàng đơn tách {splitIdx + 1}:</span>
-                            {selectedCust.customer_code !== selectedSplitOrderGroup.customerCode && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleSelectSplitCustomer(splitIdx, selectedSplitOrderGroup.customerCode)
-                                }
-                                className="text-[11px] text-purple-600 hover:underline"
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-medium text-gray-700">
+                              Đối tượng nhận đơn tách {splitIdx + 1}:
+                            </span>
+                            <div className="flex items-center gap-2">
+                              {!isStaffDebt ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleSetSplitToStaffDebt(splitIdx)}
+                                  className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
+                                >
+                                  Gắn Công nợ NVBH
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleSelectSplitCustomer(splitIdx, selectedSplitOrderGroup.customerCode)
+                                  }
+                                  className="rounded border border-purple-200 bg-white px-2 py-0.5 text-[11px] font-medium text-purple-700 hover:bg-purple-50"
+                                >
+                                  Chuyển về Khách hàng
+                                </button>
+                              )}
+                              {!isStaffDebt && selectedCust.customer_code !== selectedSplitOrderGroup.customerCode && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleSelectSplitCustomer(splitIdx, selectedSplitOrderGroup.customerCode)
+                                  }
+                                  className="text-[11px] text-purple-600 hover:underline"
+                                >
+                                  Đặt lại KH gốc
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {isStaffDebt ? (
+                            <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-900 space-y-1">
+                              <div className="font-semibold">
+                                Gắn trách nhiệm / Công nợ NVBH:{" "}
+                                {selectedSplitOrderGroup.staffName || "Nhân viên"} (
+                                {selectedSplitOrderGroup.staffCode || "NVBH"})
+                              </div>
+                              <div className="text-[11px] text-amber-700">
+                                Phần hàng thiếu chưa giao/tách cho khách sẽ được tạo thành đơn riêng gắn cho NVBH này.
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <input
+                                type="text"
+                                value={splitCustomerSearches[splitIdx] ?? ""}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setSplitCustomerSearches((prev) => {
+                                    const next = [...prev];
+                                    next[splitIdx] = val;
+                                    return next;
+                                  });
+                                }}
+                                placeholder="Tìm Mã KH, Tên KH, Cửa hàng..."
+                                className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:border-purple-500 focus:outline-none"
+                              />
+                              <select
+                                value={selectedCust.customer_code}
+                                onChange={(e) => handleSelectSplitCustomer(splitIdx, e.target.value)}
+                                className="block w-full rounded-lg border border-gray-200 bg-gray-50/70 px-2.5 py-1.5 text-xs font-medium text-gray-800 focus:border-purple-500 focus:outline-none"
                               >
-                                Đặt lại KH gốc
-                              </button>
-                            )}
-                          </div>
-                          <input
-                            type="text"
-                            value={splitCustomerSearches[splitIdx] ?? ""}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setSplitCustomerSearches((prev) => {
-                                const next = [...prev];
-                                next[splitIdx] = val;
-                                return next;
-                              });
-                            }}
-                            placeholder="Tìm Mã KH, Tên KH, Cửa hàng..."
-                            className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs focus:border-purple-500 focus:outline-none"
-                          />
-                          <select
-                            value={selectedCust.customer_code}
-                            onChange={(e) => handleSelectSplitCustomer(splitIdx, e.target.value)}
-                            className="block w-full rounded-lg border border-gray-200 bg-gray-50/70 px-2.5 py-1.5 text-xs font-medium text-gray-800 focus:border-purple-500 focus:outline-none"
-                          >
-                            {!hasSelectedInFiltered && selectedCust.customer_code && (
-                              <option value={selectedCust.customer_code}>
-                                {selectedCust.customer_code} ({selectedCust.customer_code.slice(-3)}) — {selectedCust.customer_name || "Khách hàng hiện tại"}
-                              </option>
-                            )}
-                            {filteredCustomers.map((c) => (
-                              <option key={c.customer_code} value={c.customer_code}>
-                                {c.customer_code} ({c.customer_code.slice(-3)}) — {c.customer_name}
-                                {c.company_name ? ` [${c.company_name}]` : ""}
-                              </option>
-                            ))}
-                          </select>
-                          <div className="text-[11px] text-gray-500 truncate">
-                            Đang chọn: <strong className="text-gray-800">{selectedCust.customer_code}</strong> —{" "}
-                            <span className="text-gray-700">{selectedCust.customer_name}</span>
-                          </div>
+                                {!hasSelectedInFiltered && selectedCust.customer_code && (
+                                  <option value={selectedCust.customer_code}>
+                                    {selectedCust.customer_code} ({selectedCust.customer_code.slice(-3)}) — {selectedCust.customer_name || "Khách hàng hiện tại"}
+                                  </option>
+                                )}
+                                {filteredCustomers.map((c) => (
+                                  <option key={c.customer_code} value={c.customer_code}>
+                                    {c.customer_code} ({c.customer_code.slice(-3)}) — {c.customer_name}
+                                    {c.company_name ? ` [${c.company_name}]` : ""}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="text-[11px] text-gray-500 truncate">
+                                Đang chọn: <strong className="text-gray-800">{selectedCust.customer_code}</strong> —{" "}
+                                <span className="text-gray-700">{selectedCust.customer_name}</span>
+                              </div>
+                            </>
+                          )}
                         </div>
 
                         <div className="grid grid-cols-2 gap-2 rounded-lg bg-gray-50 p-2 text-[11px]">
-                          <div className="flex items-center">
-                            <span className="text-gray-500">Tổng SL / KM:</span>{" "}
-                            <strong className="ml-1 text-gray-900">{totals.totalQty}</strong>
-                            {totals.totalPromoQty > 0 && (
-                              <span className="ml-1 text-amber-700 font-semibold">(+{totals.totalPromoQty} KM)</span>
-                            )}
+                          <div className="flex items-center justify-between pr-2 border-r border-gray-200/70">
+                            <span className="text-gray-500">Số lượng:</span>
+                            <strong className="text-gray-900">{totals.totalQty}</strong>
                           </div>
-                          <div className="flex items-center justify-end gap-1.5">
+                          <div className="flex items-center justify-between pl-1">
+                            <span className="text-amber-700 font-medium">Số lượng KM:</span>
+                            <strong className="text-amber-700">{totals.totalPromoQty}</strong>
+                          </div>
+                          <div className="flex items-center justify-between gap-1.5 pr-2 border-t border-r border-gray-200/70 pt-1">
+                            <span className="font-medium text-gray-600">Tổng giá trị:</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={1}
+                              value={totals.totalValue}
+                              onChange={(e) =>
+                                updateSplitOrderTotalValue(splitIdx, Number(e.target.value))
+                              }
+                              title="Có thể chỉnh sửa Tổng giá trị của đơn tách này"
+                              className="w-28 rounded border border-emerald-200 bg-white px-2 py-0.5 text-right text-xs font-semibold text-emerald-700 focus:border-emerald-500 focus:outline-none"
+                            />
+                          </div>
+                          <div className="flex items-center justify-between gap-1.5 border-t border-gray-200/70 pt-1 pl-1">
                             <span className="text-gray-500">Số tiền CK:</span>
                             {selectedSplitOrderGroup.totalDiscount > 0 ? (
                               <input
@@ -1685,15 +2369,11 @@ export default function SalesOrdersPage() {
                                   updateSplitOrderTotalDiscount(splitIdx, Number(e.target.value))
                                 }
                                 title="Có thể chỉnh sửa tổng Số tiền CK của đơn tách này"
-                                className="w-28 rounded border border-rose-200 bg-white px-2 py-0.5 text-right text-xs font-semibold text-rose-700 focus:border-rose-500 focus:outline-none"
+                                className="w-24 rounded border border-rose-200 bg-white px-2 py-0.5 text-right text-xs font-semibold text-rose-700 focus:border-rose-500 focus:outline-none"
                               />
                             ) : (
                               <strong className="text-rose-700">{formatVND(totals.totalDiscount)}</strong>
                             )}
-                          </div>
-                          <div className="col-span-2 flex items-center justify-between border-t border-gray-200/70 pt-1">
-                            <span className="font-medium text-gray-600">Tổng giá trị đơn tách {splitIdx + 1}:</span>
-                            <strong className="text-xs text-emerald-700">{formatVND(totals.totalValue)}</strong>
                           </div>
                         </div>
                       </div>
@@ -1706,27 +2386,76 @@ export default function SalesOrdersPage() {
                 <table className="min-w-full divide-y divide-gray-200 text-xs">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-3 py-2.5 text-left font-semibold text-gray-700">Sản phẩm</th>
-                      <th className="px-2 py-2.5 text-center font-semibold text-gray-700">ĐVT</th>
-                      <th className="px-2.5 py-2.5 text-right font-semibold text-gray-700">SL gốc</th>
-                      <th className="px-2.5 py-2.5 text-right font-semibold text-gray-700">SL KM gốc</th>
+                      <th rowSpan={2} className="px-3 py-2.5 text-left font-semibold text-gray-700 border-r border-gray-200">
+                        Sản phẩm
+                      </th>
+                      <th rowSpan={2} className="px-2 py-2.5 text-center font-semibold text-gray-700 border-r border-gray-200">
+                        ĐVT
+                      </th>
+                      <th colSpan={2} className="px-2.5 py-1.5 text-center font-semibold text-gray-700 border-b border-r border-gray-200 bg-gray-100/70">
+                        Đơn gốc
+                      </th>
                       {Array.from({ length: splitCount }, (_, idx) => {
                         const cust = splitCustomers[idx];
+                        const isStaffDebt = Boolean(cust?.is_staff_debt);
                         return (
-                          <th key={idx} className="px-2.5 py-2.5 text-center font-semibold text-purple-700 bg-purple-50/40">
-                            Đơn tách {idx + 1}
+                          <th
+                            key={idx}
+                            colSpan={2}
+                            className={`px-2.5 py-1.5 text-center font-semibold border-b border-r border-gray-200 ${
+                              isStaffDebt
+                                ? "text-amber-800 bg-amber-50/70"
+                                : "text-purple-700 bg-purple-50/40"
+                            }`}
+                          >
+                            <div>
+                              Đơn tách {idx + 1} {isStaffDebt ? "(Nợ NVBH)" : ""}
+                            </div>
                             <div className="text-[10px] font-normal text-gray-500">
                               TD-{selectedSplitOrderGroup.orderNumber}-{String(idx + 1).padStart(2, "0")}
                             </div>
                             {cust?.customer_code && (
-                              <div className="text-[10px] font-medium text-purple-600 truncate max-w-[150px] mx-auto" title={`${cust.customer_code} - ${cust.customer_name}`}>
-                                KH: {cust.customer_code.slice(-3)} — {cust.customer_name}
+                              <div
+                                className={`text-[10px] font-medium truncate max-w-[180px] mx-auto ${
+                                  isStaffDebt ? "text-amber-700" : "text-purple-600"
+                                }`}
+                                title={`${cust.customer_code} - ${cust.customer_name}`}
+                              >
+                                {isStaffDebt
+                                  ? `NVBH: ${selectedSplitOrderGroup.staffName || selectedSplitOrderGroup.staffCode}`
+                                  : `KH: ${cust.customer_code.slice(-3)} — ${cust.customer_name}`}
                               </div>
                             )}
                           </th>
                         );
                       })}
-                      <th className="px-2.5 py-2.5 text-right font-semibold text-gray-700">Còn lại</th>
+                      <th colSpan={2} className="px-2.5 py-1.5 text-center font-semibold text-gray-700 border-b border-gray-200 bg-gray-100/70">
+                        Còn lại (Chưa tách)
+                      </th>
+                    </tr>
+                    <tr className="bg-gray-50/90 text-[11px]">
+                      <th className="px-2 py-1.5 text-right font-semibold text-gray-700 border-r border-gray-200">
+                        Số lượng
+                      </th>
+                      <th className="px-2 py-1.5 text-right font-semibold text-amber-700 border-r border-gray-200 bg-amber-50/30">
+                        Số lượng KM
+                      </th>
+                      {Array.from({ length: splitCount }, (_, idx) => (
+                        <Fragment key={`sub-${idx}`}>
+                          <th className="px-2 py-1.5 text-right font-semibold text-gray-700 border-r border-gray-100">
+                            Số lượng
+                          </th>
+                          <th className="px-2 py-1.5 text-right font-semibold text-amber-700 border-r border-gray-200 bg-amber-50/20">
+                            Số lượng KM
+                          </th>
+                        </Fragment>
+                      ))}
+                      <th className="px-2 py-1.5 text-right font-semibold text-gray-700 border-r border-gray-100">
+                        Số lượng
+                      </th>
+                      <th className="px-2 py-1.5 text-right font-semibold text-amber-700 bg-amber-50/30">
+                        Số lượng KM
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 bg-white">
@@ -1744,18 +2473,16 @@ export default function SalesOrdersPage() {
                       const finRow = splitFinancials.lineBreakdown[localId] ?? [];
                       const sumQty = allocs.reduce((s, a) => s + a.quantity, 0);
                       const sumPromo = allocs.reduce((s, a) => s + a.promoQuantity, 0);
+                      const sumVal = finRow.reduce((s, f) => s + f.value, 0);
                       const sumDisc = finRow.reduce((s, f) => s + f.discount, 0);
                       const remQty = Number((origQty - sumQty).toFixed(4));
                       const remPromo = Number((origPromo - sumPromo).toFixed(4));
+                      const remVal = Math.round(origVal - sumVal);
                       const remDisc = Math.round(origDisc - sumDisc);
-                      const isMatched =
-                        Math.abs(remQty) <= 1e-4 &&
-                        Math.abs(remPromo) <= 1e-4 &&
-                        Math.abs(remDisc) <= 1;
 
                       return (
                         <tr key={localId} className="hover:bg-gray-50/60">
-                          <td className="px-3 py-2 align-top">
+                          <td className="px-3 py-2 align-top border-r border-gray-100">
                             <div className="font-medium text-gray-900">{prodCode} — {prodName}</div>
                             {promoCode && <div className="text-[11px] text-gray-500">CTKM: {promoCode}</div>}
                             <div className="text-[11px] text-emerald-700">
@@ -1763,17 +2490,27 @@ export default function SalesOrdersPage() {
                               {origDisc > 0 ? ` | CK gốc: ${formatVND(origDisc)}` : ""}
                             </div>
                           </td>
-                          <td className="px-2 py-2 text-center align-middle text-gray-600">{unit}</td>
-                          <td className="px-2.5 py-2 text-right align-middle font-semibold text-gray-900">{origQty}</td>
-                          <td className="px-2.5 py-2 text-right align-middle font-semibold text-amber-700">{origPromo}</td>
+                          <td className="px-2 py-2 text-center align-middle text-gray-600 border-r border-gray-100">
+                            {unit}
+                          </td>
+                          <td className="px-2.5 py-2 text-right align-middle font-semibold text-gray-900 border-r border-gray-100">
+                            {origQty}
+                          </td>
+                          <td className="px-2.5 py-2 text-right align-middle font-semibold text-amber-700 border-r border-gray-200 bg-amber-50/20">
+                            {origPromo}
+                          </td>
                           {Array.from({ length: splitCount }, (_, splitIdx) => {
                             const cell = allocs[splitIdx] ?? { quantity: 0, promoQuantity: 0 };
                             const cellFin = finRow[splitIdx] ?? { value: 0, discount: 0, autoDiscount: 0 };
+                            const isStaffDebt = Boolean(splitCustomers[splitIdx]?.is_staff_debt);
                             return (
-                              <td key={splitIdx} className="px-2 py-2 align-middle bg-purple-50/15">
-                                <div className="flex flex-col gap-1">
-                                  <label className="flex items-center justify-between gap-1 text-[11px] text-gray-600">
-                                    <span>SL:</span>
+                              <Fragment key={splitIdx}>
+                                <td
+                                  className={`px-2 py-2 align-top border-r border-gray-100 ${
+                                    isStaffDebt ? "bg-amber-50/20" : "bg-purple-50/10"
+                                  }`}
+                                >
+                                  <div className="flex flex-col items-end gap-1">
                                     <input
                                       type="number"
                                       min={0}
@@ -1782,64 +2519,106 @@ export default function SalesOrdersPage() {
                                       onChange={(e) =>
                                         updateSplitCell(localId, splitIdx, "quantity", Number(e.target.value))
                                       }
-                                      className="w-20 rounded border border-gray-200 px-2 py-1 text-right text-xs font-medium text-gray-900 focus:border-purple-500 focus:outline-none"
+                                      className="w-20 rounded border border-gray-200 bg-white px-2 py-1 text-right text-xs font-medium text-gray-900 focus:border-purple-500 focus:outline-none"
                                     />
-                                  </label>
-                                  {origPromo > 0 && (
-                                    <label className="flex items-center justify-between gap-1 text-[11px] text-amber-700">
-                                      <span>KM:</span>
-                                      <input
-                                        type="number"
-                                        min={0}
-                                        step="any"
-                                        value={cell.promoQuantity}
-                                        onChange={(e) =>
-                                          updateSplitCell(localId, splitIdx, "promoQuantity", Number(e.target.value))
-                                        }
-                                        className="w-20 rounded border border-amber-200 bg-amber-50/30 px-2 py-1 text-right text-xs font-medium text-amber-900 focus:border-amber-500 focus:outline-none"
-                                      />
-                                    </label>
-                                  )}
-                                  {(cell.quantity > 0 || cell.promoQuantity > 0) && (
-                                    <div className="mt-0.5 rounded bg-white/80 px-1.5 py-1 text-[10px] leading-tight border border-purple-100 space-y-1">
-                                      <div className="flex justify-between text-emerald-700 font-medium">
-                                        <span>GT:</span>
-                                        <span>{formatVND(cellFin.value)}</span>
-                                      </div>
-                                      {selectedSplitOrderGroup.totalDiscount > 0 && (
-                                        <label className="flex items-center justify-between gap-1 text-rose-700">
-                                          <span>CK:</span>
+                                    {(cell.quantity > 0 || cell.promoQuantity > 0) && (
+                                      <div className="w-full rounded bg-white/90 px-1.5 py-1 text-[10px] leading-tight border border-purple-100 space-y-1">
+                                        <label className="flex items-center justify-between gap-1 text-emerald-700 font-medium">
+                                          <span>GT:</span>
                                           <input
                                             type="number"
                                             min={0}
                                             step={1}
-                                            value={cellFin.discount}
+                                            value={cellFin.value}
                                             onChange={(e) =>
-                                              updateSplitCellDiscount(
+                                              updateSplitCellValue(
                                                 localId,
                                                 splitIdx,
                                                 Number(e.target.value)
                                               )
                                             }
-                                            className="w-20 rounded border border-rose-200 bg-rose-50/20 px-1.5 py-0.5 text-right text-[11px] font-medium text-rose-800 focus:border-rose-500 focus:outline-none"
+                                            title="Chỉnh sửa Giá trị của dòng sản phẩm này"
+                                            className="w-20 rounded border border-emerald-200 bg-emerald-50/20 px-1 py-0.5 text-right text-[10px] font-semibold text-emerald-800 focus:border-emerald-500 focus:outline-none"
                                           />
                                         </label>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              </td>
+                                        {selectedSplitOrderGroup.totalDiscount > 0 && (
+                                          <label className="flex items-center justify-between gap-1 text-rose-700">
+                                            <span>CK:</span>
+                                            <input
+                                              type="number"
+                                              min={0}
+                                              step={1}
+                                              value={cellFin.discount}
+                                              onChange={(e) =>
+                                                updateSplitCellDiscount(
+                                                  localId,
+                                                  splitIdx,
+                                                  Number(e.target.value)
+                                                )
+                                              }
+                                              className="w-20 rounded border border-rose-200 bg-rose-50/20 px-1 py-0.5 text-right text-[10px] font-medium text-rose-800 focus:border-rose-500 focus:outline-none"
+                                            />
+                                          </label>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                </td>
+                                <td
+                                  className={`px-2 py-2 align-top border-r border-gray-200 ${
+                                    isStaffDebt ? "bg-amber-50/30" : "bg-amber-50/15"
+                                  }`}
+                                >
+                                  <div className="flex flex-col items-end">
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      step="any"
+                                      value={cell.promoQuantity}
+                                      onChange={(e) =>
+                                        updateSplitCell(localId, splitIdx, "promoQuantity", Number(e.target.value))
+                                      }
+                                      className="w-20 rounded border border-amber-200 bg-white px-2 py-1 text-right text-xs font-medium text-amber-900 focus:border-amber-500 focus:outline-none"
+                                    />
+                                  </div>
+                                </td>
+                              </Fragment>
                             );
                           })}
-                          <td className="px-2.5 py-2 text-right align-middle">
+                          <td className="px-2 py-2 text-right align-middle border-r border-gray-100">
                             <span
                               className={`inline-block rounded px-2 py-0.5 text-xs font-semibold ${
-                                isMatched ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+                                Math.abs(remQty) <= 1e-4
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : remQty > 0
+                                    ? "bg-amber-50 text-amber-800"
+                                    : "bg-rose-50 text-rose-700"
                               }`}
                             >
-                              SL: {remQty}
-                              {origPromo > 0 ? ` | KM: ${remPromo}` : ""}
-                              {Math.abs(remDisc) > 1 ? ` | CK: ${formatVND(remDisc)}` : ""}
+                              {remQty}
+                            </span>
+                            {Math.abs(remVal) > 1 && (
+                              <div className="mt-1 text-[10px] font-medium text-emerald-700">
+                                GT: {formatVND(remVal)}
+                              </div>
+                            )}
+                            {Math.abs(remDisc) > 1 && (
+                              <div className="mt-0.5 text-[10px] font-medium text-rose-700">
+                                CK: {formatVND(remDisc)}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-2 py-2 text-right align-middle bg-amber-50/20">
+                            <span
+                              className={`inline-block rounded px-2 py-0.5 text-xs font-semibold ${
+                                Math.abs(remPromo) <= 1e-4
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : remPromo > 0
+                                    ? "bg-amber-100 text-amber-800"
+                                    : "bg-rose-50 text-rose-700"
+                              }`}
+                            >
+                              {remPromo}
                             </span>
                           </td>
                         </tr>
@@ -1848,7 +2627,7 @@ export default function SalesOrdersPage() {
                   </tbody>
                   <tfoot className="bg-gray-50 font-semibold text-gray-900 border-t border-gray-200">
                     <tr>
-                      <td colSpan={2} className="px-3 py-2.5 text-right align-top">
+                      <td colSpan={2} className="px-3 py-2.5 text-right align-top border-r border-gray-200">
                         <div>Tổng cộng:</div>
                         <div className="text-[11px] font-normal text-emerald-700">
                           GT gốc: {formatVND(selectedSplitOrderGroup.totalValue)}
@@ -1857,8 +2636,10 @@ export default function SalesOrdersPage() {
                           CK gốc: {formatVND(selectedSplitOrderGroup.totalDiscount)}
                         </div>
                       </td>
-                      <td className="px-2.5 py-2.5 text-right align-top">{selectedSplitOrderGroup.totalQty}</td>
-                      <td className="px-2.5 py-2.5 text-right align-top text-amber-700">
+                      <td className="px-2.5 py-2.5 text-right align-top border-r border-gray-200">
+                        {selectedSplitOrderGroup.totalQty}
+                      </td>
+                      <td className="px-2.5 py-2.5 text-right align-top text-amber-700 border-r border-gray-200 bg-amber-50/30">
                         {selectedSplitOrderGroup.totalPromoQty}
                       </td>
                       {Array.from({ length: splitCount }, (_, splitIdx) => {
@@ -1869,56 +2650,342 @@ export default function SalesOrdersPage() {
                           totalDiscount: 0,
                         };
                         return (
-                          <td key={splitIdx} className="px-2.5 py-2.5 text-right align-top bg-purple-50/30">
-                            <div className="text-gray-900">
-                              SL: {totals.totalQty}
-                              {totals.totalPromoQty > 0 ? ` | KM: ${totals.totalPromoQty}` : ""}
-                            </div>
-                            <div className="text-[11px] text-emerald-700">
-                              GT: {formatVND(totals.totalValue)}
-                            </div>
-                            <div className="text-[11px] text-rose-700">
-                              CK: {formatVND(totals.totalDiscount)}
-                            </div>
-                          </td>
+                          <Fragment key={`foot-${splitIdx}`}>
+                            <td className="px-2 py-2.5 text-right align-top bg-purple-50/30 border-r border-gray-100">
+                              <div className="text-gray-900">{totals.totalQty}</div>
+                              <div className="text-[11px] text-emerald-700">
+                                GT: {formatVND(totals.totalValue)}
+                              </div>
+                              <div className="text-[11px] text-rose-700">
+                                CK: {formatVND(totals.totalDiscount)}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2.5 text-right align-top text-amber-700 bg-amber-50/25 border-r border-gray-200">
+                              {totals.totalPromoQty}
+                            </td>
+                          </Fragment>
                         );
                       })}
-                      <td className="px-2.5 py-2.5 text-right align-top text-[11px]">
-                        <div className="text-emerald-700">
+                      <td className="px-2 py-2.5 text-right align-top border-r border-gray-100">
+                        <div>
+                          {Number(
+                            (
+                              selectedSplitOrderGroup.totalQty -
+                              splitFinancials.splitTotals.reduce((s, t) => s + t.totalQty, 0)
+                            ).toFixed(4)
+                          )}
+                        </div>
+                        <div className="text-[11px] text-emerald-700">
                           ∑GT: {formatVND(splitFinancials.splitTotals.reduce((s, t) => s + t.totalValue, 0))}
                         </div>
-                        <div className="text-rose-700">
+                        <div className="text-[11px] text-rose-700">
                           ∑CK: {formatVND(splitFinancials.splitTotals.reduce((s, t) => s + t.totalDiscount, 0))}
                         </div>
+                      </td>
+                      <td className="px-2 py-2.5 text-right align-top text-amber-700 bg-amber-50/30">
+                        {Number(
+                          (
+                            selectedSplitOrderGroup.totalPromoQty -
+                            splitFinancials.splitTotals.reduce((s, t) => s + t.totalPromoQty, 0)
+                          ).toFixed(4)
+                        )}
                       </td>
                     </tr>
                   </tfoot>
                 </table>
               </div>
 
-              <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setIsSplitDrawerOpen(false)}
-                  disabled={isSubmittingSplit}
-                  className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
-                >
-                  Hủy
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void submitSplitOrder()}
-                  disabled={isSubmittingSplit}
-                  className="flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
-                >
-                  <Split size={16} />
-                  {isSubmittingSplit ? "Đang tách đơn..." : "Xác nhận tách đơn"}
-                </button>
+              <div className="flex items-center justify-between gap-2 border-t border-gray-100 pt-4">
+                <div className="text-xs text-amber-800">
+                  * Khi gửi yêu cầu, đơn tách sẽ chuyển sang trạng thái <strong>Chờ Kế toán xác nhận</strong> trước khi chính thức tách trên hệ thống DMS nội bộ.
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsSplitDrawerOpen(false)}
+                    disabled={isSubmittingSplit}
+                    className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
+                  >
+                    Hủy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void submitSplitOrder()}
+                    disabled={isSubmittingSplit}
+                    className="flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+                  >
+                    <Split size={16} />
+                    {isSubmittingSplit ? "Đang gửi yêu cầu..." : "Gửi Kế toán duyệt tách đơn"}
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
             <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 p-8 text-center text-sm text-gray-500">
               Chọn một đơn hàng ở trên để bắt đầu phân bổ số lượng tách đơn.
+            </div>
+          )}
+        </div>
+      </Drawer>
+
+      {/* Drawer Kế toán xác nhận duyệt Tách đơn */}
+      <Drawer
+        open={isSplitApprovalDrawerOpen}
+        onClose={() => setIsSplitApprovalDrawerOpen(false)}
+        title="Kế toán xác nhận Tách đơn hàng"
+        subtitle="Kiểm tra chi tiết số lượng, số lượng KM, giá trị, chiết khấu và công nợ NVBH trước khi duyệt tách đơn trên hệ thống DMS nội bộ"
+        size="4xl"
+      >
+        <div className="space-y-4 p-5">
+          {splitApprovalError && (
+            <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">
+              <AlertTriangle size={16} />
+              <span>{splitApprovalError}</span>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSplitApprovalFilter("PENDING");
+                  void loadSplitApprovalRequests("PENDING");
+                }}
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  splitApprovalFilter === "PENDING"
+                    ? "bg-amber-600 text-white"
+                    : "border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                Chờ Kế toán duyệt ({pendingSplitRequestCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSplitApprovalFilter("ALL");
+                  void loadSplitApprovalRequests("ALL");
+                }}
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  splitApprovalFilter === "ALL"
+                    ? "bg-purple-600 text-white"
+                    : "border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                Tất cả lịch sử yêu cầu
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadSplitApprovalRequests(splitApprovalFilter)}
+              className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              <RefreshCw size={13} />
+              Làm mới
+            </button>
+          </div>
+
+          {splitApprovalRequests.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 p-10 text-center text-sm text-gray-500">
+              {splitApprovalFilter === "PENDING"
+                ? "Hiện không có yêu cầu tách đơn nào đang chờ Kế toán xác nhận."
+                : "Chưa có yêu cầu tách đơn nào."}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {splitApprovalRequests.map((reqItem) => {
+                const p = reqItem.preview ?? {};
+                const splits = Array.isArray(p.splits) ? p.splits : [];
+                const isPending = reqItem.status === "PENDING";
+                const isApproved = reqItem.status === "APPROVED";
+                const isProcessing = processingSplitRequestId === reqItem.id;
+                return (
+                  <div
+                    key={reqItem.id}
+                    className={`rounded-xl border p-4 shadow-sm space-y-3 text-xs ${
+                      isPending
+                        ? "border-amber-300 bg-amber-50/20"
+                        : isApproved
+                          ? "border-emerald-200 bg-white"
+                          : "border-rose-200 bg-rose-50/10"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 pb-2.5">
+                      <div className="space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-sm font-bold text-gray-900">
+                            YC #{reqItem.id} — Đơn gốc: {reqItem.source_order_number}
+                          </span>
+                          <span
+                            className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                              isPending
+                                ? "bg-amber-100 text-amber-800 border border-amber-300"
+                                : isApproved
+                                  ? "bg-emerald-100 text-emerald-800"
+                                  : "bg-rose-100 text-rose-800"
+                            }`}
+                          >
+                            {isPending
+                              ? "Chờ Kế toán xác nhận"
+                              : isApproved
+                                ? "Đã duyệt & Tách đơn"
+                                : "Đã từ chối"}
+                          </span>
+                        </div>
+                        <div className="text-gray-600">
+                          <strong>Khách hàng gốc:</strong> {p.customer_name || "—"} ({p.customer_code || "—"})
+                          {" | "}
+                          <strong>NVBH:</strong> {p.staff_name || p.staff_code || "—"}
+                          {" | "}
+                          <strong>Người yêu cầu:</strong>{" "}
+                          <span className="font-semibold text-sky-700">{reqItem.requested_by}</span>
+                          {reqItem.requested_at && ` (${formatVinamilkDate(reqItem.requested_at, true)})`}
+                        </div>
+                        {reqItem.reviewed_by && (
+                          <div className="text-gray-600">
+                            <strong>Kế toán xử lý:</strong>{" "}
+                            <span className="font-semibold text-emerald-700">{reqItem.reviewed_by}</span>
+                            {reqItem.reviewed_at && ` (${formatVinamilkDate(reqItem.reviewed_at, true)})`}
+                            {reqItem.rejection_reason && (
+                              <span className="ml-2 text-rose-700">
+                                — Lý do: <strong>{reqItem.rejection_reason}</strong>
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {isPending && (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={isProcessing}
+                            onClick={() => void handleRejectSplitRequest(reqItem)}
+                            className="flex items-center gap-1 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                          >
+                            <XCircle size={14} />
+                            Từ chối
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isProcessing}
+                            onClick={() => void handleApproveSplitRequest(reqItem)}
+                            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                          >
+                            <CheckCircle2 size={14} />
+                            {isProcessing ? "Đang xử lý..." : "Kế toán Xác nhận & Tách đơn"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-4 rounded-lg bg-gray-100/80 px-3 py-1.5 text-[11px] text-gray-700">
+                      <span>
+                        <strong>Tổng đơn gốc:</strong> SL: <strong>{p.total_qty ?? 0}</strong>
+                      </span>
+                      <span>
+                        SL KM: <strong className="text-amber-700">{p.total_promo_qty ?? 0}</strong>
+                      </span>
+                      <span>
+                        Giá trị: <strong className="text-emerald-700">{formatVND(Number(p.total_value ?? 0))}</strong>
+                      </span>
+                      <span>
+                        Số tiền CK: <strong className="text-rose-700">{formatVND(Number(p.total_discount ?? 0))}</strong>
+                      </span>
+                      <span>
+                        Số đơn tách ra: <strong className="text-purple-700">{splits.length} đơn</strong>
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      {splits.map((sp, sIdx) => {
+                        const isStaffDebt = Boolean(sp.is_staff_debt);
+                        return (
+                          <div
+                            key={sIdx}
+                            className={`rounded-lg border p-2.5 space-y-2 ${
+                              isStaffDebt
+                                ? "border-amber-300 bg-amber-50/40"
+                                : "border-gray-200 bg-white"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between border-b border-gray-100 pb-1.5">
+                              <div>
+                                <span className="font-mono font-bold text-purple-700">
+                                  {sp.new_order_number}
+                                </span>
+                                <span
+                                  className={`ml-2 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                    isStaffDebt
+                                      ? "bg-amber-100 text-amber-800 border border-amber-300"
+                                      : "bg-purple-50 text-purple-700"
+                                  }`}
+                                >
+                                  {sp.status_label}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-gray-600">
+                                SL: <strong>{sp.total_qty}</strong> | KM:{" "}
+                                <strong className="text-amber-700">{sp.total_promo_qty}</strong>
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-gray-700">
+                              <strong>Đối tượng nhận:</strong> {sp.customer_code} — {sp.customer_name}
+                            </div>
+                            <div className="flex items-center justify-between rounded bg-gray-50 px-2 py-1 text-[11px]">
+                              <span>
+                                Giá trị:{" "}
+                                <strong className="text-emerald-700">
+                                  {formatVND(Number(sp.total_value ?? 0))}
+                                </strong>
+                              </span>
+                              <span>
+                                Chiết khấu:{" "}
+                                <strong className="text-rose-700">
+                                  {formatVND(Number(sp.total_discount ?? 0))}
+                                </strong>
+                              </span>
+                            </div>
+                            <div className="overflow-x-auto">
+                              <table className="min-w-full divide-y divide-gray-100 text-[11px]">
+                                <thead className="bg-gray-50 text-gray-600">
+                                  <tr>
+                                    <th className="px-2 py-1 text-left">Sản phẩm</th>
+                                    <th className="px-1.5 py-1 text-right">SL</th>
+                                    <th className="px-1.5 py-1 text-right text-amber-700">SL KM</th>
+                                    <th className="px-1.5 py-1 text-right text-emerald-700">Giá trị</th>
+                                    <th className="px-1.5 py-1 text-right text-rose-700">CK</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-50">
+                                  {(sp.items ?? []).map((item, iIdx) => (
+                                    <tr key={iIdx}>
+                                      <td className="px-2 py-1 text-gray-800">
+                                        <span className="font-mono font-medium">{item.product_code}</span> —{" "}
+                                        {item.product_name}
+                                      </td>
+                                      <td className="px-1.5 py-1 text-right font-semibold">{item.quantity}</td>
+                                      <td className="px-1.5 py-1 text-right font-semibold text-amber-700">
+                                        {item.promo_quantity}
+                                      </td>
+                                      <td className="px-1.5 py-1 text-right text-emerald-700">
+                                        {formatVND(Number(item.value_amount ?? 0))}
+                                      </td>
+                                      <td className="px-1.5 py-1 text-right text-rose-700">
+                                        {formatVND(Number(item.discount_amount ?? 0))}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

@@ -17,11 +17,18 @@ from playwright.sync_api import sync_playwright
 from dotenv import dotenv_values, set_key
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload
+from app.core.auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.services.vinamilk_sales_summary import build_sales_summary
 from app.models.customer import Company, Customer
-from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot, VinamilkSyncRun
+from app.models.user import User
+from app.models.vinamilk import (
+    VinamilkOrderReplacement,
+    VinamilkOrderSnapshot,
+    VinamilkOrderSplitRequest,
+    VinamilkSyncRun,
+)
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 from app.services.vinamilk_dates import iter_inclusive_dates
 from scripts.vinamilk_login import configure_playwright_browser_path, login_and_get_cookie
@@ -92,6 +99,7 @@ class SplitOrderItemAllocation(BaseModel):
     snapshot_id: int
     quantity: float = Field(default=0, ge=0)
     promo_quantity: float = Field(default=0, ge=0)
+    value_amount: float | None = Field(default=None, ge=0)
     discount_amount: float | None = Field(default=None, ge=0)
 
 
@@ -99,6 +107,9 @@ class SplitOrderTarget(BaseModel):
     customer_code: str | None = None
     customer_name: str | None = None
     customer_address: str | None = None
+    is_staff_debt: bool = False
+    staff_code: str | None = None
+    staff_name: str | None = None
     items: list[SplitOrderItemAllocation] = Field(default_factory=list)
 
 
@@ -106,6 +117,11 @@ class SplitOrderRequest(BaseModel):
     source_order_number: str | None = None
     order_number: str | None = None
     splits: list[SplitOrderTarget]
+    auto_assign_remainder_to_staff: bool = False
+
+
+class RejectSplitOrderRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class MergeOrdersRequest(BaseModel):
@@ -159,10 +175,12 @@ def _update_order_replacement(
     db: Session,
     new_order_number: str,
     replaced_order_number: str | None,
+    performed_by: str | None = None,
 ) -> None:
     new_order_number = new_order_number.strip()
     replaced_order_number = replaced_order_number.strip() if replaced_order_number is not None else None
     replaced_order_number = replaced_order_number or None
+    actor = (performed_by or "").strip() or None
     if not new_order_number:
         raise HTTPException(status_code=400, detail="Số đơn hàng mới không hợp lệ.")
     if replaced_order_number == new_order_number:
@@ -211,9 +229,12 @@ def _update_order_replacement(
             new_order_number=new_order_number,
             replaced_order_number=replaced_order_number,
             replacement_type="MANUAL",
+            performed_by=actor,
         ))
     else:
         current.replaced_order_number = replaced_order_number
+        if actor:
+            current.performed_by = actor
         current.updated_at = datetime.utcnow()
 
 
@@ -234,7 +255,11 @@ def _format_qty_value(value: float) -> int | float:
     return round(value, 2)
 
 
-def _check_orders_available_for_split_merge(db: Session, order_numbers: list[str]) -> None:
+def _check_orders_available_for_split_merge(
+    db: Session,
+    order_numbers: list[str],
+    ignore_split_request_id: int | None = None,
+) -> None:
     all_replacements = db.scalars(select(VinamilkOrderReplacement)).all()
     busy_orders: set[str] = set()
     for item in all_replacements:
@@ -251,13 +276,33 @@ def _check_orders_available_for_split_merge(db: Session, order_numbers: list[str
                 "Vui lòng hoàn tác trước khi thực hiện lại."
             ),
         )
+    pending_stmt = select(VinamilkOrderSplitRequest.source_order_number).where(
+        VinamilkOrderSplitRequest.source_order_number.in_(order_numbers),
+        VinamilkOrderSplitRequest.status == "PENDING",
+    )
+    if ignore_split_request_id is not None:
+        pending_stmt = pending_stmt.where(VinamilkOrderSplitRequest.id != ignore_split_request_id)
+    pending_orders = list(dict.fromkeys(db.scalars(pending_stmt).all()))
+    if pending_orders:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Đơn hàng {', '.join(pending_orders)} đang có yêu cầu tách đơn chờ Kế toán xác nhận. "
+                "Vui lòng duyệt hoặc từ chối/hủy yêu cầu trước khi thực hiện lại."
+            ),
+        )
 
 
-def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, Any]:
+def _prepare_split_vinamilk_order(
+    db: Session,
+    payload: SplitOrderRequest,
+    ignore_split_request_id: int | None = None,
+) -> dict[str, Any]:
     source_order_number = (payload.source_order_number or payload.order_number or "").strip()
     if not source_order_number:
         raise HTTPException(status_code=400, detail="Mã đơn hàng gốc không được để trống.")
-    if len(payload.splits) < 2:
+    min_splits = 1 if payload.auto_assign_remainder_to_staff else 2
+    if len(payload.splits) < min_splits:
         raise HTTPException(status_code=400, detail="Cần tách thành ít nhất 2 đơn hàng.")
 
     source_rows = db.scalars(
@@ -273,15 +318,21 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
     if any(getattr(row, "is_synthetic", False) for row in source_rows):
         raise HTTPException(status_code=400, detail=f"Đơn {source_order_number} là đơn Tách/Gộp, không thể tách tiếp.")
 
-    _check_orders_available_for_split_merge(db, [source_order_number])
+    _check_orders_available_for_split_merge(
+        db,
+        [source_order_number],
+        ignore_split_request_id=ignore_split_request_id,
+    )
 
     source_by_id = {row.id: row for row in source_rows}
+    effective_splits: list[SplitOrderTarget] = list(payload.splits)
     alloc_by_split: list[dict[int, tuple[float, float]]] = []
+    custom_val_by_split_item: dict[tuple[int, int], float] = {}
     custom_disc_by_split_item: dict[tuple[int, int], float] = {}
     sum_qty: dict[int, float] = defaultdict(float)
     sum_promo: dict[int, float] = defaultdict(float)
 
-    for split_idx, split_target in enumerate(payload.splits):
+    for split_idx, split_target in enumerate(effective_splits):
         split_map: dict[int, tuple[float, float]] = {}
         has_positive = False
         for item in split_target.items:
@@ -298,6 +349,13 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
                 has_positive = True
             prev_q, prev_p = split_map.get(item.snapshot_id, (0.0, 0.0))
             split_map[item.snapshot_id] = (prev_q + qty, prev_p + promo)
+            if item.value_amount is not None:
+                if item.value_amount < 0:
+                    raise HTTPException(status_code=400, detail="Giá trị không được âm.")
+                custom_val_by_split_item[(split_idx, item.snapshot_id)] = (
+                    custom_val_by_split_item.get((split_idx, item.snapshot_id), 0.0)
+                    + float(item.value_amount)
+                )
             if item.discount_amount is not None:
                 if item.discount_amount < 0:
                     raise HTTPException(status_code=400, detail="Số tiền CK không được âm.")
@@ -314,25 +372,91 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
             )
         alloc_by_split.append(split_map)
 
+    remainder_map: dict[int, tuple[float, float]] = {}
     for s_id, s_row in source_by_id.items():
         raw = s_row.raw_payload if isinstance(s_row.raw_payload, dict) else {}
         orig_qty = _float_from_payload(raw, ("Số lượng", "quantity", "qty"))
         orig_promo = _float_from_payload(raw, ("Số lượng KM", "promotionQuantity", "freeQuantity", "giftQuantity"))
         got_qty = sum_qty.get(s_id, 0.0)
         got_promo = sum_promo.get(s_id, 0.0)
-        if abs(got_qty - orig_qty) > 1e-6:
+        if got_qty - orig_qty > 1e-6:
             raise HTTPException(
                 status_code=400,
-                detail=f"Sản phẩm {s_row.product_code}: tổng SL tách ({got_qty:g}) phải bằng SL đơn gốc ({orig_qty:g}).",
+                detail=f"Sản phẩm {s_row.product_code}: tổng SL tách ({got_qty:g}) vượt quá SL đơn gốc ({orig_qty:g}).",
             )
-        if abs(got_promo - orig_promo) > 1e-6:
+        if got_promo - orig_promo > 1e-6:
             raise HTTPException(
                 status_code=400,
-                detail=f"Sản phẩm {s_row.product_code}: tổng SL KM tách ({got_promo:g}) phải bằng SL KM đơn gốc ({orig_promo:g}).",
+                detail=f"Sản phẩm {s_row.product_code}: tổng SL KM tách ({got_promo:g}) vượt quá SL KM đơn gốc ({orig_promo:g}).",
             )
+        rem_q = max(0.0, round(orig_qty - got_qty, 4))
+        rem_p = max(0.0, round(orig_promo - got_promo, 4))
+        if rem_q > 1e-6 or rem_p > 1e-6:
+            if not payload.auto_assign_remainder_to_staff:
+                if abs(got_qty - orig_qty) > 1e-6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Sản phẩm {s_row.product_code}: tổng SL tách ({got_qty:g}) phải bằng SL đơn gốc ({orig_qty:g}).",
+                    )
+                if abs(got_promo - orig_promo) > 1e-6:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Sản phẩm {s_row.product_code}: tổng SL KM tách ({got_promo:g}) phải bằng SL KM đơn gốc ({orig_promo:g}).",
+                    )
+            else:
+                remainder_map[s_id] = (rem_q, rem_p)
+
+    if remainder_map:
+        staff_split_idx = len(effective_splits)
+        remainder_items: list[SplitOrderItemAllocation] = []
+        for s_id, (rem_q, rem_p) in remainder_map.items():
+            s_row = source_by_id[s_id]
+            raw = s_row.raw_payload if isinstance(s_row.raw_payload, dict) else {}
+            orig_val = _float_from_payload(raw, ("Giá trị", "totalValue", "total", "amount"))
+            orig_disc = _float_from_payload(raw, ("Số tiền CK", "totalDiscount", "discountAmount"))
+            has_line_custom_val = any(k[1] == s_id for k in custom_val_by_split_item)
+            rem_val: float | None = None
+            if has_line_custom_val:
+                used_custom_val = sum(
+                    val for (idx, sid), val in custom_val_by_split_item.items() if sid == s_id
+                )
+                rem_val = max(0.0, round(orig_val - used_custom_val))
+                custom_val_by_split_item[(staff_split_idx, s_id)] = rem_val
+            has_line_custom_disc = any(k[1] == s_id for k in custom_disc_by_split_item)
+            rem_disc: float | None = None
+            if has_line_custom_disc:
+                used_custom_disc = sum(
+                    val for (idx, sid), val in custom_disc_by_split_item.items() if sid == s_id
+                )
+                rem_disc = max(0.0, round(orig_disc - used_custom_disc))
+                custom_disc_by_split_item[(staff_split_idx, s_id)] = rem_disc
+            remainder_items.append(
+                SplitOrderItemAllocation(
+                    snapshot_id=s_id,
+                    quantity=rem_q,
+                    promo_quantity=rem_p,
+                    value_amount=rem_val,
+                    discount_amount=rem_disc,
+                )
+            )
+            sum_qty[s_id] += rem_q
+            sum_promo[s_id] += rem_p
+        effective_splits.append(
+            SplitOrderTarget(
+                is_staff_debt=True,
+                items=remainder_items,
+            )
+        )
+        alloc_by_split.append(remainder_map)
+
+    if len(effective_splits) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Cần tách thành ít nhất 2 đơn hàng (hoặc có phần thiếu tách cho NVBH).",
+        )
 
     new_order_numbers: list[str] = []
-    for idx in range(1, len(payload.splits) + 1):
+    for idx in range(1, len(effective_splits) + 1):
         candidate = f"TD-{source_order_number}-{idx:02d}"
         suffix = idx
         while candidate in new_order_numbers or db.scalar(
@@ -342,8 +466,10 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
             candidate = f"TD-{source_order_number}-{suffix:02d}"
         new_order_numbers.append(candidate)
 
-    # Tính toán giá trị/chiết khấu theo tỷ lệ cho từng dòng gốc qua các đơn tách
     line_financials: dict[tuple[int, int], tuple[float, float, float]] = {}
+    total_orig_qty = 0.0
+    total_orig_promo = 0.0
+    total_orig_val = 0.0
     total_orig_disc = 0.0
     for s_id, s_row in source_by_id.items():
         raw = s_row.raw_payload if isinstance(s_row.raw_payload, dict) else {}
@@ -352,6 +478,9 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
         orig_val = _float_from_payload(raw, ("Giá trị", "totalValue", "total", "amount"))
         orig_disc = _float_from_payload(raw, ("Số tiền CK", "totalDiscount", "discountAmount"))
         orig_voucher = _float_from_payload(raw, ("Giảm giá voucher", "voucherAmount", "voucherDiscount"))
+        total_orig_qty += orig_qty
+        total_orig_promo += orig_promo
+        total_orig_val += orig_val
         total_orig_disc += orig_disc
 
         active_indices = [
@@ -368,10 +497,13 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
         for pos, idx in enumerate(active_indices):
             q, p = alloc_by_split[idx].get(s_id, (0.0, 0.0))
             if idx not in weight_indices:
+                auto_val = 0.0
                 auto_disc = 0.0
+                if (idx, s_id) in custom_val_by_split_item:
+                    auto_val = round(custom_val_by_split_item[(idx, s_id)])
                 if (idx, s_id) in custom_disc_by_split_item:
                     auto_disc = round(custom_disc_by_split_item[(idx, s_id)])
-                line_financials[(idx, s_id)] = (0.0, auto_disc, 0.0)
+                line_financials[(idx, s_id)] = (auto_val, auto_disc, 0.0)
                 continue
             if idx == weight_indices[-1]:
                 val = round(orig_val - used_val)
@@ -387,6 +519,8 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
                 used_val += val
                 used_disc += disc
                 used_voucher += voucher
+            if (idx, s_id) in custom_val_by_split_item:
+                val = round(custom_val_by_split_item[(idx, s_id)])
             if (idx, s_id) in custom_disc_by_split_item:
                 disc = round(custom_disc_by_split_item[(idx, s_id)])
             line_financials[(idx, s_id)] = (val, disc, voucher)
@@ -402,15 +536,38 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
                 ),
             )
 
-    now = datetime.utcnow()
+    first_raw = source_rows[0].raw_payload if isinstance(source_rows[0].raw_payload, dict) else {}
+    default_staff_code = (_field(first_raw, ("staffCode", "salesStaffCode", "Mã NVBH")) or "").strip()
+    default_staff_name = (_field(first_raw, ("staffName", "salesStaffName", "Tên NVBH")) or "").strip()
+    orig_cust_code = (source_rows[0].customer_code or _field(first_raw, ("customerCode", "shopCode", "Mã KH")) or "").strip()
+    orig_cust_name = (source_rows[0].customer_name or _field(first_raw, ("customerName", "shopName", "Tên KH")) or "").strip()
+
+    resolved_targets: list[dict[str, Any]] = []
+    preview_splits: list[dict[str, Any]] = []
+
     for split_idx, new_order_num in enumerate(new_order_numbers):
         split_map = alloc_by_split[split_idx]
-        split_target = payload.splits[split_idx]
+        split_target = effective_splits[split_idx]
+        is_staff_debt = bool(split_target.is_staff_debt)
         chosen_cust_code = (split_target.customer_code or "").strip()
         chosen_cust_name = (split_target.customer_name or "").strip()
         chosen_cust_addr = (split_target.customer_address or "").strip()
 
-        if chosen_cust_code and not chosen_cust_name:
+        if is_staff_debt:
+            staff_code_val = (split_target.staff_code or default_staff_code).strip()
+            staff_name_val = (split_target.staff_name or default_staff_name).strip()
+            if not chosen_cust_code:
+                chosen_cust_code = f"NVBH-{staff_code_val}" if staff_code_val else "NVBH"
+            if not chosen_cust_name:
+                staff_label = (
+                    f"{staff_name_val} ({staff_code_val})"
+                    if (staff_name_val and staff_code_val)
+                    else (staff_name_val or staff_code_val or "Nhân viên")
+                )
+                chosen_cust_name = f"NVBH: {staff_label} — Công nợ tách thiếu"
+            if not chosen_cust_addr:
+                chosen_cust_addr = "Đơn tách phần thiếu gắn công nợ NVBH"
+        elif chosen_cust_code and not chosen_cust_name:
             snap_cust = db.scalar(
                 select(VinamilkOrderSnapshot)
                 .where(VinamilkOrderSnapshot.customer_code == chosen_cust_code)
@@ -424,6 +581,118 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
                         _field(snap_cust.raw_payload, ("address", "customerAddress", "shipTo", "Địa chỉ")) or ""
                     ).strip()
 
+        final_cust_code = chosen_cust_code or orig_cust_code
+        final_cust_name = chosen_cust_name or orig_cust_name
+        status_label = "Đơn Tách (Nợ NVBH)" if is_staff_debt else "Đơn Tách"
+
+        resolved_targets.append({
+            "new_order_number": new_order_num,
+            "customer_code": final_cust_code,
+            "customer_name": final_cust_name,
+            "customer_address": chosen_cust_addr,
+            "is_staff_debt": is_staff_debt,
+            "status_label": status_label,
+        })
+
+        split_items_preview: list[dict[str, Any]] = []
+        split_qty_sum = 0.0
+        split_promo_sum = 0.0
+        split_val_sum = 0.0
+        split_disc_sum = 0.0
+        for s_id, s_row in source_by_id.items():
+            q, p = split_map.get(s_id, (0.0, 0.0))
+            if q <= 0 and p <= 0:
+                continue
+            val, disc, voucher = line_financials.get((split_idx, s_id), (0.0, 0.0, 0.0))
+            raw_line = s_row.raw_payload if isinstance(s_row.raw_payload, dict) else {}
+            unit_str = (_field(raw_line, ("ĐVT", "unit", "unitName")) or "").strip()
+            promo_code_str = (_field(raw_line, ("Mã CTKM", "promotionCode", "campaignCode", "ctkmCode")) or "").strip()
+            split_qty_sum += q
+            split_promo_sum += p
+            split_val_sum += val
+            split_disc_sum += disc
+            split_items_preview.append({
+                "snapshot_id": s_id,
+                "product_code": s_row.product_code or "",
+                "product_name": s_row.product_name or "",
+                "promo_code": promo_code_str,
+                "unit": unit_str,
+                "quantity": _format_qty_value(q),
+                "promo_quantity": _format_qty_value(p),
+                "value_amount": _format_qty_value(val),
+                "discount_amount": _format_qty_value(disc),
+            })
+
+        preview_splits.append({
+            "new_order_number": new_order_num,
+            "customer_code": final_cust_code,
+            "customer_name": final_cust_name,
+            "customer_address": chosen_cust_addr,
+            "is_staff_debt": is_staff_debt,
+            "status_label": status_label,
+            "total_qty": _format_qty_value(split_qty_sum),
+            "total_promo_qty": _format_qty_value(split_promo_sum),
+            "total_value": _format_qty_value(split_val_sum),
+            "total_discount": _format_qty_value(split_disc_sum),
+            "items": split_items_preview,
+        })
+
+    preview_data = {
+        "source_order_number": source_order_number,
+        "customer_code": orig_cust_code,
+        "customer_name": orig_cust_name,
+        "staff_code": default_staff_code,
+        "staff_name": default_staff_name,
+        "order_created_date": source_rows[0].order_created_date.isoformat() if source_rows[0].order_created_date else None,
+        "total_qty": _format_qty_value(total_orig_qty),
+        "total_promo_qty": _format_qty_value(total_orig_promo),
+        "total_value": _format_qty_value(total_orig_val),
+        "total_discount": _format_qty_value(total_orig_disc),
+        "splits": preview_splits,
+    }
+
+    return {
+        "source_order_number": source_order_number,
+        "source_rows": source_rows,
+        "source_by_id": source_by_id,
+        "effective_splits": effective_splits,
+        "alloc_by_split": alloc_by_split,
+        "new_order_numbers": new_order_numbers,
+        "line_financials": line_financials,
+        "resolved_targets": resolved_targets,
+        "preview_data": preview_data,
+    }
+
+
+def _split_vinamilk_order(
+    db: Session,
+    payload: SplitOrderRequest,
+    performed_by: str | None = None,
+    ignore_split_request_id: int | None = None,
+) -> dict[str, Any]:
+    actor = (performed_by or "").strip() or "Hệ thống"
+    prepared = _prepare_split_vinamilk_order(
+        db,
+        payload,
+        ignore_split_request_id=ignore_split_request_id,
+    )
+    source_order_number: str = prepared["source_order_number"]
+    source_by_id: dict[int, VinamilkOrderSnapshot] = prepared["source_by_id"]
+    alloc_by_split: list[dict[int, tuple[float, float]]] = prepared["alloc_by_split"]
+    new_order_numbers: list[str] = prepared["new_order_numbers"]
+    line_financials: dict[tuple[int, int], tuple[float, float, float]] = prepared["line_financials"]
+    resolved_targets: list[dict[str, Any]] = prepared["resolved_targets"]
+    now = datetime.utcnow()
+
+    for split_idx, target_info in enumerate(resolved_targets):
+        new_order_num = target_info["new_order_number"]
+        split_map = alloc_by_split[split_idx]
+        is_staff_debt = bool(target_info["is_staff_debt"])
+        final_cust_code = target_info["customer_code"]
+        final_cust_name = target_info["customer_name"]
+        chosen_cust_addr = target_info["customer_address"]
+        status_label = target_info["status_label"]
+
         for s_id, s_row in source_by_id.items():
             q, p = split_map.get(s_id, (0.0, 0.0))
             if q <= 0 and p <= 0:
@@ -436,19 +705,19 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
             fmt_disc = _format_qty_value(disc)
             fmt_voucher = _format_qty_value(voucher)
 
-            final_cust_code = chosen_cust_code or s_row.customer_code
-            final_cust_name = chosen_cust_name or s_row.customer_name
+            cust_code = final_cust_code or s_row.customer_code
+            cust_name = final_cust_name or s_row.customer_name
 
             base_raw["Số đơn hàng"] = new_order_num
             base_raw["orderNumber"] = new_order_num
-            if final_cust_code:
-                base_raw["Mã KH"] = final_cust_code
-                base_raw["customerCode"] = final_cust_code
-                base_raw["shopCode"] = final_cust_code
-            if final_cust_name:
-                base_raw["Tên KH"] = final_cust_name
-                base_raw["customerName"] = final_cust_name
-                base_raw["shopName"] = final_cust_name
+            if cust_code:
+                base_raw["Mã KH"] = cust_code
+                base_raw["customerCode"] = cust_code
+                base_raw["shopCode"] = cust_code
+            if cust_name:
+                base_raw["Tên KH"] = cust_name
+                base_raw["customerName"] = cust_name
+                base_raw["shopName"] = cust_name
             if chosen_cust_addr:
                 base_raw["Địa chỉ"] = chosen_cust_addr
                 base_raw["address"] = chosen_cust_addr
@@ -465,20 +734,24 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
             base_raw["totalDiscount"] = fmt_disc
             base_raw["Giảm giá voucher"] = fmt_voucher
             base_raw["voucherAmount"] = fmt_voucher
-            base_raw["orderStatus"] = "Đơn Tách"
-            base_raw["status"] = "Đơn Tách"
+            base_raw["orderStatus"] = status_label
+            base_raw["status"] = status_label
+            base_raw["_is_staff_debt"] = is_staff_debt
+            base_raw["Người thực hiện"] = actor
+            base_raw["performedBy"] = actor
 
             remote_key = hashlib.sha256(f"SPLIT|{new_order_num}|{s_id}".encode()).hexdigest()
             db.add(VinamilkOrderSnapshot(
                 remote_key=remote_key,
                 order_number=new_order_num,
                 original_order_number=source_order_number,
-                customer_code=final_cust_code,
-                customer_name=final_cust_name,
+                customer_code=cust_code,
+                customer_name=cust_name,
                 product_code=s_row.product_code,
                 product_name=s_row.product_name,
-                status="Đơn Tách",
-                processing_status="Đơn Tách",
+                status=status_label,
+                processing_status=status_label,
+                performed_by=actor,
                 is_synthetic=True,
                 warehouse_updated=s_row.warehouse_updated,
                 returned=s_row.returned,
@@ -493,6 +766,7 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
             new_order_number=new_order_num,
             replaced_order_number=source_order_number,
             replacement_type="SPLIT",
+            performed_by=actor,
             updated_at=now,
         ))
 
@@ -502,10 +776,117 @@ def _split_vinamilk_order(db: Session, payload: SplitOrderRequest) -> dict[str, 
         "replaced_order_number": source_order_number,
         "new_order_numbers": new_order_numbers,
         "replacement_type": "SPLIT",
+        "performed_by": actor,
     }
 
 
-def _merge_vinamilk_orders(db: Session, payload: MergeOrdersRequest) -> dict[str, Any]:
+def _serialize_split_order_request(req: VinamilkOrderSplitRequest) -> dict[str, Any]:
+    preview = req.preview_data if isinstance(req.preview_data, dict) else {}
+    return {
+        "id": req.id,
+        "source_order_number": req.source_order_number,
+        "status": req.status,
+        "requested_by": req.requested_by or "Hệ thống",
+        "requested_at": _iso_utc(req.requested_at),
+        "reviewed_by": req.reviewed_by,
+        "reviewed_at": _iso_utc(req.reviewed_at),
+        "rejection_reason": req.rejection_reason,
+        "result_order_numbers": req.result_order_numbers or [],
+        "preview": preview,
+    }
+
+
+def _create_split_order_request(
+    db: Session,
+    payload: SplitOrderRequest,
+    requested_by: str | None = None,
+) -> dict[str, Any]:
+    actor = (requested_by or "").strip() or "Hệ thống"
+    prepared = _prepare_split_vinamilk_order(db, payload)
+    req_row = VinamilkOrderSplitRequest(
+        source_order_number=prepared["source_order_number"],
+        status="PENDING",
+        requested_by=actor,
+        requested_at=datetime.utcnow(),
+        request_payload=payload.model_dump(mode="json"),
+        preview_data=prepared["preview_data"],
+    )
+    db.add(req_row)
+    db.commit()
+    db.refresh(req_row)
+    return _serialize_split_order_request(req_row)
+
+
+def _approve_split_order_request(
+    db: Session,
+    request_id: int,
+    reviewed_by: str | None = None,
+) -> dict[str, Any]:
+    req_row = db.get(VinamilkOrderSplitRequest, request_id)
+    if not req_row:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu tách đơn.")
+    if req_row.status != "PENDING":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Yêu cầu tách đơn #{request_id} đã được xử lý ({req_row.status}).",
+        )
+    reviewer = (reviewed_by or "").strip() or "Kế toán"
+    requester = (req_row.requested_by or "").strip()
+    if requester and reviewer and requester != reviewer:
+        actor_label = f"{requester} (KT duyệt: {reviewer})"
+    else:
+        actor_label = reviewer or requester or "Hệ thống"
+
+    payload_obj = SplitOrderRequest.model_validate(req_row.request_payload)
+    split_res = _split_vinamilk_order(
+        db,
+        payload_obj,
+        performed_by=actor_label,
+        ignore_split_request_id=req_row.id,
+    )
+    req_row.status = "APPROVED"
+    req_row.reviewed_by = reviewer
+    req_row.reviewed_at = datetime.utcnow()
+    req_row.result_order_numbers = split_res["new_order_numbers"]
+    db.commit()
+    db.refresh(req_row)
+    return {
+        **_serialize_split_order_request(req_row),
+        "new_order_numbers": split_res["new_order_numbers"],
+        "replaced_order_number": split_res["replaced_order_number"],
+        "performed_by": actor_label,
+    }
+
+
+def _reject_split_order_request(
+    db: Session,
+    request_id: int,
+    reason: str | None = None,
+    reviewed_by: str | None = None,
+) -> dict[str, Any]:
+    req_row = db.get(VinamilkOrderSplitRequest, request_id)
+    if not req_row:
+        raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu tách đơn.")
+    if req_row.status != "PENDING":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Yêu cầu tách đơn #{request_id} đã được xử lý ({req_row.status}).",
+        )
+    req_row.status = "REJECTED"
+    req_row.reviewed_by = (reviewed_by or "").strip() or "Kế toán"
+    req_row.reviewed_at = datetime.utcnow()
+    req_row.rejection_reason = (reason or "").strip() or None
+    db.commit()
+    db.refresh(req_row)
+    return _serialize_split_order_request(req_row)
+
+
+def _merge_vinamilk_orders(
+    db: Session,
+    payload: MergeOrdersRequest,
+    performed_by: str | None = None,
+) -> dict[str, Any]:
+    actor = (performed_by or "").strip() or "Hệ thống"
     raw_nums = payload.source_order_numbers or payload.order_numbers or []
     order_nums = list(dict.fromkeys(num.strip() for num in raw_nums if num and num.strip()))
     if len(order_nums) < 2:
@@ -629,6 +1010,8 @@ def _merge_vinamilk_orders(db: Session, payload: MergeOrdersRequest) -> dict[str
         merged_raw["voucherAmount"] = fmt_voucher
         merged_raw["orderStatus"] = "Đơn Gộp"
         merged_raw["status"] = "Đơn Gộp"
+        merged_raw["Người thực hiện"] = actor
+        merged_raw["performedBy"] = actor
 
         remote_key = hashlib.sha256(f"MERGE|{new_order_num}|{prod_code}|{promo_code}|{line_idx}".encode()).hexdigest()
         db.add(VinamilkOrderSnapshot(
@@ -641,6 +1024,7 @@ def _merge_vinamilk_orders(db: Session, payload: MergeOrdersRequest) -> dict[str
             product_name=t_row.product_name,
             status="Đơn Gộp",
             processing_status="Đơn Gộp",
+            performed_by=actor,
             is_synthetic=True,
             warehouse_updated=warehouse_updated,
             returned=returned,
@@ -656,6 +1040,7 @@ def _merge_vinamilk_orders(db: Session, payload: MergeOrdersRequest) -> dict[str
         new_order_number=new_order_num,
         replaced_order_number=replaced_str,
         replacement_type="MERGE",
+        performed_by=actor,
         updated_at=now,
     ))
     db.commit()
@@ -664,6 +1049,7 @@ def _merge_vinamilk_orders(db: Session, payload: MergeOrdersRequest) -> dict[str
         "source_order_numbers": order_nums,
         "merged_order_numbers": order_nums,
         "replacement_type": "MERGE",
+        "performed_by": actor,
     }
 
 
@@ -832,6 +1218,7 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
         snapshot.product_code = product_code
         snapshot.product_name = _field(row, ("productName", "itemName", "product", "Sản phẩm"))
         snapshot.status = _field(row, ("orderStatus", "status"))
+        snapshot.performed_by = "Hệ thống"
         snapshot.order_created_date = _parse_optional_date(_field(row, ("createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày")))
         snapshot.delivery_date = _parse_optional_date(_field(row, ("deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày")))
         snapshot.synced_from = from_date
@@ -1157,12 +1544,17 @@ def list_local_vinamilk_orders(
     replaced_by: dict[str, list[str]] = defaultdict(list)
     replaced_order_for: dict[str, str] = {}
     replacement_type_for: dict[str, str] = {}
+    replacement_actor_for: dict[str, str] = {}
+    pending_split_for: dict[str, VinamilkOrderSplitRequest] = {}
     if rows:
         all_replacements = db.scalars(select(VinamilkOrderReplacement)).all()
         for replacement in all_replacements:
             replaced_order_for[replacement.new_order_number] = replacement.replaced_order_number
             rep_type = getattr(replacement, "replacement_type", "MANUAL") or "MANUAL"
             replacement_type_for[replacement.new_order_number] = rep_type
+            rep_actor = (getattr(replacement, "performed_by", None) or "").strip()
+            if rep_actor:
+                replacement_actor_for[replacement.new_order_number] = rep_actor
             for old_part in (replacement.replaced_order_number or "").split(","):
                 old_clean = old_part.strip()
                 if old_clean:
@@ -1170,14 +1562,26 @@ def list_local_vinamilk_orders(
                         replaced_by[old_clean].append(replacement.new_order_number)
                     if old_clean not in replacement_type_for:
                         replacement_type_for[old_clean] = rep_type
+        pending_reqs = db.scalars(
+            select(VinamilkOrderSplitRequest)
+            .where(VinamilkOrderSplitRequest.status == "PENDING")
+            .order_by(VinamilkOrderSplitRequest.id.desc())
+        ).all()
+        for req_item in pending_reqs:
+            src_num = (req_item.source_order_number or "").strip()
+            if src_num and src_num not in pending_split_for:
+                pending_split_for[src_num] = req_item
     for row in rows:
         order_num = row.order_number or ""
         rep_order = replaced_order_for.get(order_num)
         rep_by_list = replaced_by.get(order_num, [])
+        pending_req = pending_split_for.get(order_num)
         if rep_order:
             replacement_display = f"TT: {rep_order}"
         elif rep_by_list:
             replacement_display = f"BTT: {', '.join(rep_by_list)}"
+        elif pending_req:
+            replacement_display = f"Chờ KT duyệt tách (#{pending_req.id})"
         else:
             replacement_display = None
         proc_status = (
@@ -1185,18 +1589,32 @@ def list_local_vinamilk_orders(
             if getattr(row, "processing_status", None)
             else ("Đã cập nhật kho" if row.warehouse_updated is True else "")
         )
+        if pending_req and not getattr(row, "is_synthetic", False):
+            proc_status = "Chờ KT duyệt tách"
+        row_actor = (getattr(row, "performed_by", None) or "").strip()
+        if not row_actor and isinstance(row.raw_payload, dict):
+            row_actor = (
+                _field(row.raw_payload, ("performedBy", "Người thực hiện", "_performed_by")) or ""
+            ).strip()
+        if pending_req and pending_req.requested_by:
+            performed_by = f"{pending_req.requested_by} (Chờ KT)"
+        else:
+            performed_by = replacement_actor_for.get(order_num) or row_actor or "Hệ thống"
         base = {
             **row.raw_payload,
+            "Người thực hiện": performed_by,
+            "_performed_by": performed_by,
             "_local_id": row.id,
             "_synced_at": _iso_utc(row.synced_at),
             "_allocation_id": None,
             "_warehouse_updated": row.warehouse_updated,
             "_processing_status": proc_status,
             "_is_synthetic": bool(getattr(row, "is_synthetic", False)),
-            "_replacement_type": replacement_type_for.get(order_num),
+            "_replacement_type": replacement_type_for.get(order_num) or ("PENDING_SPLIT" if pending_req else None),
             "_replaced_order_number": rep_order,
             "_replaced_by_order_numbers": rep_by_list,
             "_replacement_display": replacement_display,
+            "_pending_split_request_id": pending_req.id if pending_req else None,
         }
         if source == "sync":
             output_rows.append(base)
@@ -1338,12 +1756,20 @@ def update_vinamilk_order_replacement(
     new_order_number: str,
     payload: OrderReplacementUpdateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    _update_order_replacement(db, new_order_number, payload.replaced_order_number)
+    actor = getattr(current_user, "username", None)
+    _update_order_replacement(
+        db,
+        new_order_number,
+        payload.replaced_order_number,
+        performed_by=actor,
+    )
     db.commit()
     return {
         "new_order_number": new_order_number,
         "replaced_order_number": payload.replaced_order_number.strip() if payload.replaced_order_number else None,
+        "performed_by": actor if payload.replaced_order_number and payload.replaced_order_number.strip() else "Hệ thống",
     }
 
 
@@ -1351,16 +1777,86 @@ def update_vinamilk_order_replacement(
 def split_vinamilk_order(
     payload: SplitOrderRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    return _split_vinamilk_order(db, payload)
+    return _split_vinamilk_order(db, payload, performed_by=getattr(current_user, "username", None))
+
+
+@router.get("/vinamilk-orders/split-requests")
+def list_vinamilk_split_order_requests(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    stmt = select(VinamilkOrderSplitRequest).order_by(
+        VinamilkOrderSplitRequest.requested_at.desc(),
+        VinamilkOrderSplitRequest.id.desc(),
+    )
+    if status and status.strip() and status.strip().upper() != "ALL":
+        stmt = stmt.where(VinamilkOrderSplitRequest.status == status.strip().upper())
+    rows = db.scalars(stmt.limit(limit)).all()
+    pending_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(VinamilkOrderSplitRequest)
+            .where(VinamilkOrderSplitRequest.status == "PENDING")
+        )
+        or 0
+    )
+    return {
+        "requests": [_serialize_split_order_request(r) for r in rows],
+        "pending_count": int(pending_count),
+    }
+
+
+@router.post("/vinamilk-orders/split-requests")
+def create_vinamilk_split_order_request(
+    payload: SplitOrderRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _create_split_order_request(
+        db,
+        payload,
+        requested_by=getattr(current_user, "username", None),
+    )
+
+
+@router.post("/vinamilk-orders/split-requests/{request_id}/approve")
+def approve_vinamilk_split_order_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _approve_split_order_request(
+        db,
+        request_id,
+        reviewed_by=getattr(current_user, "username", None),
+    )
+
+
+@router.post("/vinamilk-orders/split-requests/{request_id}/reject")
+def reject_vinamilk_split_order_request(
+    request_id: int,
+    payload: RejectSplitOrderRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _reject_split_order_request(
+        db,
+        request_id,
+        reason=payload.reason if payload else None,
+        reviewed_by=getattr(current_user, "username", None),
+    )
 
 
 @router.post("/vinamilk-orders/merge")
 def merge_vinamilk_orders(
     payload: MergeOrdersRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    return _merge_vinamilk_orders(db, payload)
+    return _merge_vinamilk_orders(db, payload, performed_by=getattr(current_user, "username", None))
 
 
 @router.delete("/vinamilk-orders/split-merge/{order_number}")

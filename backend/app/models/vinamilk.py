@@ -28,6 +28,7 @@ class VinamilkOrderSnapshot(Base):
     product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str | None] = mapped_column(String(80), nullable=True)
     processing_status: Mapped[str | None] = mapped_column(String(40), nullable=True, default=None)
+    performed_by: Mapped[str | None] = mapped_column(String(120), nullable=True, default=None)
     is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     warehouse_updated: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     returned: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
@@ -58,4 +59,21 @@ class VinamilkOrderReplacement(Base):
     new_order_number: Mapped[str] = mapped_column(String(120), primary_key=True)
     replaced_order_number: Mapped[str] = mapped_column(String(1000), nullable=False, index=True)
     replacement_type: Mapped[str] = mapped_column(String(20), nullable=False, default="MANUAL")
+    performed_by: Mapped[str | None] = mapped_column(String(120), nullable=True, default=None)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class VinamilkOrderSplitRequest(Base):
+    __tablename__ = "vinamilk_order_split_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_order_number: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    requested_by: Mapped[str | None] = mapped_column(String(120), nullable=True, default=None)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True, default=None)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    preview_data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_order_numbers: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)

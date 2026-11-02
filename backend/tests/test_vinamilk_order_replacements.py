@@ -17,17 +17,22 @@ from app.api.v1.endpoints.sync import (
     SplitOrderRequest,
     SplitOrderTarget,
     _apply_scoped_states,
+    _approve_split_order_request,
+    _create_split_order_request,
     _merge_vinamilk_orders,
     _order_numbers,
+    _reject_split_order_request,
     _revert_split_or_merge_order,
     _save_snapshot,
     _split_vinamilk_order,
     _update_order_replacement,
     list_local_vinamilk_orders,
+    list_vinamilk_split_order_requests,
 )
 from app.models.vinamilk import (
     VinamilkOrderReplacement,
     VinamilkOrderSnapshot,
+    VinamilkOrderSplitRequest,
     VinamilkSyncRun,
 )
 from app.services.vinamilk_sales_summary import build_sales_summary
@@ -42,6 +47,7 @@ def db():
     )
     VinamilkOrderSnapshot.__table__.create(engine)
     VinamilkOrderReplacement.__table__.create(engine)
+    VinamilkOrderSplitRequest.__table__.create(engine)
     VinamilkSyncRun.__table__.create(engine)
     with Session(engine) as session:
         yield session
@@ -146,7 +152,7 @@ def test_replacement_link_rejects_cycles(db):
 def test_order_list_includes_replacement_metadata_on_both_orders(db):
     add_order(db, "VM-OLD")
     add_order(db, "VM-NEW")
-    _update_order_replacement(db, "VM-NEW", "VM-OLD")
+    _update_order_replacement(db, "VM-NEW", "VM-OLD", performed_by="van.a")
     db.flush()
 
     response = list_local_vinamilk_orders(
@@ -163,8 +169,10 @@ def test_order_list_includes_replacement_metadata_on_both_orders(db):
     rows_by_number = {row["orderNumber"]: row for row in response["rows"]}
     assert rows_by_number["VM-NEW"]["_replaced_order_number"] == "VM-OLD"
     assert rows_by_number["VM-NEW"]["_replacement_display"] == "TT: VM-OLD"
+    assert rows_by_number["VM-NEW"]["_performed_by"] == "van.a"
     assert rows_by_number["VM-OLD"]["_replaced_by_order_numbers"] == ["VM-NEW"]
     assert rows_by_number["VM-OLD"]["_replacement_display"] == "BTT: VM-NEW"
+    assert rows_by_number["VM-OLD"]["_performed_by"] == "Hệ thống"
 
 
 def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
@@ -216,10 +224,12 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
                 ),
             ],
         ),
+        performed_by="admin",
     )
     db.commit()
 
     assert res["new_order_numbers"] == ["TD-PO-100-01", "TD-PO-100-02"]
+    assert res["performed_by"] == "admin"
 
     listed = list_local_vinamilk_orders(
         from_date=date(2026, 10, 1),
@@ -233,8 +243,10 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
     )
     by_order = {row["orderNumber"]: row for row in listed["rows"]}
     assert by_order["PO-100"]["_replacement_display"] == "BTT: TD-PO-100-01, TD-PO-100-02"
+    assert by_order["PO-100"]["_performed_by"] == "Hệ thống"
     assert by_order["TD-PO-100-01"]["_processing_status"] == "Đơn Tách"
     assert by_order["TD-PO-100-01"]["_replacement_display"] == "TT: PO-100"
+    assert by_order["TD-PO-100-01"]["_performed_by"] == "admin"
     assert by_order["TD-PO-100-01"]["customerCode"] == "000101"
     assert by_order["TD-PO-100-01"]["customerName"] == "KH A - CN1"
     assert by_order["TD-PO-100-01"]["totalValue"] == 40000.0
@@ -259,7 +271,7 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
     db.commit()
     assert rev["deleted_synthetic_orders"] == ["TD-PO-100-01", "TD-PO-100-02"]
 
-    # Tách lại đơn với Số tiền CK chỉnh sửa thủ công (dồn 8.500 sang Đơn tách 1 và 1.500 sang Đơn tách 2)
+    # Tách lại đơn với Giá trị và Số tiền CK chỉnh sửa thủ công (dồn sang Đơn tách 1 và Đơn tách 2)
     res_custom_disc = _split_vinamilk_order(
         db,
         SplitOrderRequest(
@@ -271,6 +283,7 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
                             snapshot_id=line1.id,
                             quantity=4,
                             promo_quantity=1,
+                            value_amount=45000,
                             discount_amount=8500,
                         )
                     ]
@@ -281,6 +294,7 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
                             snapshot_id=line1.id,
                             quantity=6,
                             promo_quantity=1,
+                            value_amount=55000,
                             discount_amount=1500,
                         )
                     ]
@@ -301,8 +315,136 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
         db=db,
     )
     by_order_after = {row["orderNumber"]: row for row in listed_after["rows"]}
+    assert by_order_after["TD-PO-100-01"]["totalValue"] == 45000.0
     assert by_order_after["TD-PO-100-01"]["totalDiscount"] == 8500.0
+    assert by_order_after["TD-PO-100-02"]["totalValue"] == 55000.0
     assert by_order_after["TD-PO-100-02"]["totalDiscount"] == 1500.0
+
+    # Hoàn tác rồi kiểm tra tự động tách phần thiếu gắn Công nợ NVBH (auto_assign_remainder_to_staff=True)
+    _revert_split_or_merge_order(db, "PO-100")
+    db.commit()
+    res_staff_shortage = _split_vinamilk_order(
+        db,
+        SplitOrderRequest(
+            order_number="PO-100",
+            auto_assign_remainder_to_staff=True,
+            splits=[
+                SplitOrderTarget(
+                    customer_code="000102",
+                    customer_name="KH Lẻ",
+                    items=[
+                        SplitOrderItemAllocation(
+                            snapshot_id=line1.id,
+                            quantity=7,
+                            promo_quantity=1,
+                        )
+                    ],
+                )
+            ],
+        ),
+        performed_by="ketoan.01",
+    )
+    db.commit()
+    assert res_staff_shortage["new_order_numbers"] == ["TD-PO-100-01", "TD-PO-100-02"]
+    listed_shortage = list_local_vinamilk_orders(
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 1),
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=2000,
+        db=db,
+    )
+    by_order_shortage = {row["orderNumber"]: row for row in listed_shortage["rows"]}
+    assert by_order_shortage["TD-PO-100-01"]["_processing_status"] == "Đơn Tách"
+    assert by_order_shortage["TD-PO-100-01"]["quantity"] == 7.0
+    assert by_order_shortage["TD-PO-100-01"]["promotionQuantity"] == 1.0
+    assert by_order_shortage["TD-PO-100-02"]["_processing_status"] == "Đơn Tách (Nợ NVBH)"
+    assert by_order_shortage["TD-PO-100-02"]["quantity"] == 3.0
+    assert by_order_shortage["TD-PO-100-02"]["promotionQuantity"] == 1.0
+    assert by_order_shortage["TD-PO-100-02"]["totalValue"] == 30000.0
+    assert by_order_shortage["TD-PO-100-02"]["totalDiscount"] == 3000.0
+    assert str(by_order_shortage["TD-PO-100-02"]["customerCode"]).startswith("NVBH")
+
+    # Hoàn tác rồi kiểm tra quy trình 2 bước: Gửi yêu cầu tách đơn -> Kế toán xác nhận (approve / reject)
+    _revert_split_or_merge_order(db, "PO-100")
+    db.commit()
+    split_req_payload = SplitOrderRequest(
+        order_number="PO-100",
+        auto_assign_remainder_to_staff=True,
+        splits=[
+            SplitOrderTarget(
+                customer_code="000102",
+                customer_name="KH Lẻ",
+                items=[
+                    SplitOrderItemAllocation(
+                        snapshot_id=line1.id,
+                        quantity=6,
+                        promo_quantity=1,
+                        value_amount=62000,
+                        discount_amount=6000,
+                    )
+                ],
+            )
+        ],
+    )
+    created_req = _create_split_order_request(db, split_req_payload, requested_by="sale.admin")
+    assert created_req["status"] == "PENDING"
+    assert created_req["requested_by"] == "sale.admin"
+    assert len(created_req["preview"]["splits"]) == 2
+
+    # Khi đang PENDING thì đơn gốc hiển thị trạng thái "Chờ KT duyệt tách" và chưa tạo đơn TD-
+    listed_pending = list_local_vinamilk_orders(
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 1),
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=2000,
+        db=db,
+    )
+    by_order_pending = {row["orderNumber"]: row for row in listed_pending["rows"]}
+    assert "TD-PO-100-01" not in by_order_pending
+    assert by_order_pending["PO-100"]["_processing_status"] == "Chờ KT duyệt tách"
+    assert by_order_pending["PO-100"]["_pending_split_request_id"] == created_req["id"]
+
+    # Thử từ chối yêu cầu trước -> đơn gốc trở lại bình thường
+    rejected = _reject_split_order_request(
+        db,
+        created_req["id"],
+        reason="Sai đơn giá chiết khấu",
+        reviewed_by="ketoan.01",
+    )
+    assert rejected["status"] == "REJECTED"
+    assert rejected["rejection_reason"] == "Sai đơn giá chiết khấu"
+
+    # Tạo lại yêu cầu mới và Kế toán bấm Duyệt
+    created_req_2 = _create_split_order_request(db, split_req_payload, requested_by="sale.admin")
+    pending_list = list_vinamilk_split_order_requests(status="PENDING", limit=50, db=db)
+    assert pending_list["pending_count"] == 1
+
+    approved = _approve_split_order_request(db, created_req_2["id"], reviewed_by="ketoan.01")
+    assert approved["status"] == "APPROVED"
+    assert approved["new_order_numbers"] == ["TD-PO-100-01", "TD-PO-100-02"]
+    assert approved["performed_by"] == "sale.admin (KT duyệt: ketoan.01)"
+
+    listed_approved = list_local_vinamilk_orders(
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 1),
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=2000,
+        db=db,
+    )
+    by_order_approved = {row["orderNumber"]: row for row in listed_approved["rows"]}
+    assert by_order_approved["TD-PO-100-01"]["totalValue"] == 62000.0
+    assert by_order_approved["TD-PO-100-01"]["_performed_by"] == "sale.admin (KT duyệt: ketoan.01)"
+    assert by_order_approved["TD-PO-100-02"]["_processing_status"] == "Đơn Tách (Nợ NVBH)"
+    assert by_order_approved["TD-PO-100-02"]["totalValue"] == 38000.0
 
 
 def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
@@ -347,11 +489,13 @@ def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
             order_numbers=["PO-201", "PO-202"],
             representative_order_number="PO-201",
         ),
+        performed_by="van.a",
     )
     db.commit()
 
     new_order_no = res["new_order_number"]
     assert new_order_no == "GD-261001-001"
+    assert res["performed_by"] == "van.a"
 
     listed = list_local_vinamilk_orders(
         from_date=date(2026, 10, 1),
@@ -366,11 +510,14 @@ def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
     by_order = {row["orderNumber"]: row for row in listed["rows"]}
     assert by_order[new_order_no]["_processing_status"] == "Đơn Gộp"
     assert by_order[new_order_no]["_replacement_display"] == "TT: PO-201, PO-202"
+    assert by_order[new_order_no]["_performed_by"] == "van.a"
     assert by_order[new_order_no]["quantity"] == 10.0
     assert by_order[new_order_no]["promotionQuantity"] == 3.0
     assert by_order[new_order_no]["totalValue"] == 100000.0
     assert by_order["PO-201"]["_replacement_display"] == f"BTT: {new_order_no}"
+    assert by_order["PO-201"]["_performed_by"] == "Hệ thống"
     assert by_order["PO-202"]["_replacement_display"] == f"BTT: {new_order_no}"
+    assert by_order["PO-202"]["_performed_by"] == "Hệ thống"
 
 
 def test_migration_leaves_existing_order_states_unknown():

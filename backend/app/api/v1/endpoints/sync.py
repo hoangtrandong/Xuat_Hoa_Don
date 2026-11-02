@@ -3,7 +3,7 @@ import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.services.vinamilk_sales_summary import build_sales_summary
 from app.models.customer import Company, Customer
+from app.models.employee import Employee
 from app.models.user import User
 from app.models.vinamilk import (
     VinamilkOrderReplacement,
@@ -51,6 +52,47 @@ def _iso_utc(value: datetime | None) -> str | None:
     if value is None:
         return None
     return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
+
+
+def _today_vn() -> date:
+    """Ngày hiện tại theo múi giờ Việt Nam (UTC+7)."""
+    return datetime.now(timezone(timedelta(hours=7))).date()
+
+
+def _is_admin_user(user: User | None) -> bool:
+    if user is None:
+        return True
+    username = (getattr(user, "username", None) or "").strip().lower()
+    if username == "admin":
+        return True
+    roles = getattr(user, "roles", None) or []
+    return any((getattr(r, "name", None) or "").strip().lower() == "admin" for r in roles)
+
+
+def _enforce_today_only_for_non_admin(
+    rows: list[VinamilkOrderSnapshot],
+    is_admin: bool = True,
+    action_label: str = "Tách/Gộp đơn",
+    today_date: date | None = None,
+) -> None:
+    if is_admin:
+        return
+    today = today_date or _today_vn()
+    past_orders: list[str] = []
+    for row in rows:
+        order_date = row.order_created_date or row.synced_from
+        if order_date is not None and order_date != today:
+            label = f"{row.order_number} ({order_date:%d/%m/%Y})"
+            if label not in past_orders:
+                past_orders.append(label)
+    if past_orders:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Chỉ tài khoản Admin mới được phép {action_label} đối với đơn hàng khác ngày hôm nay "
+                f"({today:%d/%m/%Y}). Đơn bị chặn: {', '.join(past_orders)}."
+            ),
+        )
 
 
 class VinamilkSearchRequest(BaseModel):
@@ -128,6 +170,11 @@ class MergeOrdersRequest(BaseModel):
     source_order_numbers: list[str] = Field(default_factory=list)
     order_numbers: list[str] = Field(default_factory=list)
     representative_order_number: str | None = None
+    customer_code: str | None = None
+    customer_name: str | None = None
+    customer_address: str | None = None
+    staff_code: str | None = None
+    staff_name: str | None = None
 
 
 def _order_numbers(payload: Any) -> set[str]:
@@ -297,13 +344,13 @@ def _prepare_split_vinamilk_order(
     db: Session,
     payload: SplitOrderRequest,
     ignore_split_request_id: int | None = None,
+    is_admin: bool = True,
 ) -> dict[str, Any]:
     source_order_number = (payload.source_order_number or payload.order_number or "").strip()
     if not source_order_number:
         raise HTTPException(status_code=400, detail="Mã đơn hàng gốc không được để trống.")
-    min_splits = 1 if payload.auto_assign_remainder_to_staff else 2
-    if len(payload.splits) < min_splits:
-        raise HTTPException(status_code=400, detail="Cần tách thành ít nhất 2 đơn hàng.")
+    if len(payload.splits) < 1:
+        raise HTTPException(status_code=400, detail="Cần có ít nhất 1 đơn nhận tách.")
 
     source_rows = db.scalars(
         select(VinamilkOrderSnapshot)
@@ -317,6 +364,8 @@ def _prepare_split_vinamilk_order(
         raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng {source_order_number}.")
     if any(getattr(row, "is_synthetic", False) for row in source_rows):
         raise HTTPException(status_code=400, detail=f"Đơn {source_order_number} là đơn Tách/Gộp, không thể tách tiếp.")
+
+    _enforce_today_only_for_non_admin(source_rows, is_admin=is_admin, action_label="tách đơn")
 
     _check_orders_available_for_split_merge(
         db,
@@ -449,11 +498,28 @@ def _prepare_split_vinamilk_order(
         )
         alloc_by_split.append(remainder_map)
 
-    if len(effective_splits) < 2:
+    if len(effective_splits) < 1:
         raise HTTPException(
             status_code=400,
-            detail="Cần tách thành ít nhất 2 đơn hàng (hoặc có phần thiếu tách cho NVBH).",
+            detail="Cần có ít nhất 1 đơn nhận tách.",
         )
+
+    first_raw_check = source_rows[0].raw_payload if isinstance(source_rows[0].raw_payload, dict) else {}
+    orig_cust_code_check = (
+        source_rows[0].customer_code
+        or _field(first_raw_check, ("customerCode", "shopCode", "Mã KH"))
+        or ""
+    ).strip()
+    if len(effective_splits) == 1:
+        only_target = effective_splits[0]
+        target_code = (only_target.customer_code or "").strip()
+        if not only_target.is_staff_debt and (
+            not target_code or target_code.upper() == orig_cust_code_check.upper()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Khi tách thành 1 đơn, vui lòng chọn Mã khách hàng mới khác với khách hàng của đơn gốc (hoặc gắn Công nợ NVBH).",
+            )
 
     new_order_numbers: list[str] = []
     for idx in range(1, len(effective_splits) + 1):
@@ -669,12 +735,14 @@ def _split_vinamilk_order(
     payload: SplitOrderRequest,
     performed_by: str | None = None,
     ignore_split_request_id: int | None = None,
+    is_admin: bool = True,
 ) -> dict[str, Any]:
     actor = (performed_by or "").strip() or "Hệ thống"
     prepared = _prepare_split_vinamilk_order(
         db,
         payload,
         ignore_split_request_id=ignore_split_request_id,
+        is_admin=is_admin,
     )
     source_order_number: str = prepared["source_order_number"]
     source_by_id: dict[int, VinamilkOrderSnapshot] = prepared["source_by_id"]
@@ -800,9 +868,10 @@ def _create_split_order_request(
     db: Session,
     payload: SplitOrderRequest,
     requested_by: str | None = None,
+    is_admin: bool = True,
 ) -> dict[str, Any]:
     actor = (requested_by or "").strip() or "Hệ thống"
-    prepared = _prepare_split_vinamilk_order(db, payload)
+    prepared = _prepare_split_vinamilk_order(db, payload, is_admin=is_admin)
     req_row = VinamilkOrderSplitRequest(
         source_order_number=prepared["source_order_number"],
         status="PENDING",
@@ -821,6 +890,7 @@ def _approve_split_order_request(
     db: Session,
     request_id: int,
     reviewed_by: str | None = None,
+    is_admin: bool = True,
 ) -> dict[str, Any]:
     req_row = db.get(VinamilkOrderSplitRequest, request_id)
     if not req_row:
@@ -843,6 +913,7 @@ def _approve_split_order_request(
         payload_obj,
         performed_by=actor_label,
         ignore_split_request_id=req_row.id,
+        is_admin=is_admin,
     )
     req_row.status = "APPROVED"
     req_row.reviewed_by = reviewer
@@ -885,6 +956,7 @@ def _merge_vinamilk_orders(
     db: Session,
     payload: MergeOrdersRequest,
     performed_by: str | None = None,
+    is_admin: bool = True,
 ) -> dict[str, Any]:
     actor = (performed_by or "").strip() or "Hệ thống"
     raw_nums = payload.source_order_numbers or payload.order_numbers or []
@@ -907,6 +979,8 @@ def _merge_vinamilk_orders(
     if any(getattr(row, "is_synthetic", False) for row in source_rows):
         raise HTTPException(status_code=400, detail="Không thể gộp các đơn đã là Đơn Tách hoặc Đơn Gộp.")
 
+    _enforce_today_only_for_non_admin(source_rows, is_admin=is_admin, action_label="gộp đơn")
+
     _check_orders_available_for_split_merge(db, order_nums)
 
     rep_order_num = (payload.representative_order_number or "").strip()
@@ -914,6 +988,35 @@ def _merge_vinamilk_orders(
         rep_order_num = order_nums[0]
     rep_row = next((r for r in source_rows if r.order_number == rep_order_num), source_rows[0])
     rep_raw = dict(rep_row.raw_payload) if isinstance(rep_row.raw_payload, dict) else {}
+
+    custom_cust_code = (payload.customer_code or "").strip()
+    custom_cust_name = (payload.customer_name or "").strip()
+    custom_cust_addr = (payload.customer_address or "").strip()
+    custom_staff_code = (payload.staff_code or "").strip()
+    custom_staff_name = (payload.staff_name or "").strip()
+
+    final_cust_code = custom_cust_code or (
+        rep_row.customer_code
+        or _field(rep_raw, ("customerCode", "shopCode", "Mã KH"))
+        or ""
+    ).strip() or None
+    final_cust_name = custom_cust_name or (
+        rep_row.customer_name
+        or _field(rep_raw, ("customerName", "shopName", "Tên KH"))
+        or ""
+    ).strip() or None
+    final_cust_addr = custom_cust_addr or (
+        _field(rep_raw, ("address", "customerAddress", "shipTo", "Địa chỉ"))
+        or ""
+    ).strip() or None
+    final_staff_code = custom_staff_code or (
+        _field(rep_raw, ("staffCode", "salesStaffCode", "Mã NVBH"))
+        or ""
+    ).strip() or None
+    final_staff_name = custom_staff_name or (
+        _field(rep_raw, ("staffName", "salesStaffName", "Tên NVBH"))
+        or ""
+    ).strip() or None
 
     ref_date = rep_row.order_created_date or date.today()
     prefix = f"GD-{ref_date:%y%m%d}-"
@@ -989,6 +1092,28 @@ def _merge_vinamilk_orders(
             if h_key in rep_raw:
                 merged_raw[h_key] = rep_raw[h_key]
 
+        if final_cust_code:
+            merged_raw["Mã KH"] = final_cust_code
+            merged_raw["customerCode"] = final_cust_code
+            merged_raw["shopCode"] = final_cust_code
+        if final_cust_name:
+            merged_raw["Tên KH"] = final_cust_name
+            merged_raw["customerName"] = final_cust_name
+            merged_raw["shopName"] = final_cust_name
+        if final_cust_addr:
+            merged_raw["Địa chỉ"] = final_cust_addr
+            merged_raw["address"] = final_cust_addr
+            merged_raw["customerAddress"] = final_cust_addr
+            merged_raw["shipTo"] = final_cust_addr
+        if final_staff_code:
+            merged_raw["Mã NVBH"] = final_staff_code
+            merged_raw["staffCode"] = final_staff_code
+            merged_raw["salesStaffCode"] = final_staff_code
+        if final_staff_name:
+            merged_raw["Tên NVBH"] = final_staff_name
+            merged_raw["staffName"] = final_staff_name
+            merged_raw["salesStaffName"] = final_staff_name
+
         fmt_q = _format_qty_value(group_info["qty"])
         fmt_p = _format_qty_value(group_info["promo_qty"])
         fmt_val = _format_qty_value(group_info["val"])
@@ -1018,8 +1143,8 @@ def _merge_vinamilk_orders(
             remote_key=remote_key,
             order_number=new_order_num,
             original_order_number=replaced_str[:120],
-            customer_code=rep_row.customer_code,
-            customer_name=rep_row.customer_name,
+            customer_code=final_cust_code,
+            customer_name=final_cust_name,
             product_code=t_row.product_code,
             product_name=t_row.product_name,
             status="Đơn Gộp",
@@ -1053,7 +1178,11 @@ def _merge_vinamilk_orders(
     }
 
 
-def _revert_split_or_merge_order(db: Session, order_number: str) -> dict[str, Any]:
+def _revert_split_or_merge_order(
+    db: Session,
+    order_number: str,
+    is_admin: bool = True,
+) -> dict[str, Any]:
     target = order_number.strip()
     if not target:
         raise HTTPException(status_code=400, detail="Mã đơn hàng không hợp lệ.")
@@ -1089,6 +1218,15 @@ def _revert_split_or_merge_order(db: Session, order_number: str) -> dict[str, An
             clean = part.strip()
             if clean and clean not in restored_orders:
                 restored_orders.append(clean)
+
+    if not is_admin:
+        involved_orders = list(dict.fromkeys([*synthetic_orders, *restored_orders]))
+        involved_rows = db.scalars(
+            select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number.in_(involved_orders))
+        ).all()
+        _enforce_today_only_for_non_admin(involved_rows, is_admin=False, action_label="hoàn tác tách/gộp")
+
+    for item in matched_replacements:
         db.delete(item)
 
     if synthetic_orders:
@@ -1605,6 +1743,7 @@ def list_local_vinamilk_orders(
             "Người thực hiện": performed_by,
             "_performed_by": performed_by,
             "_local_id": row.id,
+            "_order_created_date": row.order_created_date.isoformat() if row.order_created_date else None,
             "_synced_at": _iso_utc(row.synced_at),
             "_allocation_id": None,
             "_warehouse_updated": row.warehouse_updated,
@@ -1751,6 +1890,40 @@ def list_vinamilk_customer_options(
     return {"customers": list(options_by_code.values())[:limit]}
 
 
+@router.get("/vinamilk-orders/staff-options")
+def list_vinamilk_staff_options(
+    search: str = Query(default="", max_length=120),
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    """Trả về danh sách NVBH từ bảng employees và từ các đơn DMS đã đồng bộ."""
+    term = search.strip()
+    options_by_code: dict[str, dict[str, Any]] = {}
+
+    emp_stmt = select(Employee)
+    if term:
+        like_term = f"%{term}%"
+        emp_stmt = emp_stmt.where(
+            or_(
+                Employee.code.ilike(like_term),
+                Employee.name.ilike(like_term),
+                Employee.vinamilk_code.ilike(like_term),
+            )
+        )
+    emp_rows = db.scalars(emp_stmt.order_by(Employee.code).limit(limit)).all()
+    for emp in emp_rows:
+        code = ((emp.vinamilk_code or emp.code) or "").strip()
+        if not code:
+            continue
+        options_by_code[code.upper()] = {
+            "staff_code": code,
+            "staff_name": (emp.name or "").strip(),
+            "employee_code": emp.code,
+        }
+
+    return {"staffs": list(options_by_code.values())[:limit]}
+
+
 @router.patch("/vinamilk-orders/{new_order_number}/replacement")
 def update_vinamilk_order_replacement(
     new_order_number: str,
@@ -1779,7 +1952,12 @@ def split_vinamilk_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return _split_vinamilk_order(db, payload, performed_by=getattr(current_user, "username", None))
+    return _split_vinamilk_order(
+        db,
+        payload,
+        performed_by=getattr(current_user, "username", None),
+        is_admin=_is_admin_user(current_user),
+    )
 
 
 @router.get("/vinamilk-orders/split-requests")
@@ -1819,6 +1997,7 @@ def create_vinamilk_split_order_request(
         db,
         payload,
         requested_by=getattr(current_user, "username", None),
+        is_admin=_is_admin_user(current_user),
     )
 
 
@@ -1832,6 +2011,7 @@ def approve_vinamilk_split_order_request(
         db,
         request_id,
         reviewed_by=getattr(current_user, "username", None),
+        is_admin=_is_admin_user(current_user),
     )
 
 
@@ -1856,15 +2036,25 @@ def merge_vinamilk_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return _merge_vinamilk_orders(db, payload, performed_by=getattr(current_user, "username", None))
+    return _merge_vinamilk_orders(
+        db,
+        payload,
+        performed_by=getattr(current_user, "username", None),
+        is_admin=_is_admin_user(current_user),
+    )
 
 
 @router.delete("/vinamilk-orders/split-merge/{order_number}")
 def revert_split_or_merge_order(
     order_number: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    return _revert_split_or_merge_order(db, order_number)
+    return _revert_split_or_merge_order(
+        db,
+        order_number,
+        is_admin=_is_admin_user(current_user),
+    )
 
 
 @router.get("/vinamilk-orders/allocations/template")

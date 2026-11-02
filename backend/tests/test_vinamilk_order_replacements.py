@@ -446,6 +446,74 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
     assert by_order_approved["TD-PO-100-02"]["_processing_status"] == "Đơn Tách (Nợ NVBH)"
     assert by_order_approved["TD-PO-100-02"]["totalValue"] == 38000.0
 
+    # Hoàn tác rồi kiểm tra Tách thành 1 đơn duy nhất chỉ để đổi Mã KH sang khách hàng khác
+    _revert_split_or_merge_order(db, "PO-100")
+    db.commit()
+    with pytest.raises(HTTPException) as exc_same_cust:
+        _create_split_order_request(
+            db,
+            SplitOrderRequest(
+                order_number="PO-100",
+                splits=[
+                    SplitOrderTarget(
+                        customer_code="000101",
+                        customer_name="KH A",
+                        items=[
+                            SplitOrderItemAllocation(
+                                snapshot_id=line1.id,
+                                quantity=10,
+                                promo_quantity=2,
+                            )
+                        ],
+                    )
+                ],
+            ),
+            requested_by="sale.admin",
+        )
+    assert exc_same_cust.value.status_code == 400
+
+    req_one_order = _create_split_order_request(
+        db,
+        SplitOrderRequest(
+            order_number="PO-100",
+            splits=[
+                SplitOrderTarget(
+                    customer_code="000888",
+                    customer_name="KH Mới Đổi Tên",
+                    customer_address="99 Nguyễn Huệ",
+                    items=[
+                        SplitOrderItemAllocation(
+                            snapshot_id=line1.id,
+                            quantity=10,
+                            promo_quantity=2,
+                        )
+                    ],
+                )
+            ],
+        ),
+        requested_by="sale.admin",
+    )
+    approved_one = _approve_split_order_request(db, req_one_order["id"], reviewed_by="ketoan.01")
+    assert approved_one["new_order_numbers"] == ["TD-PO-100-01"]
+    listed_one = list_local_vinamilk_orders(
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 1),
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=2000,
+        db=db,
+    )
+    by_order_one = {row["orderNumber"]: row for row in listed_one["rows"]}
+    assert by_order_one["PO-100"]["_replacement_display"] == "BTT: TD-PO-100-01"
+    assert by_order_one["TD-PO-100-01"]["customerCode"] == "000888"
+    assert by_order_one["TD-PO-100-01"]["customerName"] == "KH Mới Đổi Tên"
+    assert by_order_one["TD-PO-100-01"]["address"] == "99 Nguyễn Huệ"
+    assert by_order_one["TD-PO-100-01"]["quantity"] == 10.0
+    assert by_order_one["TD-PO-100-01"]["promotionQuantity"] == 2.0
+    assert by_order_one["TD-PO-100-01"]["totalValue"] == 100000.0
+
 
 def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
     for idx, (order_no, qty, promo, val) in enumerate([
@@ -518,6 +586,66 @@ def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
     assert by_order["PO-201"]["_performed_by"] == "Hệ thống"
     assert by_order["PO-202"]["_replacement_display"] == f"BTT: {new_order_no}"
     assert by_order["PO-202"]["_performed_by"] == "Hệ thống"
+
+    # Hoàn tác gộp đơn và kiểm tra Gộp đơn với tùy chọn thay đổi KH & NVBH khác với các đơn gộp
+    _revert_split_or_merge_order(db, new_order_no)
+    db.commit()
+
+    res_custom_rep = _merge_vinamilk_orders(
+        db,
+        MergeOrdersRequest(
+            order_numbers=["PO-201", "PO-202"],
+            representative_order_number="PO-201",
+            customer_code="000777",
+            customer_name="KH Đại Diện Mới",
+            customer_address="123 Lê Lợi",
+            staff_code="NV-99",
+            staff_name="Nguyễn Văn Mới",
+        ),
+        performed_by="ketoan.02",
+    )
+    db.commit()
+
+    custom_gd_no = res_custom_rep["new_order_number"]
+    listed_custom = list_local_vinamilk_orders(
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 1),
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=2000,
+        db=db,
+    )
+    by_order_custom = {row["orderNumber"]: row for row in listed_custom["rows"]}
+    assert by_order_custom[custom_gd_no]["customerCode"] == "000777"
+    assert by_order_custom[custom_gd_no]["customerName"] == "KH Đại Diện Mới"
+    assert by_order_custom[custom_gd_no]["address"] == "123 Lê Lợi"
+    assert by_order_custom[custom_gd_no]["staffCode"] == "NV-99"
+    assert by_order_custom[custom_gd_no]["staffName"] == "Nguyễn Văn Mới"
+    assert by_order_custom[custom_gd_no]["_performed_by"] == "ketoan.02"
+
+    # Kiểm tra tài khoản không phải Admin bị chặn hoàn tác/gộp/tách đơn ngày cũ (2026-10-01 != hôm nay)
+    with pytest.raises(HTTPException) as exc_non_admin_revert:
+        _revert_split_or_merge_order(db, custom_gd_no, is_admin=False)
+    assert exc_non_admin_revert.value.status_code == 403
+
+    # Admin được phép hoàn tác đơn ngày cũ
+    _revert_split_or_merge_order(db, custom_gd_no, is_admin=True)
+    db.commit()
+
+    # Tài khoản thường bị chặn gộp đơn ngày cũ
+    with pytest.raises(HTTPException) as exc_non_admin_merge:
+        _merge_vinamilk_orders(
+            db,
+            MergeOrdersRequest(
+                order_numbers=["PO-201", "PO-202"],
+                representative_order_number="PO-201",
+            ),
+            performed_by="sale.01",
+            is_admin=False,
+        )
+    assert exc_non_admin_merge.value.status_code == 403
 
 
 def test_migration_leaves_existing_order_states_unknown():

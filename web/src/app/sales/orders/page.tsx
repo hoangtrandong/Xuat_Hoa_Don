@@ -25,6 +25,7 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
 import { formatVND } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
+import { useAuthSession } from "@/lib/auth-session";
 import * as XLSX from "xlsx";
 
 function toInputDate(date: Date) {
@@ -41,11 +42,10 @@ function toVinamilkDate(inputDate: string) {
 
 function getDefaultDateRange() {
   const today = new Date();
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
+  const todayStr = toInputDate(today);
   return {
-    from: toInputDate(yesterday),
-    to: toInputDate(today),
+    from: todayStr,
+    to: todayStr,
   };
 }
 
@@ -90,6 +90,12 @@ type CustomerOption = {
   store_name?: string;
   company_code?: string;
   company_name?: string;
+};
+
+type StaffOption = {
+  staff_code: string;
+  staff_name: string;
+  employee_code?: string;
 };
 
 type SplitCustomerSelection = {
@@ -239,6 +245,7 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
   normalized["Người thực hiện"] = performedBy;
   normalized["_performed_by"] = performedBy;
   normalized["_local_id"] = order["_local_id"] ?? null;
+  normalized["_order_created_date"] = order["_order_created_date"] ?? null;
   normalized["_replaced_order_number"] = order["_replaced_order_number"] ?? null;
   normalized["_replaced_by_order_numbers"] = order["_replaced_by_order_numbers"] ?? null;
   normalized["_replacement_type"] = order["_replacement_type"] ?? null;
@@ -299,6 +306,11 @@ function numericValue(value: unknown) {
 }
 
 export default function SalesOrdersPage() {
+  const { username: sessionUsername } = useAuthSession();
+  const [isAdminUser, setIsAdminUser] = useState(false);
+  const effectiveIsAdmin = isAdminUser || sessionUsername.trim().toLowerCase() === "admin";
+  const todayInputStr = toInputDate(new Date());
+
   const [toast, setToast] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
   const defaultDateRange = getDefaultDateRange();
@@ -335,6 +347,20 @@ export default function SalesOrdersPage() {
   const [mergeOrderSearch, setMergeOrderSearch] = useState("");
   const [selectedMergeOrderNumbers, setSelectedMergeOrderNumbers] = useState<string[]>([]);
   const [representativeOrderNumber, setRepresentativeOrderNumber] = useState("");
+  const [mergeOverrideCustomer, setMergeOverrideCustomer] = useState(false);
+  const [mergeCustomerSearch, setMergeCustomerSearch] = useState("");
+  const [mergeCustomCustomer, setMergeCustomCustomer] = useState<{
+    customer_code: string;
+    customer_name: string;
+    customer_address: string;
+  }>({ customer_code: "", customer_name: "", customer_address: "" });
+  const [mergeOverrideStaff, setMergeOverrideStaff] = useState(false);
+  const [mergeStaffSearch, setMergeStaffSearch] = useState("");
+  const [mergeCustomStaff, setMergeCustomStaff] = useState<{
+    staff_code: string;
+    staff_name: string;
+  }>({ staff_code: "", staff_name: "" });
+  const [staffOptions, setStaffOptions] = useState<StaffOption[]>([]);
   const [isSubmittingMerge, setIsSubmittingMerge] = useState(false);
   const [mergeError, setMergeError] = useState("");
 
@@ -350,6 +376,20 @@ export default function SalesOrdersPage() {
   useEffect(() => {
     const created = window.sessionStorage.getItem("dms-order-created");
     if (created) window.sessionStorage.removeItem("dms-order-created");
+  }, []);
+
+  useEffect(() => {
+    apiFetch(`${API_URL}/auth/me`)
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = (await res.json()) as { is_admin?: boolean };
+        if (typeof data.is_admin === "boolean") {
+          setIsAdminUser(data.is_admin);
+        }
+      })
+      .catch(() => {
+        // Fallback sử dụng sessionUsername === 'admin'
+      });
   }, []);
 
   const loadSplitApprovalRequests = useCallback(async (filterStatus: "PENDING" | "ALL" = splitApprovalFilter) => {
@@ -424,11 +464,29 @@ export default function SalesOrdersPage() {
     }
   }, []);
 
+  const loadStaffOptions = useCallback(async () => {
+    try {
+      const response = await apiFetch(
+        `${API_URL}/sync/vinamilk-orders/staff-options?limit=500`
+      );
+      if (!response.ok) return;
+      const payload = (await response.json()) as { staffs?: StaffOption[] };
+      if (Array.isArray(payload.staffs)) {
+        setStaffOptions(payload.staffs);
+      }
+    } catch {
+      // Bỏ qua lỗi mạng, vẫn dùng danh sách NVBH gom từ remoteOrders
+    }
+  }, []);
+
   useEffect(() => {
-    if (isSplitDrawerOpen) {
+    if (isSplitDrawerOpen || isMergeDrawerOpen) {
       void loadCustomerOptions();
     }
-  }, [isSplitDrawerOpen, loadCustomerOptions]);
+    if (isMergeDrawerOpen) {
+      void loadStaffOptions();
+    }
+  }, [isSplitDrawerOpen, isMergeDrawerOpen, loadCustomerOptions, loadStaffOptions]);
 
   // Danh sách khách hàng tổng hợp (từ API customer-options + từ các đơn hàng trên màn hình)
   const allCustomerOptions = useMemo<CustomerOption[]>(() => {
@@ -450,7 +508,37 @@ export default function SalesOrdersPage() {
     return Array.from(map.values());
   }, [customerOptions, remoteOrders]);
 
-  // Gom nhóm các đơn đủ điều kiện để Tách hoặc Gộp (chưa là đơn tách/gộp, chưa bị thay thế, chưa đang chờ KT duyệt tách)
+  // Danh sách NVBH tổng hợp (từ API staff-options + từ các đơn hàng trên màn hình)
+  const allStaffOptions = useMemo<StaffOption[]>(() => {
+    const map = new Map<string, StaffOption>();
+    for (const item of staffOptions) {
+      const code = (item.staff_code || "").trim();
+      if (!code) continue;
+      map.set(code.toUpperCase(), item);
+    }
+    for (const row of remoteOrders) {
+      const code = displayRemoteValue(row["Mã NVBH"]).trim();
+      const name = displayRemoteValue(row["Tên NVBH"]).trim();
+      const key = (code || name).toUpperCase();
+      if (!key || map.has(key)) continue;
+      map.set(key, {
+        staff_code: code || name,
+        staff_name: name || code,
+      });
+    }
+    return Array.from(map.values());
+  }, [staffOptions, remoteOrders]);
+
+  function isOrderToday(row: RemoteOrder): boolean {
+    const iso = displayRemoteValue(row["_order_created_date"]).trim();
+    if (iso) {
+      return iso === todayInputStr;
+    }
+    const createdStr = formatVinamilkDate(row["Ngày tạo"], false);
+    return createdStr === toVinamilkDate(todayInputStr);
+  }
+
+  // Gom nhóm các đơn đủ điều kiện để Tách hoặc Gộp (chưa là đơn tách/gộp, chưa bị thay thế, chưa đang chờ KT duyệt tách; tài khoản không phải Admin chỉ được tách/gộp đơn ngày hôm nay)
   const eligibleOrderGroups = useMemo<GroupedOrderSummary[]>(() => {
     const map = new Map<string, GroupedOrderSummary>();
     for (const row of remoteOrders) {
@@ -460,6 +548,7 @@ export default function SalesOrdersPage() {
       if (hasRemoteValue(row["_replaced_order_number"])) continue;
       if (Array.isArray(row["_replaced_by_order_numbers"]) && row["_replaced_by_order_numbers"].length > 0) continue;
       if (hasRemoteValue(row["_pending_split_request_id"])) continue;
+      if (!effectiveIsAdmin && !isOrderToday(row)) continue;
 
       let group = map.get(orderNum);
       if (!group) {
@@ -476,18 +565,18 @@ export default function SalesOrdersPage() {
           totalDiscount: 0,
           totalQty: 0,
           totalPromoQty: 0,
-          lines: [],
-        };
-        map.set(orderNum, group);
-      }
-      group.lines.push(row);
-      group.totalValue += numericValue(row["Giá trị"]);
-      group.totalDiscount += numericValue(row["Số tiền CK"]);
-      group.totalQty += numericValue(row["Số lượng"]);
-      group.totalPromoQty += numericValue(row["Số lượng KM"]);
-    }
-    return Array.from(map.values());
-  }, [remoteOrders]);
+      lines: [],
+    };
+    map.set(orderNum, group);
+  }
+  group.lines.push(row);
+  group.totalValue += numericValue(row["Giá trị"]);
+  group.totalDiscount += numericValue(row["Số tiền CK"]);
+  group.totalQty += numericValue(row["Số lượng"]);
+  group.totalPromoQty += numericValue(row["Số lượng KM"]);
+}
+return Array.from(map.values());
+  }, [remoteOrders, effectiveIsAdmin, todayInputStr]);
 
   const selectedSplitOrderGroup = useMemo(
     () => eligibleOrderGroups.find((g) => g.orderNumber === selectedSplitOrderNumber) ?? null,
@@ -532,7 +621,7 @@ export default function SalesOrdersPage() {
   }
 
   function handleChangeSplitCount(newCount: number) {
-    const clamped = Math.max(2, Math.min(10, newCount));
+    const clamped = Math.max(1, Math.min(10, newCount));
     setSplitCount(clamped);
     setSplitError("");
     if (!selectedSplitOrderGroup) return;
@@ -540,11 +629,26 @@ export default function SalesOrdersPage() {
       const next: SplitAllocMap = {};
       for (const line of selectedSplitOrderGroup.lines) {
         const localId = Number(line["_local_id"]);
+        const origQty = numericValue(line["Số lượng"]);
+        const origPromo = numericValue(line["Số lượng KM"]);
         const currentArr = prev[localId] ?? [];
-        next[localId] = Array.from({ length: clamped }, (_, idx) => ({
-          quantity: currentArr[idx]?.quantity ?? 0,
-          promoQuantity: currentArr[idx]?.promoQuantity ?? 0,
-        }));
+        if (clamped === 1) {
+          next[localId] = [
+            {
+              quantity: origQty,
+              promoQuantity: origPromo,
+              customValue: currentArr[0]?.customValue ?? null,
+              customDiscount: currentArr[0]?.customDiscount ?? null,
+            },
+          ];
+        } else {
+          next[localId] = Array.from({ length: clamped }, (_, idx) => ({
+            quantity: currentArr[idx]?.quantity ?? 0,
+            promoQuantity: currentArr[idx]?.promoQuantity ?? 0,
+            customValue: currentArr[idx]?.customValue ?? null,
+            customDiscount: currentArr[idx]?.customDiscount ?? null,
+          }));
+        }
       }
       return next;
     });
@@ -821,7 +925,7 @@ export default function SalesOrdersPage() {
   }
 
   function distributeEvenlyAcrossSplits() {
-    if (!selectedSplitOrderGroup || splitCount < 2) return;
+    if (!selectedSplitOrderGroup || splitCount < 1) return;
     const next: SplitAllocMap = {};
     for (const line of selectedSplitOrderGroup.lines) {
       const localId = Number(line["_local_id"]);
@@ -1301,6 +1405,17 @@ export default function SalesOrdersPage() {
         setSplitError(`Đơn tách thứ ${emptySplitIndex + 1} chưa có sản phẩm nào có số lượng > 0.`);
         return;
       }
+      if (splitsPayload.length === 1) {
+        const onlySplit = splitsPayload[0];
+        const targetCode = (onlySplit.customer_code ?? "").trim();
+        const origCode = (selectedSplitOrderGroup.customerCode ?? "").trim();
+        if (!onlySplit.is_staff_debt && (!targetCode || targetCode.toUpperCase() === origCode.toUpperCase())) {
+          setSplitError(
+            "Khi tách thành 1 đơn (đổi khách hàng), vui lòng chọn Mã khách hàng mới khác với khách hàng của đơn gốc (hoặc gắn Công nợ NVBH)."
+          );
+          return;
+        }
+      }
     } else {
       const staffLabel =
         selectedSplitOrderGroup.staffName || selectedSplitOrderGroup.staffCode || "NVBH của đơn";
@@ -1419,6 +1534,45 @@ export default function SalesOrdersPage() {
     [eligibleOrderGroups, selectedMergeOrderNumbers]
   );
 
+  const selectedRepresentativeMergeGroup = useMemo(
+    () =>
+      selectedMergeGroups.find((g) => g.orderNumber === representativeOrderNumber) ??
+      selectedMergeGroups[0] ??
+      null,
+    [selectedMergeGroups, representativeOrderNumber]
+  );
+
+  function handleSelectMergeCustomer(customerCode: string) {
+    const found = allCustomerOptions.find((c) => c.customer_code === customerCode);
+    if (found) {
+      setMergeCustomCustomer({
+        customer_code: found.customer_code,
+        customer_name: found.customer_name,
+        customer_address: found.customer_address,
+      });
+    } else {
+      setMergeCustomCustomer((prev) => ({
+        ...prev,
+        customer_code: customerCode,
+      }));
+    }
+  }
+
+  function handleSelectMergeStaff(staffCode: string) {
+    const found = allStaffOptions.find((s) => s.staff_code === staffCode);
+    if (found) {
+      setMergeCustomStaff({
+        staff_code: found.staff_code,
+        staff_name: found.staff_name,
+      });
+    } else {
+      setMergeCustomStaff((prev) => ({
+        ...prev,
+        staff_code: staffCode,
+      }));
+    }
+  }
+
   const mergedProductPreview = useMemo(() => {
     const map = new Map<
       string,
@@ -1478,6 +1632,14 @@ export default function SalesOrdersPage() {
       setMergeError("Vui lòng chọn ít nhất 2 đơn hàng để gộp.");
       return;
     }
+    if (mergeOverrideCustomer && !mergeCustomCustomer.customer_code.trim()) {
+      setMergeError("Vui lòng chọn hoặc nhập Mã khách hàng đại diện cho đơn gộp.");
+      return;
+    }
+    if (mergeOverrideStaff && !mergeCustomStaff.staff_code.trim() && !mergeCustomStaff.staff_name.trim()) {
+      setMergeError("Vui lòng chọn hoặc nhập NVBH đại diện cho đơn gộp.");
+      return;
+    }
     setMergeError("");
     setIsSubmittingMerge(true);
     try {
@@ -1487,6 +1649,11 @@ export default function SalesOrdersPage() {
         body: JSON.stringify({
           order_numbers: selectedMergeOrderNumbers,
           representative_order_number: representativeOrderNumber || selectedMergeOrderNumbers[0],
+          customer_code: mergeOverrideCustomer ? mergeCustomCustomer.customer_code.trim() || undefined : undefined,
+          customer_name: mergeOverrideCustomer ? mergeCustomCustomer.customer_name.trim() || undefined : undefined,
+          customer_address: mergeOverrideCustomer ? mergeCustomCustomer.customer_address.trim() || undefined : undefined,
+          staff_code: mergeOverrideStaff ? mergeCustomStaff.staff_code.trim() || undefined : undefined,
+          staff_name: mergeOverrideStaff ? mergeCustomStaff.staff_name.trim() || undefined : undefined,
         }),
       });
       const result = await response.json() as {
@@ -1498,6 +1665,8 @@ export default function SalesOrdersPage() {
       setIsMergeDrawerOpen(false);
       setSelectedMergeOrderNumbers([]);
       setRepresentativeOrderNumber("");
+      setMergeOverrideCustomer(false);
+      setMergeOverrideStaff(false);
       setToast(
         `Đã gộp ${(result.merged_order_numbers ?? []).join(", ")} thành đơn mới ${result.new_order_number}.`
       );
@@ -1647,6 +1816,7 @@ export default function SalesOrdersPage() {
           }
           if (replacementType === "SPLIT" || replacementType === "MERGE") {
             const isBtt = text.startsWith("BTT:");
+            const canRevert = effectiveIsAdmin || isOrderToday(order);
             return (
               <div className="flex items-center justify-between gap-2">
                 <span
@@ -1657,16 +1827,25 @@ export default function SalesOrdersPage() {
                 >
                   {text}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => void handleRevertSplitMerge(orderNum)}
-                  disabled={revertingOrderNumber === orderNum}
-                  title="Hoàn tác tách/gộp đơn này"
-                  className="inline-flex shrink-0 items-center gap-1 rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[11px] font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50"
-                >
-                  <RotateCcw size={11} />
-                  Hoàn tác
-                </button>
+                {canRevert ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleRevertSplitMerge(orderNum)}
+                    disabled={revertingOrderNumber === orderNum}
+                    title="Hoàn tác tách/gộp đơn này"
+                    className="inline-flex shrink-0 items-center gap-1 rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[11px] font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                  >
+                    <RotateCcw size={11} />
+                    Hoàn tác
+                  </button>
+                ) : (
+                  <span
+                    className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500"
+                    title="Chỉ Admin mới được phép hoàn tác tách/gộp đơn của ngày cũ"
+                  >
+                    Đã khóa
+                  </span>
+                )}
               </div>
             );
           }
@@ -2085,6 +2264,17 @@ export default function SalesOrdersPage() {
             </div>
           )}
 
+          {!effectiveIsAdmin && (
+            <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-2.5 text-xs text-amber-800">
+              <Clock3 size={15} className="shrink-0" />
+              <span>
+                Tài khoản hiện tại chỉ được phép <strong>Tách đơn</strong> đối với các đơn hàng trong ngày hôm nay (
+                <strong>{toVinamilkDate(todayInputStr)}</strong>) để tránh tác động vào dữ liệu các ngày cũ. Chỉ tài khoản{" "}
+                <strong>Admin</strong> mới có thể tách đơn ngày cũ.
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <label className="block text-sm text-gray-700">
               1. Tìm đơn hàng cần tách
@@ -2111,10 +2301,10 @@ export default function SalesOrdersPage() {
               </select>
             </label>
             <label className="block text-sm text-gray-700">
-              3. Số lượng đơn muốn tách ra
+              3. Số lượng đơn muốn tách ra (chọn 1 nếu chỉ đổi Mã KH)
               <input
                 type="number"
-                min={2}
+                min={1}
                 max={10}
                 value={splitCount}
                 onChange={(e) => handleChangeSplitCount(Number(e.target.value))}
@@ -2148,26 +2338,42 @@ export default function SalesOrdersPage() {
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
+                    onClick={() => handleChangeSplitCount(1)}
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      splitCount === 1
+                        ? "border-sky-600 bg-sky-600 text-white"
+                        : "border-sky-200 bg-white text-sky-700 hover:bg-sky-50"
+                    }`}
+                    title="Chuyển toàn bộ đơn hàng sang 1 khách hàng khác (chỉ tạo 1 đơn tách)"
+                  >
+                    Đổi KH (1 đơn)
+                  </button>
+                  <button
+                    type="button"
                     onClick={resetSplitDiscountsToAuto}
                     className="rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50"
                     title="Tính lại Giá trị & Số tiền CK tự động theo tỷ lệ Số lượng"
                   >
                     Tính lại GT & CK theo SL
                   </button>
-                  <button
-                    type="button"
-                    onClick={distributeEvenlyAcrossSplits}
-                    className="rounded-lg border border-purple-200 bg-white px-3 py-1.5 text-xs font-medium text-purple-700 hover:bg-purple-50"
-                  >
-                    Chia đều tự động
-                  </button>
-                  <button
-                    type="button"
-                    onClick={fillRemainderToLastSplit}
-                    className="rounded-lg border border-purple-300 bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-800 hover:bg-purple-100"
-                  >
-                    Điền phần còn lại vào Đơn tách {splitCount}
-                  </button>
+                  {splitCount >= 2 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={distributeEvenlyAcrossSplits}
+                        className="rounded-lg border border-purple-200 bg-white px-3 py-1.5 text-xs font-medium text-purple-700 hover:bg-purple-50"
+                      >
+                        Chia đều tự động
+                      </button>
+                      <button
+                        type="button"
+                        onClick={fillRemainderToLastSplit}
+                        className="rounded-lg border border-purple-300 bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-800 hover:bg-purple-100"
+                      >
+                        Điền phần còn lại vào Đơn tách {splitCount}
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     onClick={assignRemainderToStaffSplit}
@@ -3007,6 +3213,17 @@ export default function SalesOrdersPage() {
             </div>
           )}
 
+          {!effectiveIsAdmin && (
+            <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-2.5 text-xs text-amber-800">
+              <Clock3 size={15} className="shrink-0" />
+              <span>
+                Tài khoản hiện tại chỉ được phép <strong>Gộp đơn</strong> đối với các đơn hàng trong ngày hôm nay (
+                <strong>{toVinamilkDate(todayInputStr)}</strong>) để tránh tác động vào dữ liệu các ngày cũ. Chỉ tài khoản{" "}
+                <strong>Admin</strong> mới có thể gộp đơn ngày cũ.
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <label className="block text-sm text-gray-700">
               Tìm kiếm đơn hàng để gộp
@@ -3019,7 +3236,7 @@ export default function SalesOrdersPage() {
             </label>
             {selectedMergeOrderNumbers.length >= 2 && (
               <label className="block text-sm text-gray-700">
-                Đơn đại diện lấy thông tin chung (Khách hàng, NVBH, Ngày đơn)
+                Đơn đại diện lấy thông tin chung (Ngày đơn, mặc định KH & NVBH)
                 <select
                   value={representativeOrderNumber || selectedMergeOrderNumbers[0]}
                   onChange={(e) => setRepresentativeOrderNumber(e.target.value)}
@@ -3034,6 +3251,241 @@ export default function SalesOrdersPage() {
               </label>
             )}
           </div>
+
+          {selectedMergeOrderNumbers.length >= 2 && selectedRepresentativeMergeGroup && (
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/30 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-xs font-semibold text-indigo-950">
+                    Tùy chọn thay đổi thông tin đại diện cho Đơn Gộp (Khách hàng & NVBH khác với các đơn gộp)
+                  </h4>
+                  <p className="text-[11px] text-gray-600">
+                    Mặc định lấy theo đơn đại diện{" "}
+                    <strong className="font-mono">{selectedRepresentativeMergeGroup.orderNumber}</strong>:{" "}
+                    KH <strong>{selectedRepresentativeMergeGroup.customerCode}</strong> (
+                    {selectedRepresentativeMergeGroup.customerName || "—"}) | NVBH:{" "}
+                    <strong>
+                      {selectedRepresentativeMergeGroup.staffName ||
+                        selectedRepresentativeMergeGroup.staffCode ||
+                        "—"}
+                    </strong>
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {/* Cột 1: Tùy chọn đổi Khách hàng đại diện */}
+                <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2.5 text-xs">
+                  <label className="flex cursor-pointer items-center justify-between gap-2 font-semibold text-gray-800">
+                    <span>Thay đổi Mã / Tên Khách hàng khác</span>
+                    <input
+                      type="checkbox"
+                      checked={mergeOverrideCustomer}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setMergeOverrideCustomer(checked);
+                        if (checked && !mergeCustomCustomer.customer_code) {
+                          setMergeCustomCustomer({
+                            customer_code: selectedRepresentativeMergeGroup.customerCode,
+                            customer_name: selectedRepresentativeMergeGroup.customerName,
+                            customer_address: selectedRepresentativeMergeGroup.customerAddress,
+                          });
+                        }
+                      }}
+                      className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                  </label>
+
+                  {!mergeOverrideCustomer ? (
+                    <div className="rounded bg-gray-50 px-2.5 py-2 text-[11px] text-gray-600">
+                      Giữ theo đơn đại diện:{" "}
+                      <strong className="text-gray-900">
+                        {selectedRepresentativeMergeGroup.customerCode} —{" "}
+                        {selectedRepresentativeMergeGroup.customerName}
+                      </strong>
+                      {selectedRepresentativeMergeGroup.customerAddress && (
+                        <div className="mt-0.5 text-gray-500">
+                          Đ/c: {selectedRepresentativeMergeGroup.customerAddress}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2 pt-1">
+                      <input
+                        value={mergeCustomerSearch}
+                        onChange={(e) => setMergeCustomerSearch(e.target.value)}
+                        placeholder="Tìm nhanh theo Mã KH, Tên KH, Cửa hàng..."
+                        className="block w-full rounded border border-gray-200 px-2.5 py-1.5 text-xs focus:border-indigo-500 focus:outline-none"
+                      />
+                      <select
+                        value={mergeCustomCustomer.customer_code}
+                        onChange={(e) => handleSelectMergeCustomer(e.target.value)}
+                        className="block w-full rounded border border-indigo-200 bg-indigo-50/20 px-2.5 py-1.5 text-xs font-medium text-gray-900 focus:border-indigo-500 focus:outline-none"
+                      >
+                        <option value="">-- Chọn khách hàng từ danh mục --</option>
+                        {allCustomerOptions
+                          .filter((opt) => {
+                            const q = mergeCustomerSearch.trim().toLocaleLowerCase("vi");
+                            if (!q) return true;
+                            return (
+                              opt.customer_code.toLocaleLowerCase("vi").includes(q) ||
+                              opt.customer_name.toLocaleLowerCase("vi").includes(q) ||
+                              (opt.store_name ?? "").toLocaleLowerCase("vi").includes(q)
+                            );
+                          })
+                          .slice(0, 150)
+                          .map((opt) => (
+                            <option key={opt.customer_code} value={opt.customer_code}>
+                              {opt.customer_code} — {opt.customer_name}
+                              {opt.store_name ? ` (${opt.store_name})` : ""}
+                            </option>
+                          ))}
+                      </select>
+                      <div className="grid grid-cols-3 gap-2">
+                        <label className="col-span-1 block text-[11px] text-gray-600">
+                          Mã KH mới
+                          <input
+                            value={mergeCustomCustomer.customer_code}
+                            onChange={(e) =>
+                              setMergeCustomCustomer((prev) => ({
+                                ...prev,
+                                customer_code: e.target.value,
+                              }))
+                            }
+                            placeholder="Mã KH..."
+                            className="mt-0.5 block w-full rounded border border-gray-200 px-2 py-1 text-xs font-mono text-gray-900"
+                          />
+                        </label>
+                        <label className="col-span-2 block text-[11px] text-gray-600">
+                          Tên KH mới
+                          <input
+                            value={mergeCustomCustomer.customer_name}
+                            onChange={(e) =>
+                              setMergeCustomCustomer((prev) => ({
+                                ...prev,
+                                customer_name: e.target.value,
+                              }))
+                            }
+                            placeholder="Tên khách hàng..."
+                            className="mt-0.5 block w-full rounded border border-gray-200 px-2 py-1 text-xs text-gray-900"
+                          />
+                        </label>
+                      </div>
+                      <label className="block text-[11px] text-gray-600">
+                        Địa chỉ giao hàng
+                        <input
+                          value={mergeCustomCustomer.customer_address}
+                          onChange={(e) =>
+                            setMergeCustomCustomer((prev) => ({
+                              ...prev,
+                              customer_address: e.target.value,
+                            }))
+                          }
+                          placeholder="Địa chỉ khách hàng..."
+                          className="mt-0.5 block w-full rounded border border-gray-200 px-2 py-1 text-xs text-gray-900"
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                {/* Cột 2: Tùy chọn đổi NVBH đại diện */}
+                <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2.5 text-xs">
+                  <label className="flex cursor-pointer items-center justify-between gap-2 font-semibold text-gray-800">
+                    <span>Thay đổi NVBH đại diện khác</span>
+                    <input
+                      type="checkbox"
+                      checked={mergeOverrideStaff}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setMergeOverrideStaff(checked);
+                        if (checked && !mergeCustomStaff.staff_code && !mergeCustomStaff.staff_name) {
+                          setMergeCustomStaff({
+                            staff_code: selectedRepresentativeMergeGroup.staffCode,
+                            staff_name: selectedRepresentativeMergeGroup.staffName,
+                          });
+                        }
+                      }}
+                      className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                  </label>
+
+                  {!mergeOverrideStaff ? (
+                    <div className="rounded bg-gray-50 px-2.5 py-2 text-[11px] text-gray-600">
+                      Giữ theo đơn đại diện:{" "}
+                      <strong className="text-gray-900">
+                        {selectedRepresentativeMergeGroup.staffCode
+                          ? `${selectedRepresentativeMergeGroup.staffCode} — `
+                          : ""}
+                        {selectedRepresentativeMergeGroup.staffName || "—"}
+                      </strong>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 pt-1">
+                      <input
+                        value={mergeStaffSearch}
+                        onChange={(e) => setMergeStaffSearch(e.target.value)}
+                        placeholder="Tìm nhanh theo Mã NVBH hoặc Tên NVBH..."
+                        className="block w-full rounded border border-gray-200 px-2.5 py-1.5 text-xs focus:border-indigo-500 focus:outline-none"
+                      />
+                      <select
+                        value={mergeCustomStaff.staff_code}
+                        onChange={(e) => handleSelectMergeStaff(e.target.value)}
+                        className="block w-full rounded border border-indigo-200 bg-indigo-50/20 px-2.5 py-1.5 text-xs font-medium text-gray-900 focus:border-indigo-500 focus:outline-none"
+                      >
+                        <option value="">-- Chọn NVBH từ danh sách --</option>
+                        {allStaffOptions
+                          .filter((opt) => {
+                            const q = mergeStaffSearch.trim().toLocaleLowerCase("vi");
+                            if (!q) return true;
+                            return (
+                              opt.staff_code.toLocaleLowerCase("vi").includes(q) ||
+                              opt.staff_name.toLocaleLowerCase("vi").includes(q)
+                            );
+                          })
+                          .slice(0, 150)
+                          .map((opt) => (
+                            <option key={opt.staff_code} value={opt.staff_code}>
+                              {opt.staff_code} — {opt.staff_name}
+                            </option>
+                          ))}
+                      </select>
+                      <div className="grid grid-cols-3 gap-2">
+                        <label className="col-span-1 block text-[11px] text-gray-600">
+                          Mã NVBH mới
+                          <input
+                            value={mergeCustomStaff.staff_code}
+                            onChange={(e) =>
+                              setMergeCustomStaff((prev) => ({
+                                ...prev,
+                                staff_code: e.target.value,
+                              }))
+                            }
+                            placeholder="Mã NVBH..."
+                            className="mt-0.5 block w-full rounded border border-gray-200 px-2 py-1 text-xs font-mono text-gray-900"
+                          />
+                        </label>
+                        <label className="col-span-2 block text-[11px] text-gray-600">
+                          Tên NVBH mới
+                          <input
+                            value={mergeCustomStaff.staff_name}
+                            onChange={(e) =>
+                              setMergeCustomStaff((prev) => ({
+                                ...prev,
+                                staff_name: e.target.value,
+                              }))
+                            }
+                            placeholder="Tên NVBH..."
+                            className="mt-0.5 block w-full rounded border border-gray-200 px-2 py-1 text-xs text-gray-900"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="max-h-60 overflow-y-auto rounded-xl border border-gray-200 divide-y divide-gray-100">
             {filteredMergeOrderOptions.length === 0 ? (

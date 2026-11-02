@@ -82,3 +82,19 @@ def change_password(
     current_user.locked_until = None
     db.commit()
     return {"detail": "Đổi mật khẩu thành công."}
+
+
+@router.get("/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    role_names = [role.name for role in (current_user.roles or []) if role and role.name]
+    is_admin = (
+        (current_user.username or "").strip().lower() == "admin"
+        or any(r.strip().lower() == "admin" for r in role_names)
+    )
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "full_name": current_user.full_name,
+        "roles": role_names,
+        "is_admin": is_admin,
+    }

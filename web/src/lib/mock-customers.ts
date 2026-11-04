@@ -20,6 +20,8 @@ export interface Customer {
   debitBalance: number;
   totalSpend: number;
   createdAt: string;
+  staffCode?: string;
+  staffName?: string;
   // Phase 2: cửa hàng & công ty quản lý
   storeId?: string;
   companyId?: string;

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import {
   Mail, MapPin, User, CreditCard, ShoppingBag,
-  CalendarDays, Truck, Route, Store,
+  CalendarDays, Truck, Route, Store, UserCheck,
 } from "lucide-react";
 import type { Customer } from "@/lib/mock-customers";
 import { getOrdersByCustomer } from "@/lib/mock-orders";
@@ -51,6 +51,7 @@ export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDele
       <div className="rounded-xl border border-gray-100 divide-y divide-gray-50">
         <InfoRow icon={<Store size={14} />} label="Cửa hàng" value={customer.storeCode ? `${customer.storeName} (${customer.storeCode})` : "—"} />
         <InfoRow icon={<Route size={14} />} label="Tuyến" value={customer.storeRoute || "—"} />
+        <InfoRow icon={<UserCheck size={14} />} label="NVBH" value={customer.staffCode || customer.staffName ? `${customer.staffName || "—"} (${customer.staffCode || "—"})` : "—"} />
         <InfoRow icon={<User size={14} />} label="Người liên hệ" value={customer.contactName || "—"} />
         <InfoRow icon={<Mail size={14} />} label="Email" value={customer.email || "—"} />
         <InfoRow icon={<MapPin size={14} />} label="Địa chỉ" value={[customer.address, customer.district].filter(Boolean).join(", ") || "—"} />

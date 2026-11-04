@@ -14,6 +14,8 @@ class CustomerBase(BaseModel):
     credit_limit: float = 0
     status: str = "active"
     territory_id: Optional[int] = None
+    staff_code: Optional[str] = None
+    staff_name: Optional[str] = None
     # Phase 2: thuộc cửa hàng + công ty quản lý / xuất hóa đơn
     store_id: Optional[int] = None
     company_id: Optional[int] = None
@@ -32,6 +34,8 @@ class CustomerUpdate(BaseModel):
     tax_code: Optional[str] = None
     credit_limit: Optional[float] = None
     status: Optional[str] = None
+    staff_code: Optional[str] = None
+    staff_name: Optional[str] = None
     store_id: Optional[int] = None
     company_id: Optional[int] = None
     store_route: Optional[str] = None

@@ -133,7 +133,18 @@ export default function AdminDeliveryRequestsPage() {
       const r = await apiFetch(`${API_URL}/delivery-requests/`);
       if (!r.ok) throw new Error("Không thể tải danh sách yêu cầu.");
       const data: DeliveryRequest[] = await r.json();
-      setRows(data.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
+      const sortedRows = data.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setRows(sortedRows);
+      const requestId = Number(new URLSearchParams(window.location.search).get("request_id"));
+      if (Number.isInteger(requestId) && requestId > 0) {
+        const request = sortedRows.find((row) => row.id === requestId);
+        if (request) {
+          openDetail(request);
+          const url = new URL(window.location.href);
+          url.searchParams.delete("request_id");
+          window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+        }
+      }
     } catch (e) { setError(e instanceof Error ? e.message : "Không thể tải dữ liệu."); }
   }
 

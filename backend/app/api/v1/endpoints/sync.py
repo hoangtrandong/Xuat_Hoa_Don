@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from openpyxl import load_workbook
@@ -23,6 +23,8 @@ from app.core.database import get_db
 from app.services.vinamilk_sales_summary import build_sales_summary
 from app.models.customer import Company, Customer
 from app.models.employee import Employee
+from app.models.inventory import DeliveryRequest, DeliveryRequestOrder
+from app.models.product import Product
 from app.models.user import User
 from app.models.vinamilk import (
     VinamilkOrderReplacement,
@@ -177,12 +179,79 @@ class MergeOrdersRequest(BaseModel):
     staff_name: str | None = None
 
 
+class DeliveryRequestFormOrder(BaseModel):
+    order_number: str = Field(min_length=1, max_length=120)
+    delivery_employee_code: str = Field(min_length=1, max_length=20)
+    status: str = Field(
+        default="001-Xuất hàng",
+        pattern="^(?:(?:001|002|003).*$|(?:Xuất Hàng|Trả Số|Gửi Số)$)",
+    )
+
+
+class DeliveryRequestFormRequest(BaseModel):
+    orders: list[DeliveryRequestFormOrder] = Field(min_length=1, max_length=500)
+
+
 def _order_numbers(payload: Any) -> set[str]:
     numbers = (
         _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
         for row in _row_list(payload)
     )
     return {number for number in numbers if number}
+
+
+def _build_delivery_request_form(
+    orders: list[dict[str, Any]],
+    template_path: Path | None = None,
+) -> bytes:
+    source_path = template_path or (
+        Path(__file__).resolve().parents[3] / "templates" / "delivery_request_form.xlsx"
+    )
+    workbook = load_workbook(source_path)
+    if "DSDonHang" not in workbook.sheetnames:
+        raise RuntimeError("Mẫu phiếu xuất hàng không có sheet DSDonHang.")
+    worksheet = workbook["DSDonHang"]
+    expected_headers = [
+        "Ngày đơn hàng",
+        "Số đơn hàng",
+        "Mã NVGH",
+        "Tên NVGH",
+        "Mã Khách hàng",
+        "Tên Khách hàng",
+        "Trạng Thái",
+    ]
+    actual_headers = [worksheet.cell(4, column).value for column in range(1, 8)]
+    if actual_headers != expected_headers:
+        raise RuntimeError("Cấu trúc mẫu phiếu xuất hàng không đúng định dạng DSDonHang.")
+
+    for row in worksheet.iter_rows(min_row=5, max_col=7):
+        for cell in row:
+            cell.value = None
+
+    for row_number, order in enumerate(orders, start=5):
+        if row_number > worksheet.max_row:
+            worksheet.row_dimensions[row_number].height = worksheet.row_dimensions[5].height
+            for column in range(1, 8):
+                source_cell = worksheet.cell(5, column)
+                target_cell = worksheet.cell(row_number, column)
+                if source_cell.has_style:
+                    target_cell._style = source_cell._style
+        values = (
+            order["order_date"],
+            order["order_number"],
+            order["employee_code"],
+            order["employee_name"],
+            order["customer_code"],
+            order["customer_name"],
+            order["status"],
+        )
+        for column, value in enumerate(values, start=1):
+            worksheet.cell(row=row_number, column=column, value=value)
+
+    worksheet.auto_filter.ref = f"A4:G{max(4, len(orders) + 4)}"
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 def _apply_scoped_states(
@@ -1373,6 +1442,30 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
                 VinamilkOrderSnapshot.product_code.is_(None),
             )
         )
+    # Tự động cập nhật mã NVBH và tên NVBH cho khách hàng tương ứng nếu chưa có
+    try:
+        cust_staff_updates: dict[str, tuple[str | None, str | None]] = {}
+        for _, row, _, _ in row_data_list:
+            c_code = _field(row, ("customerCode", "shopCode", "Mã KH"))
+            s_code = _field(row, ("Mã NVBH", "staffCode", "salesStaffCode"))
+            s_name = _field(row, ("Tên NVBH", "staffName", "salesStaffName"))
+            if c_code and (s_code or s_name):
+                clean_c = c_code.strip()
+                cust_staff_updates[clean_c] = (s_code, s_name)
+                if len(clean_c) > 3:
+                    cust_staff_updates[clean_c[-3:]] = (s_code, s_name)
+        if cust_staff_updates:
+            target_custs = db.scalars(
+                select(Customer).where(Customer.code.in_(list(cust_staff_updates.keys())))
+            ).all()
+            for c in target_custs:
+                sc, sn = cust_staff_updates.get(c.code, (None, None))
+                if sc and not c.staff_code:
+                    c.staff_code = sc
+                if sn and not c.staff_name:
+                    c.staff_name = sn
+    except Exception:
+        pass
     return saved
 
 def read_cookie() -> str:
@@ -1709,6 +1802,35 @@ def list_local_vinamilk_orders(
             src_num = (req_item.source_order_number or "").strip()
             if src_num and src_num not in pending_split_for:
                 pending_split_for[src_num] = req_item
+
+    product_supplier_map: dict[str, str] = {}
+    try:
+        product_supplier_map = {
+            p.sku.upper(): p.supplier
+            for p in db.scalars(select(Product)).all()
+            if p.supplier
+        }
+    except Exception:
+        pass
+
+    order_delivery_status: dict[str, str] = {}
+    try:
+        dr_rows = db.execute(
+            select(DeliveryRequestOrder.order_number, DeliveryRequest.status)
+            .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
+            .where(DeliveryRequest.status != "CANCELLED")
+        ).all()
+        for o_num, req_status in dr_rows:
+            if not o_num:
+                continue
+            key = o_num.strip().upper()
+            if req_status == "COMPLETED":
+                order_delivery_status[key] = "Đã Xuất"
+            elif req_status in ("DRAFT", "SUBMITTED", "RECEIVED"):
+                if order_delivery_status.get(key) != "Đã Xuất":
+                    order_delivery_status[key] = "Đã Duyệt"
+    except Exception:
+        pass
     for row in rows:
         order_num = row.order_number or ""
         rep_order = replaced_order_for.get(order_num)
@@ -1722,6 +1844,19 @@ def list_local_vinamilk_orders(
             replacement_display = f"Chờ KT duyệt tách (#{pending_req.id})"
         else:
             replacement_display = None
+
+        # Tình trạng xuất kho / duyệt đơn từ Yêu cầu xuất hàng (DeliveryRequest)
+        d_status = order_delivery_status.get(order_num.upper())
+        if not d_status and rep_order:
+            for old_part in [p.strip().upper() for p in rep_order.split(",") if p.strip()]:
+                if old_part in order_delivery_status:
+                    d_status = order_delivery_status[old_part]
+                    break
+        if not d_status and rep_by_list:
+            sub_statuses = [order_delivery_status.get(s.upper()) for s in rep_by_list if order_delivery_status.get(s.upper())]
+            if sub_statuses:
+                d_status = "Đã Xuất" if all(s == "Đã Xuất" for s in sub_statuses) else "Đã Duyệt"
+
         proc_status = (
             row.processing_status
             if getattr(row, "processing_status", None)
@@ -1729,6 +1864,11 @@ def list_local_vinamilk_orders(
         )
         if pending_req and not getattr(row, "is_synthetic", False):
             proc_status = "Chờ KT duyệt tách"
+
+        prod_sku = (row.product_code or "").strip().upper()
+        supplier = product_supplier_map.get(prod_sku, "")
+        order_status_label = d_status or proc_status or ""
+
         row_actor = (getattr(row, "performed_by", None) or "").strip()
         if not row_actor and isinstance(row.raw_payload, dict):
             row_actor = (
@@ -1740,6 +1880,12 @@ def list_local_vinamilk_orders(
             performed_by = replacement_actor_for.get(order_num) or row_actor or "Hệ thống"
         base = {
             **row.raw_payload,
+            "Nhà cung cấp": supplier,
+            "supplier": supplier,
+            "_supplier": supplier,
+            "Tình trạng xử lý đơn hàng": order_status_label,
+            "Trạng thái xử lý": order_status_label,
+            "_delivery_status": d_status,
             "Người thực hiện": performed_by,
             "_performed_by": performed_by,
             "_local_id": row.id,
@@ -1815,6 +1961,87 @@ def list_vinamilk_order_options(
         query = query.where(VinamilkOrderSnapshot.order_number.ilike(f"%{search.strip()}%"))
     order_numbers = db.scalars(query.distinct().order_by(VinamilkOrderSnapshot.order_number.desc()).limit(limit)).all()
     return {"order_numbers": order_numbers}
+
+
+@router.post("/vinamilk-orders/delivery-request-form")
+def download_vinamilk_delivery_request_form(
+    payload: DeliveryRequestFormRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Chỉ Admin mới được tạo phiếu yêu cầu xuất hàng.")
+
+    orders_by_number: dict[str, DeliveryRequestFormOrder] = {}
+    for order in payload.orders:
+        order_number = order.order_number.strip()
+        if not order_number:
+            raise HTTPException(status_code=422, detail="Số đơn hàng không được để trống.")
+        normalized_number = order_number.upper()
+        if normalized_number in orders_by_number:
+            raise HTTPException(status_code=422, detail=f"Đơn hàng {order_number} bị chọn nhiều lần.")
+        orders_by_number[normalized_number] = order.model_copy(update={"order_number": order_number})
+
+    employee_codes = {
+        order.delivery_employee_code.strip().upper()
+        for order in orders_by_number.values()
+    }
+    employees = db.scalars(
+        select(Employee).where(
+            Employee.status == "active",
+            func.upper(Employee.code).in_(employee_codes),
+        )
+    ).all()
+    employees_by_code = {
+        employee.code.strip().upper(): employee
+        for employee in employees
+        if employee.code.strip().upper().startswith("NV")
+    }
+    missing_employees = sorted(employee_codes - employees_by_code.keys())
+    if missing_employees:
+        raise HTTPException(
+            status_code=422,
+            detail="NVGH không hợp lệ hoặc không còn hoạt động: " + ", ".join(missing_employees),
+        )
+
+    snapshots = db.scalars(
+        select(VinamilkOrderSnapshot)
+        .where(func.upper(VinamilkOrderSnapshot.order_number).in_(orders_by_number))
+        .order_by(VinamilkOrderSnapshot.id.desc())
+    ).all()
+    latest_snapshot_by_number: dict[str, VinamilkOrderSnapshot] = {}
+    for snapshot in snapshots:
+        if snapshot.order_number:
+            latest_snapshot_by_number.setdefault(snapshot.order_number.strip().upper(), snapshot)
+
+    missing_orders = sorted(set(orders_by_number) - latest_snapshot_by_number.keys())
+    if missing_orders:
+        raise HTTPException(
+            status_code=404,
+            detail="Không tìm thấy các đơn hàng đã chọn trong dữ liệu đồng bộ: " + ", ".join(missing_orders),
+        )
+
+    form_orders = []
+    for normalized_number, request_order in orders_by_number.items():
+        snapshot = latest_snapshot_by_number[normalized_number]
+        employee = employees_by_code[request_order.delivery_employee_code.strip().upper()]
+        form_orders.append({
+            "order_date": snapshot.order_created_date.strftime("%d/%m/%Y") if snapshot.order_created_date else "",
+            "order_number": snapshot.order_number or request_order.order_number,
+            "employee_code": employee.code,
+            "employee_name": employee.name,
+            "customer_code": (snapshot.customer_code or "").strip()[-3:],
+            "customer_name": snapshot.customer_name or "",
+            "status": request_order.status,
+        })
+
+    workbook_bytes = _build_delivery_request_form(form_orders)
+    filename = f"Form_Yeu_Cau_Xuat_Kho_{date.today():%Y%m%d}.xlsx"
+    return Response(
+        content=workbook_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/vinamilk-orders/customer-options")
@@ -2055,6 +2282,188 @@ def revert_split_or_merge_order(
         order_number,
         is_admin=_is_admin_user(current_user),
     )
+
+
+MANUAL_ORDER_PREFIX = "TC"
+MANUAL_ORDER_STATUS = "Đơn Tự Tạo"
+
+
+class ManualOrderLine(BaseModel):
+    product_code: str
+    quantity: float = Field(gt=0)
+    promo_quantity: float = Field(default=0, ge=0)
+    unit_price: float | None = Field(default=None, ge=0)
+    discount_amount: float = Field(default=0, ge=0)
+
+
+class ManualOrderRequest(BaseModel):
+    customer_code: str
+    order_type: str = "001-Xuất hàng"
+    order_date: date | None = None
+    delivery_date: date | None = None
+    staff_code: str | None = None
+    staff_name: str | None = None
+    customer_address: str | None = None
+    note: str | None = None
+    lines: list[ManualOrderLine] = Field(min_length=1)
+
+
+def _next_manual_order_number(db: Session, ref_date: date) -> str:
+    prefix = f"{MANUAL_ORDER_PREFIX}-{ref_date:%y%m%d}-"
+    existing = db.scalars(
+        select(VinamilkOrderSnapshot.order_number)
+        .where(VinamilkOrderSnapshot.order_number.like(f"{prefix}%"))
+        .distinct()
+    ).all()
+    max_seq = 0
+    for code in existing:
+        tail = (code or "")[len(prefix):]
+        if tail.isdigit():
+            max_seq = max(max_seq, int(tail))
+    return f"{prefix}{max_seq + 1:03d}"
+
+
+def _create_manual_order(db: Session, payload: ManualOrderRequest, performed_by: str | None = None) -> dict[str, Any]:
+    """Tạo đơn hàng tự tạo (không từ DMS), lưu cùng bảng snapshot để hiển thị chung danh sách Đơn hàng."""
+    actor = (performed_by or "").strip() or "Hệ thống"
+    cust_code = (payload.customer_code or "").strip()
+    customer = db.scalar(select(Customer).where(Customer.code == cust_code)) if cust_code else None
+    if customer is None:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy khách hàng {cust_code}.")
+
+    codes = [line.product_code.strip().upper() for line in payload.lines]
+    if len(set(codes)) != len(codes):
+        raise HTTPException(status_code=400, detail="Mỗi sản phẩm chỉ được xuất hiện một lần trong đơn.")
+    products = {
+        p.sku.strip().upper(): p
+        for p in db.scalars(select(Product).options(joinedload(Product.unit)).where(func.upper(Product.sku).in_(codes))).all()
+    }
+    missing = [code for code in codes if code not in products]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy sản phẩm trong Danh sách SKU: {', '.join(missing)}.")
+
+    order_type = (payload.order_type or "001-Xuất hàng").strip()
+    if order_type not in ("001-Xuất hàng", "002-Dương Số"):
+        order_type = "001-Xuất hàng"
+
+    order_date = payload.order_date or date.today()
+    delivery_date = payload.delivery_date or order_date
+    order_number = _next_manual_order_number(db, order_date)
+    staff_code = (payload.staff_code or customer.staff_code or "").strip()
+    staff_name = (payload.staff_name or customer.staff_name or "").strip()
+    address = (payload.customer_address or "").strip()
+    if not address and customer.addresses:
+        default_addr = next((a for a in customer.addresses if a.is_default), customer.addresses[0])
+        address = ", ".join(part for part in (default_addr.address, default_addr.district, default_addr.city) if part)
+    note = (payload.note or "").strip()
+    now = datetime.utcnow()
+    total_value = 0.0
+
+    for line_idx, line in enumerate(payload.lines, start=1):
+        product = products[line.product_code.strip().upper()]
+        price = float(line.unit_price if line.unit_price is not None else (product.base_price or 0))
+        value = round(price * line.quantity, 2)
+        discount = min(float(line.discount_amount or 0), value)
+        total_value += value - discount
+        unit_name = (product.unit.code if product.unit else "") or ""
+        raw = {
+            "Số đơn hàng gốc": "",
+            "Số đơn hàng": order_number,
+            "Trạng thái tạo đơn": order_type,
+            "orderType": order_type,
+            "_order_type": order_type,
+            "Mã CTKM": "",
+            "Tên CTKM": "",
+            "Ngày": order_date.strftime("%d/%m/%Y"),
+            "Mã NVBH": staff_code,
+            "Tên NVBH": staff_name,
+            "Mã KH": customer.code,
+            "Tên KH": customer.name,
+            "Địa chỉ": address,
+            "Mã sản phẩm": product.sku,
+            "Sản phẩm": product.name,
+            "ĐVT": unit_name,
+            "Số lượng": float(line.quantity),
+            "Số lượng KM": float(line.promo_quantity or 0),
+            "Giá trị": value,
+            "Tỉ lệ CK": round(discount / value * 100, 2) if value and discount else "",
+            "Số tiền CK": discount if discount else "",
+            "Đơn giá": price,
+            "Thời gian xác nhận giao hàng": "",
+            "Ngày đơn hàng gốc": "",
+            "Ghi chú": note,
+            "Người thực hiện": actor,
+            "performedBy": actor,
+            "_manual_order": True,
+        }
+        db.add(VinamilkOrderSnapshot(
+            remote_key=hashlib.sha256(f"MANUAL|{order_number}|{product.sku}|{line_idx}".encode()).hexdigest(),
+            order_number=order_number,
+            customer_code=customer.code,
+            customer_name=customer.name,
+            product_code=product.sku,
+            product_name=product.name,
+            status=MANUAL_ORDER_STATUS,
+            processing_status=MANUAL_ORDER_STATUS,
+            performed_by=actor,
+            is_synthetic=True,
+            order_created_date=order_date,
+            delivery_date=delivery_date,
+            synced_from=order_date,
+            synced_to=order_date,
+            synced_at=now,
+            raw_payload=raw,
+        ))
+    db.commit()
+    return {
+        "order_number": order_number,
+        "customer_code": customer.code,
+        "line_count": len(payload.lines),
+        "total_value": total_value,
+        "performed_by": actor,
+    }
+
+
+def _delete_manual_order(db: Session, order_number: str) -> dict[str, Any]:
+    target = order_number.strip()
+    if not target.upper().startswith(f"{MANUAL_ORDER_PREFIX}-"):
+        raise HTTPException(status_code=400, detail="Chỉ xóa được đơn hàng tự tạo.")
+    in_delivery = db.scalar(
+        select(DeliveryRequestOrder.id)
+        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
+        .where(func.upper(DeliveryRequestOrder.order_number) == target.upper(), DeliveryRequest.status != "CANCELLED")
+        .limit(1)
+    )
+    if in_delivery is not None:
+        raise HTTPException(status_code=400, detail=f"Đơn {target} đã nằm trong yêu cầu xuất hàng, không thể xóa.")
+    result = db.execute(
+        delete(VinamilkOrderSnapshot).where(
+            VinamilkOrderSnapshot.order_number == target,
+            VinamilkOrderSnapshot.is_synthetic.is_(True),
+        )
+    )
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng {target}.")
+    db.commit()
+    return {"deleted_order_number": target, "deleted_lines": result.rowcount}
+
+
+@router.post("/vinamilk-orders/manual", status_code=201)
+def create_manual_order(
+    payload: ManualOrderRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _create_manual_order(db, payload, performed_by=getattr(current_user, "username", None))
+
+
+@router.delete("/vinamilk-orders/manual/{order_number}")
+def delete_manual_order(
+    order_number: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _delete_manual_order(db, order_number)
 
 
 @router.get("/vinamilk-orders/allocations/template")

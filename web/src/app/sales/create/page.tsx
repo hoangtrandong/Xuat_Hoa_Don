@@ -1,120 +1,236 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
-// src/app/sales/create/page.tsx - Tao don hang (Buoc 3)
+// src/app/sales/create/page.tsx - Tao don hang tu tao (ma don bat dau bang TC-), hien thi chung voi don dong bo tu DMS
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Search, Trash2, User, CheckCircle2, AlertTriangle, X } from "lucide-react";
+import { Search, Trash2, User, CheckCircle2, AlertTriangle, X, Loader2 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import Badge from "@/components/ui/Badge";
-import { customers, type Customer } from "@/lib/mock-customers";
-import { priceListItems } from "@/lib/mock-products";
-import { warehouses } from "@/lib/mock-inventory";
-import { getAllStockLevels } from "@/lib/inventory-store";
-import { createOrder, reserveOrderStock } from "@/lib/order-store";
-import { formatVND, formatVNDFull, formatNumber, getInitials } from "@/lib/format";
+import { API_URL, apiFetch } from "@/lib/api";
+import { formatVNDFull, formatNumber, getInitials } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+interface SystemCustomer {
+  id: number;
+  code: string;
+  name: string;
+  type: string;
+  tier: string;
+  status: string;
+  staffCode: string;
+  staffName: string;
+  storeName: string;
+}
+
+interface SystemProduct {
+  id: number;
+  sku: string;
+  name: string;
+  unit: string;
+  supplier: string;
+  basePrice: number;
+}
+
+interface WarehouseOption {
+  id: number;
+  name: string;
+}
 
 interface Line {
   productCode: string;
   productName: string;
   unit: string;
   quantity: number;
+  promoQuantity: number;
   price: number;
-  discount: number;
-  lineTotal: number;
+  discountAmount: number;
 }
 
-const paymentMethods = ["Chuyển khoản", "Tiền mặt", "COD"];
+const customerTypeLabel: Record<string, string> = {
+  DISTRIBUTOR: "Nhà phân phối",
+  WHOLESALE: "Đại lý",
+  HORECA: "HORECA",
+  RETAIL: "Cửa hàng",
+};
+
+const ORDER_TYPES = ["001-Xuất hàng", "002-Dương Số"] as const;
+
+function todayStr() {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function normalizeText(value: string) {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").toLowerCase();
+}
 
 export default function CreateOrderPage() {
   const router = useRouter();
+  const [customers, setCustomers] = useState<SystemCustomer[]>([]);
+  const [products, setProducts] = useState<SystemProduct[]>([]);
+  const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
+  const [warehouseId, setWarehouseId] = useState<number | null>(null);
+  const [stockMap, setStockMap] = useState<Map<string, number>>(new Map());
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+
   const [customerQuery, setCustomerQuery] = useState("");
   const [customerOpen, setCustomerOpen] = useState(false);
-  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
-  const [priceListId, setPriceListId] = useState(priceListItems[0].id);
+  const [selectedCustomer, setSelectedCustomer] = useState<SystemCustomer | null>(null);
+  const [orderType, setOrderType] = useState<string>("001-Xuất hàng");
+  const [staffCode, setStaffCode] = useState("");
+  const [staffName, setStaffName] = useState("");
+  const [address, setAddress] = useState("");
+  const [orderDate, setOrderDate] = useState(todayStr());
+  const [deliveryDate, setDeliveryDate] = useState(todayStr());
+
   const [productQuery, setProductQuery] = useState("");
   const [productOpen, setProductOpen] = useState(false);
   const [lines, setLines] = useState<Line[]>([]);
   const [pickError, setPickError] = useState("");
-  const [warehouse, setWarehouse] = useState(warehouses[0].name);
-  const [orderDiscount, setOrderDiscount] = useState(0);
   const [note, setNote] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState(paymentMethods[0]);
-  const [amountPaidRaw, setAmountPaidRaw] = useState("0");
   const [submitError, setSubmitError] = useState("");
-  const stockMap = useMemo(() => {
-    const m = new Map<string, { available: number }>();
-    getAllStockLevels().forEach((s) => m.set(s.productCode, { available: s.available }));
-    return m;
-  }, []);
+  const [submitting, setSubmitting] = useState(false);
 
-  const priceList = priceListItems.find((pl) => pl.id === priceListId) ?? priceListItems[0];
-
+  // Tai du lieu that tu he thong: khach hang, Danh sach SKU, kho
   useEffect(() => {
-    const key = new URLSearchParams(window.location.search).get("customer");
-    if (key) {
-      const c = customers.find((x) => x.code === key);
-      if (c) setSelectedCustomer(c);
+    let cancelled = false;
+    async function load() {
+      try {
+        const [custRes, prodRes, unitRes, whRes] = await Promise.all([
+          apiFetch(`${API_URL}/customers/?limit=5000`),
+          apiFetch(`${API_URL}/products/?limit=10000`),
+          apiFetch(`${API_URL}/products/units/`),
+          apiFetch(`${API_URL}/inventory/warehouses/`),
+        ]);
+        if (!custRes.ok) throw new Error("Không thể tải danh sách khách hàng.");
+        if (!prodRes.ok) throw new Error("Không thể tải Danh sách SKU.");
+        const custRows = (await custRes.json()) as Array<Record<string, unknown>>;
+        const prodRows = (await prodRes.json()) as Array<Record<string, unknown>>;
+        const unitRows = unitRes.ok ? ((await unitRes.json()) as Array<{ id: number; name: string }>) : [];
+        const whRows = whRes.ok ? ((await whRes.json()) as Array<{ id: number; name: string }>) : [];
+        if (cancelled) return;
+        const unitName = new Map(unitRows.map((u) => [u.id, u.name]));
+        const loadedCustomers = custRows
+          .filter((row) => row.status !== "inactive")
+          .map((row) => ({
+            id: Number(row.id),
+            code: String(row.code ?? ""),
+            name: String(row.name ?? ""),
+            type: customerTypeLabel[String(row.type ?? "")] ?? String(row.type ?? ""),
+            tier: String(row.tier ?? ""),
+            status: String(row.status ?? "active"),
+            staffCode: String(row.staff_code ?? ""),
+            staffName: String(row.staff_name ?? ""),
+            storeName: String(row.store_name ?? ""),
+          }));
+        setCustomers(loadedCustomers);
+        setProducts(
+          prodRows
+            .filter((row) => row.status !== "inactive")
+            .map((row) => ({
+              id: Number(row.id),
+              sku: String(row.sku ?? ""),
+              name: String(row.name ?? ""),
+              unit: unitName.get(Number(row.unit_id)) ?? "",
+              supplier: String(row.supplier ?? ""),
+              basePrice: Number(row.base_price ?? 0),
+            }))
+        );
+        setWarehouses(whRows.map((w) => ({ id: w.id, name: w.name })));
+        if (whRows.length > 0) setWarehouseId(whRows[0].id);
+        const key = new URLSearchParams(window.location.search).get("customer");
+        if (key) {
+          const c = loadedCustomers.find((x) => x.code === key);
+          if (c) selectCustomer(c);
+        }
+      } catch (error) {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : "Không thể tải dữ liệu.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
+    void load();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const filteredCustomers = useMemo(() => {
-    const q = customerQuery.trim().toLowerCase();
-    if (!q) return customers.slice(0, 8);
-    return customers
-      .filter((c) => c.name.toLowerCase().includes(q) || c.code.toLowerCase().includes(q))
-      .slice(0, 8);
-  }, [customerQuery]);
+  // Ton kha dung theo kho (chi de canh bao)
+  useEffect(() => {
+    if (warehouseId == null) return;
+    apiFetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${warehouseId}`)
+      .then(async (res) => (res.ok ? ((await res.json()) as Array<{ product_code: string; available: number }>) : []))
+      .then((rows) => setStockMap(new Map(rows.map((r) => [r.product_code.toUpperCase(), Number(r.available ?? 0)]))))
+      .catch(() => setStockMap(new Map()));
+  }, [warehouseId]);
 
-  const filteredProducts = useMemo(() => {
-    const q = productQuery.trim().toLowerCase();
-    const list = q
-      ? priceList.items.filter(
-          (it) => it.productName.toLowerCase().includes(q) || it.productCode.toLowerCase().includes(q)
-        )
-      : priceList.items;
-    return list.slice(0, 7);
-  }, [productQuery, priceList]);
-
-  const subtotal = lines.reduce((s, l) => s + l.lineTotal, 0);
-  const discountAmt = Math.round((subtotal * orderDiscount) / 100);
-  const total = subtotal - discountAmt;
-  const amountPaid = Math.max(0, Math.min(Number(amountPaidRaw) || 0, total));
-  const paymentStatus =
-    total > 0 && amountPaid >= total ? "Đã thanh toán" : amountPaid > 0 ? "Thanh toán một phần" : "Chưa thanh toán";
-
-  function recompute(list: Line[]): Line[] {
-    return list.map((l) => ({
-      ...l,
-      lineTotal: Math.round(l.price * l.quantity * (1 - l.discount / 100)),
-    }));
+  function selectCustomer(c: SystemCustomer) {
+    setSelectedCustomer(c);
+    setStaffCode(c.staffCode);
+    setStaffName(c.staffName);
+    setAddress("");
+    setCustomerOpen(false);
+    setCustomerQuery("");
   }
 
-  function addProduct(productCode: string) {
+  const filteredCustomers = useMemo(() => {
+    const q = normalizeText(customerQuery.trim());
+    const list = q
+      ? customers.filter((c) =>
+          [c.code, c.name, c.staffCode, c.staffName, c.storeName].some((v) => normalizeText(v).includes(q))
+        )
+      : customers;
+    return list.slice(0, 20);
+  }, [customerQuery, customers]);
+
+  const filteredProducts = useMemo(() => {
+    const q = normalizeText(productQuery.trim());
+    const list = q
+      ? products.filter((p) => [p.sku, p.name, p.supplier].some((v) => normalizeText(v).includes(q)))
+      : products;
+    return list.slice(0, 20);
+  }, [productQuery, products]);
+
+  const lineValue = (l: Line) => Math.round(l.price * l.quantity);
+  const lineTotal = (l: Line) => Math.max(0, lineValue(l) - l.discountAmount);
+  const subtotal = lines.reduce((s, l) => s + lineValue(l), 0);
+  const totalDiscount = lines.reduce((s, l) => s + Math.min(l.discountAmount, lineValue(l)), 0);
+  const total = subtotal - totalDiscount;
+  const stockOf = (code: string) => stockMap.get(code.toUpperCase());
+
+  function addProduct(product: SystemProduct) {
     setPickError("");
-    if (lines.some((l) => l.productCode === productCode)) {
+    if (lines.some((l) => l.productCode === product.sku)) {
       setPickError("Sản phẩm đã có trong đơn hàng.");
       return;
     }
-    const item = priceList.items.find((it) => it.productCode === productCode);
-    if (!item) return;
     setLines((prev) => [
       ...prev,
-      { productCode: item.productCode, productName: item.productName, unit: item.unit, quantity: 1, price: item.price, discount: 0, lineTotal: item.price },
+      {
+        productCode: product.sku,
+        productName: product.name,
+        unit: product.unit,
+        quantity: 1,
+        promoQuantity: 0,
+        price: product.basePrice,
+        discountAmount: 0,
+      },
     ]);
     setProductQuery("");
     setProductOpen(false);
   }
 
   function updateLine(idx: number, patch: Partial<Line>) {
-    setLines((prev) => recompute(prev.map((l, i) => (i === idx ? { ...l, ...patch } : l))));
+    setLines((prev) => prev.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
   }
 
   function removeLine(idx: number) {
     setLines((prev) => prev.filter((_, i) => i !== idx));
   }
 
-  function handleSubmit() {
+  async function handleSubmit() {
     setSubmitError("");
     if (!selectedCustomer) {
       setSubmitError("Vui lòng chọn khách hàng.");
@@ -124,53 +240,68 @@ export default function CreateOrderPage() {
       setSubmitError("Vui lòng thêm ít nhất 1 sản phẩm vào đơn.");
       return;
     }
-    const invalid = lines.find((l) => {
-      const stock = stockMap.get(l.productCode);
-      return l.quantity < 1 || (stock && l.quantity > stock.available);
-    });
-    if (invalid) {
-      setSubmitError(
-        `Số lượng của "${invalid.productName}" vượt tồn khả dụng (còn ${stockMap.get(invalid.productCode)?.available ?? 0} ${invalid.unit}).`
-      );
+    if (lines.some((l) => l.quantity <= 0)) {
+      setSubmitError("Số lượng sản phẩm phải lớn hơn 0.");
       return;
     }
-    const order = createOrder({
-      customer: selectedCustomer,
-      warehouse,
-      items: lines,
-      orderDiscount,
-      paymentMethod,
-      amountPaid,
-      note: note.trim() || undefined,
-    });
-    reserveOrderStock(lines);
-    window.sessionStorage.setItem("dms-order-created", order.code);
-    router.push("/sales/orders");
+    setSubmitting(true);
+    try {
+      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/manual`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customer_code: selectedCustomer.code,
+          order_type: orderType,
+          order_date: orderDate || null,
+          delivery_date: deliveryDate || null,
+          staff_code: staffCode.trim() || null,
+          staff_name: staffName.trim() || null,
+          customer_address: address.trim() || null,
+          note: note.trim() || null,
+          lines: lines.map((l) => ({
+            product_code: l.productCode,
+            quantity: l.quantity,
+            promo_quantity: l.promoQuantity,
+            unit_price: l.price,
+            discount_amount: l.discountAmount,
+          })),
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as { order_number?: string; detail?: unknown };
+      if (!response.ok) {
+        throw new Error(typeof payload.detail === "string" ? payload.detail : "Không thể lưu đơn hàng.");
+      }
+      window.sessionStorage.setItem("dms-order-created", payload.order_number ?? "");
+      router.push("/sales/orders");
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Không thể lưu đơn hàng.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
-  const statusBadge =
-    paymentStatus === "Đã thanh toán" ? (
-      <Badge variant="success">Đã thanh toán</Badge>
-    ) : paymentStatus === "Thanh toán một phần" ? (
-      <Badge variant="warning">Thanh toán một phần</Badge>
-    ) : (
-      <Badge variant="default">Chưa thanh toán</Badge>
-    );
+  const inputCls =
+    "mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white";
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Tạo đơn hàng"
-        subtitle="Lập phiếu bán mới: chọn khách hàng, thêm sản phẩm và xác nhận thanh toán"
+        subtitle="Đơn tự tạo có mã bắt đầu bằng TC- và hiển thị chung với đơn đồng bộ từ DMS"
         backHref="/sales/orders"
         actions={
-          <button onClick={handleSubmit} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-            <CheckCircle2 size={16} /> Lưu đơn hàng
+          <button
+            onClick={handleSubmit}
+            disabled={submitting}
+            className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            {submitting ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />} Lưu đơn hàng
           </button>
         }
       />
-      {submitError && (
+      {(submitError || loadError) && (
         <div className="flex items-center gap-2 bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">
-          <AlertTriangle size={16} /> {submitError}
+          <AlertTriangle size={16} /> {submitError || loadError}
         </div>
       )}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
@@ -179,17 +310,36 @@ export default function CreateOrderPage() {
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
             <h3 className="text-sm font-semibold text-gray-700 mb-3">1. Khách hàng</h3>
             {selectedCustomer ? (
-              <div className="flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-50/50 p-3">
-                <div className="w-9 h-9 rounded-full bg-sky-500 flex items-center justify-center flex-shrink-0">
-                  <span className="text-white text-xs font-bold">{getInitials(selectedCustomer.name)}</span>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3 rounded-xl border border-sky-200 bg-sky-50/50 p-3">
+                  <div className="w-9 h-9 rounded-full bg-sky-500 flex items-center justify-center flex-shrink-0">
+                    <span className="text-white text-xs font-bold">{getInitials(selectedCustomer.name)}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-gray-900">{selectedCustomer.name}</p>
+                    <p className="text-xs text-gray-500">
+                      {selectedCustomer.code} · {selectedCustomer.type}
+                      {selectedCustomer.storeName ? ` · ${selectedCustomer.storeName}` : ""}
+                    </p>
+                  </div>
+                  <button onClick={() => setSelectedCustomer(null)} className="p-1.5 rounded-lg hover:bg-white text-gray-400" aria-label="Bỏ chọn">
+                    <X size={16} />
+                  </button>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-gray-900">{selectedCustomer.name}</p>
-                  <p className="text-xs text-gray-500">{selectedCustomer.code} · {selectedCustomer.type} · {selectedCustomer.district}</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="text-xs text-gray-500">Mã NVBH</span>
+                    <input value={staffCode} onChange={(e) => setStaffCode(e.target.value)} className={inputCls} />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500">Tên NVBH</span>
+                    <input value={staffName} onChange={(e) => setStaffName(e.target.value)} className={inputCls} />
+                  </label>
+                  <label className="block sm:col-span-2">
+                    <span className="text-xs text-gray-500">Địa chỉ giao hàng</span>
+                    <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Để trống sẽ dùng địa chỉ mặc định của khách hàng" className={inputCls} />
+                  </label>
                 </div>
-                <button onClick={() => setSelectedCustomer(null)} className="p-1.5 rounded-lg hover:bg-white text-gray-400" aria-label="Bỏ chọn">
-                  <X size={16} />
-                </button>
               </div>
             ) : (
               <div className="relative">
@@ -198,16 +348,16 @@ export default function CreateOrderPage() {
                   value={customerQuery}
                   onChange={(e) => { setCustomerQuery(e.target.value); setCustomerOpen(true); }}
                   onFocus={() => setCustomerOpen(true)}
-                  placeholder="Tìm khách hàng theo mã, tên, số điện thoại..."
+                  placeholder={loading ? "Đang tải khách hàng..." : `Tìm trong ${formatNumber(customers.length)} khách hàng theo mã, tên, NVBH...`}
                   className="pl-8 pr-3 py-2.5 text-sm bg-gray-50 border border-gray-200 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white"
                 />
-                {customerOpen && (
+                {customerOpen && !loading && (
                   <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg z-20 max-h-72 overflow-y-auto">
                     {filteredCustomers.length === 0 && <p className="px-4 py-3 text-sm text-gray-400">Không tìm thấy khách hàng.</p>}
                     {filteredCustomers.map((c) => (
                       <button
-                        key={c.code}
-                        onClick={() => { setSelectedCustomer(c); setCustomerOpen(false); setCustomerQuery(""); }}
+                        key={c.id}
+                        onClick={() => selectCustomer(c)}
                         className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-sky-50 transition-colors text-left"
                       >
                         <div className="w-7 h-7 rounded-full bg-gray-100 flex items-center justify-center flex-shrink-0">
@@ -215,56 +365,54 @@ export default function CreateOrderPage() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-gray-800 truncate">{c.name}</p>
-                          <p className="text-xs text-gray-400">{c.code} · {c.type} · {c.district}</p>
+                          <p className="text-xs text-gray-400 truncate">
+                            {c.code} · {c.type}
+                            {c.staffName ? ` · NVBH: ${c.staffName}` : ""}
+                          </p>
                         </div>
-                        <Badge variant="default">Tier {c.tier}</Badge>
+                        {c.tier && <Badge variant="default">Tier {c.tier}</Badge>}
                       </button>
                     ))}
                   </div>
                 )}
               </div>
             )}
-          </div>          {/* 2. San pham */}
+          </div>
+
+          {/* 2. San pham */}
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-              <h3 className="text-sm font-semibold text-gray-700">2. Sản phẩm &amp; số lượng</h3>
-              <select value={priceListId} onChange={(e) => setPriceListId(e.target.value)} className="px-3 py-1.5 text-xs bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500">
-                {priceListItems.map((pl) => (
-                  <option key={pl.id} value={pl.id}>{pl.name}</option>
-                ))}
-              </select>
-            </div>
+            <h3 className="text-sm font-semibold text-gray-700 mb-3">2. Sản phẩm &amp; số lượng</h3>
             <div className="relative mb-3">
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
                 value={productQuery}
                 onChange={(e) => { setProductQuery(e.target.value); setProductOpen(true); }}
                 onFocus={() => setProductOpen(true)}
-                placeholder="Tìm sản phẩm để thêm vào đơn..."
+                onBlur={() => setTimeout(() => setProductOpen(false), 150)}
+                placeholder={loading ? "Đang tải Danh sách SKU..." : `Tìm trong ${formatNumber(products.length)} SKU theo mã, tên, nhà cung cấp...`}
                 className="pl-8 pr-3 py-2.5 text-sm bg-gray-50 border border-gray-200 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white"
               />
-              {productOpen && (
+              {productOpen && !loading && (
                 <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg z-20 max-h-80 overflow-y-auto">
                   {pickError && <p className="px-3 pt-2 text-xs text-red-600">{pickError}</p>}
                   {filteredProducts.length === 0 && <p className="px-4 py-3 text-sm text-gray-400">Không tìm thấy sản phẩm.</p>}
                   {filteredProducts.map((p) => {
-                    const stock = stockMap.get(p.productCode);
-                    const disabled = stock ? stock.available <= 0 : false;
+                    const stock = stockOf(p.sku);
                     return (
                       <button
-                        key={p.productCode}
-                        onClick={() => addProduct(p.productCode)}
-                        disabled={disabled}
-                        className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-sky-50 transition-colors text-left disabled:opacity-40 disabled:cursor-not-allowed"
+                        key={p.id}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => addProduct(p)}
+                        className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-sky-50 transition-colors text-left"
                       >
-                        <div className="w-7 h-7 rounded-lg bg-sky-50 flex items-center justify-center flex-shrink-0">
-                          <CheckCircle2 size={13} className="text-sky-500" />
-                        </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-800 truncate">{p.productName}</p>
-                          <p className="text-xs text-gray-400">{p.productCode} · ĐVT: {p.unit} · Tồn khả dụng: {formatNumber(stock?.available ?? 0)}</p>
+                          <p className="text-sm font-medium text-gray-800 truncate">{p.name}</p>
+                          <p className="text-xs text-gray-400 truncate">
+                            {p.sku} · ĐVT: {p.unit || "—"}
+                            {p.supplier ? ` · NCC: ${p.supplier}` : ""} · Tồn: {stock == null ? "—" : formatNumber(stock)}
+                          </p>
                         </div>
-                        <span className="text-sm font-semibold text-gray-900">{formatVNDFull(p.price)}</span>
+                        <span className="text-sm font-semibold text-gray-900">{formatVNDFull(p.basePrice)}</span>
                       </button>
                     );
                   })}
@@ -281,16 +429,17 @@ export default function CreateOrderPage() {
                       <th className="text-left px-3 py-2.5 text-xs font-semibold text-gray-500">Sản phẩm</th>
                       <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">Tồn</th>
                       <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">SL</th>
+                      <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">SL KM</th>
                       <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-500">Đơn giá</th>
-                      <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">CK %</th>
+                      <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-500">Tiền CK</th>
                       <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-500">Thành tiền</th>
                       <th />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {lines.map((l, idx) => {
-                      const stock = stockMap.get(l.productCode);
-                      const over = stock ? l.quantity > stock.available : false;
+                      const stock = stockOf(l.productCode);
+                      const over = stock != null && l.quantity + l.promoQuantity > stock;
                       return (
                         <tr key={l.productCode} className="hover:bg-gray-50">
                           <td className="px-3 py-2.5">
@@ -298,31 +447,39 @@ export default function CreateOrderPage() {
                             <p className="text-xs text-gray-400">{l.productCode} · {l.unit}</p>
                           </td>
                           <td className="px-3 py-2.5 text-center">
-                            <span className={cn("text-xs font-medium", over ? "text-red-600" : "text-emerald-600")}>
-                              {formatNumber(stock?.available ?? 0)}
+                            <span className={cn("text-xs font-medium", over ? "text-red-600" : "text-emerald-600")} title={over ? "Vượt tồn khả dụng" : undefined}>
+                              {stock == null ? "—" : formatNumber(stock)}
                             </span>
                           </td>
                           <td className="px-3 py-2.5 text-center">
                             <input
-                              type="number"
-                              min={1}
-                              value={l.quantity}
-                              onChange={(e) => updateLine(idx, { quantity: Math.max(1, Number(e.target.value) || 1) })}
-                              className={cn("w-16 text-center px-2 py-1 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-sky-500", over ? "border-red-300 bg-red-50 text-red-700" : "border-gray-200")}
+                              type="number" min={1} value={l.quantity}
+                              onChange={(e) => updateLine(idx, { quantity: Math.max(0, Number(e.target.value) || 0) })}
+                              className={cn("w-20 text-center px-2 py-1 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-sky-500", over ? "border-red-300 bg-red-50 text-red-700" : "border-gray-200")}
                             />
                           </td>
-                          <td className="px-3 py-2.5 text-right text-gray-700">{formatVNDFull(l.price)}</td>
                           <td className="px-3 py-2.5 text-center">
                             <input
-                              type="number"
-                              min={0}
-                              max={100}
-                              value={l.discount}
-                              onChange={(e) => updateLine(idx, { discount: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
+                              type="number" min={0} value={l.promoQuantity}
+                              onChange={(e) => updateLine(idx, { promoQuantity: Math.max(0, Number(e.target.value) || 0) })}
                               className="w-16 text-center px-2 py-1 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
                             />
                           </td>
-                          <td className="px-3 py-2.5 text-right font-semibold text-gray-900">{formatVNDFull(l.lineTotal)}</td>
+                          <td className="px-3 py-2.5 text-right">
+                            <input
+                              type="number" min={0} step={1} value={l.price}
+                              onChange={(e) => updateLine(idx, { price: Math.max(0, Number(e.target.value) || 0) })}
+                              className="w-28 text-right px-2 py-1 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                            />
+                          </td>
+                          <td className="px-3 py-2.5 text-right">
+                            <input
+                              type="number" min={0} step={1000} value={l.discountAmount}
+                              onChange={(e) => updateLine(idx, { discountAmount: Math.max(0, Number(e.target.value) || 0) })}
+                              className="w-28 text-right px-2 py-1 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                            />
+                          </td>
+                          <td className="px-3 py-2.5 text-right font-semibold text-gray-900">{formatVNDFull(lineTotal(l))}</td>
                           <td className="px-2 py-2.5">
                             <button onClick={() => removeLine(idx)} className="p-1.5 rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-500 transition-colors" aria-label="Xóa">
                               <Trash2 size={14} />
@@ -337,63 +494,65 @@ export default function CreateOrderPage() {
             )}
             <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="Ghi chú đơn hàng (nếu có)..." className="mt-3 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white" />
           </div>
-        </div>        {/* Cot tom tat */}
+        </div>
+
+        {/* Cot tom tat */}
         <div>
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 space-y-4 lg:sticky lg:top-20">
             <h3 className="text-sm font-semibold text-gray-700">Tóm tắt đơn hàng</h3>
-            <div className="space-y-1.5 text-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-gray-500">Tạm tính ({lines.length} dòng)</span>
-                <span className="font-medium text-gray-800">{formatVNDFull(subtotal)}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-gray-500">Chiết khấu đơn</span>
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" min={0} max={100} value={orderDiscount}
-                    onChange={(e) => setOrderDiscount(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-                    className="w-14 text-right px-2 py-1 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  />
-                  <span className="text-gray-400">%</span>
+            <div className="space-y-3 border-b border-gray-100 pb-3">
+              <div>
+                <span className="text-xs font-semibold text-gray-700">Trạng thái tạo đơn</span>
+                <div className="mt-1.5 grid grid-cols-2 gap-2">
+                  {ORDER_TYPES.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setOrderType(t)}
+                      className={cn(
+                        "px-2.5 py-1.5 text-xs font-semibold rounded-lg border text-center transition-all",
+                        orderType === t
+                          ? "bg-sky-50 text-sky-700 border-sky-300 ring-2 ring-sky-200 shadow-xs"
+                          : "bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                      )}
+                    >
+                      {t}
+                    </button>
+                  ))}
                 </div>
               </div>
+              <label className="block">
+                <span className="text-xs text-gray-500">Ngày đơn hàng</span>
+                <input type="date" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} className={inputCls} />
+              </label>
+              <label className="block">
+                <span className="text-xs text-gray-500">Ngày giao</span>
+                <input type="date" value={deliveryDate} onChange={(e) => setDeliveryDate(e.target.value)} className={inputCls} />
+              </label>
+              <label className="block">
+                <span className="text-xs text-gray-500">Kho (xem tồn khả dụng)</span>
+                <select value={warehouseId ?? ""} onChange={(e) => setWarehouseId(Number(e.target.value))} className={inputCls}>
+                  {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+                </select>
+              </label>
+            </div>
+            <div className="space-y-1.5 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">Giá trị ({lines.length} dòng)</span>
+                <span className="font-medium text-gray-800">{formatVNDFull(subtotal)}</span>
+              </div>
               <div className="flex items-center justify-between text-gray-500">
-                <span>Giảm giá</span>
-                <span className="text-red-500 font-medium">-{formatVNDFull(discountAmt)}</span>
+                <span>Chiết khấu</span>
+                <span className="text-red-500 font-medium">-{formatVNDFull(totalDiscount)}</span>
               </div>
               <div className="flex items-center justify-between pt-2 border-t border-gray-100">
                 <span className="font-bold text-gray-900">Tổng cộng</span>
                 <span className="font-bold text-sky-600 text-base">{formatVNDFull(total)}</span>
               </div>
             </div>
-            <div className="space-y-2 border-t border-gray-100 pt-3">
-              <label className="block">
-                <span className="text-xs text-gray-500">Kho xuất</span>
-                <select value={warehouse} onChange={(e) => setWarehouse(e.target.value)} className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500">
-                  {warehouses.map((w) => <option key={w.id} value={w.name}>{w.name}</option>)}
-                </select>
-              </label>
-              <label className="block">
-                <span className="text-xs text-gray-500">Phương thức thanh toán</span>
-                <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500">
-                  {paymentMethods.map((m) => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </label>
-              <label className="block">
-                <span className="text-xs text-gray-500">Số tiền thu ({formatVND(total)})</span>
-                <input
-                  type="number" min={0} step={1000} value={amountPaidRaw}
-                  onChange={(e) => setAmountPaidRaw(e.target.value)}
-                  className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </label>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-500">Trạng thái</span>
-              {statusBadge}
-            </div>
-            <button onClick={handleSubmit} disabled={!selectedCustomer || lines.length === 0} className="w-full flex items-center justify-center gap-2 bg-sky-500 hover:bg-sky-600 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg py-2.5 transition-colors disabled:cursor-not-allowed">
-              Lưu đơn hàng
+            <p className="text-xs text-gray-400">Mã đơn sẽ được cấp tự động theo dạng <b>TC-YYMMDD-001</b>.</p>
+            <button onClick={handleSubmit} disabled={!selectedCustomer || lines.length === 0 || submitting} className="w-full flex items-center justify-center gap-2 bg-sky-500 hover:bg-sky-600 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg py-2.5 transition-colors disabled:cursor-not-allowed">
+              {submitting && <Loader2 size={16} className="animate-spin" />} Lưu đơn hàng
             </button>
           </div>
         </div>

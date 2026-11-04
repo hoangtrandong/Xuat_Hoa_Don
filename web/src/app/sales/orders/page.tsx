@@ -17,8 +17,10 @@ import {
   RotateCcw,
   ClipboardCheck,
   XCircle,
+  Download,
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -96,6 +98,92 @@ type StaffOption = {
   staff_code: string;
   staff_name: string;
   employee_code?: string;
+};
+
+type DeliveryEmployeeOption = {
+  code: string;
+  name: string;
+  status: string;
+};
+
+type DeliveryWarehouseOption = {
+  id: number;
+  name: string;
+};
+
+type DeliveryRequestOrderOption = {
+  order_number: string;
+  order_date: string;
+  customer_code: string;
+  customer_name: string;
+  original_status: string;
+};
+
+type DeliveryRequestPreviewItem = {
+  product_id: number;
+  sku: string;
+  product_name: string;
+  quantity: number;
+  boxes_per_carton: number;
+  available_quantity: number;
+  shortage_quantity: number;
+  employee_allocations?: Record<string, { quantity?: number }> | null;
+  borrowed_employee_offsets?: {
+    external_employee_code: string;
+    external_employee_name?: string | null;
+    employee_id?: number | null;
+    quantity: number;
+    amount: number;
+  }[];
+};
+
+type DeliveryRequestPreview = {
+  items: DeliveryRequestPreviewItem[];
+  employee_summaries: {
+    employee_id: number | null;
+    employee_code: string;
+    employee_name?: string | null;
+    weight_ton: number;
+    order_count: number;
+    amount: number;
+    is_over_limit?: boolean;
+    projected_debt?: number;
+    debt_limit?: number;
+  }[];
+  orders: {
+    order_date?: string | null;
+    order_number: string;
+    employee_id?: number | null;
+    employee_code: string;
+    employee_name?: string | null;
+    customer_code?: string | null;
+    customer_name?: string | null;
+    amount: number;
+    payment_status: string;
+    payment_method?: string | null;
+  }[];
+  issues: string[];
+  warnings: string[];
+  import_hash: string;
+  filename: string;
+  can_create: boolean;
+};
+
+type DeliveryPlanItem = {
+  product_id: number;
+  sku: string;
+  quantity: number;
+  planned_quantity: number;
+  shortage_quantity: number;
+  picks: {
+    lot_id: number | null;
+    location_code: string | null;
+    location_id: number | null;
+    lot_number: string | null;
+    expiry_date: string | null;
+    quantity: number;
+    allocation_strategy: string;
+  }[];
 };
 
 type SplitCustomerSelection = {
@@ -186,6 +274,7 @@ const remoteColumnDefinitions: {
   truncate?: boolean;
 }[] = [
   { title: "Số đơn hàng", keys: ["orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"], width: "9rem" },
+  { title: "Trạng thái tạo đơn", keys: ["Trạng thái tạo đơn", "orderType", "_order_type"], width: "10.5rem" },
   { title: "Mã CTKM", keys: ["promotionCode", "campaignCode", "ctkmCode", "promotionId", "Mã CTKM"], width: "11rem", truncate: true },
   { title: "Tên CTKM", keys: ["promotionName", "campaignName", "Tên CTKM"], width: "16rem", truncate: true },
   { title: "Ngày tạo", keys: ["createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày"], width: "10.5rem" },
@@ -197,6 +286,7 @@ const remoteColumnDefinitions: {
   { title: "Địa chỉ", keys: ["address", "customerAddress", "shipTo", "Địa chỉ"], width: "14rem", truncate: true },
   { title: "Mã sản phẩm", keys: ["productCode", "itemCode", "sku", "Mã sản phẩm"], width: "7.5rem" },
   { title: "Sản phẩm", keys: ["productName", "itemName", "product", "Sản phẩm"], width: "16rem", truncate: true },
+  { title: "Nhà cung cấp", keys: ["Nhà cung cấp", "supplier", "_supplier"], width: "9.5rem", truncate: true },
   { title: "ĐVT", keys: ["unit", "unitName", "ĐVT"], width: "4.5rem" },
   { title: "Số lượng", keys: ["quantity", "qty", "Số lượng"], width: "6.5rem", align: "right" },
   { title: "Số lượng KM", keys: ["promotionQuantity", "freeQuantity", "giftQuantity", "Số lượng KM"], width: "7.5rem", align: "right" },
@@ -204,10 +294,9 @@ const remoteColumnDefinitions: {
   { title: "Tỉ lệ CK", keys: ["discountRate", "saleOrderDiscount", "discountPercent", "Tỉ lệ CK"], width: "6.5rem", align: "right" },
   { title: "Số tiền CK", keys: ["totalDiscount", "discountAmount", "Số tiền CK"], width: "8rem", align: "right" },
   { title: "Đơn giá", keys: ["unitPrice", "price", "Đơn giá"], width: "7.5rem", align: "right" },
-  { title: "Giảm giá voucher", keys: ["voucherAmount", "voucherDiscount", "Giảm giá voucher"], width: "9rem", align: "right" },
   { title: "Thời gian xác nhận giao hàng", keys: ["deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate"], width: "14rem" },
   { title: "Ngày đơn hàng gốc", keys: ["initialOrderDate", "originalOrderDate", "Ngày đơn hàng gốc"], width: "10.5rem" },
-  { title: "Trạng thái xử lý", keys: [], width: "14rem" },
+  { title: "Tình trạng xử lý đơn hàng", keys: ["Tình trạng xử lý đơn hàng", "Trạng thái xử lý", "_delivery_status", "_processing_status"], width: "14rem" },
   { title: "Thay thế cho đơn", keys: ["_replacement_display", "_replaced_order_number"], width: "16rem" },
   { title: "Người thực hiện", keys: ["_performed_by", "performedBy", "Người thực hiện"], width: "9.5rem" },
 ];
@@ -241,6 +330,21 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
       : hasRemoteValue(order["Người thực hiện"])
         ? String(order["Người thực hiện"]).trim()
         : "Hệ thống";
+  const supplier = hasRemoteValue(order["Nhà cung cấp"])
+    ? String(order["Nhà cung cấp"]).trim()
+    : hasRemoteValue(order["supplier"])
+      ? String(order["supplier"]).trim()
+      : hasRemoteValue(order["_supplier"])
+        ? String(order["_supplier"]).trim()
+        : null;
+  const deliveryStatus = hasRemoteValue(order["_delivery_status"])
+    ? String(order["_delivery_status"]).trim()
+    : hasRemoteValue(order["delivery_status"])
+      ? String(order["delivery_status"]).trim()
+      : null;
+  normalized["Nhà cung cấp"] = supplier;
+  normalized["_supplier"] = supplier;
+  normalized["_delivery_status"] = deliveryStatus;
   normalized["Thay thế cho đơn"] = replacementDisplay;
   normalized["Người thực hiện"] = performedBy;
   normalized["_performed_by"] = performedBy;
@@ -257,11 +361,14 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
 }
 
 function addProcessingStatus(order: RemoteOrder): RemoteOrder {
+  const deliveryStatus = displayRemoteValue(order["_delivery_status"]).trim();
   const procStatus = displayRemoteValue(order["_processing_status"]).trim();
   const whStatus = order["_warehouse_updated"] === true ? "Đã cập nhật kho" : "";
+  const finalStatus = deliveryStatus || procStatus || whStatus;
   return {
     ...order,
-    "Trạng thái xử lý": procStatus || whStatus,
+    "Tình trạng xử lý đơn hàng": finalStatus,
+    "Trạng thái xử lý": finalStatus,
   };
 }
 
@@ -306,6 +413,7 @@ function numericValue(value: unknown) {
 }
 
 export default function SalesOrdersPage() {
+  const router = useRouter();
   const { username: sessionUsername } = useAuthSession();
   const [isAdminUser, setIsAdminUser] = useState(false);
   const effectiveIsAdmin = isAdminUser || sessionUsername.trim().toLowerCase() === "admin";
@@ -372,6 +480,24 @@ export default function SalesOrdersPage() {
   const [splitApprovalFilter, setSplitApprovalFilter] = useState<"PENDING" | "ALL">("PENDING");
   const [processingSplitRequestId, setProcessingSplitRequestId] = useState<number | null>(null);
   const [splitApprovalError, setSplitApprovalError] = useState("");
+
+  const [isDeliveryRequestDrawerOpen, setIsDeliveryRequestDrawerOpen] = useState(false);
+  const [deliveryEmployees, setDeliveryEmployees] = useState<DeliveryEmployeeOption[]>([]);
+  const [deliveryWarehouses, setDeliveryWarehouses] = useState<DeliveryWarehouseOption[]>([]);
+  const [deliveryWarehouseId, setDeliveryWarehouseId] = useState("");
+  const [isLoadingDeliveryEmployees, setIsLoadingDeliveryEmployees] = useState(false);
+  const [deliveryEmployeeError, setDeliveryEmployeeError] = useState("");
+  const [selectedDeliveryOrderNumbers, setSelectedDeliveryOrderNumbers] = useState<Set<string>>(new Set());
+  const [deliveryEmployeeAssignments, setDeliveryEmployeeAssignments] = useState<Record<string, string>>({});
+  const [deliveryOrderStatuses, setDeliveryOrderStatuses] = useState<Record<string, string>>({});
+  const [deliveryRequestSearch, setDeliveryRequestSearch] = useState("");
+  const [deliveryRequestError, setDeliveryRequestError] = useState("");
+  const [isDownloadingDeliveryRequest, setIsDownloadingDeliveryRequest] = useState(false);
+  const [isAnalyzingDeliveryRequest, setIsAnalyzingDeliveryRequest] = useState(false);
+  const [isCreatingDeliveryRequest, setIsCreatingDeliveryRequest] = useState(false);
+  const [deliveryRequestPreview, setDeliveryRequestPreview] = useState<DeliveryRequestPreview | null>(null);
+  const [deliveryRequestPlan, setDeliveryRequestPlan] = useState<DeliveryPlanItem[] | null>(null);
+  const [acknowledgeDeliveryWarnings, setAcknowledgeDeliveryWarnings] = useState(false);
 
   useEffect(() => {
     const created = window.sessionStorage.getItem("dms-order-created");
@@ -1768,7 +1894,7 @@ return Array.from(map.values());
 
   const remoteColumns = remoteColumnDefinitions
     .filter(({ title }) => (
-      ["Trạng thái xử lý", "Thay thế cho đơn", "Người thực hiện"].includes(title)
+      ["Tình trạng xử lý đơn hàng", "Trạng thái xử lý", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
     ) || remoteOrders.some((order) => hasRemoteValue(order[title])))
     .map(({ title, width, align }): Column<RemoteOrder> => ({
       key: title,
@@ -1778,6 +1904,15 @@ return Array.from(map.values());
       align,
       render: (value, order) => {
         const text = formatRemoteColumnValue(title, value);
+        if (title === "Nhà cung cấp") {
+          return text ? (
+            <span className="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 border border-amber-200">
+              {text}
+            </span>
+          ) : (
+            <span className="text-gray-400">—</span>
+          );
+        }
         if (title === "Người thực hiện") {
           const actor = text || "Hệ thống";
           const isSystem = actor === "Hệ thống";
@@ -1860,8 +1995,58 @@ return Array.from(map.values());
             </button>
           );
         }
-        if (title === "Trạng thái xử lý") {
-          if (!text) return null;
+        if (title === "Trạng thái tạo đơn") {
+          if (!text) return <span className="text-gray-400">—</span>;
+          const isXuatHang = text.includes("001") || text.includes("Xuất hàng");
+          const isDuongSo = text.includes("002") || text.includes("Dương Số");
+          return (
+            <span
+              className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border ${
+                isXuatHang
+                  ? "bg-blue-50 text-blue-700 border-blue-200"
+                  : isDuongSo
+                  ? "bg-amber-50 text-amber-800 border-amber-300"
+                  : "bg-gray-100 text-gray-700 border-gray-200"
+              }`}
+            >
+              {text}
+            </span>
+          );
+        }
+        if (title === "Tình trạng xử lý đơn hàng" || title === "Trạng thái xử lý") {
+          const deliveryStatus = displayRemoteValue(order["_delivery_status"]).trim();
+          const procStatus = displayRemoteValue(order["_processing_status"]).trim();
+
+          if (deliveryStatus === "Đã Xuất") {
+            return (
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
+                  <CheckCircle2 size={12} className="text-emerald-600" />
+                  Đã Xuất
+                </span>
+                {procStatus && procStatus !== "Đã Xuất" && (
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
+                    {procStatus}
+                  </span>
+                )}
+              </div>
+            );
+          }
+          if (deliveryStatus === "Đã Duyệt") {
+            return (
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-700 ring-1 ring-sky-200">
+                  <CircleCheck size={12} className="text-sky-600" />
+                  Đã Duyệt
+                </span>
+                {procStatus && procStatus !== "Đã Duyệt" && (
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
+                    {procStatus}
+                  </span>
+                )}
+              </div>
+            );
+          }
           if (text === "Chờ KT duyệt tách") {
             return (
               <button
@@ -1913,20 +2098,32 @@ return Array.from(map.values());
               </div>
             );
           }
-          if (text !== "Đã cập nhật kho" && text !== "Đã trả") return null;
-          const tone = "bg-emerald-50 text-emerald-700";
-          return <span className={`rounded-full px-2 py-1 text-xs font-medium ${tone}`}>{text}</span>;
+          if (text === "Đơn Tự Tạo") {
+            return (
+              <span className="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-medium text-teal-700 border border-teal-200">
+                Đơn Tự Tạo
+              </span>
+            );
+          }
+          if (text === "Đã cập nhật kho" || text === "Đã trả") {
+            const tone = "bg-emerald-50 text-emerald-700";
+            return <span className={`rounded-full px-2 py-1 text-xs font-medium ${tone}`}>{text}</span>;
+          }
+          if (!text) return <span className="text-gray-400">—</span>;
+          return <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700">{text}</span>;
         }
         return <span className="block truncate" title={text || undefined}>{text}</span>;
       },
     }));
 
   const remoteStatuses = Array.from(
-    new Set(
-      remoteOrders
-        .map((order) => displayRemoteValue(order["Trạng thái xử lý"]))
-        .filter((status) => status.length > 0)
-    )
+    new Set([
+      "Đã Duyệt",
+      "Đã Xuất",
+      ...remoteOrders
+        .map((order) => displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]))
+        .filter((status) => status.length > 0 && status !== "Đã Duyệt" && status !== "Đã Xuất"),
+    ])
   );
   const filteredRemoteOrders = remoteOrders.filter((order) => {
     const matches = (key: string, query: string) =>
@@ -1941,10 +2138,343 @@ return Array.from(map.values());
     if (!matches("Số đơn hàng", orderFilter) && !(orderQuery && relatedOrders.some((value) => value.includes(orderQuery)))) return false;
     if (!matches("Mã KH", customerFilter) && !matches("Tên KH", customerFilter)) return false;
     if (!matches("Mã NVBH", staffFilter) && !matches("Tên NVBH", staffFilter)) return false;
-    if (!matches("Mã sản phẩm", productFilter) && !matches("Sản phẩm", productFilter)) return false;
-    if (statusFilter !== "Tất cả" && displayRemoteValue(order["Trạng thái xử lý"]) !== statusFilter) return false;
+    if (!matches("Mã sản phẩm", productFilter) && !matches("Sản phẩm", productFilter) && !matches("Nhà cung cấp", productFilter)) return false;
+    if (statusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]) !== statusFilter) return false;
     return true;
   });
+
+  const deliveryRequestOrderOptions = Array.from(
+    filteredRemoteOrders.reduce((orders, row) => {
+      const orderNumber = displayRemoteValue(row["Số đơn hàng"]).trim();
+      if (!orderNumber || orders.has(orderNumber)) return orders;
+      orders.set(orderNumber, {
+        order_number: orderNumber,
+        order_date: displayRemoteValue(row["_order_created_date"]).trim()
+          || displayRemoteValue(row["Ngày tạo"]).trim(),
+        customer_code: displayRemoteValue(row["Mã KH"]).trim(),
+        customer_name: displayRemoteValue(row["Tên KH"]).trim(),
+        original_status: displayRemoteValue(row["Trạng thái"]).trim(),
+      });
+      return orders;
+    }, new Map<string, DeliveryRequestOrderOption>())
+      .values()
+  );
+  const filteredDeliveryRequestOrders = deliveryRequestOrderOptions.filter((order) => {
+    const search = deliveryRequestSearch.trim().toLocaleLowerCase("vi");
+    if (!search) return true;
+    return [
+      order.order_number,
+      order.customer_code,
+      order.customer_name,
+      order.original_status,
+    ].some((value) => value.toLocaleLowerCase("vi").includes(search));
+  });
+  const selectedDeliveryOrders = deliveryRequestOrderOptions.filter((order) =>
+    selectedDeliveryOrderNumbers.has(order.order_number)
+  );
+
+  async function openDeliveryRequestDrawer() {
+    setDeliveryRequestError("");
+    setDeliveryEmployeeError("");
+    setDeliveryRequestSearch("");
+    setSelectedDeliveryOrderNumbers(new Set());
+    setDeliveryEmployeeAssignments({});
+    setDeliveryOrderStatuses({});
+    setDeliveryRequestPreview(null);
+    setDeliveryRequestPlan(null);
+    setAcknowledgeDeliveryWarnings(false);
+    setIsDeliveryRequestDrawerOpen(true);
+    setIsLoadingDeliveryEmployees(true);
+    try {
+      const [employeeResponse, warehouseResponse] = await Promise.all([
+        apiFetch(`${API_URL}/employees/?status=active&limit=1000`),
+        apiFetch(`${API_URL}/inventory/warehouses/`),
+      ]);
+      const employeePayload = await employeeResponse.json() as DeliveryEmployeeOption[] | { detail?: string };
+      if (!employeeResponse.ok) {
+        throw new Error(!Array.isArray(employeePayload) ? employeePayload.detail ?? "Không tải được danh sách nhân viên." : "Không tải được danh sách nhân viên.");
+      }
+      const warehouses = await warehouseResponse.json() as DeliveryWarehouseOption[] | { detail?: string };
+      if (!warehouseResponse.ok || !Array.isArray(warehouses)) {
+        throw new Error(!Array.isArray(warehouses) ? warehouses.detail ?? "Không tải được danh sách kho." : "Không tải được danh sách kho.");
+      }
+      const employees = Array.isArray(employeePayload)
+        ? employeePayload.filter((employee) =>
+            employee.status?.toLowerCase() === "active" && employee.code?.trim().toUpperCase().startsWith("NV")
+          )
+        : [];
+      setDeliveryEmployees(employees);
+      setDeliveryWarehouses(warehouses);
+      setDeliveryWarehouseId((current) => current && warehouses.some((warehouse) => String(warehouse.id) === current)
+        ? current
+        : warehouses[0] ? String(warehouses[0].id) : "");
+      if (employees.length === 0) {
+        setDeliveryEmployeeError("Không tìm thấy nhân viên đang hoạt động có mã bắt đầu bằng NV.");
+      }
+    } catch (error) {
+      setDeliveryEmployeeError(error instanceof Error ? error.message : "Không tải được danh sách NVGH.");
+    } finally {
+      setIsLoadingDeliveryEmployees(false);
+    }
+  }
+
+  function toggleDeliveryRequestOrder(orderNumber: string, checked: boolean) {
+    setDeliveryRequestPreview(null);
+    setDeliveryRequestPlan(null);
+    setAcknowledgeDeliveryWarnings(false);
+    setSelectedDeliveryOrderNumbers((current) => {
+      const next = new Set(current);
+      if (checked) next.add(orderNumber);
+      else next.delete(orderNumber);
+      return next;
+    });
+    if (checked) {
+      setDeliveryOrderStatuses((current) => ({
+        ...current,
+        [orderNumber]: current[orderNumber] ?? "001-Xuất hàng",
+      }));
+    } else {
+      setDeliveryEmployeeAssignments((current) => {
+        const next = { ...current };
+        delete next[orderNumber];
+        return next;
+      });
+      setDeliveryOrderStatuses((current) => {
+        const next = { ...current };
+        delete next[orderNumber];
+        return next;
+      });
+    }
+  }
+
+  function buildDeliveryRequestWorkbook(orders: DeliveryRequestOrderOption[]) {
+    const rows = [
+      ["Ngày đơn hàng", "Số đơn hàng", "Mã NVGH", "Tên NVGH", "Mã Khách hàng", "Tên Khách hàng", "Trạng Thái"],
+      ...orders.map((order) => {
+        const employeeCode = deliveryEmployeeAssignments[order.order_number] ?? "";
+        const employee = deliveryEmployees.find((item) => item.code.toUpperCase() === employeeCode.toUpperCase());
+        return [
+          order.order_date,
+          order.order_number,
+          employeeCode,
+          employee?.name ?? "",
+          order.customer_code,
+          order.customer_name,
+          deliveryOrderStatuses[order.order_number] ?? "001-Xuất hàng",
+        ];
+      }),
+    ];
+    const worksheet = XLSX.utils.aoa_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "DSDonHang");
+    const contents = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    return new File(
+      [contents],
+      `Form_Yeu_Cau_Xuat_Kho_${fromDate}.xlsx`,
+      { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    );
+  }
+
+  async function analyzeDeliveryRequest() {
+    if (!deliveryWarehouseId) {
+      setDeliveryRequestError("Vui lòng chọn kho xuất hàng.");
+      return;
+    }
+    if (selectedDeliveryOrders.length === 0) {
+      setDeliveryRequestError("Vui lòng chọn ít nhất một đơn hàng.");
+      return;
+    }
+    if (selectedDeliveryOrders.some((order) => (
+      !deliveryEmployeeAssignments[order.order_number] ||
+      !(deliveryOrderStatuses[order.order_number] ?? "001-Xuất hàng")
+    ))) {
+      setDeliveryRequestError("Vui lòng chọn NVGH và trạng thái cho tất cả đơn đã chọn.");
+      return;
+    }
+    setDeliveryRequestError("");
+    setDeliveryRequestPreview(null);
+    setDeliveryRequestPlan(null);
+    setAcknowledgeDeliveryWarnings(false);
+    setIsAnalyzingDeliveryRequest(true);
+    try {
+      const body = new FormData();
+      body.append("file", buildDeliveryRequestWorkbook(selectedDeliveryOrders));
+      const response = await apiFetch(
+        `${API_URL}/delivery-requests/upload?warehouse_id=${encodeURIComponent(deliveryWarehouseId)}`,
+        { method: "POST", body },
+      );
+      const result = await response.json() as DeliveryRequestPreview | { detail?: string };
+      if (!response.ok) {
+        throw new Error(!("items" in result) ? result.detail ?? "Không thể phân tích yêu cầu xuất hàng." : "Không thể phân tích yêu cầu xuất hàng.");
+      }
+      const preview = result as DeliveryRequestPreview;
+      setDeliveryRequestPreview(preview);
+      if (preview.items.length === 0 || !preview.can_create || preview.issues.length > 0) return;
+
+      const [planResponse, stockResponse] = await Promise.all([
+        apiFetch(`${API_URL}/delivery-requests/plan`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            warehouse_id: Number(deliveryWarehouseId),
+            items: preview.items.map((item) => ({ product_id: item.product_id, quantity: item.quantity })),
+          }),
+        }),
+        apiFetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${encodeURIComponent(deliveryWarehouseId)}`),
+      ]);
+      const [planResult, stockResult] = await Promise.all([
+        planResponse.json() as Promise<DeliveryPlanItem[] | { detail?: string }>,
+        stockResponse.json() as Promise<{ product_id: number; available: number }[] | { detail?: string }>,
+      ]);
+      if (!planResponse.ok || !Array.isArray(planResult)) {
+        throw new Error(!Array.isArray(planResult) ? planResult.detail ?? "Không thể lập kế hoạch FEFO." : "Không thể lập kế hoạch FEFO.");
+      }
+      if (!stockResponse.ok || !Array.isArray(stockResult)) {
+        throw new Error(!Array.isArray(stockResult) ? stockResult.detail ?? "Không thể kiểm tra tồn kho." : "Không thể kiểm tra tồn kho.");
+      }
+      const availableByProduct = new Map(stockResult.map((item) => [item.product_id, item.available]));
+      const stockedPreview = {
+        ...preview,
+        items: preview.items.map((item) => {
+          const available = availableByProduct.get(item.product_id) ?? 0;
+          return {
+            ...item,
+            available_quantity: available,
+            shortage_quantity: Math.max(0, item.quantity - available),
+          };
+        }),
+      };
+      setDeliveryRequestPreview(stockedPreview);
+      setDeliveryRequestPlan(planResult);
+    } catch (error) {
+      setDeliveryRequestError(error instanceof Error ? error.message : "Không thể phân tích yêu cầu xuất hàng.");
+    } finally {
+      setIsAnalyzingDeliveryRequest(false);
+    }
+  }
+
+  async function submitDeliveryRequest() {
+    if (!deliveryRequestPreview || !deliveryRequestPlan) return;
+    if (!deliveryRequestPreview.can_create || deliveryRequestPreview.issues.length > 0) {
+      setDeliveryRequestError("Hãy xử lý các lỗi đối chiếu trước khi gửi yêu cầu.");
+      return;
+    }
+    if (deliveryRequestPreview.warnings.length > 0 && !acknowledgeDeliveryWarnings) {
+      setDeliveryRequestError("Vui lòng xác nhận đã xem các cảnh báo trước khi gửi.");
+      return;
+    }
+    if (deliveryRequestPreview.items.some((item) => item.shortage_quantity > 0) ||
+      deliveryRequestPlan.some((item) => item.shortage_quantity > 0 || item.planned_quantity !== item.quantity)) {
+      setDeliveryRequestError("Không thể gửi yêu cầu khi còn thiếu tồn kho hoặc FEFO chưa phân bổ đủ.");
+      return;
+    }
+    setDeliveryRequestError("");
+    setIsCreatingDeliveryRequest(true);
+    try {
+      const items = deliveryRequestPreview.items.map((item) => {
+        const planItem = deliveryRequestPlan.find((planned) => planned.product_id === item.product_id);
+        if (!planItem) throw new Error(`Thiếu kế hoạch FEFO cho mã ${item.sku}.`);
+        return {
+          product_id: item.product_id,
+          quantity: item.quantity,
+          employee_allocations: item.employee_allocations,
+          borrowed_employee_offsets: item.borrowed_employee_offsets,
+          planned_allocations: planItem.picks.map((pick) => ({
+            lot_id: pick.lot_id,
+            location_code: pick.location_code,
+            location_id: pick.location_id,
+            lot_number: pick.lot_number,
+            expiry_date: pick.expiry_date,
+            quantity: pick.quantity,
+            allocation_strategy: pick.allocation_strategy,
+          })),
+        };
+      });
+      const response = await apiFetch(`${API_URL}/delivery-requests/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          warehouse_id: Number(deliveryWarehouseId),
+          items,
+          employee_summaries: deliveryRequestPreview.employee_summaries,
+          orders: deliveryRequestPreview.orders,
+          note: "Tạo trực tiếp từ màn hình Đơn hàng Vinamilk.",
+        }),
+      });
+      const created = await response.json() as { id?: number; code?: string; detail?: string };
+      if (!response.ok) throw new Error(created.detail ?? "Không thể tạo yêu cầu xuất hàng.");
+      let submitWarning = "";
+      if (created.id) {
+        try {
+          const submitResponse = await apiFetch(`${API_URL}/delivery-requests/${created.id}/submit`, { method: "POST" });
+          if (!submitResponse.ok) {
+            const submitResult = await submitResponse.json() as { detail?: string };
+            submitWarning = `Tạo được yêu cầu ${created.code ?? ""} nhưng chưa gửi thủ kho: ${submitResult.detail ?? "lỗi không xác định"}.`;
+          }
+        } catch (error) {
+          submitWarning = `Tạo được yêu cầu ${created.code ?? ""} nhưng chưa xác nhận gửi thủ kho: ${error instanceof Error ? error.message : "lỗi kết nối"}.`;
+        }
+      }
+      setToast(submitWarning
+        ? submitWarning
+        : `Đã tạo và gửi yêu cầu ${created.code ?? ""} đến thủ kho.`);
+      setIsDeliveryRequestDrawerOpen(false);
+      setDeliveryRequestPreview(null);
+      setDeliveryRequestPlan(null);
+      router.push(created.id
+        ? `/admin/delivery-requests?request_id=${created.id}`
+        : "/admin/delivery-requests");
+    } catch (error) {
+      setDeliveryRequestError(error instanceof Error ? error.message : "Không thể gửi yêu cầu xuất hàng.");
+    } finally {
+      setIsCreatingDeliveryRequest(false);
+    }
+  }
+
+  async function downloadDeliveryRequestForm() {
+    const orders = selectedDeliveryOrders.map((order) => ({
+      order_number: order.order_number,
+      delivery_employee_code: deliveryEmployeeAssignments[order.order_number] ?? "",
+      status: deliveryOrderStatuses[order.order_number] ?? "001-Xuất hàng",
+    }));
+    if (orders.length === 0) {
+      setDeliveryRequestError("Vui lòng chọn ít nhất một đơn hàng.");
+      return;
+    }
+    if (orders.some((order) => !order.delivery_employee_code)) {
+      setDeliveryRequestError("Vui lòng chọn nhân viên giao hàng cho tất cả đơn đã chọn.");
+      return;
+    }
+
+    setDeliveryRequestError("");
+    setIsDownloadingDeliveryRequest(true);
+    try {
+      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/delivery-request-form`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orders }),
+      });
+      if (!response.ok) {
+        const result = await response.json() as { detail?: string };
+        throw new Error(result.detail ?? "Không thể tạo phiếu yêu cầu xuất hàng.");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `Form_Yeu_Cau_Xuat_Kho_${fromDate}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setToast(`Đã tạo phiếu yêu cầu xuất hàng gồm ${orders.length} đơn.`);
+      setIsDeliveryRequestDrawerOpen(false);
+    } catch (error) {
+      setDeliveryRequestError(error instanceof Error ? error.message : "Không thể tạo phiếu yêu cầu xuất hàng.");
+    } finally {
+      setIsDownloadingDeliveryRequest(false);
+    }
+  }
 
   function clearFilters() {
     setOrderFilter("");
@@ -2080,6 +2610,17 @@ return Array.from(map.values());
         subtitle="Quản lý đơn đặt hàng, phiếu bán và trạng thái xử lý"
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            {effectiveIsAdmin && (
+              <button
+                type="button"
+                onClick={() => void openDeliveryRequestDrawer()}
+                disabled={deliveryRequestOrderOptions.length === 0}
+                className="flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3.5 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Download size={16} />
+                Tạo phiếu yêu cầu xuất hàng
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -2158,7 +2699,7 @@ return Array.from(map.values());
           <input value={orderFilter} onChange={(event) => setOrderFilter(event.target.value)} placeholder="Lọc số đơn hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
           <input value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)} placeholder="Lọc mã/tên khách hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
           <input value={staffFilter} onChange={(event) => setStaffFilter(event.target.value)} placeholder="Lọc mã/tên NVBH" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={productFilter} onChange={(event) => setProductFilter(event.target.value)} placeholder="Lọc mã/tên sản phẩm" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <input value={productFilter} onChange={(event) => setProductFilter(event.target.value)} placeholder="Lọc mã/tên SP, Nhà cung cấp" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
           <div className="flex gap-2">
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm">
               <option value="Tất cả">Tất cả trạng thái</option>
@@ -2186,6 +2727,327 @@ return Array.from(map.values());
           Chưa có dữ liệu trong database. Chọn khoảng ngày rồi bấm “Đồng bộ Vinamilk DMS” để cập nhật.
         </div>
       )}
+
+      <Drawer
+        open={isDeliveryRequestDrawerOpen}
+        onClose={() => {
+          if (!isDownloadingDeliveryRequest && !isAnalyzingDeliveryRequest && !isCreatingDeliveryRequest) {
+            setIsDeliveryRequestDrawerOpen(false);
+          }
+        }}
+        title="Tạo phiếu yêu cầu xuất hàng"
+        subtitle="Chọn đơn hàng, kiểm tra tồn kho và FEFO, rồi xác nhận gửi yêu cầu đến thủ kho."
+        size="4xl"
+      >
+        <div className="space-y-4 p-5">
+          <label className="block text-sm text-gray-600">
+            Kho xuất hàng
+            <select
+              value={deliveryWarehouseId}
+              onChange={(event) => {
+                setDeliveryWarehouseId(event.target.value);
+                setDeliveryRequestPreview(null);
+                setDeliveryRequestPlan(null);
+              }}
+              disabled={deliveryWarehouses.length === 0 || isCreatingDeliveryRequest}
+              className="mt-1 block w-full rounded-lg border border-gray-200 px-3 py-2 text-sm disabled:bg-gray-100"
+            >
+              <option value="">Chọn kho xuất hàng</option>
+              {deliveryWarehouses.map((warehouse) => (
+                <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>
+              ))}
+            </select>
+          </label>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label className="min-w-[220px] flex-1 text-sm text-gray-600">
+              Tìm đơn trong danh sách hiện tại
+              <input
+                value={deliveryRequestSearch}
+                onChange={(event) => setDeliveryRequestSearch(event.target.value)}
+                placeholder="Mã đơn, mã/tên khách hàng, trạng thái"
+                className="mt-1 block w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                const next = new Set(selectedDeliveryOrderNumbers);
+                const allVisibleSelected = filteredDeliveryRequestOrders.every((order) => next.has(order.order_number));
+                filteredDeliveryRequestOrders.forEach((order) => {
+                  if (allVisibleSelected) {
+                    next.delete(order.order_number);
+                  } else {
+                    next.add(order.order_number);
+                  }
+                });
+                setSelectedDeliveryOrderNumbers(next);
+                setDeliveryRequestPreview(null);
+                setDeliveryRequestPlan(null);
+                setAcknowledgeDeliveryWarnings(false);
+              }}
+              disabled={filteredDeliveryRequestOrders.length === 0}
+              className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {filteredDeliveryRequestOrders.length > 0
+                && filteredDeliveryRequestOrders.every((order) => selectedDeliveryOrderNumbers.has(order.order_number))
+                ? "Bỏ chọn danh sách lọc"
+                : "Chọn danh sách lọc"}
+            </button>
+          </div>
+
+          <div className="rounded-lg bg-sky-50 px-3 py-2 text-sm text-sky-800">
+            Danh sách lấy theo bộ lọc bảng đơn hàng. Đã chọn {selectedDeliveryOrders.length} đơn.
+            Danh sách NVGH chỉ gồm nhân viên đang hoạt động có mã bắt đầu bằng NV. 002-Dương Số ghi nhận hàng vay theo NVBH; 003-Âm Số bù trừ hàng đã vay.
+          </div>
+          {deliveryEmployeeError && (
+            <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{deliveryEmployeeError}</div>
+          )}
+          {deliveryRequestError && (
+            <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{deliveryRequestError}</div>
+          )}
+          {isLoadingDeliveryEmployees && (
+            <p className="text-sm text-gray-500">Đang tải danh sách nhân viên giao hàng...</p>
+          )}
+
+          <div className="max-h-[55vh] overflow-auto rounded-xl border border-gray-200">
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="sticky top-0 bg-gray-50">
+                <tr>
+                  <th className="w-10 px-3 py-2 text-center">
+                    <span className="sr-only">Chọn đơn</span>
+                  </th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">Ngày đơn hàng</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">Số đơn hàng</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">Khách hàng</th>
+                  <th className="min-w-40 px-3 py-2 text-left font-semibold text-gray-600">Loại yêu cầu</th>
+                  <th className="min-w-64 px-3 py-2 text-left font-semibold text-gray-600">Nhân viên giao hàng</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 bg-white">
+                {filteredDeliveryRequestOrders.map((order) => {
+                  const checked = selectedDeliveryOrderNumbers.has(order.order_number);
+                  return (
+                    <tr key={order.order_number} className={checked ? "bg-sky-50/60" : ""}>
+                      <td className="px-3 py-2 text-center">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => toggleDeliveryRequestOrder(order.order_number, event.target.checked)}
+                          aria-label={`Chọn đơn ${order.order_number}`}
+                          className="h-4 w-4 rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                        />
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2">
+                        {formatRemoteColumnValue("Ngày tạo", order.order_date) || "—"}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 font-mono font-medium">{order.order_number}</td>
+                      <td className="px-3 py-2">
+                        <div className="font-medium text-gray-800">{order.customer_name || "—"}</div>
+                        <div className="text-xs text-gray-500">{order.customer_code}</div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <select
+                          value={deliveryOrderStatuses[order.order_number] ?? "001-Xuất hàng"}
+                          onChange={(event) => {
+                            setDeliveryOrderStatuses((current) => ({
+                              ...current,
+                              [order.order_number]: event.target.value,
+                            }));
+                            setDeliveryRequestPreview(null);
+                            setDeliveryRequestPlan(null);
+                            setAcknowledgeDeliveryWarnings(false);
+                          }}
+                          disabled={!checked || isCreatingDeliveryRequest}
+                          className="w-full rounded-lg border border-gray-200 px-2.5 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+                          aria-label={`Loại yêu cầu đơn ${order.order_number}`}
+                        >
+                          <option value="001-Xuất hàng">001-Xuất hàng</option>
+                          <option value="002-Dương Số">002-Dương Số</option>
+                          <option value="003-Âm Số">003-Âm Số</option>
+                        </select>
+                      </td>
+                      <td className="px-3 py-2">
+                        <select
+                          value={deliveryEmployeeAssignments[order.order_number] ?? ""}
+                          onChange={(event) => {
+                            setDeliveryEmployeeAssignments((current) => ({
+                              ...current,
+                              [order.order_number]: event.target.value,
+                            }));
+                            setDeliveryRequestPreview(null);
+                            setDeliveryRequestPlan(null);
+                            setAcknowledgeDeliveryWarnings(false);
+                          }}
+                          disabled={!checked || isLoadingDeliveryEmployees || deliveryEmployees.length === 0 || isCreatingDeliveryRequest}
+                          className="w-full rounded-lg border border-gray-200 px-2.5 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+                          aria-label={`Nhân viên giao hàng đơn ${order.order_number}`}
+                        >
+                          <option value="">Chọn NVGH</option>
+                          {deliveryEmployees.map((employee) => (
+                            <option key={employee.code} value={employee.code}>
+                              {employee.code} · {employee.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {filteredDeliveryRequestOrders.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-10 text-center text-gray-500">
+                      Không có đơn hàng phù hợp với bộ lọc hiện tại.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {deliveryRequestPreview && (
+            <section className="space-y-3 rounded-xl border border-gray-200 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-semibold text-gray-900">Kết quả phân tích yêu cầu</h3>
+                <span className="text-sm text-gray-500">{deliveryRequestPreview.items.length} mã hàng · {deliveryRequestPreview.orders.length} đơn</span>
+              </div>
+              {deliveryRequestPreview.issues.length > 0 && (
+                <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
+                  <p className="mb-1 font-semibold">Cần xử lý trước khi tạo yêu cầu</p>
+                  <ul className="list-disc space-y-1 pl-5">
+                    {deliveryRequestPreview.issues.map((issue, index) => <li key={`${index}-${issue}`}>{issue}</li>)}
+                  </ul>
+                </div>
+              )}
+              {deliveryRequestPreview.warnings.length > 0 && (
+                <div className="space-y-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+                  <p className="font-semibold">Cảnh báo cần kiểm tra</p>
+                  <ul className="list-disc space-y-1 pl-5">
+                    {deliveryRequestPreview.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}
+                  </ul>
+                  <label className="flex items-start gap-2 pt-1">
+                    <input
+                      type="checkbox"
+                      checked={acknowledgeDeliveryWarnings}
+                      onChange={(event) => setAcknowledgeDeliveryWarnings(event.target.checked)}
+                      className="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+                    />
+                    <span>Tôi đã kiểm tra và xác nhận các cảnh báo trên.</span>
+                  </label>
+                </div>
+              )}
+              <div className="max-h-72 overflow-auto rounded-lg border border-gray-200">
+                <table className="min-w-full text-sm">
+                  <thead className="sticky top-0 bg-gray-50 text-xs uppercase text-gray-500">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Mã hàng</th>
+                      <th className="px-3 py-2 text-right">Cần xuất</th>
+                      <th className="px-3 py-2 text-right">Tồn khả dụng</th>
+                      <th className="px-3 py-2 text-right">Thiếu</th>
+                      <th className="px-3 py-2 text-left">FEFO: vị trí / HSD / SL</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {deliveryRequestPreview.items.map((item) => {
+                      const plan = deliveryRequestPlan?.find((row) => row.product_id === item.product_id);
+                      return (
+                        <tr key={item.product_id}>
+                          <td className="px-3 py-2">
+                            <span className="font-mono font-medium">{item.sku}</span>
+                            <span className="ml-2 text-gray-500">{item.product_name}</span>
+                          </td>
+                          <td className="px-3 py-2 text-right">{item.quantity.toLocaleString("vi-VN")}</td>
+                          <td className="px-3 py-2 text-right">{item.available_quantity.toLocaleString("vi-VN")}</td>
+                          <td className={`px-3 py-2 text-right font-medium ${item.shortage_quantity > 0 ? "text-red-600" : "text-emerald-700"}`}>
+                            {item.shortage_quantity.toLocaleString("vi-VN")}
+                          </td>
+                          <td className="whitespace-pre-line px-3 py-2 text-xs text-gray-600">
+                            {plan?.picks.map((pick) => (
+                              `${pick.location_code || "—"} / ${pick.expiry_date ? formatVinamilkDate(pick.expiry_date, false) : "—"} / ${pick.quantity}`
+                            )).join("\n") || "Chưa lập kế hoạch"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {deliveryRequestPreview.items.length === 0 && (
+                      <tr><td colSpan={5} className="px-3 py-6 text-center text-gray-500">Không có sản phẩm để xuất.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {deliveryRequestPreview.employee_summaries.some((summary) => summary.is_over_limit) && (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  Cảnh báo: có NVGH vượt hạn mức công nợ dự kiến; công nợ chỉ được ghi nhận theo quy trình khi thủ kho xác nhận xuất.
+                </p>
+              )}
+            </section>
+          )}
+
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-gray-100 pt-4">
+            <button
+              type="button"
+              onClick={() => setIsDeliveryRequestDrawerOpen(false)}
+              disabled={isDownloadingDeliveryRequest || isAnalyzingDeliveryRequest || isCreatingDeliveryRequest}
+              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Hủy
+            </button>
+            <button
+              type="button"
+              onClick={() => void downloadDeliveryRequestForm()}
+              disabled={
+                isDownloadingDeliveryRequest ||
+                isLoadingDeliveryEmployees ||
+                deliveryEmployees.length === 0 ||
+                selectedDeliveryOrders.length === 0 ||
+                selectedDeliveryOrders.some((order) => (
+                  !deliveryEmployeeAssignments[order.order_number] ||
+                  !(deliveryOrderStatuses[order.order_number] ?? "001-Xuất hàng")
+                ))
+              }
+              className="flex items-center gap-2 rounded-lg border border-sky-200 bg-white px-4 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Download size={16} />
+              {isDownloadingDeliveryRequest ? "Đang tạo file..." : "Tải file Excel"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void analyzeDeliveryRequest()}
+              disabled={
+                isAnalyzingDeliveryRequest ||
+                isCreatingDeliveryRequest ||
+                isLoadingDeliveryEmployees ||
+                selectedDeliveryOrders.length === 0 ||
+                !deliveryWarehouseId ||
+                selectedDeliveryOrders.some((order) => !deliveryEmployeeAssignments[order.order_number])
+              }
+              className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={isAnalyzingDeliveryRequest ? "animate-spin" : ""} />
+              {isAnalyzingDeliveryRequest ? "Đang phân tích..." : "Phân tích tồn kho / FEFO"}
+            </button>
+            {deliveryRequestPreview && (
+              <button
+                type="button"
+                onClick={() => void submitDeliveryRequest()}
+                disabled={
+                  isCreatingDeliveryRequest ||
+                  isAnalyzingDeliveryRequest ||
+                  !deliveryRequestPlan ||
+                  !deliveryRequestPreview.can_create ||
+                  deliveryRequestPreview.issues.length > 0 ||
+                  (deliveryRequestPreview.warnings.length > 0 && !acknowledgeDeliveryWarnings) ||
+                  deliveryRequestPreview.items.some((item) => item.shortage_quantity > 0) ||
+                  deliveryRequestPlan.some((item) => item.shortage_quantity > 0 || item.planned_quantity !== item.quantity)
+                }
+                className="flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <ClipboardCheck size={16} />
+                {isCreatingDeliveryRequest ? "Đang gửi..." : "Xác nhận gửi thủ kho"}
+              </button>
+            )}
+          </div>
+        </div>
+      </Drawer>
 
       {/* Drawer Liên kết đơn thay thế thủ công */}
       <Drawer

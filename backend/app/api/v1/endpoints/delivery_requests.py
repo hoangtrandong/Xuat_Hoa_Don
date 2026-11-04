@@ -213,12 +213,18 @@ def _read_new_workbook_order_rows(workbook):
         seen_orders.add(key)
         status_text = str(row[columns["status"]] or "").strip()
         status_key = _normalized_label(status_text)
-        status = {
+        coded_statuses = {
+            "001": "Xuất Hàng",
+            "002": "Mượn Số",
+            "003": "Trả Số",
+        }
+        legacy_statuses = {
             "xuat hang": "Xuất Hàng",
             "gui so": "Gửi Số",
             "muon so": "Mượn Số",
             "tra so": "Trả Số",
-        }.get(status_key)
+        }
+        status = coded_statuses.get(status_text[:3]) or legacy_statuses.get(status_key)
         if not status:
             raise ValueError(f"Dòng {row_number}: trạng thái '{status_text}' không được hỗ trợ.")
         orders.append({

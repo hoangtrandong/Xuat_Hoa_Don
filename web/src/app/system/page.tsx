@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
 
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -16,7 +17,7 @@ interface AppUser {
   employee_id: number | null; employee_code: string | null; employee_name: string | null;
   created_at: string; roles: RoleOption[];
 }
-interface EmployeeOption { id: number; code: string; name: string; position: string }
+interface EmployeeOption { id: number; code: string; name: string; position: string; email?: string | null }
 
 const ROLE_LABELS: Record<string, string> = { admin: "Quản trị viên", staff: "Nhân viên" };
 
@@ -73,7 +74,13 @@ function SystemUsersPageContent() {
     if (preselectApplied || !preselectEmployeeId || employees.length === 0) return;
     const employee = employees.find((candidate) => String(candidate.id) === preselectEmployeeId);
     if (employee) {
-      setForm((current) => ({ ...current, employee_id: employee.id, full_name: employee.name }));
+      setForm((current) => ({
+        ...current,
+        employee_id: employee.id,
+        full_name: employee.name,
+        username: employee.code,
+        email: employee.email || `${employee.code.toLowerCase()}@congty.vn`,
+      }));
       setCreateOpen(true);
     }
     setPreselectApplied(true);
@@ -123,6 +130,8 @@ function SystemUsersPageContent() {
       ...current,
       employee_id: employee ? employee.id : null,
       full_name: employee ? employee.name : current.full_name,
+      username: employee ? employee.code : current.username,
+      email: employee?.email || (employee ? (current.email && !current.email.endsWith("@congty.vn") ? current.email : `${employee.code.toLowerCase()}@congty.vn`) : current.email),
     }));
   }
 
@@ -210,7 +219,7 @@ function SystemUsersPageContent() {
           </select>
           <span className="text-xs text-gray-400">Chọn để tự điền họ tên từ trang Quản lý nhân viên, tránh nhập trùng dữ liệu.</span>
         </label>
-        <label className="block"><span className="text-xs text-gray-500">Tên đăng nhập</span><input value={form.username} onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))} placeholder="vd: nvkd01" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg" /></label>
+        <label className="block"><span className="text-xs text-gray-500">Tên đăng nhập (mặc định theo mã NV)</span><input value={form.username} onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))} placeholder="Mặc định theo mã nhân viên (vd: NV001)" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg" /></label>
         <label className="block"><span className="text-xs text-gray-500">Email</span><input type="email" value={form.email} onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))} placeholder="vd: nvkd01@congty.vn" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg" /></label>
         <label className="block"><span className="text-xs text-gray-500">Họ tên</span><input value={form.full_name} onChange={(event) => setForm((current) => ({ ...current, full_name: event.target.value }))} className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg" /></label>
         <label className="block"><span className="text-xs text-gray-500">Mật khẩu tạm (tối thiểu 12 ký tự)</span><input type="text" value={form.password} onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))} placeholder="Yêu cầu nhân viên đổi mật khẩu sau lần đăng nhập đầu" className="mt-1 w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg" /></label>

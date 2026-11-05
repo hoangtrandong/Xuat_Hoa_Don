@@ -209,3 +209,60 @@ def test_sync_default_roles_creates_admin_and_staff_with_expected_permissions(mo
         assert db.query(Role).filter_by(name="staff").count() == 1
     Base.metadata.drop_all(engine)
     engine.dispose()
+
+
+def test_create_user_defaults_username_to_employee_code(user_management_client):
+    from app.models.employee import Employee
+    client, db, headers, staff_role = user_management_client
+
+    emp = Employee(code="NV099", name="Nguyễn Văn Chín", position="Nhân viên kinh doanh", phone="0909090909")
+    db.add(emp)
+    db.commit()
+
+    resp = client.post(
+        "/api/v1/users/",
+        json={
+            "employee_id": emp.id,
+            "email": "nv099@congty.vn",
+            "full_name": emp.name,
+            "password": "Password123456!",
+            "role_ids": [staff_role.id],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["username"] == "NV099"
+    assert data["employee_code"] == "NV099"
+    assert data["employee_name"] == "Nguyễn Văn Chín"
+
+
+def test_update_user_can_link_employee(user_management_client):
+    from app.models.employee import Employee
+    client, db, headers, staff_role = user_management_client
+
+    emp = Employee(code="NV088", name="Trần Văn Tám", position="Giao hàng", phone="0808080808")
+    db.add(emp)
+    db.commit()
+
+    created = client.post(
+        "/api/v1/users/",
+        json={
+            "username": "custom_user_88",
+            "email": "user88@congty.vn",
+            "full_name": "Tài khoản 88",
+            "password": "Password123456!",
+            "role_ids": [staff_role.id],
+        },
+        headers=headers,
+    ).json()
+
+    patch_resp = client.patch(
+        f"/api/v1/users/{created['id']}",
+        json={"employee_id": emp.id},
+        headers=headers,
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    updated = patch_resp.json()
+    assert updated["employee_id"] == emp.id
+    assert updated["employee_code"] == "NV088"

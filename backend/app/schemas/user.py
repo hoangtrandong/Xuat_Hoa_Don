@@ -13,7 +13,7 @@ class RoleResponse(BaseModel):
 
 
 class UserCreate(BaseModel):
-    username: str = Field(min_length=3, max_length=50)
+    username: Optional[str] = Field(default=None, max_length=50)
     email: str = Field(min_length=3, max_length=120)
     full_name: str = Field(min_length=1, max_length=120)
     password: str
@@ -32,6 +32,7 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
     role_ids: Optional[List[int]] = None
     full_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    employee_id: Optional[int] = None
 
 
 class UserResponse(BaseModel):

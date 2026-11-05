@@ -51,15 +51,24 @@ def _resolve_roles(db: Session, role_ids: List[int]) -> List[Role]:
 
 
 def create_user(db: Session, payload: UserCreate) -> User:
-    if db.scalar(select(User.id).where(User.username == payload.username)):
-        raise ValueError(f"Tên đăng nhập '{payload.username}' đã tồn tại.")
+    username = (payload.username or "").strip()
+    if payload.employee_id is not None:
+        employee = db.get(Employee, payload.employee_id)
+        if not employee:
+            raise ValueError("Không tìm thấy nhân viên tương ứng.")
+        if not username:
+            username = employee.code.strip()
+    if not username:
+        raise ValueError("Tên đăng nhập không được để trống.")
+    if len(username) < 3:
+        raise ValueError("Tên đăng nhập cần tối thiểu 3 ký tự.")
+    if db.scalar(select(User.id).where(User.username == username)):
+        raise ValueError(f"Tên đăng nhập '{username}' đã tồn tại.")
     if db.scalar(select(User.id).where(User.email == payload.email)):
         raise ValueError(f"Email '{payload.email}' đã được sử dụng.")
-    if payload.employee_id is not None and not db.get(Employee, payload.employee_id):
-        raise ValueError("Không tìm thấy nhân viên tương ứng.")
     roles = _resolve_roles(db, payload.role_ids)
     user = User(
-        username=payload.username,
+        username=username,
         email=payload.email,
         full_name=payload.full_name,
         hashed_password=hash_password(payload.password),
@@ -83,6 +92,10 @@ def update_user(db: Session, user_id: int, payload: UserUpdate) -> Optional[User
         user.is_active = payload.is_active
     if payload.role_ids is not None:
         user.roles = _resolve_roles(db, payload.role_ids)
+    if "employee_id" in payload.model_fields_set:
+        if payload.employee_id is not None and not db.get(Employee, payload.employee_id):
+            raise ValueError("Không tìm thấy nhân viên tương ứng.")
+        user.employee_id = payload.employee_id
     db.commit()
     db.refresh(user)
     return user

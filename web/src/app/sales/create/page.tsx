@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
 // src/app/sales/create/page.tsx - Tao don hang tu tao (ma don bat dau bang TC-), hien thi chung voi don dong bo tu DMS
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Search, Trash2, User, CheckCircle2, AlertTriangle, X, Loader2 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
@@ -94,6 +94,7 @@ export default function CreateOrderPage() {
   const [orderType, setOrderType] = useState<string>("001-Xuất hàng");
   const [staffCode, setStaffCode] = useState("");
   const [staffName, setStaffName] = useState("");
+  const hasOwnStaffRef = useRef(false);
   const [deliveryEmployees, setDeliveryEmployees] = useState<EmployeeOption[]>([]);
   const [deliveryEmployeeCode, setDeliveryEmployeeCode] = useState("");
   const [address, setAddress] = useState("");
@@ -130,10 +131,12 @@ export default function CreateOrderPage() {
         const me = meRes.ok ? ((await meRes.json()) as CurrentUser) : null;
         const empRows = empRes.ok ? ((await empRes.json()) as EmployeeOption[]) : [];
         if (cancelled) return;
-        // NVBH mac dinh = nguoi dang dang nhap tao don
-        if (me) {
-          setStaffCode(me.employee_code ?? me.username ?? "");
-          setStaffName(me.employee_name ?? me.full_name ?? "");
+        // NVBH mac dinh = nhan vien gan voi tai khoan dang dang nhap.
+        // Tai khoan quan tri (vd: admin) khong gan nhan vien -> NVBH lay theo khach hang khi chon KH.
+        if (me?.employee_code) {
+          hasOwnStaffRef.current = true;
+          setStaffCode(me.employee_code);
+          setStaffName(me.employee_name ?? "");
         }
         // NVGH: nhan vien dang hoat dong co ma bat dau bang NV (giong man hinh Yeu cau xuat hang)
         setDeliveryEmployees(
@@ -198,7 +201,11 @@ export default function CreateOrderPage() {
 
   function selectCustomer(c: SystemCustomer) {
     setSelectedCustomer(c);
-    // Khong ghi de NVBH theo khach hang: NVBH mac dinh la nguoi dang dang nhap
+    // Tai khoan gan nhan vien: giu NVBH la nguoi dang nhap. Tai khoan quan tri: dung NVBH cua khach hang.
+    if (!hasOwnStaffRef.current) {
+      setStaffCode(c.staffCode);
+      setStaffName(c.staffName);
+    }
     setAddress("");
     setCustomerOpen(false);
     setCustomerQuery("");

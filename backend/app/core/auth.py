@@ -182,3 +182,20 @@ def check_permission(user: User, permission_code: str) -> None:
     }
     if permission_code not in granted:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied.")
+
+
+def resolve_user_employee(db: Session, user: User):
+    """Tra ve nhan vien cua tai khoan: uu tien lien ket employee_id, neu chua co thi
+    lay nhan vien co ma trung ten dang nhap (quy uoc: ten dang nhap = ma NV)."""
+    from sqlalchemy import func
+
+    from app.models.employee import Employee
+
+    if user is None:
+        return None
+    if user.employee is not None:
+        return user.employee
+    username = (user.username or "").strip()
+    if not username:
+        return None
+    return db.scalar(select(Employee).where(func.upper(Employee.code) == username.upper()))

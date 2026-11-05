@@ -9,6 +9,7 @@ from app.core.auth import (
     create_access_token,
     get_current_user,
     hash_password,
+    resolve_user_employee,
     verify_password,
 )
 from app.core.database import get_db
@@ -85,13 +86,13 @@ def change_password(
 
 
 @router.get("/me")
-def get_me(current_user: User = Depends(get_current_user)):
+def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     role_names = [role.name for role in (current_user.roles or []) if role and role.name]
     is_admin = (
         (current_user.username or "").strip().lower() == "admin"
         or any(r.strip().lower() == "admin" for r in role_names)
     )
-    employee = current_user.employee
+    employee = resolve_user_employee(db, current_user)
     return {
         "id": current_user.id,
         "username": current_user.username,

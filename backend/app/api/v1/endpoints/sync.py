@@ -17,7 +17,7 @@ from playwright.sync_api import sync_playwright
 from dotenv import dotenv_values, set_key
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, resolve_user_employee
 from app.core.config import settings
 from app.core.database import get_db
 from app.services.vinamilk_sales_summary import build_sales_summary
@@ -2560,7 +2560,7 @@ def create_manual_order(
         db,
         payload,
         performed_by=getattr(current_user, "username", None),
-        current_employee=getattr(current_user, "employee", None),
+        current_employee=resolve_user_employee(db, current_user),
     )
 
 

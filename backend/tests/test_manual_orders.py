@@ -271,3 +271,15 @@ def test_manual_order_rejects_unknown_delivery_employee(db):
     with pytest.raises(HTTPException) as exc:
         _create_manual_order(db, _payload(delivery_employee_code="NV999"), performed_by="admin")
     assert exc.value.status_code == 404
+
+
+def test_resolve_user_employee_falls_back_to_username_as_employee_code(db):
+    from app.core.auth import resolve_user_employee
+    from app.models.user import User
+
+    staff = Employee(code="NV030", name="Theo Mã", position="Nhân viên kinh doanh", phone="0900000030")
+    db.add(staff)
+    db.commit()
+    user = User(username="nv030", email="nv030@noemail.local", hashed_password="x", full_name="Theo Mã")
+    assert resolve_user_employee(db, user).code == "NV030"
+    assert resolve_user_employee(db, User(username="admin", email="a@a", hashed_password="x", full_name="A")) is None

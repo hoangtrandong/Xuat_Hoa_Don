@@ -118,6 +118,7 @@ type DeliveryRequestOrderOption = {
   customer_name: string;
   original_status: string;
   delivery_employee_code: string;
+  manager_code: string;
 };
 
 type DeliveryRequestPreviewItem = {
@@ -2148,6 +2149,7 @@ return Array.from(map.values());
         customer_name: displayRemoteValue(row["Tên KH"]).trim(),
         original_status: displayRemoteValue(row["Trạng thái"]).trim(),
         delivery_employee_code: displayRemoteValue(row["Mã NVGH"]).trim(),
+        manager_code: displayRemoteValue(row["Mã NVQL"]).trim(),
       });
       return orders;
     }, new Map<string, DeliveryRequestOrderOption>())
@@ -2166,6 +2168,13 @@ return Array.from(map.values());
   const selectedDeliveryOrders = deliveryRequestOrderOptions.filter((order) =>
     selectedDeliveryOrderNumbers.has(order.order_number)
   );
+
+  function defaultDeliveryEmployee(order: DeliveryRequestOrderOption): DeliveryEmployeeOption | undefined {
+    const managerCode = order.manager_code.trim().toUpperCase();
+    const existingDeliveryCode = order.delivery_employee_code.trim().toUpperCase();
+    return deliveryEmployees.find((employee) => employee.code.toUpperCase() === managerCode)
+      ?? deliveryEmployees.find((employee) => employee.code.toUpperCase() === existingDeliveryCode);
+  }
 
   async function openDeliveryRequestDrawer() {
     setDeliveryRequestError("");
@@ -2227,17 +2236,12 @@ return Array.from(map.values());
         ...current,
         [orderNumber]: current[orderNumber] ?? "001-Xuất hàng",
       }));
-      // Tu dien NVGH da chon khi tao don (neu co va con hoat dong)
-      const presetCode = deliveryRequestOrderOptions
-        .find((order) => order.order_number === orderNumber)
-        ?.delivery_employee_code.toUpperCase();
-      const presetEmployee = presetCode
-        ? deliveryEmployees.find((employee) => employee.code.toUpperCase() === presetCode)
-        : undefined;
-      if (presetEmployee) {
+      const selectedOrder = deliveryRequestOrderOptions.find((order) => order.order_number === orderNumber);
+      const defaultEmployee = selectedOrder ? defaultDeliveryEmployee(selectedOrder) : undefined;
+      if (defaultEmployee) {
         setDeliveryEmployeeAssignments((current) => ({
           ...current,
-          [orderNumber]: current[orderNumber] || presetEmployee.code,
+          [orderNumber]: current[orderNumber] || defaultEmployee.code,
         }));
       }
     } else {
@@ -2778,14 +2782,12 @@ return Array.from(map.values());
                 });
                 setSelectedDeliveryOrderNumbers(next);
                 if (!allVisibleSelected) {
-                  // Tu dien NVGH da chon khi tao don cho cac don vua chon
+                  // Ưu tiên NVQL của khách hàng, sau đó dùng NVGH đã lưu trên đơn.
                   setDeliveryEmployeeAssignments((current) => {
                     const updated = { ...current };
                     filteredDeliveryRequestOrders.forEach((order) => {
-                      if (updated[order.order_number] || !order.delivery_employee_code) return;
-                      const employee = deliveryEmployees.find(
-                        (item) => item.code.toUpperCase() === order.delivery_employee_code.toUpperCase()
-                      );
+                      if (updated[order.order_number]) return;
+                      const employee = defaultDeliveryEmployee(order);
                       if (employee) updated[order.order_number] = employee.code;
                     });
                     return updated;

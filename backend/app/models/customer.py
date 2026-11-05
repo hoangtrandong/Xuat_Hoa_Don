@@ -23,6 +23,8 @@ class Customer(Base):
     territory_id: Mapped[int | None] = mapped_column(ForeignKey("sales_territories.id"))
     staff_code: Mapped[str | None] = mapped_column(String(50), index=True)
     staff_name: Mapped[str | None] = mapped_column(String(160))
+    manager_code: Mapped[str | None] = mapped_column(String(50), index=True)
+    manager_name: Mapped[str | None] = mapped_column(String(160))
     # Phát sinh Phase 2: 1 cửa hàng → nhiều mã KH; mã KH quản lý bởi 1 công ty xuất hóa đơn.
     store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), index=True)
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), index=True)

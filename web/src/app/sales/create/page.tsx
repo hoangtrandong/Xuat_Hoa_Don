@@ -36,6 +36,19 @@ interface WarehouseOption {
   name: string;
 }
 
+interface EmployeeOption {
+  code: string;
+  name: string;
+  status: string;
+}
+
+interface CurrentUser {
+  username: string;
+  full_name: string;
+  employee_code: string | null;
+  employee_name: string | null;
+}
+
 interface Line {
   productCode: string;
   productName: string;
@@ -81,6 +94,8 @@ export default function CreateOrderPage() {
   const [orderType, setOrderType] = useState<string>("001-Xuất hàng");
   const [staffCode, setStaffCode] = useState("");
   const [staffName, setStaffName] = useState("");
+  const [deliveryEmployees, setDeliveryEmployees] = useState<EmployeeOption[]>([]);
+  const [deliveryEmployeeCode, setDeliveryEmployeeCode] = useState("");
   const [address, setAddress] = useState("");
   const [orderDate, setOrderDate] = useState(todayStr());
   const [deliveryDate, setDeliveryDate] = useState(todayStr());
@@ -98,11 +113,13 @@ export default function CreateOrderPage() {
     let cancelled = false;
     async function load() {
       try {
-        const [custRes, prodRes, unitRes, whRes] = await Promise.all([
+        const [custRes, prodRes, unitRes, whRes, meRes, empRes] = await Promise.all([
           apiFetch(`${API_URL}/customers/?limit=5000`),
           apiFetch(`${API_URL}/products/?limit=10000`),
           apiFetch(`${API_URL}/products/units/`),
           apiFetch(`${API_URL}/inventory/warehouses/`),
+          apiFetch(`${API_URL}/auth/me`),
+          apiFetch(`${API_URL}/employees/?status=active&limit=1000`),
         ]);
         if (!custRes.ok) throw new Error("Không thể tải danh sách khách hàng.");
         if (!prodRes.ok) throw new Error("Không thể tải Danh sách SKU.");
@@ -110,7 +127,20 @@ export default function CreateOrderPage() {
         const prodRows = (await prodRes.json()) as Array<Record<string, unknown>>;
         const unitRows = unitRes.ok ? ((await unitRes.json()) as Array<{ id: number; name: string }>) : [];
         const whRows = whRes.ok ? ((await whRes.json()) as Array<{ id: number; name: string }>) : [];
+        const me = meRes.ok ? ((await meRes.json()) as CurrentUser) : null;
+        const empRows = empRes.ok ? ((await empRes.json()) as EmployeeOption[]) : [];
         if (cancelled) return;
+        // NVBH mac dinh = nguoi dang dang nhap tao don
+        if (me) {
+          setStaffCode(me.employee_code ?? me.username ?? "");
+          setStaffName(me.employee_name ?? me.full_name ?? "");
+        }
+        // NVGH: nhan vien dang hoat dong co ma bat dau bang NV (giong man hinh Yeu cau xuat hang)
+        setDeliveryEmployees(
+          (Array.isArray(empRows) ? empRows : []).filter(
+            (e) => e.status?.toLowerCase() === "active" && e.code?.trim().toUpperCase().startsWith("NV")
+          )
+        );
         const unitName = new Map(unitRows.map((u) => [u.id, u.name]));
         const loadedCustomers = custRows
           .filter((row) => row.status !== "inactive")
@@ -168,8 +198,7 @@ export default function CreateOrderPage() {
 
   function selectCustomer(c: SystemCustomer) {
     setSelectedCustomer(c);
-    setStaffCode(c.staffCode);
-    setStaffName(c.staffName);
+    // Khong ghi de NVBH theo khach hang: NVBH mac dinh la nguoi dang dang nhap
     setAddress("");
     setCustomerOpen(false);
     setCustomerQuery("");
@@ -256,6 +285,8 @@ export default function CreateOrderPage() {
           delivery_date: deliveryDate || null,
           staff_code: staffCode.trim() || null,
           staff_name: staffName.trim() || null,
+          delivery_employee_code: deliveryEmployeeCode || null,
+          delivery_employee_name: deliveryEmployees.find((e) => e.code === deliveryEmployeeCode)?.name ?? null,
           customer_address: address.trim() || null,
           note: note.trim() || null,
           lines: lines.map((l) => ({
@@ -334,6 +365,17 @@ export default function CreateOrderPage() {
                   <label className="block">
                     <span className="text-xs text-gray-500">Tên NVBH</span>
                     <input value={staffName} onChange={(e) => setStaffName(e.target.value)} className={inputCls} />
+                  </label>
+                  <label className="block sm:col-span-2">
+                    <span className="text-xs text-gray-500">Nhân viên giao hàng (NVGH)</span>
+                    <select value={deliveryEmployeeCode} onChange={(e) => setDeliveryEmployeeCode(e.target.value)} className={inputCls}>
+                      <option value="">-- Chọn NVGH --</option>
+                      {deliveryEmployees.map((e) => (
+                        <option key={e.code} value={e.code}>
+                          {e.code} - {e.name}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label className="block sm:col-span-2">
                     <span className="text-xs text-gray-500">Địa chỉ giao hàng</span>

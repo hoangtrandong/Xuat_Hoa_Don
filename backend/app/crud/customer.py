@@ -1,8 +1,9 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional
 
 from app.models.customer import Customer, Store
+from app.models.employee import Employee
 from app.schemas.customer import CustomerCreate, CustomerUpdate
 
 
@@ -27,9 +28,24 @@ def list_(db: Session, skip: int = 0, limit: int = 100, status: Optional[str] = 
     return list(db.execute(stmt).scalars().all())
 
 
+def resolve_manager_assignment(db: Session, manager_code: str | None) -> tuple[str | None, str | None]:
+    code = (manager_code or "").strip().upper()
+    if not code:
+        return None, None
+    if not code.startswith("NV"):
+        raise ValueError("Mã NVQL phải bắt đầu bằng NV.")
+    employee = db.scalar(select(Employee).where(func.upper(Employee.code) == code))
+    if employee is None:
+        raise ValueError(f"Không tìm thấy nhân viên có mã {code}.")
+    return employee.code, employee.name
+
+
 def create(db: Session, obj_in: CustomerCreate) -> Customer:
     data = obj_in.model_dump()
     store_route = data.pop("store_route", None)
+    manager_code, manager_name = resolve_manager_assignment(db, data.get("manager_code"))
+    data["manager_code"] = manager_code
+    data["manager_name"] = manager_name
     customer = Customer(**data)
     db.add(customer)
     if customer.store_id and store_route is not None:
@@ -44,6 +60,8 @@ def create(db: Session, obj_in: CustomerCreate) -> Customer:
 def update(db: Session, customer: Customer, obj_in: CustomerUpdate) -> Customer:
     data = obj_in.model_dump(exclude_unset=True)
     store_route = data.pop("store_route", None)
+    if "manager_code" in data:
+        data["manager_code"], data["manager_name"] = resolve_manager_assignment(db, data["manager_code"])
     for field, value in data.items():
         setattr(customer, field, value)
     if customer.store_id and store_route is not None:

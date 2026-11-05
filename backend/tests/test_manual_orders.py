@@ -17,10 +17,13 @@ from app.api.v1.endpoints.sync import (
 )
 from app.api.v1.endpoints.delivery_requests import submit_request
 from app.core.database import Base
+from app.crud import customer as customer_crud
 from app.models.customer import Customer
+from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder, Warehouse
 from app.models.product import Product, ProductCategory, ProductUnit
 from app.models.vinamilk import VinamilkOrderSnapshot
+from app.schemas.customer import CustomerCreate
 
 
 @pytest.fixture
@@ -35,7 +38,7 @@ def db():
         session.add(Product(sku="01VD41", name="SĐCĐ Ông Thọ", category_id=cat.id, unit_id=unit.id,
                             supplier="Vinamilk", base_price=4428))
         session.add(Customer(code="0MD", name="Nam thúy 1", type="RETAIL", staff_code="0000030917",
-                             staff_name="Phạm Thị Lê"))
+                             staff_name="Phạm Thị Lê", manager_code="NV001", manager_name="Nguyễn An"))
         session.commit()
         yield session
     engine.dispose()
@@ -83,6 +86,54 @@ def test_manual_order_shows_in_order_list_with_supplier(db):
     assert rows[0]["Nhà cung cấp"] == "Vinamilk"
     assert rows[0]["Tình trạng xử lý đơn hàng"] == "Đơn Tự Tạo"
     assert rows[0]["Trạng thái tạo đơn"] == "001-Xuất hàng"
+    assert rows[0]["Mã NVQL"] == "NV001"
+    assert rows[0]["Tên NVQL"] == "Nguyễn An"
+
+
+def test_order_list_resolves_manager_by_last_three_customer_code_characters(db):
+    db.add(Customer(
+        code="IMV",
+        name="Khách hàng khớp hậu tố",
+        type="RETAIL",
+        manager_code="NV002",
+        manager_name="Trần Bình",
+    ))
+    db.add(VinamilkOrderSnapshot(
+        remote_key="manager-suffix-order",
+        order_number="VM-MANAGER-SUFFIX",
+        customer_code="MG20031IMV",
+        order_created_date=date(2026, 11, 4),
+        synced_from=date(2026, 11, 4),
+        synced_to=date(2026, 11, 4),
+        raw_payload={"orderNumber": "VM-MANAGER-SUFFIX", "customerCode": "MG20031IMV"},
+    ))
+    db.commit()
+
+    response = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+    order = next(row for row in response["rows"] if row["orderNumber"] == "VM-MANAGER-SUFFIX")
+    assert order["Mã NVQL"] == "NV002"
+    assert order["Tên NVQL"] == "Trần Bình"
+
+
+def test_customer_manager_assignment_requires_existing_nv_employee(db):
+    db.add(Employee(code="NV003", name="Lê Cường", position="Quản lý", phone=""))
+    db.commit()
+
+    customer = customer_crud.create(
+        db,
+        CustomerCreate(code="MGR-1", name="Khách hàng quản lý", manager_code="nv003"),
+    )
+    assert customer.manager_code == "NV003"
+    assert customer.manager_name == "Lê Cường"
+
+    with pytest.raises(ValueError, match="bắt đầu bằng NV"):
+        customer_crud.create(
+            db,
+            CustomerCreate(code="MGR-2", name="Mã không hợp lệ", manager_code="AB001"),
+        )
 
 
 def test_order_list_separates_processing_and_warehouse_request_statuses(db):
@@ -195,3 +246,28 @@ def test_delete_manual_order(db):
     assert _delete_manual_order(db, "TC-261104-001")["deleted_lines"] == 1
     with pytest.raises(HTTPException):
         _delete_manual_order(db, "IN062823")
+
+
+def test_manual_order_defaults_staff_to_current_user_and_records_delivery_employee(db):
+    seller = Employee(code="NV010", name="Người Bán", position="Nhân viên kinh doanh", phone="0900000010")
+    shipper = Employee(code="NV020", name="Người Giao", position="Giao hàng", phone="0900000020")
+    db.add_all([seller, shipper])
+    db.commit()
+
+    result = _create_manual_order(
+        db,
+        _payload(delivery_employee_code="nv020"),
+        performed_by="nv010",
+        current_employee=seller,
+    )
+    row = db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == result["order_number"]))
+    assert row.raw_payload["Mã NVBH"] == "NV010"
+    assert row.raw_payload["Tên NVBH"] == "Người Bán"
+    assert row.raw_payload["Mã NVGH"] == "NV020"
+    assert row.raw_payload["Tên NVGH"] == "Người Giao"
+
+
+def test_manual_order_rejects_unknown_delivery_employee(db):
+    with pytest.raises(HTTPException) as exc:
+        _create_manual_order(db, _payload(delivery_employee_code="NV999"), performed_by="admin")
+    assert exc.value.status_code == 404

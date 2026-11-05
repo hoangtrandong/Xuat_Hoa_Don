@@ -16,6 +16,8 @@ class CustomerBase(BaseModel):
     territory_id: Optional[int] = None
     staff_code: Optional[str] = None
     staff_name: Optional[str] = None
+    manager_code: Optional[str] = None
+    manager_name: Optional[str] = None
     # Phase 2: thuộc cửa hàng + công ty quản lý / xuất hóa đơn
     store_id: Optional[int] = None
     company_id: Optional[int] = None
@@ -36,6 +38,7 @@ class CustomerUpdate(BaseModel):
     status: Optional[str] = None
     staff_code: Optional[str] = None
     staff_name: Optional[str] = None
+    manager_code: Optional[str] = None
     store_id: Optional[int] = None
     company_id: Optional[int] = None
     store_route: Optional[str] = None

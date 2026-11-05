@@ -22,6 +22,8 @@ export interface Customer {
   createdAt: string;
   staffCode?: string;
   staffName?: string;
+  managerCode?: string;
+  managerName?: string;
   // Phase 2: cửa hàng & công ty quản lý
   storeId?: string;
   companyId?: string;
@@ -56,4 +58,3 @@ export const customers: Customer[] = [
   { id: "KH-0021", code: "KH-0021", name: "Đại lý Ánh Dương", type: "Đại lý", tier: "B", contactName: "Anh Dương", email: "anhduong.daily@gmail.com", address: "66 Quốc Lộ 22", district: "Hóc Môn", status: "active", debitBalance: 41000000, totalSpend: 720000000, createdAt: "2021-07-12" },
   { id: "KH-0022", code: "KH-0022", name: "Cửa hàng Hoàng Kim", type: "Cửa hàng", tier: "B", contactName: "Chị Kim", email: "hoangkim.sh@gmail.com", address: "18 Cách Mạng Tháng 8", district: "Q.3", status: "active", debitBalance: 5200000, totalSpend: 148000000, createdAt: "2022-12-01" },
 ];
-

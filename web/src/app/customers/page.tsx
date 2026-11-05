@@ -31,13 +31,14 @@ export default function CustomersPage() {
   const [selected, setSelected] = useState<Customer | null>(null);
   const [customerRows, setCustomerRows] = useState<Customer[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ code: "", name: "", type: "RETAIL", tier: "B", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", store_route: "", company_id: "", staff_code: "", staff_name: "" });
+  const [form, setForm] = useState({ code: "", name: "", type: "RETAIL", tier: "B", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", store_route: "", company_id: "", manager_code: "" });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [createError, setCreateError] = useState("");
   const [createMessage, setCreateMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const [storeOptions, setStoreOptions] = useState<Array<{ id: string; code: string; name: string; route: string }>>([]);
   const [companyOptions, setCompanyOptions] = useState<Array<{ id: string; code: string; name: string }>>([]);
+  const [managerOptions, setManagerOptions] = useState<Array<{ code: string; name: string }>>([]);
   useEffect(() => {
     apiFetch(`${API_URL}/customers/?limit=5000`)
       .then(async (response) => {
@@ -57,6 +58,8 @@ export default function CustomersPage() {
         createdAt: String(row.created_at ?? ""),
         staffCode: String(row.staff_code ?? ""),
         staffName: String(row.staff_name ?? ""),
+        managerCode: String(row.manager_code ?? ""),
+        managerName: String(row.manager_name ?? ""),
         storeId: row.store_id != null ? String(row.store_id) : "",
         companyId: row.company_id != null ? String(row.company_id) : "",
         storeCode: String(row.store_code ?? ""),
@@ -76,6 +79,16 @@ export default function CustomersPage() {
       .then((rows: Array<Record<string, unknown>>) => setCompanyOptions(rows.map((row) => ({
         id: String(row.id), code: String(row.code ?? ""), name: String(row.name ?? ""),
       }))));
+    apiFetch(`${API_URL}/employees/?limit=5000`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Không thể tải danh sách nhân viên.");
+        return response.json() as Promise<Array<Record<string, unknown>>>;
+      })
+      .then((rows) => setManagerOptions(rows
+        .filter((row) => String(row.code ?? "").trim().toUpperCase().startsWith("NV"))
+        .map((row) => ({ code: String(row.code), name: String(row.name ?? "") }))
+        .sort((a, b) => a.code.localeCompare(b.code))))
+      .catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể tải danh sách nhân viên."));
   }, []);
   async function uploadCustomers(file: File) {
     const body = new FormData();
@@ -97,6 +110,7 @@ export default function CustomersPage() {
           store_id: form.store_id ? Number(form.store_id) : null,
           store_route: form.store_id ? form.store_route : null,
           company_id: form.company_id ? Number(form.company_id) : null,
+          manager_name: managerOptions.find((employee) => employee.code === form.manager_code)?.name ?? null,
         }),
       });
       const result = await response.json() as {
@@ -112,8 +126,8 @@ export default function CustomersPage() {
         status: "active" | "inactive";
         current_debt: number;
         created_at: string;
-        staff_code?: string | null;
-        staff_name?: string | null;
+        manager_code?: string | null;
+        manager_name?: string | null;
         store_id: number | null;
         company_id: number | null;
         store_code: string | null;
@@ -146,8 +160,8 @@ export default function CustomersPage() {
         debitBalance: result.current_debt,
         totalSpend: 0,
         createdAt: result.created_at,
-        staffCode: result.staff_code ?? "",
-        staffName: result.staff_name ?? "",
+        managerCode: result.manager_code ?? "",
+        managerName: result.manager_name ?? "",
         storeId: result.store_id != null ? String(result.store_id) : "",
         companyId: result.company_id != null ? String(result.company_id) : "",
         storeCode: result.store_code ?? "",
@@ -189,8 +203,7 @@ export default function CustomersPage() {
       store_id: customer.storeId ?? "",
       store_route: customer.storeRoute ?? "",
       company_id: customer.companyId ?? "",
-      staff_code: customer.staffCode ?? "",
-      staff_name: customer.staffName ?? "",
+      manager_code: customer.managerCode ?? "",
     });
     setSelected(null); setCreateError(""); setCreateOpen(true);
   }
@@ -217,8 +230,8 @@ export default function CustomersPage() {
     downloadExcel(filtered.map((customer) => ({
       "Mã KH": customer.code,
       "Tên khách hàng": customer.name,
-      "Mã NVBH": customer.staffCode ?? "",
-      "Tên NVBH": customer.staffName ?? "",
+      "Mã NVQL": customer.managerCode ?? "",
+      "Tên NVQL": customer.managerName ?? "",
       "Loại": customer.type,
       "Hạng": customer.tier,
       "CCCD": customer.citizenId ?? "",
@@ -247,8 +260,8 @@ export default function CustomersPage() {
       ),
     },
     {
-      key: "staffCode",
-      title: "Mã NVBH",
+      key: "managerCode",
+      title: "Mã NVQL",
       sortable: true,
       render: (val) =>
         val ? (
@@ -258,8 +271,8 @@ export default function CustomersPage() {
         ),
     },
     {
-      key: "staffName",
-      title: "Tên NVBH",
+      key: "managerName",
+      title: "Tên NVQL",
       sortable: true,
       render: (val) =>
         val ? (
@@ -347,7 +360,7 @@ export default function CustomersPage() {
           <button onClick={() => fileInput.current?.click()} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"><Upload size={16} />Upload Excel</button>
           <button onClick={exportCustomers} disabled={filtered.length === 0} className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50"><Download size={16} />Tải Excel</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadCustomers(file).catch((error: unknown) => setCreateError(error instanceof Error ? error.message : "Không thể tải file Excel.")); event.target.value = ""; }} />
-          <button onClick={() => { setEditingId(null); setForm({ code: "", name: "", type: "RETAIL", tier: "B", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", store_route: "", company_id: "", staff_code: "", staff_name: "" }); setCreateError(""); setCreateOpen(true); }}  className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+          <button onClick={() => { setEditingId(null); setForm({ code: "", name: "", type: "RETAIL", tier: "B", email: "", citizen_id: "", tax_code: "", status: "active", store_id: "", store_route: "", company_id: "", manager_code: "" }); setCreateError(""); setCreateOpen(true); }}  className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
             <Plus size={16} />
             Thêm khách hàng
           </button>
@@ -367,8 +380,8 @@ export default function CustomersPage() {
       <DataTable
         data={filtered}
         columns={columns}
-        searchKeys={["code", "name", "staffCode", "staffName", "district", "storeCode", "storeName", "storeRoute", "companyName"]}
-        searchPlaceholder="Tìm mã, tên khách hàng, mã/tên NVBH, tuyến..."
+        searchKeys={["code", "name", "managerCode", "managerName", "district", "storeCode", "storeName", "storeRoute", "companyName"]}
+        searchPlaceholder="Tìm mã, tên khách hàng, mã/tên NVQL, tuyến..."
         onRowClick={(row) => setSelected(row)}
         emptyMessage="Không có khách hàng phù hợp"
         toolbar={
@@ -432,10 +445,16 @@ export default function CustomersPage() {
           </select>
           <input placeholder="CCCD (tùy chọn)" value={form.citizen_id} onChange={(e) => setForm({ ...form, citizen_id: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <input placeholder="Mã số thuế (tùy chọn)" value={form.tax_code} onChange={(e) => setForm({ ...form, tax_code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-          <div className="grid grid-cols-2 gap-3">
-            <input placeholder="Mã NVBH (tùy chọn)" value={form.staff_code} onChange={(e) => setForm({ ...form, staff_code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-            <input placeholder="Tên NVBH (tùy chọn)" value={form.staff_name} onChange={(e) => setForm({ ...form, staff_name: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-          </div>
+            <select
+              value={form.manager_code}
+              onChange={(e) => setForm({ ...form, manager_code: e.target.value })}
+              className="w-full px-3 py-2 text-sm border rounded-lg"
+            >
+              <option value="">— Chọn NVQL (tùy chọn) —</option>
+              {managerOptions.map((employee) => (
+                <option key={employee.code} value={employee.code}>{employee.code} · {employee.name}</option>
+              ))}
+            </select>
           <input placeholder="Email (tùy chọn)" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
           <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg"><option value="active">Hoạt động</option><option value="inactive">Ngưng giao</option></select>
           <button onClick={createCustomer} className="w-full bg-sky-500 text-white rounded-lg py-2.5 text-sm font-medium">{editingId ? "Cập nhật khách hàng" : "Lưu khách hàng"}</button>

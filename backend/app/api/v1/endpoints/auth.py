@@ -91,10 +91,13 @@ def get_me(current_user: User = Depends(get_current_user)):
         (current_user.username or "").strip().lower() == "admin"
         or any(r.strip().lower() == "admin" for r in role_names)
     )
+    employee = current_user.employee
     return {
         "id": current_user.id,
         "username": current_user.username,
         "full_name": current_user.full_name,
+        "employee_code": employee.code if employee else None,
+        "employee_name": employee.name if employee else None,
         "roles": role_names,
         "is_admin": is_admin,
     }

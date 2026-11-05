@@ -39,6 +39,10 @@ CUSTOMER_HEADER_ALIASES = {
     "Tên NVBH": "staff_name",
     "Mã nhân viên bán hàng": "staff_code",
     "Tên nhân viên bán hàng": "staff_name",
+    "Mã NVQL": "manager_code",
+    "Tên NVQL": "manager_name",
+    "Mã nhân viên quản lý": "manager_code",
+    "Tên nhân viên quản lý": "manager_name",
     "Tên trên hoá đơn": "invoice_name",
     "Tên trên hóa đơn": "invoice_name",
     "Địa chỉ trên hoá đơn": "invoice_address",
@@ -59,6 +63,7 @@ def download_customer_template():
         headers=[
             "Mã KH", "Tên khách hàng", "Loại", "Email", "CCCD",
             "Mã số thuế", "Hạn mức công nợ", "Trạng thái", "Mã cửa hàng", "Tuyến", "Mã công ty quản lý",
+            "Mã NVQL",
         ],
         sub_guides=[
             "Bắt buộc. VD: KH-0001 (Không trùng lặp)",
@@ -72,12 +77,13 @@ def download_customer_template():
             "Tùy chọn. Mã điểm bán liên kết (VD: CH-0001)",
             "Tùy chọn. Tuyến của cửa hàng (VD: Tuyến 1)",
             "Tùy chọn. Mã công ty quản lý (VD: CT001)",
+            "Tùy chọn. Mã nhân viên quản lý khách hàng, phải bắt đầu bằng NV",
         ],
         sample_rows=[
-            ["KH-0001", "Hộ kinh doanh Mai Linh", "RETAIL", "mailinh@gmail.com", "012345678901", "8012345678", 20000000, "active", "CH-0001", "Tuyến 1", "CT001"],
-            ["KH-0002", "Công ty TNHH Hưng Thịnh", "WHOLESALE", "hungthinh@gmail.com", "", "0102030405", 50000000, "active", "CH-0002", "Tuyến 2", "CT001"],
+            ["KH-0001", "Hộ kinh doanh Mai Linh", "RETAIL", "mailinh@gmail.com", "012345678901", "8012345678", 20000000, "active", "CH-0001", "Tuyến 1", "CT001", "NV001"],
+            ["KH-0002", "Công ty TNHH Hưng Thịnh", "WHOLESALE", "hungthinh@gmail.com", "", "0102030405", 50000000, "active", "CH-0002", "Tuyến 2", "CT001", "NV002"],
         ],
-        col_widths=[18, 28, 16, 24, 18, 18, 20, 16, 18, 18, 20],
+        col_widths=[18, 28, 16, 24, 18, 18, 20, 16, 18, 18, 20, 16],
         guide_title="HƯỚNG DẪN NHẬP DANH SÁCH KHÁCH HÀNG / ĐỐI TÁC",
         guide_sections=[
             ("1. Quy tắc chung:", [
@@ -88,6 +94,7 @@ def download_customer_template():
                 "• 'Mã cửa hàng': Giúp gom nhóm nhiều mã xuất hóa đơn của cùng 1 cửa hàng vật lý.",
                 "• 'Tuyến': Ghi nhận tuyến của cửa hàng liên kết (hiển thị sang danh sách khách hàng).",
                 "• 'Mã công ty quản lý': Chỉ định công ty nội bộ chịu trách nhiệm xuất hóa đơn cho khách hàng này.",
+                "• 'Mã NVQL': Mã nhân viên quản lý khách hàng, phải tồn tại trong danh sách nhân viên và bắt đầu bằng NV.",
             ]),
         ],
         validations=[
@@ -175,10 +182,15 @@ def upload_customers(file: UploadFile = File(...), db: Session = Depends(get_db)
                 tax_code=str(data.get("tax_code") or "").strip() or None,
                 staff_code=str(data.get("staff_code") or "").strip() or None,
                 staff_name=str(data.get("staff_name") or "").strip() or None,
+                manager_code=None,
+                manager_name=None,
                 credit_limit=float(data.get("credit_limit") or 0),
                 status=str(data.get("status") or "active").strip(),
                 store_id=store_id,
                 company_id=company_id,
+            )
+            customer.manager_code, customer.manager_name = crud.resolve_manager_assignment(
+                db, str(data.get("manager_code") or "")
             )
             db.add(customer)
             db.flush()
@@ -224,7 +236,10 @@ def create_customer(payload: CustomerCreate, db: Session = Depends(get_db)):
     existing = crud.get_by_code(db, payload.code)
     if existing:
         raise HTTPException(status_code=409, detail="Customer code already exists")
-    return crud.create(db, payload)
+    try:
+        return crud.create(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{customer_id}", response_model=Customer)
@@ -240,7 +255,10 @@ def update_customer(customer_id: int, payload: CustomerUpdate, db: Session = Dep
     obj = crud.get(db, customer_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Customer not found")
-    return crud.update(db, obj, payload)
+    try:
+        return crud.update(db, obj, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/{customer_id}", status_code=204)

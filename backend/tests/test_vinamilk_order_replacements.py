@@ -35,6 +35,7 @@ from app.models.vinamilk import (
     VinamilkOrderSplitRequest,
     VinamilkSyncRun,
 )
+from app.models.customer import Customer
 from app.services.vinamilk_sales_summary import build_sales_summary
 
 
@@ -45,6 +46,7 @@ def db():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    Customer.__table__.create(engine)
     VinamilkOrderSnapshot.__table__.create(engine)
     VinamilkOrderReplacement.__table__.create(engine)
     VinamilkOrderSplitRequest.__table__.create(engine)
@@ -623,6 +625,8 @@ def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
     )
     by_order = {row["orderNumber"]: row for row in listed["rows"]}
     assert by_order[new_order_no]["_processing_status"] == "Đơn Gộp"
+    assert by_order["PO-201"]["_processing_status"] == "Đã Hủy"
+    assert by_order["PO-202"]["_processing_status"] == "Đã Hủy"
     assert by_order[new_order_no]["_replacement_display"] == "TT: PO-201, PO-202"
     assert by_order[new_order_no]["_performed_by"] == "van.a"
     assert by_order[new_order_no]["quantity"] == 10.0

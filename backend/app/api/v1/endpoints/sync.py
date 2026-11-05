@@ -1792,11 +1792,27 @@ def list_local_vinamilk_orders(
         ).all()
         for allocation in allocations:
             allocations_by_snapshot[allocation.snapshot_id].append(allocation)
+    customer_manager_by_code: dict[str, tuple[str | None, str | None]] = {}
+    customer_managers_by_suffix: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
+    if rows:
+        customer_assignments = db.execute(
+            select(Customer.code, Customer.manager_code, Customer.manager_name).where(
+                or_(Customer.manager_code.is_not(None), Customer.manager_name.is_not(None))
+            )
+        ).all()
+        for customer_code, manager_code, manager_name in customer_assignments:
+            normalized_code = (customer_code or "").strip().upper()
+            assignment = (manager_code, manager_name)
+            if normalized_code:
+                customer_manager_by_code[normalized_code] = assignment
+                if len(normalized_code) >= 3:
+                    customer_managers_by_suffix[normalized_code[-3:]].append(assignment)
     output_rows: list[dict[str, Any]] = []
     replaced_by: dict[str, list[str]] = defaultdict(list)
     replaced_order_for: dict[str, str] = {}
     replacement_type_for: dict[str, str] = {}
     replacement_actor_for: dict[str, str] = {}
+    merged_source_orders: set[str] = set()
     pending_split_for: dict[str, VinamilkOrderSplitRequest] = {}
     if rows:
         all_replacements = db.scalars(select(VinamilkOrderReplacement)).all()
@@ -1812,6 +1828,8 @@ def list_local_vinamilk_orders(
                 if old_clean:
                     if replacement.new_order_number not in replaced_by[old_clean]:
                         replaced_by[old_clean].append(replacement.new_order_number)
+                    if rep_type == "MERGE":
+                        merged_source_orders.add(old_clean)
                     if old_clean not in replacement_type_for:
                         replacement_type_for[old_clean] = rep_type
         pending_reqs = db.scalars(
@@ -1901,10 +1919,25 @@ def list_local_vinamilk_orders(
         )
         if pending_req and not getattr(row, "is_synthetic", False):
             proc_status = "Chờ KT duyệt tách"
+        if order_num in merged_source_orders:
+            proc_status = "Đã Hủy"
+        elif replacement_type_for.get(order_num) == "MERGE":
+            proc_status = "Đơn Gộp"
 
         prod_sku = (row.product_code or "").strip().upper()
         supplier = product_supplier_map.get(prod_sku, "")
         order_status_label = proc_status or "Chưa xử lý"
+        customer_code = (
+            row.customer_code
+            or _field(row.raw_payload, ("customerCode", "shopCode", "Mã KH"))
+            or ""
+        ).strip().upper()
+        manager_assignment = customer_manager_by_code.get(customer_code)
+        if manager_assignment is None and len(customer_code) >= 3:
+            suffix_matches = customer_managers_by_suffix.get(customer_code[-3:], [])
+            if len(suffix_matches) == 1:
+                manager_assignment = suffix_matches[0]
+        manager_code, manager_name = manager_assignment or (None, None)
 
         row_actor = (getattr(row, "performed_by", None) or "").strip()
         if not row_actor and isinstance(row.raw_payload, dict):
@@ -1924,6 +1957,10 @@ def list_local_vinamilk_orders(
             "Trạng thái xử lý": order_status_label,
             "Tình trạng xuất kho": d_status or "Chưa yêu cầu",
             "_delivery_status": d_status or "Chưa yêu cầu",
+            "Mã NVQL": manager_code,
+            "Tên NVQL": manager_name,
+            "_manager_code": manager_code,
+            "_manager_name": manager_name,
             "Người thực hiện": performed_by,
             "_performed_by": performed_by,
             "_local_id": row.id,
@@ -2341,6 +2378,8 @@ class ManualOrderRequest(BaseModel):
     delivery_date: date | None = None
     staff_code: str | None = None
     staff_name: str | None = None
+    delivery_employee_code: str | None = None
+    delivery_employee_name: str | None = None
     customer_address: str | None = None
     note: str | None = None
     lines: list[ManualOrderLine] = Field(min_length=1)
@@ -2361,8 +2400,16 @@ def _next_manual_order_number(db: Session, ref_date: date) -> str:
     return f"{prefix}{max_seq + 1:03d}"
 
 
-def _create_manual_order(db: Session, payload: ManualOrderRequest, performed_by: str | None = None) -> dict[str, Any]:
-    """Tạo đơn hàng tự tạo (không từ DMS), lưu cùng bảng snapshot để hiển thị chung danh sách Đơn hàng."""
+def _create_manual_order(
+    db: Session,
+    payload: ManualOrderRequest,
+    performed_by: str | None = None,
+    current_employee: Employee | None = None,
+) -> dict[str, Any]:
+    """Tạo đơn hàng tự tạo (không từ DMS), lưu cùng bảng snapshot để hiển thị chung danh sách Đơn hàng.
+
+    NVBH mặc định là nhân viên gắn với tài khoản đang đăng nhập (nếu không truyền staff_code).
+    """
     actor = (performed_by or "").strip() or "Hệ thống"
     cust_code = (payload.customer_code or "").strip()
     customer = db.scalar(select(Customer).where(Customer.code == cust_code)) if cust_code else None
@@ -2387,8 +2434,23 @@ def _create_manual_order(db: Session, payload: ManualOrderRequest, performed_by:
     order_date = payload.order_date or date.today()
     delivery_date = payload.delivery_date or order_date
     order_number = _next_manual_order_number(db, order_date)
-    staff_code = (payload.staff_code or customer.staff_code or "").strip()
-    staff_name = (payload.staff_name or customer.staff_name or "").strip()
+    staff_code = (payload.staff_code or "").strip()
+    staff_name = (payload.staff_name or "").strip()
+    if not staff_code and current_employee is not None:
+        staff_code = current_employee.code or ""
+        staff_name = staff_name or current_employee.name or ""
+    if not staff_code:
+        staff_code = (customer.staff_code or "").strip()
+        staff_name = staff_name or (customer.staff_name or "").strip()
+
+    delivery_code = (payload.delivery_employee_code or "").strip()
+    delivery_name = (payload.delivery_employee_name or "").strip()
+    if delivery_code:
+        delivery_employee = db.scalar(select(Employee).where(func.upper(Employee.code) == delivery_code.upper()))
+        if delivery_employee is None or (delivery_employee.status or "").lower() != "active":
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy NVGH đang hoạt động {delivery_code}.")
+        delivery_code = delivery_employee.code
+        delivery_name = delivery_employee.name
     address = (payload.customer_address or "").strip()
     if not address and customer.addresses:
         default_addr = next((a for a in customer.addresses if a.is_default), customer.addresses[0])
@@ -2415,6 +2477,8 @@ def _create_manual_order(db: Session, payload: ManualOrderRequest, performed_by:
             "Ngày": order_date.strftime("%d/%m/%Y"),
             "Mã NVBH": staff_code,
             "Tên NVBH": staff_name,
+            "Mã NVGH": delivery_code,
+            "Tên NVGH": delivery_name,
             "Mã KH": customer.code,
             "Tên KH": customer.name,
             "Địa chỉ": address,
@@ -2492,7 +2556,12 @@ def create_manual_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return _create_manual_order(db, payload, performed_by=getattr(current_user, "username", None))
+    return _create_manual_order(
+        db,
+        payload,
+        performed_by=getattr(current_user, "username", None),
+        current_employee=getattr(current_user, "employee", None),
+    )
 
 
 @router.delete("/vinamilk-orders/manual/{order_number}")

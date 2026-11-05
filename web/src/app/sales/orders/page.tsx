@@ -117,6 +117,7 @@ type DeliveryRequestOrderOption = {
   customer_code: string;
   customer_name: string;
   original_status: string;
+  delivery_employee_code: string;
 };
 
 type DeliveryRequestPreviewItem = {
@@ -283,6 +284,8 @@ const remoteColumnDefinitions: {
   { title: "Tên NVBH", keys: ["staffName", "salesStaffName", "Tên NVBH"], width: "10rem", truncate: true },
   { title: "Mã KH", keys: ["customerCode", "shopCode", "Mã KH"], width: "8rem" },
   { title: "Tên KH", keys: ["customerName", "shopName", "Tên KH"], width: "12rem", truncate: true },
+  { title: "Mã NVQL", keys: ["Mã NVQL", "_manager_code"], width: "7.5rem" },
+  { title: "Tên NVQL", keys: ["Tên NVQL", "_manager_name"], width: "10rem", truncate: true },
   { title: "Địa chỉ", keys: ["address", "customerAddress", "shipTo", "Địa chỉ"], width: "14rem", truncate: true },
   { title: "Mã sản phẩm", keys: ["productCode", "itemCode", "sku", "Mã sản phẩm"], width: "7.5rem" },
   { title: "Sản phẩm", keys: ["productName", "itemName", "product", "Sản phẩm"], width: "16rem", truncate: true },
@@ -365,7 +368,7 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
 function addProcessingStatus(order: RemoteOrder): RemoteOrder {
   const procStatus = displayRemoteValue(order["_processing_status"]).trim();
   const whStatus = order["_warehouse_updated"] === true ? "Đã cập nhật kho" : "";
-  const finalStatus = procStatus || whStatus;
+  const finalStatus = procStatus || whStatus || "Chưa xử lý";
   return {
     ...order,
     "Tình trạng xử lý đơn hàng": finalStatus,
@@ -2076,16 +2079,9 @@ return Array.from(map.values());
           }
           if (text === "Đơn Gộp") {
             return (
-              <div className="flex flex-wrap items-center gap-1">
-                <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 border border-indigo-200">
-                  Đơn Gộp
-                </span>
-                {order["_warehouse_updated"] === true && (
-                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                    Đã cập nhật kho
-                  </span>
-                )}
-              </div>
+              <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 border border-indigo-200">
+                Đơn Gộp
+              </span>
             );
           }
           if (text === "Đơn Tự Tạo") {
@@ -2151,6 +2147,7 @@ return Array.from(map.values());
         customer_code: displayRemoteValue(row["Mã KH"]).trim(),
         customer_name: displayRemoteValue(row["Tên KH"]).trim(),
         original_status: displayRemoteValue(row["Trạng thái"]).trim(),
+        delivery_employee_code: displayRemoteValue(row["Mã NVGH"]).trim(),
       });
       return orders;
     }, new Map<string, DeliveryRequestOrderOption>())
@@ -2230,6 +2227,19 @@ return Array.from(map.values());
         ...current,
         [orderNumber]: current[orderNumber] ?? "001-Xuất hàng",
       }));
+      // Tu dien NVGH da chon khi tao don (neu co va con hoat dong)
+      const presetCode = deliveryRequestOrderOptions
+        .find((order) => order.order_number === orderNumber)
+        ?.delivery_employee_code.toUpperCase();
+      const presetEmployee = presetCode
+        ? deliveryEmployees.find((employee) => employee.code.toUpperCase() === presetCode)
+        : undefined;
+      if (presetEmployee) {
+        setDeliveryEmployeeAssignments((current) => ({
+          ...current,
+          [orderNumber]: current[orderNumber] || presetEmployee.code,
+        }));
+      }
     } else {
       setDeliveryEmployeeAssignments((current) => {
         const next = { ...current };
@@ -2767,6 +2777,20 @@ return Array.from(map.values());
                   }
                 });
                 setSelectedDeliveryOrderNumbers(next);
+                if (!allVisibleSelected) {
+                  // Tu dien NVGH da chon khi tao don cho cac don vua chon
+                  setDeliveryEmployeeAssignments((current) => {
+                    const updated = { ...current };
+                    filteredDeliveryRequestOrders.forEach((order) => {
+                      if (updated[order.order_number] || !order.delivery_employee_code) return;
+                      const employee = deliveryEmployees.find(
+                        (item) => item.code.toUpperCase() === order.delivery_employee_code.toUpperCase()
+                      );
+                      if (employee) updated[order.order_number] = employee.code;
+                    });
+                    return updated;
+                  });
+                }
                 setDeliveryRequestPreview(null);
                 setDeliveryRequestPlan(null);
                 setAcknowledgeDeliveryWarnings(false);

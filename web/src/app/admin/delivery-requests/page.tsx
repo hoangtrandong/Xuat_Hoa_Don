@@ -69,6 +69,8 @@ type DeliveryRequest = {
   status: "DRAFT" | "SUBMITTED" | "RECEIVED" | "COMPLETED" | "CANCELLED";
   note: string | null;
   created_by: string | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
   submitted_at: string | null;
   received_at: string | null;
   completed_at: string | null;
@@ -89,7 +91,7 @@ type AdminDeliveryRequestRow = DeliveryRequest & {
   skuSummary: string;
 };
 
-const statusLabel: Record<string, string> = { DRAFT: "Nháp", SUBMITTED: "Chờ nhận", RECEIVED: "Đang xuất", COMPLETED: "Hoàn thành", CANCELLED: "Đã hủy" };
+const statusLabel: Record<string, string> = { DRAFT: "Chờ Admin duyệt", SUBMITTED: "Đã duyệt - chờ kho nhận", RECEIVED: "Đã nhận - đang xuất kho", COMPLETED: "Đã xuất kho", CANCELLED: "Đã hủy yêu cầu" };
 const statusVariant: Record<string, "default" | "info" | "warning" | "success" | "danger"> = { DRAFT: "default", SUBMITTED: "warning", RECEIVED: "info", COMPLETED: "success", CANCELLED: "danger" };
 
 function totalQuantityOf(request: Pick<DeliveryRequest, "items">) {
@@ -216,7 +218,7 @@ export default function AdminDeliveryRequestsPage() {
 
   async function transition(action: "submit" | "receive" | "complete") {
     if (!selected) return;
-    const successMap = { submit: "Đã gửi xác nhận — yêu cầu chuyển sang Chờ nhận.", receive: "Đã chuyển sang Đang xuất.", complete: "Đã hoàn thành xuất kho — tồn kho đã được trừ." };
+    const successMap = { submit: "Admin đã duyệt — yêu cầu chuyển sang hàng đợi thủ kho.", receive: "Thủ kho đã nhận yêu cầu, bắt đầu xuất hàng.", complete: "Đã hoàn thành xuất kho — tồn kho đã được trừ." };
     setLoading(true); setError(""); setMessage("");
     try {
       if (action === "submit" && stockPlan) {
@@ -380,18 +382,18 @@ export default function AdminDeliveryRequestsPage() {
         <>
           <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
             <StatCard label="Tổng yêu cầu" value={stats.total} icon={<ClipboardList size={20} />} color="bg-sky-50 text-sky-600" />
-            <StatCard label="Nháp" value={stats.draft} icon={<Pencil size={20} />} color="bg-gray-50 text-gray-600" />
-            <StatCard label="Chờ nhận" value={stats.submitted} icon={<Send size={20} />} color="bg-amber-50 text-amber-600" />
-            <StatCard label="Đang xuất" value={stats.received} icon={<Truck size={20} />} color="bg-blue-50 text-blue-600" />
-            <StatCard label="Hoàn thành" value={stats.completed} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
-            <StatCard label="Đã hủy" value={stats.cancelled} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />
+            <StatCard label="Chờ Admin duyệt" value={stats.draft} icon={<Pencil size={20} />} color="bg-amber-50 text-amber-700" />
+            <StatCard label="Đã duyệt - chờ kho nhận" value={stats.submitted} icon={<Send size={20} />} color="bg-amber-50 text-amber-600" />
+            <StatCard label="Đã nhận - đang xuất kho" value={stats.received} icon={<Truck size={20} />} color="bg-blue-50 text-blue-600" />
+            <StatCard label="Đã xuất kho" value={stats.completed} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
+            <StatCard label="Đã hủy yêu cầu" value={stats.cancelled} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />
           </div>
 
           <div className="flex flex-col sm:flex-row gap-4 items-end">
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">Trạng thái</label>
               <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-full sm:w-48 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500">
-                <option value="ALL">Tất cả</option><option value="DRAFT">Nháp</option><option value="SUBMITTED">Chờ nhận</option><option value="RECEIVED">Đang xuất</option><option value="COMPLETED">Hoàn thành</option><option value="CANCELLED">Đã hủy</option>
+                <option value="ALL">Tất cả</option><option value="DRAFT">Chờ Admin duyệt</option><option value="SUBMITTED">Đã duyệt - chờ kho nhận</option><option value="RECEIVED">Đã nhận - đang xuất kho</option><option value="COMPLETED">Đã xuất kho</option><option value="CANCELLED">Đã hủy yêu cầu</option>
               </select>
             </div>
             <div>
@@ -473,8 +475,8 @@ export default function AdminDeliveryRequestsPage() {
                   <h4 className="text-sm font-semibold text-gray-700 mb-3">Tiến trình xử lý</h4>
                   <div className="space-y-2">
                     {[
-                      { label: "Tạo phiếu (Nháp)", time: selected.created_at, done: true, cancelled: false },
-                      { label: "Gửi xác nhận (Chờ nhận)", time: selected.submitted_at, done: !!selected.submitted_at, cancelled: false },
+                      { label: "Tạo yêu cầu (Chờ Admin duyệt)", time: selected.created_at, done: true, cancelled: false },
+                      { label: `Admin duyệt${selected.approved_by ? ` (${selected.approved_by})` : ""}`, time: selected.approved_at ?? selected.submitted_at, done: !!(selected.approved_at ?? selected.submitted_at), cancelled: false },
                       { label: "Thủ kho nhận (Đang xuất)", time: selected.received_at, done: !!selected.received_at, cancelled: false },
                       { label: selected.cancelled_at ? "Đã hủy" : "Hoàn thành xuất kho", time: selected.cancelled_at || selected.completed_at, done: !!(selected.cancelled_at || selected.completed_at), cancelled: !!selected.cancelled_at },
                     ].map((step, i) => (
@@ -552,12 +554,12 @@ export default function AdminDeliveryRequestsPage() {
                 {(selected.status === "DRAFT" || selected.status === "SUBMITTED" || selected.status === "RECEIVED") && (
                   <div className="space-y-2 pt-1 border-t border-gray-100">
                     {selected.status === "DRAFT" && <>
-                      <p className="text-xs text-gray-500 font-medium pt-1">📝 Phiếu nháp — kiểm tra tồn kho trước khi gửi xác nhận.</p>
+                      <p className="text-xs text-amber-700 font-medium pt-1">📝 Yêu cầu chờ Admin duyệt — kiểm tra tồn kho và FEFO trước khi duyệt gửi thủ kho.</p>
                       <button onClick={checkStock} disabled={checkingStock} className="flex items-center justify-center gap-2 w-full rounded-lg border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-700 py-2.5 text-sm font-medium transition-colors disabled:opacity-50">
                         <PackageSearch size={15} />{checkingStock ? "Đang kiểm tra..." : "Kiểm tra tồn kho (FEFO)"}
                       </button>
                       <button onClick={() => transition("submit")} disabled={loading || !stockOk} title={!stockPlan ? "Hãy kiểm tra tồn kho trước" : !stockOk ? "Tồn kho không đủ" : ""} className="flex items-center justify-center gap-2 w-full rounded-lg bg-sky-500 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed text-white py-2.5 text-sm font-medium transition-colors">
-                        {loading ? "Đang xử lý..." : "✓ Gửi xác nhận xuất kho"}
+                        {loading ? "Đang xử lý..." : "✓ Admin duyệt & gửi thủ kho"}
                       </button>
                     </>}
                     {selected.status === "SUBMITTED" && <>

@@ -513,7 +513,12 @@ def _with_stock(db: Session, request: DeliveryRequest | None):
     return request
 
 
-def transition(db: Session, request_id: int, action: str):
+def transition(
+    db: Session,
+    request_id: int,
+    action: str,
+    performed_by: str | None = None,
+):
     request = db.scalar(select(DeliveryRequest).options(
         selectinload(DeliveryRequest.items).selectinload(DeliveryRequestItem.allocations)
     ).where(DeliveryRequest.id == request_id).with_for_update())
@@ -533,6 +538,7 @@ def transition(db: Session, request_id: int, action: str):
             for item in request.items:
                 _allocate(db, request, item)
             request.status, request.submitted_at = "SUBMITTED", now
+            request.approved_at, request.approved_by = now, performed_by
         elif action == "receive":
             request.status, request.received_at = "RECEIVED", now
         elif action == "cancel":

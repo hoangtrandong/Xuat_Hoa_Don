@@ -296,7 +296,8 @@ const remoteColumnDefinitions: {
   { title: "Đơn giá", keys: ["unitPrice", "price", "Đơn giá"], width: "7.5rem", align: "right" },
   { title: "Thời gian xác nhận giao hàng", keys: ["deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate"], width: "14rem" },
   { title: "Ngày đơn hàng gốc", keys: ["initialOrderDate", "originalOrderDate", "Ngày đơn hàng gốc"], width: "10.5rem" },
-  { title: "Tình trạng xử lý đơn hàng", keys: ["Tình trạng xử lý đơn hàng", "Trạng thái xử lý", "_delivery_status", "_processing_status"], width: "14rem" },
+  { title: "Tình trạng xử lý đơn hàng", keys: ["Tình trạng xử lý đơn hàng", "Trạng thái xử lý", "_processing_status"], width: "14rem" },
+  { title: "Tình trạng xuất kho", keys: ["Tình trạng xuất kho", "_delivery_status"], width: "14rem" },
   { title: "Thay thế cho đơn", keys: ["_replacement_display", "_replaced_order_number"], width: "16rem" },
   { title: "Người thực hiện", keys: ["_performed_by", "performedBy", "Người thực hiện"], width: "9.5rem" },
 ];
@@ -337,13 +338,14 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
       : hasRemoteValue(order["_supplier"])
         ? String(order["_supplier"]).trim()
         : null;
-  const deliveryStatus = hasRemoteValue(order["_delivery_status"])
-    ? String(order["_delivery_status"]).trim()
-    : hasRemoteValue(order["delivery_status"])
-      ? String(order["delivery_status"]).trim()
-      : null;
   normalized["Nhà cung cấp"] = supplier;
   normalized["_supplier"] = supplier;
+  const deliveryStatus = hasRemoteValue(order["Tình trạng xuất kho"])
+    ? String(order["Tình trạng xuất kho"]).trim()
+    : hasRemoteValue(order["_delivery_status"])
+      ? String(order["_delivery_status"]).trim()
+      : "Chưa yêu cầu";
+  normalized["Tình trạng xuất kho"] = deliveryStatus;
   normalized["_delivery_status"] = deliveryStatus;
   normalized["Thay thế cho đơn"] = replacementDisplay;
   normalized["Người thực hiện"] = performedBy;
@@ -361,10 +363,9 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
 }
 
 function addProcessingStatus(order: RemoteOrder): RemoteOrder {
-  const deliveryStatus = displayRemoteValue(order["_delivery_status"]).trim();
   const procStatus = displayRemoteValue(order["_processing_status"]).trim();
   const whStatus = order["_warehouse_updated"] === true ? "Đã cập nhật kho" : "";
-  const finalStatus = deliveryStatus || procStatus || whStatus;
+  const finalStatus = procStatus || whStatus;
   return {
     ...order,
     "Tình trạng xử lý đơn hàng": finalStatus,
@@ -433,6 +434,7 @@ export default function SalesOrdersPage() {
   const [staffFilter, setStaffFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("Tất cả");
+  const [deliveryStatusFilter, setDeliveryStatusFilter] = useState("Tất cả");
   const [editingReplacement, setEditingReplacement] = useState<ReplacementEditForm | null>(null);
   const [replacementOptions, setReplacementOptions] = useState<string[]>([]);
   const [isSavingReplacement, setIsSavingReplacement] = useState(false);
@@ -1894,7 +1896,7 @@ return Array.from(map.values());
 
   const remoteColumns = remoteColumnDefinitions
     .filter(({ title }) => (
-      ["Tình trạng xử lý đơn hàng", "Trạng thái xử lý", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
+      ["Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Trạng thái xử lý", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
     ) || remoteOrders.some((order) => hasRemoteValue(order[title])))
     .map(({ title, width, align }): Column<RemoteOrder> => ({
       key: title,
@@ -2013,40 +2015,28 @@ return Array.from(map.values());
             </span>
           );
         }
+        if (title === "Tình trạng xuất kho") {
+          const deliveryStatus = displayRemoteValue(value).trim() || "Chưa yêu cầu";
+          const tone = deliveryStatus === "Đã xuất kho"
+            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+            : deliveryStatus === "Đã xuất một phần"
+              ? "bg-amber-50 text-amber-800 border-amber-200"
+              : deliveryStatus === "Đã nhận - đang xuất kho"
+                ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                : deliveryStatus.startsWith("Đã duyệt")
+                  ? "bg-sky-50 text-sky-700 border-sky-200"
+                  : deliveryStatus === "Chờ Admin duyệt"
+                    ? "bg-amber-50 text-amber-800 border-amber-200"
+                    : deliveryStatus === "Đã hủy yêu cầu"
+                      ? "bg-rose-50 text-rose-700 border-rose-200"
+                      : "bg-gray-100 text-gray-600 border-gray-200";
+          return (
+            <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${tone}`}>
+              {deliveryStatus}
+            </span>
+          );
+        }
         if (title === "Tình trạng xử lý đơn hàng" || title === "Trạng thái xử lý") {
-          const deliveryStatus = displayRemoteValue(order["_delivery_status"]).trim();
-          const procStatus = displayRemoteValue(order["_processing_status"]).trim();
-
-          if (deliveryStatus === "Đã Xuất") {
-            return (
-              <div className="flex flex-wrap items-center gap-1">
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
-                  <CheckCircle2 size={12} className="text-emerald-600" />
-                  Đã Xuất
-                </span>
-                {procStatus && procStatus !== "Đã Xuất" && (
-                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
-                    {procStatus}
-                  </span>
-                )}
-              </div>
-            );
-          }
-          if (deliveryStatus === "Đã Duyệt") {
-            return (
-              <div className="flex flex-wrap items-center gap-1">
-                <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-700 ring-1 ring-sky-200">
-                  <CircleCheck size={12} className="text-sky-600" />
-                  Đã Duyệt
-                </span>
-                {procStatus && procStatus !== "Đã Duyệt" && (
-                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
-                    {procStatus}
-                  </span>
-                )}
-              </div>
-            );
-          }
           if (text === "Chờ KT duyệt tách") {
             return (
               <button
@@ -2116,15 +2106,21 @@ return Array.from(map.values());
       },
     }));
 
-  const remoteStatuses = Array.from(
-    new Set([
-      "Đã Duyệt",
-      "Đã Xuất",
-      ...remoteOrders
-        .map((order) => displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]))
-        .filter((status) => status.length > 0 && status !== "Đã Duyệt" && status !== "Đã Xuất"),
-    ])
-  );
+  const remoteStatuses = Array.from(new Set(
+    remoteOrders
+      .map((order) => displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]))
+      .filter((status) => status.length > 0)
+  ));
+  const deliveryStatuses = Array.from(new Set([
+    "Chưa yêu cầu",
+    "Chờ Admin duyệt",
+    "Đã duyệt - chờ kho nhận",
+    "Đã nhận - đang xuất kho",
+    "Đã xuất một phần",
+    "Đã xuất kho",
+    "Đã hủy yêu cầu",
+    ...remoteOrders.map((order) => displayRemoteValue(order["Tình trạng xuất kho"])).filter(Boolean),
+  ]));
   const filteredRemoteOrders = remoteOrders.filter((order) => {
     const matches = (key: string, query: string) =>
       !query || displayRemoteValue(order[key]).toLocaleLowerCase("vi").includes(query.trim().toLocaleLowerCase("vi"));
@@ -2140,6 +2136,7 @@ return Array.from(map.values());
     if (!matches("Mã NVBH", staffFilter) && !matches("Tên NVBH", staffFilter)) return false;
     if (!matches("Mã sản phẩm", productFilter) && !matches("Sản phẩm", productFilter) && !matches("Nhà cung cấp", productFilter)) return false;
     if (statusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]) !== statusFilter) return false;
+    if (deliveryStatusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xuất kho"]) !== deliveryStatusFilter) return false;
     return true;
   });
 
@@ -2403,21 +2400,7 @@ return Array.from(map.values());
       });
       const created = await response.json() as { id?: number; code?: string; detail?: string };
       if (!response.ok) throw new Error(created.detail ?? "Không thể tạo yêu cầu xuất hàng.");
-      let submitWarning = "";
-      if (created.id) {
-        try {
-          const submitResponse = await apiFetch(`${API_URL}/delivery-requests/${created.id}/submit`, { method: "POST" });
-          if (!submitResponse.ok) {
-            const submitResult = await submitResponse.json() as { detail?: string };
-            submitWarning = `Tạo được yêu cầu ${created.code ?? ""} nhưng chưa gửi thủ kho: ${submitResult.detail ?? "lỗi không xác định"}.`;
-          }
-        } catch (error) {
-          submitWarning = `Tạo được yêu cầu ${created.code ?? ""} nhưng chưa xác nhận gửi thủ kho: ${error instanceof Error ? error.message : "lỗi kết nối"}.`;
-        }
-      }
-      setToast(submitWarning
-        ? submitWarning
-        : `Đã tạo và gửi yêu cầu ${created.code ?? ""} đến thủ kho.`);
+      setToast(`Đã tạo yêu cầu ${created.code ?? ""}; đang chờ Admin duyệt trước khi chuyển cho thủ kho.`);
       setIsDeliveryRequestDrawerOpen(false);
       setDeliveryRequestPreview(null);
       setDeliveryRequestPlan(null);
@@ -2482,6 +2465,7 @@ return Array.from(map.values());
     setStaffFilter("");
     setProductFilter("");
     setStatusFilter("Tất cả");
+    setDeliveryStatusFilter("Tất cả");
   }
 
   async function loadReplacementOptions(search: string) {
@@ -2695,18 +2679,20 @@ return Array.from(map.values());
             Tải Excel toàn bộ
           </button>
         </div>
-        <div className="grid grid-cols-1 gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-5">
+        <div className="grid grid-cols-1 gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-7">
           <input value={orderFilter} onChange={(event) => setOrderFilter(event.target.value)} placeholder="Lọc số đơn hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
           <input value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)} placeholder="Lọc mã/tên khách hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
           <input value={staffFilter} onChange={(event) => setStaffFilter(event.target.value)} placeholder="Lọc mã/tên NVBH" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
           <input value={productFilter} onChange={(event) => setProductFilter(event.target.value)} placeholder="Lọc mã/tên SP, Nhà cung cấp" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <div className="flex gap-2">
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm">
-              <option value="Tất cả">Tất cả trạng thái</option>
-              {remoteStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
-            </select>
-            <button onClick={clearFilters} className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">Xóa lọc</button>
-          </div>
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm">
+            <option value="Tất cả">Tất cả tình trạng xử lý</option>
+            {remoteStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+          </select>
+          <select value={deliveryStatusFilter} onChange={(event) => setDeliveryStatusFilter(event.target.value)} className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm">
+            <option value="Tất cả">Tất cả tình trạng xuất kho</option>
+            {deliveryStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+          </select>
+          <button onClick={clearFilters} className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">Xóa lọc</button>
         </div>
         {remoteOrders.length > 0 && <p className="text-sm text-gray-500">Đang hiển thị {filteredRemoteOrders.length}/{remoteOrders.length} bản ghi sau lọc. {lastSyncedAt && ` Cập nhật gần nhất: ${formatVinamilkDate(lastSyncedAt, true)}`}</p>}
         {remoteError && <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700"><AlertTriangle size={16} />{remoteError}</div>}

@@ -223,6 +223,8 @@ class DeliveryRequest(Base):
     status: Mapped[str] = mapped_column(String(15), default="DRAFT", index=True)
     note: Mapped[str | None] = mapped_column(String(255))
     created_by: Mapped[str | None] = mapped_column(String(120))
+    approved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime)
     received_at: Mapped[datetime | None] = mapped_column(DateTime)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)

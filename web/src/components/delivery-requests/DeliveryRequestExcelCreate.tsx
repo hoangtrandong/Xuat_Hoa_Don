@@ -368,24 +368,12 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
     });
     const result = await response.json() as { detail?: string; id?: number; code?: string; status?: string };
     if (!response.ok) { setError(result.detail ?? "Không thể tạo yêu cầu."); return; }
-    // Tự động submit sau khi kế hoạch FEFO đã được lưu cùng yêu cầu.
-    // để thủ kho thấy trong "Hàng đợi xuất kho".
-    let submitNote = "";
-    if (result.id) {
-      const submitResponse = await apiFetch(`${API_URL}/delivery-requests/${result.id}/submit`, { method: "POST" });
-      const submitResult = await submitResponse.json().catch(() => ({})) as { detail?: string };
-      if (!submitResponse.ok) {
-        submitNote = ` Tuy nhiên gửi xác nhận thất bại: ${submitResult.detail ?? "lỗi không xác định"}.`;
-      } else {
-        submitNote = " Đã gửi xác nhận đến thủ kho.";
-      }
-    }
     setPreview([]);
     setOrders([]);
     setOrdersReconciliation([]);
     setBorrowEntries([]);
     setPlan(null);
-    setMessage(`Đã tạo yêu cầu ${result.code ?? ""}.${submitNote}`);
+    setMessage(`Đã tạo yêu cầu ${result.code ?? ""}; đang chờ Admin duyệt trước khi chuyển cho thủ kho.`);
     await load();
     await onCreated?.(result);
   }

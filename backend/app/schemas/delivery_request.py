@@ -381,6 +381,8 @@ class DeliveryRequestList(BaseModel):
     status: str
     note: Optional[str] = None
     created_by: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -414,6 +416,8 @@ class DeliveryRequest(BaseModel):
     status: str
     note: Optional[str] = None
     created_by: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None

@@ -40,6 +40,21 @@ router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
 borrow_router = APIRouter(prefix="/employee-borrowing", tags=["employee-borrowing"])
 
 
+def _is_admin_user(user: User) -> bool:
+    username = (getattr(user, "username", None) or "").strip().lower()
+    if username == "admin":
+        return True
+    return any(
+        (getattr(role, "name", None) or "").strip().lower() == "admin"
+        for role in (getattr(user, "roles", None) or [])
+    )
+
+
+def _require_admin(user: User) -> None:
+    if not _is_admin_user(user):
+        raise HTTPException(status_code=403, detail="Chỉ Admin mới được duyệt yêu cầu xuất kho.")
+
+
 
 def _quantity(value: Any, boxes_per_carton: int = 1) -> tuple[int, int, int, str | None]:
     """Return base boxes, cartons, loose boxes and the original cell value."""
@@ -1601,9 +1616,19 @@ def delete_request(request_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{request_id}/submit", response_model=DeliveryRequest)
-def submit_request(request_id: int, db: Session = Depends(get_db)):
+def submit_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_admin(current_user)
     try:
-        return crud.transition(db, request_id, "submit")
+        return crud.transition(
+            db,
+            request_id,
+            "submit",
+            performed_by=getattr(current_user, "username", None),
+        )
     except ValueError as exc:
         return _error(db, exc)
 

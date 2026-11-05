@@ -15,7 +15,7 @@ from zipfile import BadZipFile
 from pydantic import BaseModel, Field
 from playwright.sync_api import sync_playwright
 from dotenv import dotenv_values, set_key
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 from app.core.auth import get_current_user
 from app.core.config import settings
@@ -1384,15 +1384,16 @@ def _parse_json_body(body: object) -> Any:
 
 
 def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) -> int:
-    rows = _row_list(payload)
-    if not rows:
-        return 0
-        
+    if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
+        raise ValueError("Vinamilk trả về danh sách đơn hàng không hợp lệ; không thể đối soát snapshot.")
+    rows = payload
     row_data_list = []
     keys_to_fetch = []
     
     for row in rows:
         order_number = _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
+        if not order_number:
+            raise ValueError("Vinamilk trả về dòng dữ liệu không có số đơn hàng; không thể đối soát snapshot.")
         product_code = _field(row, ("productCode", "itemCode", "sku", "Mã sản phẩm"))
         line_id = _field(row, ("lineId", "itemId", "orderItemId", "detailId", "id"))
         identity = "|".join((order_number or "", product_code or "", line_id or ""))
@@ -1426,7 +1427,10 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
         snapshot.product_name = _field(row, ("productName", "itemName", "product", "Sản phẩm"))
         snapshot.status = _field(row, ("orderStatus", "status"))
         snapshot.performed_by = "Hệ thống"
-        snapshot.order_created_date = _parse_optional_date(_field(row, ("createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày")))
+        snapshot.order_created_date = (
+            _parse_optional_date(_field(row, ("createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày")))
+            or from_date
+        )
         snapshot.delivery_date = _parse_optional_date(_field(row, ("deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày")))
         snapshot.synced_from = from_date
         snapshot.synced_to = to_date
@@ -1442,6 +1446,23 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
                 VinamilkOrderSnapshot.product_code.is_(None),
             )
         )
+    incoming_remote_keys = set(keys_to_fetch)
+    stale_snapshots = db.scalars(select(VinamilkOrderSnapshot).where(
+        or_(
+            and_(
+                VinamilkOrderSnapshot.order_created_date >= from_date,
+                VinamilkOrderSnapshot.order_created_date <= to_date,
+            ),
+            and_(
+                VinamilkOrderSnapshot.synced_from == from_date,
+                VinamilkOrderSnapshot.synced_to == to_date,
+            ),
+        ),
+        VinamilkOrderSnapshot.is_synthetic.is_(False),
+    )).all()
+    for snapshot in stale_snapshots:
+        if snapshot.remote_key not in incoming_remote_keys:
+            db.delete(snapshot)
     # Tự động cập nhật mã NVBH và tên NVBH cho khách hàng tương ứng nếu chưa có
     try:
         cust_staff_updates: dict[str, tuple[str | None, str | None]] = {}
@@ -1818,17 +1839,21 @@ def list_local_vinamilk_orders(
         dr_rows = db.execute(
             select(DeliveryRequestOrder.order_number, DeliveryRequest.status)
             .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
-            .where(DeliveryRequest.status != "CANCELLED")
+            .order_by(DeliveryRequest.created_at.desc(), DeliveryRequest.id.desc())
         ).all()
+        delivery_status_labels = {
+            "DRAFT": "Chờ Admin duyệt",
+            "SUBMITTED": "Đã duyệt - chờ kho nhận",
+            "RECEIVED": "Đã nhận - đang xuất kho",
+            "COMPLETED": "Đã xuất kho",
+            "CANCELLED": "Đã hủy yêu cầu",
+        }
         for o_num, req_status in dr_rows:
             if not o_num:
                 continue
             key = o_num.strip().upper()
-            if req_status == "COMPLETED":
-                order_delivery_status[key] = "Đã Xuất"
-            elif req_status in ("DRAFT", "SUBMITTED", "RECEIVED"):
-                if order_delivery_status.get(key) != "Đã Xuất":
-                    order_delivery_status[key] = "Đã Duyệt"
+            if key not in order_delivery_status:
+                order_delivery_status[key] = delivery_status_labels.get(req_status, "Chưa yêu cầu")
     except Exception:
         pass
     for row in rows:
@@ -1853,9 +1878,21 @@ def list_local_vinamilk_orders(
                     d_status = order_delivery_status[old_part]
                     break
         if not d_status and rep_by_list:
-            sub_statuses = [order_delivery_status.get(s.upper()) for s in rep_by_list if order_delivery_status.get(s.upper())]
+            sub_statuses = [order_delivery_status.get(s.upper(), "Chưa yêu cầu") for s in rep_by_list]
             if sub_statuses:
-                d_status = "Đã Xuất" if all(s == "Đã Xuất" for s in sub_statuses) else "Đã Duyệt"
+                if all(status == "Đã xuất kho" for status in sub_statuses):
+                    d_status = "Đã xuất kho"
+                elif any(status == "Đã xuất kho" for status in sub_statuses):
+                    d_status = "Đã xuất một phần"
+                else:
+                    progress = {
+                        "Chưa yêu cầu": 0,
+                        "Đã hủy yêu cầu": 0,
+                        "Chờ Admin duyệt": 1,
+                        "Đã duyệt - chờ kho nhận": 2,
+                        "Đã nhận - đang xuất kho": 3,
+                    }
+                    d_status = min(sub_statuses, key=lambda status: progress.get(status, 0))
 
         proc_status = (
             row.processing_status
@@ -1867,7 +1904,7 @@ def list_local_vinamilk_orders(
 
         prod_sku = (row.product_code or "").strip().upper()
         supplier = product_supplier_map.get(prod_sku, "")
-        order_status_label = d_status or proc_status or ""
+        order_status_label = proc_status or "Chưa xử lý"
 
         row_actor = (getattr(row, "performed_by", None) or "").strip()
         if not row_actor and isinstance(row.raw_payload, dict):
@@ -1885,7 +1922,8 @@ def list_local_vinamilk_orders(
             "_supplier": supplier,
             "Tình trạng xử lý đơn hàng": order_status_label,
             "Trạng thái xử lý": order_status_label,
-            "_delivery_status": d_status,
+            "Tình trạng xuất kho": d_status or "Chưa yêu cầu",
+            "_delivery_status": d_status or "Chưa yêu cầu",
             "Người thực hiện": performed_by,
             "_performed_by": performed_by,
             "_local_id": row.id,

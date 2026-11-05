@@ -105,6 +105,52 @@ def test_regular_sync_does_not_touch_scoped_states(db):
     assert snapshot.returned is None
 
 
+def test_successful_sync_removes_missing_orders_and_preserves_synthetic_orders(db):
+    day = date(2026, 10, 1)
+    add_order(db, "VM-STALE")
+    db.add(VinamilkOrderSnapshot(
+        remote_key="synthetic-key",
+        order_number="VM-SYNTHETIC",
+        order_created_date=day,
+        synced_from=day,
+        synced_to=day,
+        raw_payload={},
+        is_synthetic=True,
+    ))
+    db.flush()
+
+    _save_snapshot(
+        db,
+        [{"orderNumber": "VM-CURRENT", "productCode": "SKU-1", "lineId": "line-1"}],
+        day,
+        day,
+    )
+
+    order_numbers = {snapshot.order_number for snapshot in db.query(VinamilkOrderSnapshot).all()}
+    assert order_numbers == {"VM-CURRENT", "VM-SYNTHETIC"}
+
+
+def test_successful_empty_sync_removes_stale_dms_orders(db):
+    day = date(2026, 10, 1)
+    add_order(db, "VM-STALE")
+    db.query(VinamilkOrderSnapshot).one().order_created_date = None
+    db.flush()
+
+    assert _save_snapshot(db, [], day, day) == 0
+
+    assert db.query(VinamilkOrderSnapshot).all() == []
+
+
+def test_invalid_sync_payload_keeps_existing_orders(db):
+    day = date(2026, 10, 1)
+    add_order(db, "VM-EXISTING")
+
+    with pytest.raises(ValueError):
+        _save_snapshot(db, {"unexpected": []}, day, day)
+
+    assert db.query(VinamilkOrderSnapshot).one().order_number == "VM-EXISTING"
+
+
 def test_replacement_link_can_be_updated_and_cleared(db):
     add_order(db, "VM-OLD")
     add_order(db, "VM-NEW")

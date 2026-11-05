@@ -56,11 +56,11 @@ type DeliveryRequest = {
 };
 
 const statusLabel: Record<string, string> = {
-  DRAFT: "Nháp",
-  SUBMITTED: "Chờ nhận",
-  RECEIVED: "Đang xuất",
-  COMPLETED: "Hoàn thành",
-  CANCELLED: "Đã hủy",
+  DRAFT: "Chờ Admin duyệt",
+  SUBMITTED: "Đã duyệt - chờ kho nhận",
+  RECEIVED: "Đã nhận - đang xuất kho",
+  COMPLETED: "Đã xuất kho",
+  CANCELLED: "Đã hủy yêu cầu",
 };
 
 const statusVariant: Record<string, "default" | "info" | "warning" | "success" | "danger"> = {
@@ -210,8 +210,8 @@ return (
       {message && <div className="bg-emerald-50 text-emerald-700 rounded-lg px-4 py-3 text-sm">{message}</div>}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Chờ nhận" value={submittedCount} icon={<ClipboardList size={20} />} color="bg-amber-50 text-amber-600" />
-        <StatCard label="Đang xuất" value={receivedCount} icon={<Package size={20} />} color="bg-sky-50 text-sky-600" />
+        <StatCard label="Đã duyệt - chờ kho nhận" value={submittedCount} icon={<ClipboardList size={20} />} color="bg-amber-50 text-amber-600" />
+        <StatCard label="Đã nhận - đang xuất kho" value={receivedCount} icon={<Package size={20} />} color="bg-sky-50 text-sky-600" />
         <StatCard label="Tổng SKU chờ xử lý" value={totalItems} icon={<Truck size={20} />} color="bg-purple-50 text-purple-600" />
         <StatCard label="Tổng yêu cầu" value={rows.length} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
       </div>
@@ -221,13 +221,13 @@ return (
           onClick={() => setStatusFilter("SUBMITTED")}
           className={`px-4 py-2 text-sm font-medium rounded-t-lg ${statusFilter === "SUBMITTED" ? "bg-blue-50 text-blue-600 border-b-2 border-blue-600" : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"}`}
         >
-          Chờ nhận
+          Đã duyệt - chờ kho nhận
         </button>
         <button
           onClick={() => setStatusFilter("RECEIVED")}
           className={`px-4 py-2 text-sm font-medium rounded-t-lg ${statusFilter === "RECEIVED" ? "bg-blue-50 text-blue-600 border-b-2 border-blue-600" : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"}`}
         >
-          Đang xuất
+          Đã nhận - đang xuất kho
         </button>
       </div>
 

@@ -1,4 +1,5 @@
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -14,8 +15,10 @@ from app.api.v1.endpoints.sync import (
     _delete_manual_order,
     list_local_vinamilk_orders,
 )
+from app.api.v1.endpoints.delivery_requests import submit_request
 from app.core.database import Base
 from app.models.customer import Customer
+from app.models.inventory import DeliveryRequest, DeliveryRequestOrder, Warehouse
 from app.models.product import Product, ProductCategory, ProductUnit
 from app.models.vinamilk import VinamilkOrderSnapshot
 
@@ -80,6 +83,104 @@ def test_manual_order_shows_in_order_list_with_supplier(db):
     assert rows[0]["Nhà cung cấp"] == "Vinamilk"
     assert rows[0]["Tình trạng xử lý đơn hàng"] == "Đơn Tự Tạo"
     assert rows[0]["Trạng thái tạo đơn"] == "001-Xuất hàng"
+
+
+def test_order_list_separates_processing_and_warehouse_request_statuses(db):
+    warehouse = Warehouse(code="W1", name="Kho chính", location="Hà Nội")
+    db.add(warehouse)
+    db.flush()
+
+    statuses = {
+        "TC-REQUESTED": "DRAFT",
+        "TC-APPROVED": "SUBMITTED",
+        "TC-RECEIVING": "RECEIVED",
+        "TC-EXPORTED": "COMPLETED",
+        "TC-CANCELLED": "CANCELLED",
+    }
+    expected_delivery_statuses = {
+        "TC-NONE": "Chưa yêu cầu",
+        "TC-PENDING": "Chưa yêu cầu",
+        "TC-REQUESTED": "Chờ Admin duyệt",
+        "TC-APPROVED": "Đã duyệt - chờ kho nhận",
+        "TC-RECEIVING": "Đã nhận - đang xuất kho",
+        "TC-EXPORTED": "Đã xuất kho",
+        "TC-CANCELLED": "Đã hủy yêu cầu",
+    }
+    order_numbers = ["TC-NONE", "TC-PENDING", *statuses]
+    for order_number in order_numbers:
+        db.add(VinamilkOrderSnapshot(
+            remote_key=f"key-{order_number}",
+            order_number=order_number,
+            order_created_date=date(2026, 11, 4),
+            synced_from=date(2026, 11, 4),
+            synced_to=date(2026, 11, 4),
+            processing_status="Đơn Tách" if order_number == "TC-NONE" else None,
+            warehouse_updated=order_number == "TC-NONE",
+            raw_payload={"orderNumber": order_number},
+        ))
+    db.flush()
+
+    for order_number, status in statuses.items():
+        request = DeliveryRequest(
+            code=f"YC-{order_number}",
+            warehouse_id=warehouse.id,
+            status=status,
+        )
+        db.add(request)
+        db.flush()
+        db.add(DeliveryRequestOrder(
+            delivery_request_id=request.id,
+            order_number=order_number,
+            employee_code="NV001",
+        ))
+    db.flush()
+
+    response = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4),
+        to_date=date(2026, 11, 4),
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=100,
+        db=db,
+    )
+    rows_by_order = {row["orderNumber"]: row for row in response["rows"]}
+
+    for order_number, expected in expected_delivery_statuses.items():
+        assert rows_by_order[order_number]["Tình trạng xuất kho"] == expected
+    assert rows_by_order["TC-NONE"]["Tình trạng xử lý đơn hàng"] == "Đơn Tách"
+    assert rows_by_order["TC-NONE"]["Trạng thái xử lý"] == "Đơn Tách"
+    assert rows_by_order["TC-NONE"]["_warehouse_updated"] is True
+    assert rows_by_order["TC-PENDING"]["Tình trạng xử lý đơn hàng"] == "Chưa xử lý"
+
+
+def test_admin_approval_is_required_and_recorded(db):
+    warehouse = Warehouse(code="APPROVAL", name="Approval test warehouse", location="Test")
+    db.add(warehouse)
+    db.flush()
+    request = DeliveryRequest(code="YC-APPROVAL-TEST", warehouse_id=warehouse.id, status="DRAFT")
+    db.add(request)
+    db.commit()
+
+    with pytest.raises(HTTPException) as error:
+        submit_request(
+            request.id,
+            db,
+            SimpleNamespace(username="warehouse", roles=[]),
+        )
+    assert error.value.status_code == 403
+
+    approved = submit_request(
+        request.id,
+        db,
+        SimpleNamespace(username="supervisor", roles=[SimpleNamespace(name="Admin")]),
+    )
+
+    assert approved.status == "SUBMITTED"
+    assert approved.approved_by == "supervisor"
+    assert approved.approved_at is not None
+    assert approved.submitted_at is not None
 
 
 def test_manual_order_rejects_unknown_customer_or_product(db):

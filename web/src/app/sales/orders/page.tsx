@@ -2140,7 +2140,11 @@ return Array.from(map.values());
   const deliveryRequestOrderOptions = Array.from(
     filteredRemoteOrders.reduce((orders, row) => {
       const orderNumber = displayRemoteValue(row["Số đơn hàng"]).trim();
-      if (!orderNumber || orders.has(orderNumber)) return orders;
+      if (
+        !orderNumber ||
+        orders.has(orderNumber) ||
+        displayRemoteValue(row["Tình trạng xử lý đơn hàng"]).trim() === "Đã Hủy"
+      ) return orders;
       orders.set(orderNumber, {
         order_number: orderNumber,
         order_date: displayRemoteValue(row["_order_created_date"]).trim()

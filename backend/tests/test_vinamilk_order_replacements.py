@@ -291,6 +291,8 @@ def test_split_order_creates_td_orders_and_excludes_original_in_summary(db):
     )
     by_order = {row["orderNumber"]: row for row in listed["rows"]}
     assert by_order["PO-100"]["_replacement_display"] == "BTT: TD-PO-100-01, TD-PO-100-02"
+    assert by_order["PO-100"]["_processing_status"] == "Đã Hủy"
+    assert by_order["PO-100"]["Tình trạng xuất kho"] == "Không áp dụng"
     assert by_order["PO-100"]["_performed_by"] == "Hệ thống"
     assert by_order["TD-PO-100-01"]["_processing_status"] == "Đơn Tách"
     assert by_order["TD-PO-100-01"]["_replacement_display"] == "TT: PO-100"
@@ -627,6 +629,8 @@ def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
     assert by_order[new_order_no]["_processing_status"] == "Đơn Gộp"
     assert by_order["PO-201"]["_processing_status"] == "Đã Hủy"
     assert by_order["PO-202"]["_processing_status"] == "Đã Hủy"
+    assert by_order["PO-201"]["Tình trạng xuất kho"] == "Không áp dụng"
+    assert by_order["PO-202"]["Tình trạng xuất kho"] == "Không áp dụng"
     assert by_order[new_order_no]["_replacement_display"] == "TT: PO-201, PO-202"
     assert by_order[new_order_no]["_performed_by"] == "van.a"
     assert by_order[new_order_no]["quantity"] == 10.0

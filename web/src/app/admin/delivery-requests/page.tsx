@@ -228,6 +228,7 @@ export default function AdminDeliveryRequestsPage() {
             product_id: item.product_id,
             quantity: item.quantity,
             requested_quantity_raw: item.requested_quantity_raw,
+            employee_allocations: item.employee_allocations,
             planned_allocations: planned?.picks.map((pick) => ({
               lot_id: pick.lot_id,
               location_id: pick.location_id,
@@ -242,7 +243,12 @@ export default function AdminDeliveryRequestsPage() {
         const planResponse = await apiFetch(`${API_URL}/delivery-requests/${selected.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ warehouse_id: selected.warehouse_id, note: selected.note, items }),
+          body: JSON.stringify({
+            warehouse_id: selected.warehouse_id,
+            note: selected.note,
+            items,
+            employee_summaries: selected.employee_summaries ?? [],
+          }),
         });
         const planResult = await planResponse.json().catch(() => ({})) as { detail?: string };
         if (!planResponse.ok) throw new Error(planResult.detail ?? "Không thể lưu vị trí lấy hàng.");

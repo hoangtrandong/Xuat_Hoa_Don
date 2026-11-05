@@ -1828,8 +1828,8 @@ def list_local_vinamilk_orders(
                 if old_clean:
                     if replacement.new_order_number not in replaced_by[old_clean]:
                         replaced_by[old_clean].append(replacement.new_order_number)
-                    if rep_type == "MERGE":
-                        merged_source_orders.add(old_clean)
+                    if rep_type in ("MERGE", "SPLIT"):
+                        merged_source_orders.add(old_clean.upper())
                     if old_clean not in replacement_type_for:
                         replacement_type_for[old_clean] = rep_type
         pending_reqs = db.scalars(
@@ -1888,8 +1888,10 @@ def list_local_vinamilk_orders(
         else:
             replacement_display = None
 
+        is_merged_source = order_num.strip().upper() in merged_source_orders
+
         # Tình trạng xuất kho / duyệt đơn từ Yêu cầu xuất hàng (DeliveryRequest)
-        d_status = order_delivery_status.get(order_num.upper())
+        d_status = None if is_merged_source else order_delivery_status.get(order_num.upper())
         if not d_status and rep_order:
             for old_part in [p.strip().upper() for p in rep_order.split(",") if p.strip()]:
                 if old_part in order_delivery_status:
@@ -1911,6 +1913,8 @@ def list_local_vinamilk_orders(
                         "Đã nhận - đang xuất kho": 3,
                     }
                     d_status = min(sub_statuses, key=lambda status: progress.get(status, 0))
+        if is_merged_source:
+            d_status = "Không áp dụng"
 
         proc_status = (
             row.processing_status

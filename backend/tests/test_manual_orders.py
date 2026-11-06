@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +22,7 @@ from app.models.customer import Customer
 from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder, Warehouse
 from app.models.product import Product, ProductCategory, ProductUnit
+from app.models.promotion import Promotion, PromotionItem, PromotionRule
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.schemas.customer import CustomerCreate
 
@@ -271,6 +272,79 @@ def test_manual_order_rejects_unknown_delivery_employee(db):
     with pytest.raises(HTTPException) as exc:
         _create_manual_order(db, _payload(delivery_employee_code="NV999"), performed_by="admin")
     assert exc.value.status_code == 404
+
+
+def test_manual_order_applies_promotion_server_side_and_saves_entry_metadata(db):
+    product = db.scalar(select(Product).where(Product.sku == "01VD41"))
+    product.boxes_per_carton = 10
+    promotion = Promotion(
+        code="KM-TEST-001",
+        name="Mua thùng tặng hộp",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30, 23, 59, 59),
+        is_active=True,
+        items=[PromotionItem(product_id=product.id)],
+        rules=[
+            PromotionRule(
+                trigger_type="CARTON",
+                min_cartons=1,
+                min_qty=1,
+                reward_type="FREE_QUANTITY",
+                reward_value=2,
+                free_quantity=2,
+            )
+        ],
+    )
+    db.add(promotion)
+    db.commit()
+    result = _create_manual_order(
+        db,
+        _payload(
+            order_date=date(2026, 11, 4),
+            entry_date=date(2026, 11, 5),
+            sales_route="Tuyến A",
+            lines=[
+                ManualOrderLine(
+                    product_code="01VD41",
+                    quantity=10,
+                    promo_quantity=999,
+                    discount_amount=999999,
+                    promotion_id=promotion.id,
+                )
+            ],
+        ),
+    )
+
+    row = db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == result["order_number"]))
+    assert row.raw_payload["Mã CTKM"] == "KM-TEST-001"
+    assert row.raw_payload["Tên CTKM"] == "Mua thùng tặng hộp"
+    assert row.raw_payload["Số lượng KM"] == 2
+    assert row.raw_payload["Số tiền CK"] == ""
+    assert row.raw_payload["Ngày nhập"] == "05/11/2026"
+    assert row.raw_payload["Tuyến bán hàng"] == "Tuyến A"
+
+
+def test_manual_order_rejects_locked_promotion(db):
+    product = db.scalar(select(Product).where(Product.sku == "01VD41"))
+    promotion = Promotion(
+        code="KM-TEST-LOCK",
+        name="Đã khóa",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30),
+        is_active=True,
+        is_locked=True,
+        items=[PromotionItem(product_id=product.id)],
+        rules=[PromotionRule(trigger_type="CARTON", min_cartons=1, min_qty=1, reward_type="FREE_QUANTITY", reward_value=1)],
+    )
+    db.add(promotion)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        _create_manual_order(
+            db,
+            _payload(lines=[ManualOrderLine(product_code="01VD41", quantity=1, promotion_id=promotion.id)]),
+        )
+    assert exc.value.status_code == 400
 
 
 def test_resolve_user_employee_falls_back_to_username_as_employee_code(db):

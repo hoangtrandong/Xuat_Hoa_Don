@@ -10,11 +10,13 @@ class Promotion(Base):
     __tablename__ = "promotions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(160))
     description: Mapped[str | None] = mapped_column(String(255))
     start_date: Mapped[datetime] = mapped_column(DateTime)
     end_date: Mapped[datetime] = mapped_column(DateTime)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
 
     rules: Mapped[List["PromotionRule"]] = relationship(back_populates="promotion", cascade="all, delete-orphan")
     items: Mapped[List["PromotionItem"]] = relationship(back_populates="promotion", cascade="all, delete-orphan")
@@ -28,6 +30,12 @@ class PromotionRule(Base):
     min_qty: Mapped[int] = mapped_column(Integer, default=1)
     discount_percent: Mapped[float] = mapped_column(Float, default=0)
     discount_amount: Mapped[float] = mapped_column(Float, default=0)
+    trigger_type: Mapped[str] = mapped_column(String(20), default="CARTON")
+    min_cartons: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    min_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    free_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    reward_type: Mapped[str] = mapped_column(String(30), default="FREE_QUANTITY")
+    reward_value: Mapped[float] = mapped_column(Float, default=0)
 
     promotion: Mapped["Promotion"] = relationship(back_populates="rules")
 

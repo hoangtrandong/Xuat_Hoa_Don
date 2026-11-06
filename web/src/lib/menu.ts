@@ -41,6 +41,7 @@ export const menuItems: MenuItem[] = [
       { key: "sales-orders", label: "Đơn hàng", icon: "FileText", href: "/sales/orders" },
       { key: "sales-summary", label: "Tổng hợp đơn hàng", icon: "BarChart2", href: "/sales/summary" },
       { key: "sales-returns", label: "Trả hàng", icon: "RotateCcw", href: "/sales/returns" },
+      { key: "sales-promotions", label: "Chương trình khuyến mãi", icon: "Gift", href: "/promotions" },
     ],
   },
   {
@@ -68,7 +69,6 @@ export const menuItems: MenuItem[] = [
       { key: "admin-daily-settlements", label: "Quyết toán ngày", icon: "ClipboardCheck", href: "/admin/daily-settlements" },
     ],
   },
-  { key: "promotions", label: "Khuyến mãi", icon: "Gift", href: "/promotions" },
   { key: "market", label: "Thị trường", icon: "Map", href: "/market" },
   { key: "employees", label: "Nhân viên", icon: "UserCheck", href: "/employees" },
   {

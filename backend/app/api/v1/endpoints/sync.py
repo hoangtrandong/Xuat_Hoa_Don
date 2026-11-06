@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from playwright.sync_api import sync_playwright
 from dotenv import dotenv_values, set_key
 from sqlalchemy import and_, delete, func, or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from app.core.auth import get_current_user, resolve_user_employee
 from app.core.config import settings
 from app.core.database import get_db
@@ -25,6 +25,7 @@ from app.models.customer import Company, Customer
 from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder
 from app.models.product import Product
+from app.models.promotion import Promotion
 from app.models.user import User
 from app.models.vinamilk import (
     VinamilkOrderReplacement,
@@ -2370,16 +2371,21 @@ MANUAL_ORDER_STATUS = "Đơn Tự Tạo"
 class ManualOrderLine(BaseModel):
     product_code: str
     quantity: float = Field(gt=0)
+    cartons: int | None = Field(default=None, ge=0)
+    boxes: int | None = Field(default=None, ge=0)
     promo_quantity: float = Field(default=0, ge=0)
     unit_price: float | None = Field(default=None, ge=0)
     discount_amount: float = Field(default=0, ge=0)
+    promotion_id: int | None = Field(default=None, gt=0)
 
 
 class ManualOrderRequest(BaseModel):
     customer_code: str
     order_type: str = "001-Xuất hàng"
     order_date: date | None = None
+    entry_date: date | None = None
     delivery_date: date | None = None
+    sales_route: str | None = None
     staff_code: str | None = None
     staff_name: str | None = None
     delivery_employee_code: str | None = None
@@ -2436,6 +2442,7 @@ def _create_manual_order(
         order_type = "001-Xuất hàng"
 
     order_date = payload.order_date or date.today()
+    entry_date = payload.entry_date or date.today()
     delivery_date = payload.delivery_date or order_date
     order_number = _next_manual_order_number(db, order_date)
     staff_code = (payload.staff_code or "").strip()
@@ -2460,14 +2467,69 @@ def _create_manual_order(
         default_addr = next((a for a in customer.addresses if a.is_default), customer.addresses[0])
         address = ", ".join(part for part in (default_addr.address, default_addr.district, default_addr.city) if part)
     note = (payload.note or "").strip()
+    sales_route = (payload.sales_route or customer.store_route or "").strip()
     now = datetime.utcnow()
     total_value = 0.0
 
     for line_idx, line in enumerate(payload.lines, start=1):
         product = products[line.product_code.strip().upper()]
+        if line.cartons is not None and line.boxes is not None:
+            boxes_per_carton = max(int(product.boxes_per_carton or 1), 1)
+            expected_quantity = line.boxes if boxes_per_carton <= 1 else line.cartons * boxes_per_carton + line.boxes
+            if boxes_per_carton > 1 and line.boxes >= boxes_per_carton:
+                raise HTTPException(status_code=400, detail=f"Số hộp của {product.sku} phải nhỏ hơn {boxes_per_carton}.")
+            if abs(float(line.quantity) - expected_quantity) > 1e-6:
+                raise HTTPException(status_code=400, detail=f"Số lượng quy đổi của {product.sku} không khớp thùng/hộp.")
         price = float(line.unit_price if line.unit_price is not None else (product.base_price or 0))
         value = round(price * line.quantity, 2)
-        discount = min(float(line.discount_amount or 0), value)
+        promo_quantity = float(line.promo_quantity or 0)
+        discount = float(line.discount_amount or 0)
+        promotion = None
+        if line.promotion_id is not None:
+            if order_type != "001-Xuất hàng":
+                raise HTTPException(status_code=400, detail="Đơn Dương Số không áp dụng chương trình khuyến mãi.")
+            promotion = db.scalar(
+                select(Promotion)
+                .options(selectinload(Promotion.rules), selectinload(Promotion.items))
+                .where(Promotion.id == line.promotion_id)
+            )
+            if promotion is None:
+                raise HTTPException(status_code=404, detail=f"Không tìm thấy chương trình khuyến mãi ID {line.promotion_id}.")
+            if not promotion.is_active or promotion.is_locked:
+                raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} đã ngừng áp dụng hoặc bị khóa.")
+            if promotion.start_date.date() > order_date or promotion.end_date.date() < order_date:
+                raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} không áp dụng trong ngày đặt hàng.")
+            if not any(item.product_id == product.id for item in promotion.items):
+                raise HTTPException(status_code=400, detail=f"Sản phẩm {product.sku} không thuộc chương trình {promotion.name}.")
+
+            promo_quantity = 0
+            discount = 0
+            carton_count = int(line.quantity // max(int(product.boxes_per_carton or 1), 1))
+            best_reward_value = -1.0
+            for rule in promotion.rules:
+                if rule.trigger_type == "CARTON":
+                    threshold = int(rule.min_cartons or rule.min_qty or 1)
+                    repeats = carton_count // threshold
+                else:
+                    threshold = float(rule.min_amount or 0)
+                    repeats = int(value // threshold) if threshold > 0 else 0
+                if repeats <= 0:
+                    continue
+                if rule.reward_type == "FREE_QUANTITY":
+                    candidate_quantity = int(rule.reward_value or rule.free_quantity) * repeats
+                    candidate_discount = 0
+                elif rule.reward_type == "DISCOUNT_PERCENT":
+                    candidate_quantity = 0
+                    candidate_discount = value * float(rule.reward_value or rule.discount_percent) / 100 * repeats
+                else:
+                    candidate_quantity = 0
+                    candidate_discount = float(rule.reward_value or rule.discount_amount) * repeats
+                reward_value = candidate_quantity * price + min(value, candidate_discount)
+                if reward_value > best_reward_value:
+                    best_reward_value = reward_value
+                    promo_quantity = candidate_quantity
+                    discount = candidate_discount
+        discount = min(discount, value)
         total_value += value - discount
         unit_name = (product.unit.code if product.unit else "") or ""
         raw = {
@@ -2476,9 +2538,11 @@ def _create_manual_order(
             "Trạng thái tạo đơn": order_type,
             "orderType": order_type,
             "_order_type": order_type,
-            "Mã CTKM": "",
-            "Tên CTKM": "",
+            "Mã CTKM": promotion.code if promotion else "",
+            "Tên CTKM": promotion.name if promotion else "",
             "Ngày": order_date.strftime("%d/%m/%Y"),
+            "Ngày nhập": entry_date.strftime("%d/%m/%Y"),
+            "Tuyến bán hàng": sales_route,
             "Mã NVBH": staff_code,
             "Tên NVBH": staff_name,
             "Mã NVGH": delivery_code,
@@ -2490,7 +2554,9 @@ def _create_manual_order(
             "Sản phẩm": product.name,
             "ĐVT": unit_name,
             "Số lượng": float(line.quantity),
-            "Số lượng KM": float(line.promo_quantity or 0),
+            "Số thùng": line.cartons if line.cartons is not None else int(line.quantity // max(int(product.boxes_per_carton or 1), 1)),
+            "Số hộp": line.boxes if line.boxes is not None else float(line.quantity % max(int(product.boxes_per_carton or 1), 1)),
+            "Số lượng KM": promo_quantity,
             "Giá trị": value,
             "Tỉ lệ CK": round(discount / value * 100, 2) if value and discount else "",
             "Số tiền CK": discount if discount else "",
@@ -2498,6 +2564,7 @@ def _create_manual_order(
             "Thời gian xác nhận giao hàng": "",
             "Ngày đơn hàng gốc": "",
             "Ghi chú": note,
+            "promotion_id": promotion.id if promotion else None,
             "Người thực hiện": actor,
             "performedBy": actor,
             "_manual_order": True,
@@ -2566,6 +2633,15 @@ def create_manual_order(
         performed_by=getattr(current_user, "username", None),
         current_employee=resolve_user_employee(db, current_user),
     )
+
+
+@router.get("/vinamilk-orders/manual/next-number")
+def get_next_manual_order_number(
+    order_date: date | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return {"order_number": _next_manual_order_number(db, order_date or date.today())}
 
 
 @router.delete("/vinamilk-orders/manual/{order_number}")

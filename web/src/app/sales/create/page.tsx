@@ -20,6 +20,7 @@ interface SystemCustomer {
   staffCode: string;
   staffName: string;
   storeName: string;
+  salesRoute: string;
 }
 
 interface SystemProduct {
@@ -29,6 +30,24 @@ interface SystemProduct {
   unit: string;
   supplier: string;
   basePrice: number;
+  boxesPerCarton: number;
+}
+
+interface PromotionRule {
+  id: number;
+  trigger_type: "CARTON" | "AMOUNT";
+  min_cartons: number | null;
+  min_amount: number | null;
+  reward_type: "FREE_QUANTITY" | "DISCOUNT_AMOUNT" | "DISCOUNT_PERCENT";
+  reward_value: number;
+}
+
+interface PromotionOption {
+  id: number;
+  code: string;
+  name: string;
+  product_ids: number[];
+  rules: PromotionRule[];
 }
 
 interface WarehouseOption {
@@ -50,13 +69,19 @@ interface CurrentUser {
 }
 
 interface Line {
+  productId: number;
   productCode: string;
   productName: string;
   unit: string;
+  supplier: string;
+  boxesPerCarton: number;
+  cartons: number;
+  boxes: number;
   quantity: number;
   promoQuantity: number;
   price: number;
   discountAmount: number;
+  promotionId: number | null;
 }
 
 const customerTypeLabel: Record<string, string> = {
@@ -85,6 +110,8 @@ export default function CreateOrderPage() {
   const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
   const [warehouseId, setWarehouseId] = useState<number | null>(null);
   const [stockMap, setStockMap] = useState<Map<string, number>>(new Map());
+  const [stockError, setStockError] = useState("");
+  const [stockLoading, setStockLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
@@ -99,7 +126,15 @@ export default function CreateOrderPage() {
   const [deliveryEmployeeCode, setDeliveryEmployeeCode] = useState("");
   const [address, setAddress] = useState("");
   const [orderDate, setOrderDate] = useState(todayStr());
+  const [entryDate, setEntryDate] = useState(todayStr());
   const [deliveryDate, setDeliveryDate] = useState(todayStr());
+  const [salesRoute, setSalesRoute] = useState("");
+  const [orderNumber, setOrderNumber] = useState("");
+  const [orderNumberError, setOrderNumberError] = useState("");
+  const [promotions, setPromotions] = useState<PromotionOption[]>([]);
+  const [promotionError, setPromotionError] = useState("");
+  const [loadingPromotions, setLoadingPromotions] = useState(false);
+  const [promotionsLoaded, setPromotionsLoaded] = useState(false);
 
   const [productQuery, setProductQuery] = useState("");
   const [productOpen, setProductOpen] = useState(false);
@@ -124,10 +159,11 @@ export default function CreateOrderPage() {
         ]);
         if (!custRes.ok) throw new Error("Không thể tải danh sách khách hàng.");
         if (!prodRes.ok) throw new Error("Không thể tải Danh sách SKU.");
+        if (!whRes.ok) throw new Error("Không thể tải danh sách kho.");
         const custRows = (await custRes.json()) as Array<Record<string, unknown>>;
         const prodRows = (await prodRes.json()) as Array<Record<string, unknown>>;
         const unitRows = unitRes.ok ? ((await unitRes.json()) as Array<{ id: number; name: string }>) : [];
-        const whRows = whRes.ok ? ((await whRes.json()) as Array<{ id: number; name: string }>) : [];
+        const whRows = (await whRes.json()) as Array<{ id: number; name: string }>;
         const me = meRes.ok ? ((await meRes.json()) as CurrentUser) : null;
         const empRows = empRes.ok ? ((await empRes.json()) as EmployeeOption[]) : [];
         if (cancelled) return;
@@ -157,6 +193,7 @@ export default function CreateOrderPage() {
             staffCode: String(row.staff_code ?? ""),
             staffName: String(row.staff_name ?? ""),
             storeName: String(row.store_name ?? ""),
+            salesRoute: String(row.store_route ?? ""),
           }));
         setCustomers(loadedCustomers);
         setProducts(
@@ -169,6 +206,7 @@ export default function CreateOrderPage() {
               unit: unitName.get(Number(row.unit_id)) ?? "",
               supplier: String(row.supplier ?? ""),
               basePrice: Number(row.base_price ?? 0),
+              boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
             }))
         );
         setWarehouses(whRows.map((w) => ({ id: w.id, name: w.name })));
@@ -193,11 +231,39 @@ export default function CreateOrderPage() {
   // Ton kha dung theo kho (chi de canh bao)
   useEffect(() => {
     if (warehouseId == null) return;
+    setStockLoading(true);
+    setStockError("");
     apiFetch(`${API_URL}/inventory/stock-levels/?warehouse_id=${warehouseId}`)
-      .then(async (res) => (res.ok ? ((await res.json()) as Array<{ product_code: string; available: number }>) : []))
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Không thể tải tồn kho của kho đã chọn.");
+        return (await res.json()) as Array<{ product_code: string; available: number }>;
+      })
       .then((rows) => setStockMap(new Map(rows.map((r) => [r.product_code.toUpperCase(), Number(r.available ?? 0)]))))
-      .catch(() => setStockMap(new Map()));
+      .catch((error: unknown) => setStockError(error instanceof Error ? error.message : "Không thể tải tồn kho."))
+      .finally(() => setStockLoading(false));
   }, [warehouseId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setOrderNumberError("");
+    apiFetch(`${API_URL}/sync/vinamilk-orders/manual/next-number?order_date=${orderDate}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Không thể lấy mã đơn dự kiến.");
+        return (await res.json()) as { order_number: string };
+      })
+      .then((result) => {
+        if (!cancelled) setOrderNumber(result.order_number);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setOrderNumber("");
+          setOrderNumberError("Không thể tải mã dự kiến; mã sẽ được cấp khi lưu.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [orderDate]);
 
   function selectCustomer(c: SystemCustomer) {
     setSelectedCustomer(c);
@@ -207,6 +273,7 @@ export default function CreateOrderPage() {
       setStaffName(c.staffName);
     }
     setAddress("");
+    setSalesRoute(c.salesRoute);
     setCustomerOpen(false);
     setCustomerQuery("");
   }
@@ -236,6 +303,35 @@ export default function CreateOrderPage() {
   const total = subtotal - totalDiscount;
   const stockOf = (code: string) => stockMap.get(code.toUpperCase());
 
+  function getPromotionReward(promotionId: number, productId: number, quantity: number, price: number, boxesPerCarton: number) {
+    const promotion = promotions.find((item) => item.id === promotionId && item.product_ids.includes(productId));
+    if (!promotion) return { promoQuantity: 0, discountAmount: 0 };
+    const value = quantity * price;
+    const cartons = Math.floor(quantity / Math.max(1, boxesPerCarton));
+    let best = { promoQuantity: 0, discountAmount: 0 };
+    let bestValue = -1;
+    for (const rule of promotion.rules) {
+      const threshold = rule.trigger_type === "CARTON" ? (rule.min_cartons ?? 0) : (rule.min_amount ?? 0);
+      const basis = rule.trigger_type === "CARTON" ? cartons : value;
+      const repeats = threshold > 0 ? Math.floor(basis / threshold) : 0;
+      if (repeats < 1) continue;
+      let candidate: { promoQuantity: number; discountAmount: number };
+      if (rule.reward_type === "FREE_QUANTITY") {
+        candidate = { promoQuantity: rule.reward_value * repeats, discountAmount: 0 };
+      } else if (rule.reward_type === "DISCOUNT_PERCENT") {
+        candidate = { promoQuantity: 0, discountAmount: Math.min(value, value * rule.reward_value / 100 * repeats) };
+      } else {
+        candidate = { promoQuantity: 0, discountAmount: Math.min(value, rule.reward_value * repeats) };
+      }
+      const candidateValue = candidate.promoQuantity * price + candidate.discountAmount;
+      if (candidateValue > bestValue) {
+        best = candidate;
+        bestValue = candidateValue;
+      }
+    }
+    return best;
+  }
+
   function addProduct(product: SystemProduct) {
     setPickError("");
     if (lines.some((l) => l.productCode === product.sku)) {
@@ -245,13 +341,19 @@ export default function CreateOrderPage() {
     setLines((prev) => [
       ...prev,
       {
+        productId: product.id,
         productCode: product.sku,
         productName: product.name,
         unit: product.unit,
+        supplier: product.supplier,
+        boxesPerCarton: product.boxesPerCarton,
+        cartons: 0,
+        boxes: 1,
         quantity: 1,
         promoQuantity: 0,
         price: product.basePrice,
         discountAmount: 0,
+        promotionId: null,
       },
     ]);
     setProductQuery("");
@@ -259,7 +361,64 @@ export default function CreateOrderPage() {
   }
 
   function updateLine(idx: number, patch: Partial<Line>) {
-    setLines((prev) => prev.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
+    setLines((prev) => prev.map((line, i) => {
+      if (i !== idx) return line;
+      const next = { ...line, ...patch };
+      if ("cartons" in patch || "boxes" in patch) {
+        next.cartons = Math.max(0, next.cartons);
+        next.boxes = next.boxesPerCarton > 1
+          ? Math.min(next.boxesPerCarton - 1, Math.max(0, next.boxes))
+          : Math.max(0, next.boxes);
+        next.quantity = next.boxesPerCarton > 1
+          ? next.cartons * next.boxesPerCarton + next.boxes
+          : next.boxes;
+      }
+      if (orderType === "001-Xuất hàng" && next.promotionId != null) {
+        Object.assign(next, getPromotionReward(next.promotionId, next.productId, next.quantity, next.price, next.boxesPerCarton));
+      }
+      return next;
+    }));
+  }
+
+  function applyPromotion(idx: number, promotionId: number | null) {
+    setLines((prev) => prev.map((line, i) => {
+      if (i !== idx) return line;
+      const reward = promotionId == null
+        ? { promoQuantity: 0, discountAmount: 0 }
+        : getPromotionReward(promotionId, line.productId, line.quantity, line.price, line.boxesPerCarton);
+      return { ...line, promotionId, ...reward };
+    }));
+  }
+
+  function changeOrderType(nextType: string) {
+    setOrderType(nextType);
+    setLines((previous) => previous.map((line) => ({ ...line, promotionId: null })));
+  }
+
+  function changeOrderDate(nextDate: string) {
+    setOrderDate(nextDate);
+    setPromotions([]);
+    setPromotionsLoaded(false);
+    setPromotionError("");
+    setLines((previous) => previous.map((line) => line.promotionId == null
+      ? line
+      : { ...line, promotionId: null, promoQuantity: 0, discountAmount: 0 }));
+  }
+
+  async function loadPromotions() {
+    setLoadingPromotions(true);
+    setPromotionError("");
+    try {
+      const response = await apiFetch(`${API_URL}/promotions/available?on_date=${orderDate}`);
+      if (!response.ok) throw new Error("Không thể tải chương trình khuyến mãi khả dụng.");
+      const result = (await response.json()) as PromotionOption[];
+      setPromotions(result);
+      setPromotionsLoaded(true);
+    } catch (error) {
+      setPromotionError(error instanceof Error ? error.message : "Không thể tải chương trình khuyến mãi.");
+    } finally {
+      setLoadingPromotions(false);
+    }
   }
 
   function removeLine(idx: number) {
@@ -289,7 +448,9 @@ export default function CreateOrderPage() {
           customer_code: selectedCustomer.code,
           order_type: orderType,
           order_date: orderDate || null,
+          entry_date: entryDate || null,
           delivery_date: deliveryDate || null,
+          sales_route: salesRoute.trim() || null,
           staff_code: staffCode.trim() || null,
           staff_name: staffName.trim() || null,
           delivery_employee_code: deliveryEmployeeCode || null,
@@ -299,9 +460,12 @@ export default function CreateOrderPage() {
           lines: lines.map((l) => ({
             product_code: l.productCode,
             quantity: l.quantity,
+            cartons: l.cartons,
+            boxes: l.boxes,
             promo_quantity: l.promoQuantity,
             unit_price: l.price,
             discount_amount: l.discountAmount,
+            promotion_id: orderType === "001-Xuất hàng" ? l.promotionId : null,
           })),
         }),
       });
@@ -388,6 +552,10 @@ export default function CreateOrderPage() {
                     <span className="text-xs text-gray-500">Địa chỉ giao hàng</span>
                     <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Để trống sẽ dùng địa chỉ mặc định của khách hàng" className={inputCls} />
                   </label>
+                  <label className="block sm:col-span-2">
+                    <span className="text-xs text-gray-500">Tuyến bán hàng</span>
+                    <input value={salesRoute} onChange={(e) => setSalesRoute(e.target.value)} placeholder="Tự động lấy theo khách hàng, có thể chỉnh sửa" className={inputCls} />
+                  </label>
                 </div>
               </div>
             ) : (
@@ -430,7 +598,21 @@ export default function CreateOrderPage() {
 
           {/* 2. San pham */}
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
-            <h3 className="text-sm font-semibold text-gray-700 mb-3">2. Sản phẩm &amp; số lượng</h3>
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-sm font-semibold text-gray-700">2. Sản phẩm &amp; số lượng</h3>
+              <button
+                type="button"
+                onClick={loadPromotions}
+                disabled={loadingPromotions || orderType !== "001-Xuất hàng"}
+                className="inline-flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {loadingPromotions && <Loader2 size={14} className="animate-spin" />}
+                {promotionsLoaded ? "Tải lại CTKM" : "Tải chương trình khuyến mãi"}
+              </button>
+            </div>
+            {promotionError && <p className="mb-2 text-xs text-red-600">{promotionError}</p>}
+            {stockError && <p className="mb-2 text-xs text-red-600">{stockError}</p>}
+            {stockLoading && <p className="mb-2 text-xs text-gray-500">Đang tải tồn kho...</p>}
             <div className="relative mb-3">
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
@@ -477,7 +659,8 @@ export default function CreateOrderPage() {
                     <tr className="bg-gray-50 border-b border-gray-100">
                       <th className="text-left px-3 py-2.5 text-xs font-semibold text-gray-500">Sản phẩm</th>
                       <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">Tồn</th>
-                      <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">SL</th>
+                      <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">Thùng</th>
+                      <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">Hộp</th>
                       <th className="text-center px-3 py-2.5 text-xs font-semibold text-gray-500">SL KM</th>
                       <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-500">Đơn giá</th>
                       <th className="text-right px-3 py-2.5 text-xs font-semibold text-gray-500">Tiền CK</th>
@@ -493,7 +676,20 @@ export default function CreateOrderPage() {
                         <tr key={l.productCode} className="hover:bg-gray-50">
                           <td className="px-3 py-2.5">
                             <p className="font-medium text-gray-900">{l.productName}</p>
-                            <p className="text-xs text-gray-400">{l.productCode} · {l.unit}</p>
+                            <p className="text-xs text-gray-400">{l.productCode} · {l.unit} · NCC: {l.supplier || "—"}</p>
+                            <select
+                              value={l.promotionId ?? ""}
+                              onChange={(e) => applyPromotion(idx, e.target.value ? Number(e.target.value) : null)}
+                              disabled={orderType !== "001-Xuất hàng" || !promotionsLoaded}
+                              className="mt-1 max-w-64 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs disabled:bg-gray-100"
+                            >
+                              <option value="">{promotionsLoaded ? "Không áp dụng CTKM" : "Tải CTKM để chọn"}</option>
+                              {promotions
+                                .filter((promotion) => promotion.product_ids.includes(l.productId))
+                                .map((promotion) => (
+                                  <option key={promotion.id} value={promotion.id}>{promotion.code} - {promotion.name}</option>
+                                ))}
+                            </select>
                           </td>
                           <td className="px-3 py-2.5 text-center">
                             <span className={cn("text-xs font-medium", over ? "text-red-600" : "text-emerald-600")} title={over ? "Vượt tồn khả dụng" : undefined}>
@@ -502,16 +698,24 @@ export default function CreateOrderPage() {
                           </td>
                           <td className="px-3 py-2.5 text-center">
                             <input
-                              type="number" min={1} value={l.quantity}
-                              onChange={(e) => updateLine(idx, { quantity: Math.max(0, Number(e.target.value) || 0) })}
-                              className={cn("w-20 text-center px-2 py-1 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-sky-500", over ? "border-red-300 bg-red-50 text-red-700" : "border-gray-200")}
+                              type="number" min={0} value={l.cartons}
+                              disabled={l.boxesPerCarton <= 1}
+                              onChange={(e) => updateLine(idx, { cartons: Math.max(0, Number(e.target.value) || 0) })}
+                              className={cn("w-16 text-center px-2 py-1 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:bg-gray-100", over ? "border-red-300 bg-red-50 text-red-700" : "border-gray-200")}
                             />
                           </td>
                           <td className="px-3 py-2.5 text-center">
                             <input
-                              type="number" min={0} value={l.promoQuantity}
-                              onChange={(e) => updateLine(idx, { promoQuantity: Math.max(0, Number(e.target.value) || 0) })}
+                              type="number" min={0} max={l.boxesPerCarton > 1 ? l.boxesPerCarton - 1 : undefined} value={l.boxes}
+                              onChange={(e) => updateLine(idx, { boxes: Math.max(0, Number(e.target.value) || 0) })}
                               className="w-16 text-center px-2 py-1 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                            />
+                          </td>
+                          <td className="px-3 py-2.5 text-center">
+                            <input
+                              type="number" min={0} value={l.promoQuantity} readOnly={orderType === "001-Xuất hàng" && l.promotionId != null}
+                              onChange={(e) => updateLine(idx, { promoQuantity: Math.max(0, Number(e.target.value) || 0) })}
+                              className="w-16 text-center px-2 py-1 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 read-only:bg-gray-100"
                             />
                           </td>
                           <td className="px-3 py-2.5 text-right">
@@ -524,8 +728,9 @@ export default function CreateOrderPage() {
                           <td className="px-3 py-2.5 text-right">
                             <input
                               type="number" min={0} step={1000} value={l.discountAmount}
+                              readOnly={orderType === "001-Xuất hàng" && l.promotionId != null}
                               onChange={(e) => updateLine(idx, { discountAmount: Math.max(0, Number(e.target.value) || 0) })}
-                              className="w-28 text-right px-2 py-1 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                              className="w-28 text-right px-2 py-1 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 read-only:bg-gray-100"
                             />
                           </td>
                           <td className="px-3 py-2.5 text-right font-semibold text-gray-900">{formatVNDFull(lineTotal(l))}</td>
@@ -557,7 +762,7 @@ export default function CreateOrderPage() {
                     <button
                       key={t}
                       type="button"
-                      onClick={() => setOrderType(t)}
+                      onClick={() => changeOrderType(t)}
                       className={cn(
                         "px-2.5 py-1.5 text-xs font-semibold rounded-lg border text-center transition-all",
                         orderType === t
@@ -570,13 +775,26 @@ export default function CreateOrderPage() {
                   ))}
                 </div>
               </div>
+              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                <span className="text-xs text-gray-500">Mã đơn hàng dự kiến</span>
+                <p className="text-sm font-semibold text-gray-800">{orderNumber || "Mã sẽ được cấp khi lưu"}</p>
+                {orderNumberError && <p className="mt-1 text-xs text-amber-700">{orderNumberError}</p>}
+              </div>
               <label className="block">
                 <span className="text-xs text-gray-500">Ngày đơn hàng</span>
-                <input type="date" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} className={inputCls} />
+                <input type="date" value={orderDate} onChange={(e) => changeOrderDate(e.target.value)} className={inputCls} />
+              </label>
+              <label className="block">
+                <span className="text-xs text-gray-500">Ngày nhập</span>
+                <input type="date" value={entryDate} onChange={(e) => setEntryDate(e.target.value)} className={inputCls} />
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">Ngày giao</span>
                 <input type="date" value={deliveryDate} onChange={(e) => setDeliveryDate(e.target.value)} className={inputCls} />
+              </label>
+              <label className="block">
+                <span className="text-xs text-gray-500">Tuyến bán hàng</span>
+                <input value={salesRoute} onChange={(e) => setSalesRoute(e.target.value)} className={inputCls} />
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">Kho (xem tồn khả dụng)</span>
@@ -599,7 +817,7 @@ export default function CreateOrderPage() {
                 <span className="font-bold text-sky-600 text-base">{formatVNDFull(total)}</span>
               </div>
             </div>
-            <p className="text-xs text-gray-400">Mã đơn sẽ được cấp tự động theo dạng <b>TC-YYMMDD-001</b>.</p>
+            <p className="text-xs text-gray-400">Mã đơn theo dạng <b>TC-YYMMDD-001</b>. Tồn và số lượng tính theo hộp đơn vị cơ sở.</p>
             <button onClick={handleSubmit} disabled={!selectedCustomer || lines.length === 0 || submitting} className="w-full flex items-center justify-center gap-2 bg-sky-500 hover:bg-sky-600 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg py-2.5 transition-colors disabled:cursor-not-allowed">
               {submitting && <Loader2 size={16} className="animate-spin" />} Lưu đơn hàng
             </button>

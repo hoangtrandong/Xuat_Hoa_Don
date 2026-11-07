@@ -13,6 +13,9 @@ interface ProductOption {
   name: string;
   supplier: string;
   status: string;
+  unit: string;
+  boxesPerCarton: number;
+  basePrice: number;
 }
 
 interface EmployeeOption {
@@ -142,17 +145,17 @@ export default function PromotionsPage() {
   const [form, setForm] = useState<PromotionForm>(newForm);
   const [productSearch, setProductSearch] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("");
+  const [productPickerOpen, setProductPickerOpen] = useState(false);
 
   const filteredProducts = useMemo(() => {
     const query = productSearch.trim().toLocaleLowerCase();
-    if (!query && !supplierFilter) return [];
     return products
       .filter((product) => product.status.toLowerCase() !== "inactive")
-      .filter((product) => !form.product_ids.includes(product.id))
       .filter((product) => !supplierFilter || product.supplier === supplierFilter)
-      .filter((product) => !query || [product.sku, product.name, product.supplier].some((value) => value.toLocaleLowerCase().includes(query)))
-      .slice(0, 100);
-  }, [form.product_ids, productSearch, products, supplierFilter]);
+      .filter((product) => !query || [product.sku, product.name, product.supplier].some((value) => value.toLocaleLowerCase().includes(query)));
+  }, [productSearch, products, supplierFilter]);
+
+  const visibleProducts = useMemo(() => filteredProducts.slice(0, 100), [filteredProducts]);
 
   const suppliers = useMemo(
     () => [...new Set(products.map((product) => product.supplier.trim()).filter(Boolean))]
@@ -167,6 +170,9 @@ export default function PromotionsPage() {
       name: "Sản phẩm không còn trong danh mục",
       supplier: "",
       status: "inactive",
+      unit: "",
+      boxesPerCarton: 1,
+      basePrice: 0,
     }),
     [form.product_ids, products],
   );
@@ -175,9 +181,10 @@ export default function PromotionsPage() {
     setLoading(true);
     setError("");
     try {
-      const [promotionResponse, productResponse, userResponse, employeeResponse] = await Promise.all([
+      const [promotionResponse, productResponse, unitResponse, userResponse, employeeResponse] = await Promise.all([
         apiFetch(`${API_URL}/promotions`),
         apiFetch(`${API_URL}/products/?limit=10000`),
+        apiFetch(`${API_URL}/products/units/`),
         apiFetch(`${API_URL}/auth/me`),
         apiFetch(`${API_URL}/employees/?status=active&limit=1000`),
       ]);
@@ -185,6 +192,8 @@ export default function PromotionsPage() {
       if (!productResponse.ok) throw new Error(await responseError(productResponse, "Không thể tải danh sách sản phẩm."));
       const promotionRows = await promotionResponse.json() as Promotion[];
       const productRows = await productResponse.json() as Array<Record<string, unknown>>;
+      const unitRows = unitResponse.ok ? await unitResponse.json() as Array<{ id: number; name: string }> : [];
+      const unitNames = new Map(unitRows.map((unit) => [unit.id, unit.name]));
       const user = userResponse.ok ? await userResponse.json() as { is_admin?: boolean } : null;
       setPromotions(promotionRows);
       setIsAdmin(user?.is_admin === true);
@@ -194,6 +203,9 @@ export default function PromotionsPage() {
           name: String(row.name ?? ""),
           supplier: String(row.supplier ?? ""),
           status: String(row.status ?? "active"),
+          unit: unitNames.get(Number(row.unit_id)) ?? "—",
+          boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
+          basePrice: Number(row.base_price ?? 0),
         })));
       const employeeRows = employeeResponse.ok ? await employeeResponse.json() as EmployeeOption[] : [];
       setEmployees(employeeRows.filter((employee) => employee.status?.toLowerCase() === "active"));
@@ -213,6 +225,7 @@ export default function PromotionsPage() {
     setForm(newForm());
     setProductSearch("");
     setSupplierFilter("");
+    setProductPickerOpen(false);
     setDialog("create");
   }
 
@@ -244,7 +257,25 @@ export default function PromotionsPage() {
     });
     setProductSearch("");
     setSupplierFilter(promotion.supplier ?? "");
+    setProductPickerOpen(false);
     setDialog(mode);
+  }
+
+  function toggleProductSelection(productId: number) {
+    setForm((current) => ({
+      ...current,
+      product_ids: current.product_ids.includes(productId)
+        ? current.product_ids.filter((id) => id !== productId)
+        : [...current.product_ids, productId],
+    }));
+  }
+
+  function addFilteredProducts() {
+    const filteredIds = filteredProducts.map((product) => product.id);
+    setForm((current) => ({
+      ...current,
+      product_ids: [...new Set([...current.product_ids, ...filteredIds])],
+    }));
   }
 
   async function openEdit(promotion: Promotion) {
@@ -582,90 +613,64 @@ export default function PromotionsPage() {
                       Áp dụng cho tất cả sản phẩm của nhà cung cấp <strong>{form.supplier || "đã chọn"}</strong>.
                     </div>
                   ) : (
-                    <>
-                  <label htmlFor="promotion-product-search" className="text-xs font-medium text-gray-600">Tìm và thêm sản phẩm áp dụng</label>
-                  <div className="mt-1 grid gap-2 sm:grid-cols-[minmax(0,1.5fr)_minmax(220px,1fr)]">
-                    <div className="relative">
-                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-                    <input
-                      id="promotion-product-search"
-                      value={productSearch}
-                      onChange={(event) => setProductSearch(event.target.value)}
-                      placeholder="Tìm theo mã SKU, tên sản phẩm hoặc nhà cung cấp..."
-                      className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                    />
-                    </div>
-                    <select
-                      aria-label="Lọc sản phẩm theo nhà cung cấp"
-                      value={supplierFilter}
-                      onChange={(event) => setSupplierFilter(event.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                    >
-                      <option value="">Tất cả nhà cung cấp ({suppliers.length})</option>
-                      {suppliers.map((supplier) => (
-                        <option key={supplier} value={supplier}>{supplier}</option>
-                      ))}
-                    </select>
-                  </div>
-                  {(productSearch.trim() || supplierFilter) ? <div className="mt-2 overflow-hidden rounded-xl border border-gray-200">
-                    <div className="flex items-center justify-between bg-gray-50 px-3 py-2 text-xs text-gray-500">
-                      <span>Kết quả tìm kiếm</span>
-                      <span>{filteredProducts.length}{filteredProducts.length === 100 ? "+" : ""} sản phẩm</span>
-                    </div>
-                    <div className="max-h-64 divide-y divide-gray-100 overflow-y-auto">
-                      {filteredProducts.length === 0 ? (
-                        <p className="px-3 py-5 text-center text-xs text-gray-400">
-                          Không tìm thấy sản phẩm phù hợp.
-                        </p>
-                      ) : filteredProducts.map((product) => (
-                        <div key={product.id} className="flex items-center gap-3 px-3 py-2 hover:bg-sky-50/60">
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium text-gray-800">{product.name}</p>
-                            <p className="truncate text-xs text-gray-500">{product.sku}{product.supplier ? ` · NCC: ${product.supplier}` : ""}</p>
-                          </div>
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <h3 className="text-sm font-semibold text-gray-800">Sản phẩm áp dụng</h3>
+                          <p className="text-xs text-gray-500">Chọn SKU cụ thể hoặc mở danh sách để chọn theo nhà cung cấp.</p>
+                        </div>
+                        {dialog !== "view" && (
                           <button
                             type="button"
-                            onClick={() => setForm((current) => ({ ...current, product_ids: [...current.product_ids, product.id] }))}
-                            className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-sky-200 bg-white px-2.5 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-50"
+                            onClick={() => {
+                              setProductSearch("");
+                              setSupplierFilter("");
+                              setProductPickerOpen(true);
+                            }}
+                            className="inline-flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100"
                           >
-                            <Plus size={13} /> Thêm
+                            <Plus size={15} /> Chọn sản phẩm
                           </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div> : <p className="mt-2 rounded-lg border border-dashed border-gray-200 px-3 py-3 text-center text-xs text-gray-400">Nhập mã SKU, tên sản phẩm hoặc chọn nhà cung cấp để tìm sản phẩm.</p>}
-                  <div className="mt-3 flex items-center justify-between">
-                    <p className="text-xs font-semibold text-gray-700">Danh sách áp dụng ({selectedProducts.length})</p>
-                    {selectedProducts.length > 0 && (
-                      <button type="button" onClick={() => setForm((current) => ({ ...current, product_ids: [] }))} className="text-xs font-medium text-red-600 hover:underline">
-                        Xóa tất cả
-                      </button>
-                    )}
-                  </div>
-                  {selectedProducts.length === 0 ? (
-                    <p className="mt-2 rounded-lg border border-dashed border-gray-300 px-3 py-4 text-center text-xs text-gray-400">Chưa có sản phẩm. Tìm và bấm “Thêm” để chọn.</p>
-                  ) : (
-                    <div className="mt-2 max-h-52 divide-y divide-gray-100 overflow-y-auto rounded-xl border border-gray-200">
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-gray-700">Đã chọn {selectedProducts.length} sản phẩm</p>
+                        {selectedProducts.length > 0 && dialog !== "view" && (
+                          <button type="button" onClick={() => setForm((current) => ({ ...current, product_ids: [] }))} className="text-xs font-medium text-red-600 hover:underline">
+                            Xóa tất cả
+                          </button>
+                        )}
+                      </div>
+                      {selectedProducts.length === 0 ? (
+                        <p className="rounded-lg border border-dashed border-gray-300 px-3 py-4 text-center text-xs text-gray-400">Chưa chọn sản phẩm áp dụng.</p>
+                      ) : (
+                        <div className="max-h-48 divide-y divide-gray-100 overflow-y-auto rounded-xl border border-gray-200">
                       {selectedProducts.map((product) => (
                         <div key={product.id} className="flex items-center gap-3 px-3 py-2">
                           <Check size={14} className="shrink-0 text-emerald-600" />
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-sm text-gray-800">{product.name}</p>
-                            <p className="text-xs text-gray-500">{product.sku}{product.supplier ? ` · ${product.supplier}` : ""}</p>
+                            <p className="text-xs text-gray-500">
+                              {product.sku}{product.supplier ? ` · ${product.supplier}` : ""}
+                              {product.unit ? ` · ${product.unit} · ${product.boxesPerCarton} hộp/thùng` : ""}
+                              {` · ${product.basePrice.toLocaleString("vi-VN")} đ`}
+                            </p>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => setForm((current) => ({ ...current, product_ids: current.product_ids.filter((id) => id !== product.id) }))}
-                            className="rounded-md p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600"
-                            aria-label={`Bỏ ${product.name}`}
-                          >
-                            <X size={15} />
-                          </button>
+                          {dialog !== "view" && (
+                            <button
+                              type="button"
+                              onClick={() => toggleProductSelection(product.id)}
+                              className="rounded-md p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600"
+                              aria-label={`Bỏ ${product.name}`}
+                            >
+                              <X size={15} />
+                            </button>
+                          )}
                         </div>
                       ))}
+                        </div>
+                      )}
                     </div>
-                  )}
-                    </>
                   )}
               </div>
             </fieldset>
@@ -678,6 +683,106 @@ export default function PromotionsPage() {
               )}
             </div>
           </form>
+          {productPickerOpen && dialog !== "view" && (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="product-picker-title">
+              <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+                <div className="flex items-start justify-between border-b border-gray-100 px-5 py-4">
+                  <div>
+                    <h2 id="product-picker-title" className="text-lg font-semibold text-gray-900">Chọn sản phẩm khuyến mại</h2>
+                    <p className="mt-1 text-xs text-gray-500">Tìm theo mã/tên sản phẩm hoặc lọc theo nhà cung cấp. Có thể chọn nhiều sản phẩm.</p>
+                  </div>
+                  <button type="button" onClick={() => setProductPickerOpen(false)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100" aria-label="Đóng danh sách sản phẩm">
+                    <X size={18} />
+                  </button>
+                </div>
+                <div className="grid gap-3 border-b border-gray-100 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_280px]">
+                  <div className="relative">
+                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input
+                      autoFocus
+                      value={productSearch}
+                      onChange={(event) => setProductSearch(event.target.value)}
+                      placeholder="Tìm theo mã SKU, tên sản phẩm..."
+                      className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                  </div>
+                  <select
+                    aria-label="Lọc sản phẩm theo nhà cung cấp"
+                    value={supplierFilter}
+                    onChange={(event) => setSupplierFilter(event.target.value)}
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    <option value="">Tất cả nhà cung cấp ({suppliers.length})</option>
+                    {suppliers.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
+                  </select>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 bg-gray-50 px-5 py-3">
+                  <p className="text-xs text-gray-600">
+                    {filteredProducts.length.toLocaleString("vi-VN")} sản phẩm phù hợp
+                    {filteredProducts.length > visibleProducts.length ? ` · đang hiển thị ${visibleProducts.length} sản phẩm đầu tiên` : ""}
+                  </p>
+                  <button
+                    type="button"
+                    disabled={filteredProducts.length === 0}
+                    onClick={addFilteredProducts}
+                    className="rounded-lg border border-sky-200 bg-white px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-50 disabled:opacity-50"
+                  >
+                    Chọn tất cả {supplierFilter ? `của ${supplierFilter}` : "kết quả"} ({filteredProducts.length.toLocaleString("vi-VN")})
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto">
+                  <table className="w-full min-w-[900px] text-left text-sm">
+                    <thead className="sticky top-0 z-10 bg-white text-xs text-gray-500 shadow-sm">
+                      <tr>
+                        <th className="w-12 px-4 py-3">Chọn</th>
+                        <th className="px-4 py-3">Mã SKU / Tên sản phẩm</th>
+                        <th className="px-4 py-3">Quy cách</th>
+                        <th className="px-4 py-3">Nhà cung cấp</th>
+                        <th className="px-4 py-3 text-right">Giá bán</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {visibleProducts.length === 0 ? (
+                        <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-gray-400">Không tìm thấy sản phẩm phù hợp.</td></tr>
+                      ) : visibleProducts.map((product) => {
+                        const checked = form.product_ids.includes(product.id);
+                        return (
+                          <tr key={product.id} className={cn("hover:bg-sky-50/60", checked && "bg-sky-50/40")}>
+                            <td className="px-4 py-3">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleProductSelection(product.id)}
+                                aria-label={`Chọn ${product.sku} ${product.name}`}
+                                className="h-4 w-4 rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                              />
+                            </td>
+                            <td className="px-4 py-3">
+                              <p className="font-medium text-gray-800">{product.sku}</p>
+                              <p className="text-xs text-gray-500">{product.name}</p>
+                            </td>
+                            <td className="px-4 py-3 text-xs text-gray-600">
+                              {product.unit}<br />{product.boxesPerCarton} hộp/thùng
+                            </td>
+                            <td className="px-4 py-3 text-xs text-gray-600">{product.supplier || "—"}</td>
+                            <td className="px-4 py-3 text-right font-medium tabular-nums text-gray-800">
+                              {product.basePrice.toLocaleString("vi-VN")} đ
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex items-center justify-between gap-3 border-t border-gray-100 px-5 py-4">
+                  <p className="text-sm text-gray-600">Đã chọn <strong>{form.product_ids.length}</strong> sản phẩm</p>
+                  <button type="button" onClick={() => setProductPickerOpen(false)} className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700">
+                    Xong
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

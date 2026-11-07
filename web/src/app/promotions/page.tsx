@@ -132,6 +132,7 @@ export default function PromotionsPage() {
   const [products, setProducts] = useState<ProductOption[]>([]);
   const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingPromotionId, setLoadingPromotionId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
@@ -236,6 +237,26 @@ export default function PromotionsPage() {
     setProductSearch("");
     setSupplierFilter(promotion.supplier ?? "");
     setDialog(mode);
+  }
+
+  async function openEdit(promotion: Promotion) {
+    setError("");
+    setLoadingPromotionId(promotion.id);
+    try {
+      const response = await apiFetch(`${API_URL}/promotions/${promotion.id}`);
+      if (!response.ok) {
+        throw new Error(await responseError(response, "Không thể tải nội dung chương trình để chỉnh sửa."));
+      }
+      const details = await response.json() as Promotion;
+      if (!Array.isArray(details.rules)) {
+        throw new Error("Dữ liệu điều kiện khuyến mãi không hợp lệ, vui lòng tải lại trang.");
+      }
+      openExisting("edit", details);
+    } catch (editFailure) {
+      setError(editFailure instanceof Error ? editFailure.message : "Không thể tải chương trình để chỉnh sửa.");
+    } finally {
+      setLoadingPromotionId(null);
+    }
   }
 
   async function savePromotion(event: React.FormEvent<HTMLFormElement>) {
@@ -366,7 +387,16 @@ export default function PromotionsPage() {
                     <button title="Xem" onClick={() => openExisting("view", promotion)} className="rounded-md p-2 text-gray-500 hover:bg-gray-100"><Eye size={15} /></button>
                     {isAdmin && (
                       <>
-                        <button title="Sửa" disabled={promotion.is_locked} onClick={() => openExisting("edit", promotion)} className="rounded-md p-2 text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40"><Pencil size={15} /></button>
+                        <button
+                          title="Sửa"
+                          disabled={promotion.is_locked || loadingPromotionId !== null}
+                          onClick={() => void openEdit(promotion)}
+                          className="rounded-md p-2 text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {loadingPromotionId === promotion.id
+                            ? <Loader2 size={15} className="animate-spin" />
+                            : <Pencil size={15} />}
+                        </button>
                         <button title={promotion.is_locked ? "Mở khóa" : "Khóa"} onClick={() => void runAction(promotion, "lock")} className="rounded-md p-2 text-amber-700 hover:bg-amber-50">{promotion.is_locked ? <LockOpen size={15} /> : <Lock size={15} />}</button>
                         <button title="Tạo chương trình tương tự" onClick={() => void runAction(promotion, "clone")} className="rounded-md p-2 text-indigo-700 hover:bg-indigo-50"><Copy size={15} /></button>
                         <button title="Xóa" onClick={() => void runAction(promotion, "delete")} className="rounded-md p-2 text-red-600 hover:bg-red-50"><Trash2 size={15} /></button>

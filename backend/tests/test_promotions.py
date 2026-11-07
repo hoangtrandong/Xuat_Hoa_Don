@@ -13,6 +13,7 @@ from app.api.v1.endpoints.promotions import (
     clone_promotion,
     create_promotion,
     delete_promotion,
+    get_promotion,
     list_promotions,
     toggle_promotion_lock,
     update_promotion,
@@ -71,6 +72,12 @@ def test_promotion_crud_available_lock_and_clone(db):
     assert created.rules[0].trigger_type == "QUANTITY"
     assert created.rules[0].quantity_unit == "CARTON"
     assert created.rules[0].reward_unit == "BOX"
+    details = get_promotion(created.id, session, admin)
+    assert details.name == "Summer deal"
+    assert details.product_ids == [product_id]
+    assert len(details.rules) == 1
+    assert details.rules[0].min_quantity == 2
+    assert details.rules[0].reward_value == 3
     assert len(available_promotions(date(2026, 11, 4), db=session, current_user=admin)) == 1
     assert len(available_promotions(date(2026, 12, 1), db=session, current_user=admin)) == 0
 

@@ -46,13 +46,17 @@ def _to_output(promotion: Promotion) -> PromotionOutput:
         is_active=promotion.is_active,
         is_locked=promotion.is_locked,
         promotion_type=promotion.promotion_type,
+        promotion_kind=promotion.promotion_kind,
         target_scope=promotion.target_scope,
         customer_type=promotion.customer_type,
         employee_code=promotion.employee_code,
         vat_rate=promotion.vat_rate,
         product_scope=promotion.product_scope,
         supplier=promotion.supplier,
+        applied_quantity_unit=promotion.applied_quantity_unit,
+        minimum_product_quantity=promotion.minimum_product_quantity,
         product_ids=[item.product_id for item in promotion.items],
+        product_min_quantities={item.product_id: item.min_quantity for item in promotion.items},
         rules=promotion.rules,
     )
 
@@ -86,19 +90,36 @@ def _replace_details(db: Session, promotion: Promotion, payload: PromotionInput)
         if employee is None:
             raise HTTPException(status_code=400, detail="Nhân viên áp dụng không tồn tại hoặc không hoạt động.")
 
+    reward_product_ids = {rule.reward_product_id for rule in payload.rules if rule.reward_product_id is not None}
+    if reward_product_ids:
+        existing_reward_products = set(
+            db.scalars(select(Product.id).where(Product.id.in_(reward_product_ids))).all()
+        )
+        if existing_reward_products != reward_product_ids:
+            raise HTTPException(status_code=400, detail="Một hoặc nhiều sản phẩm khuyến mại không tồn tại.")
+
     promotion.name = payload.name.strip()
     promotion.description = payload.description
     promotion.start_date = payload.start_date
     promotion.end_date = payload.end_date
     promotion.is_active = payload.is_active
     promotion.promotion_type = payload.promotion_type
+    promotion.promotion_kind = payload.promotion_kind
     promotion.target_scope = payload.target_scope
     promotion.customer_type = payload.customer_type
     promotion.employee_code = payload.employee_code
     promotion.vat_rate = payload.vat_rate
     promotion.product_scope = payload.product_scope
     promotion.supplier = payload.supplier.strip() if payload.supplier else None
-    promotion.items = [PromotionItem(product_id=product_id) for product_id in sorted(product_ids)]
+    promotion.applied_quantity_unit = payload.applied_quantity_unit
+    promotion.minimum_product_quantity = payload.minimum_product_quantity
+    promotion.items = [
+        PromotionItem(
+            product_id=product_id,
+            min_quantity=max(1, payload.product_min_quantities.get(product_id, 1)),
+        )
+        for product_id in sorted(product_ids)
+    ]
     promotion.rules = [
         PromotionRule(
             trigger_type=rule.trigger_type,
@@ -113,6 +134,7 @@ def _replace_details(db: Session, promotion: Promotion, payload: PromotionInput)
             reward_unit=rule.reward_unit,
             discount_amount=rule.reward_value if rule.reward_type == "DISCOUNT_AMOUNT" else 0,
             discount_percent=rule.reward_value if rule.reward_type == "DISCOUNT_PERCENT" else 0,
+            reward_product_id=rule.reward_product_id,
         )
         for rule in payload.rules
     ]
@@ -153,6 +175,7 @@ def available_promotions(
         .where(
             Promotion.is_active.is_(True),
             Promotion.is_locked.is_(False),
+            Promotion.promotion_type == "ORDER",
             Promotion.start_date < day_end,
             Promotion.end_date >= day_start,
         )
@@ -185,12 +208,15 @@ def create_promotion(
         end_date=payload.end_date,
         is_active=payload.is_active,
         promotion_type=payload.promotion_type,
+        promotion_kind=payload.promotion_kind,
         target_scope=payload.target_scope,
         customer_type=payload.customer_type,
         employee_code=payload.employee_code,
         vat_rate=payload.vat_rate,
         product_scope=payload.product_scope,
         supplier=payload.supplier,
+        applied_quantity_unit=payload.applied_quantity_unit,
+        minimum_product_quantity=payload.minimum_product_quantity,
     )
     _replace_details(db, promotion, payload)
     db.add(promotion)
@@ -269,13 +295,19 @@ def clone_promotion(
         is_active=False,
         is_locked=False,
         promotion_type=original.promotion_type,
+        promotion_kind=original.promotion_kind,
         target_scope=original.target_scope,
         customer_type=original.customer_type,
         employee_code=original.employee_code,
         vat_rate=original.vat_rate,
         product_scope=original.product_scope,
         supplier=original.supplier,
-        items=[PromotionItem(product_id=item.product_id) for item in original.items],
+        applied_quantity_unit=original.applied_quantity_unit,
+        minimum_product_quantity=original.minimum_product_quantity,
+        items=[
+            PromotionItem(product_id=item.product_id, min_quantity=item.min_quantity)
+            for item in original.items
+        ],
         rules=[
             PromotionRule(
                 min_qty=rule.min_qty,
@@ -290,6 +322,7 @@ def clone_promotion(
                 reward_unit=rule.reward_unit,
                 reward_type=rule.reward_type,
                 reward_value=rule.reward_value,
+                reward_product_id=rule.reward_product_id,
             )
             for rule in original.rules
         ],

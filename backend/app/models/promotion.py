@@ -18,12 +18,15 @@ class Promotion(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
     promotion_type: Mapped[str] = mapped_column(String(20), default="ORDER")
+    promotion_kind: Mapped[str] = mapped_column(String(30), default="GENERAL")
     target_scope: Mapped[str] = mapped_column(String(20), default="ALL")
     customer_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     employee_code: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     vat_rate: Mapped[float] = mapped_column(Float, default=0)
     product_scope: Mapped[str] = mapped_column(String(20), default="SELECTED")
     supplier: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    applied_quantity_unit: Mapped[str] = mapped_column(String(20), default="STANDARD")
+    minimum_product_quantity: Mapped[int] = mapped_column(Integer, default=1)
 
     rules: Mapped[List["PromotionRule"]] = relationship(back_populates="promotion", cascade="all, delete-orphan")
     items: Mapped[List["PromotionItem"]] = relationship(back_populates="promotion", cascade="all, delete-orphan")
@@ -46,8 +49,10 @@ class PromotionRule(Base):
     reward_unit: Mapped[str] = mapped_column(String(10), default="BOX")
     reward_type: Mapped[str] = mapped_column(String(30), default="FREE_QUANTITY")
     reward_value: Mapped[float] = mapped_column(Float, default=0)
+    reward_product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
 
     promotion: Mapped["Promotion"] = relationship(back_populates="rules")
+    reward_product: Mapped["Product | None"] = relationship(foreign_keys=[reward_product_id])
 
 
 class PromotionItem(Base):
@@ -56,6 +61,7 @@ class PromotionItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     promotion_id: Mapped[int] = mapped_column(ForeignKey("promotions.id", ondelete="CASCADE"))
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    min_quantity: Mapped[int] = mapped_column(Integer, default=1)
 
     promotion: Mapped["Promotion"] = relationship(back_populates="items")
     product: Mapped["Product"] = relationship()

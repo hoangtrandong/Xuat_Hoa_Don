@@ -10,6 +10,9 @@ RewardType = Literal["FREE_QUANTITY", "DISCOUNT_AMOUNT", "DISCOUNT_PERCENT"]
 CustomerType = Literal["DISTRIBUTOR", "WHOLESALE", "HORECA", "RETAIL"]
 TargetScope = Literal["ALL", "CUSTOMER_TYPE"]
 ProductScope = Literal["SELECTED", "SUPPLIER"]
+PromotionType = Literal["ORDER", "AFTER_SALES"]
+PromotionKind = Literal["GENERAL", "INVOICE_AMOUNT", "PRODUCT_AMOUNT"]
+AppliedQuantityUnit = Literal["STANDARD", "SECONDARY"]
 
 
 class PromotionRuleInput(BaseModel):
@@ -20,6 +23,7 @@ class PromotionRuleInput(BaseModel):
     reward_type: RewardType
     reward_value: float = Field(ge=0)
     reward_unit: QuantityUnit = "BOX"
+    reward_product_id: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_trigger(self):
@@ -40,14 +44,18 @@ class PromotionInput(BaseModel):
     start_date: datetime
     end_date: datetime
     is_active: bool = True
-    promotion_type: Literal["ORDER"] = "ORDER"
+    promotion_type: PromotionType = "ORDER"
+    promotion_kind: PromotionKind = "GENERAL"
     target_scope: TargetScope = "ALL"
     customer_type: CustomerType | None = None
     employee_code: str | None = Field(default=None, max_length=20)
     vat_rate: float = Field(default=0, ge=0, le=100)
     product_scope: ProductScope = "SELECTED"
     supplier: str | None = Field(default=None, max_length=120)
+    applied_quantity_unit: AppliedQuantityUnit = "STANDARD"
+    minimum_product_quantity: int = Field(default=1, ge=1)
     product_ids: list[int] = Field(default_factory=list)
+    product_min_quantities: dict[int, int] = Field(default_factory=dict)
     rules: list[PromotionRuleInput] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -85,9 +93,13 @@ class PromotionOutput(BaseModel):
     customer_type: str | None
     employee_code: str | None
     vat_rate: float
+    promotion_kind: str
     product_scope: str
     supplier: str | None
+    applied_quantity_unit: str
+    minimum_product_quantity: int
     product_ids: list[int]
+    product_min_quantities: dict[int, int]
     rules: list[PromotionRuleOutput]
 
 

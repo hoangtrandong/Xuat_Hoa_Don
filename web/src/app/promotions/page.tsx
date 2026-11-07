@@ -33,6 +33,7 @@ interface PromotionRule {
   reward_type: "FREE_QUANTITY" | "DISCOUNT_AMOUNT" | "DISCOUNT_PERCENT";
   reward_value: number;
   reward_unit: "CARTON" | "BOX";
+  reward_product_id: number | null;
 }
 
 interface Promotion {
@@ -44,14 +45,18 @@ interface Promotion {
   end_date: string;
   is_active: boolean;
   is_locked: boolean;
-  promotion_type: "ORDER";
+  promotion_type: "ORDER" | "AFTER_SALES";
+  promotion_kind: "GENERAL" | "INVOICE_AMOUNT" | "PRODUCT_AMOUNT";
   target_scope: "ALL" | "CUSTOMER_TYPE";
   customer_type: string | null;
   employee_code: string | null;
   vat_rate: number;
   product_scope: "SELECTED" | "SUPPLIER";
   supplier: string | null;
+  applied_quantity_unit: "STANDARD" | "SECONDARY";
+  minimum_product_quantity: number;
   product_ids: number[];
+  product_min_quantities: Record<number, number>;
   rules: PromotionRule[];
 }
 
@@ -66,6 +71,7 @@ const emptyRule = (): PromotionRule => ({
   reward_type: "FREE_QUANTITY",
   reward_value: 1,
   reward_unit: "BOX",
+  reward_product_id: null,
 });
 
 const customerTypeLabels: Record<string, string> = {
@@ -90,13 +96,17 @@ function newForm(): PromotionForm {
     end_date: `${today}T23:59:59`,
     is_active: true,
     promotion_type: "ORDER",
+    promotion_kind: "GENERAL",
     target_scope: "ALL",
     customer_type: null,
     employee_code: null,
     vat_rate: 0,
     product_scope: "SELECTED",
     supplier: null,
+    applied_quantity_unit: "STANDARD",
+    minimum_product_quantity: 1,
     product_ids: [],
+    product_min_quantities: {},
     rules: [emptyRule()],
   };
 }
@@ -145,7 +155,7 @@ export default function PromotionsPage() {
   const [form, setForm] = useState<PromotionForm>(newForm);
   const [productSearch, setProductSearch] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("");
-  const [productPickerOpen, setProductPickerOpen] = useState(false);
+  const [productPickerTarget, setProductPickerTarget] = useState<{ type: "eligible" } | { type: "reward"; ruleIndex: number } | null>(null);
 
   const filteredProducts = useMemo(() => {
     const query = productSearch.trim().toLocaleLowerCase();
@@ -198,15 +208,15 @@ export default function PromotionsPage() {
       setPromotions(promotionRows);
       setIsAdmin(user?.is_admin === true);
       setProducts(productRows.map((row) => ({
-          id: Number(row.id),
-          sku: String(row.sku ?? ""),
-          name: String(row.name ?? ""),
-          supplier: String(row.supplier ?? ""),
-          status: String(row.status ?? "active"),
-          unit: unitNames.get(Number(row.unit_id)) ?? "—",
-          boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
-          basePrice: Number(row.base_price ?? 0),
-        })));
+        id: Number(row.id),
+        sku: String(row.sku ?? ""),
+        name: String(row.name ?? ""),
+        supplier: String(row.supplier ?? ""),
+        status: String(row.status ?? "active"),
+        unit: unitNames.get(Number(row.unit_id)) ?? "—",
+        boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
+        basePrice: Number(row.base_price ?? 0),
+      })));
       const employeeRows = employeeResponse.ok ? await employeeResponse.json() as EmployeeOption[] : [];
       setEmployees(employeeRows.filter((employee) => employee.status?.toLowerCase() === "active"));
     } catch (loadFailure) {
@@ -225,7 +235,7 @@ export default function PromotionsPage() {
     setForm(newForm());
     setProductSearch("");
     setSupplierFilter("");
-    setProductPickerOpen(false);
+    setProductPickerTarget(null);
     setDialog("create");
   }
 
@@ -238,13 +248,17 @@ export default function PromotionsPage() {
       end_date: promotion.end_date,
       is_active: promotion.is_active,
       promotion_type: promotion.promotion_type ?? "ORDER",
+      promotion_kind: promotion.promotion_kind ?? "GENERAL",
       target_scope: promotion.target_scope ?? "ALL",
       customer_type: promotion.customer_type,
       employee_code: promotion.employee_code,
       vat_rate: promotion.vat_rate ?? 0,
       product_scope: promotion.product_scope ?? "SELECTED",
       supplier: promotion.supplier,
+      applied_quantity_unit: promotion.applied_quantity_unit ?? "STANDARD",
+      minimum_product_quantity: promotion.minimum_product_quantity ?? 1,
       product_ids: [...promotion.product_ids],
+      product_min_quantities: promotion.product_min_quantities ?? {},
       rules: promotion.rules.map((rule) => ({
         trigger_type: rule.trigger_type,
         min_quantity: rule.min_quantity,
@@ -253,28 +267,59 @@ export default function PromotionsPage() {
         reward_type: rule.reward_type,
         reward_value: rule.reward_value,
         reward_unit: rule.reward_unit,
+        reward_product_id: rule.reward_product_id ?? null,
       })),
     });
     setProductSearch("");
     setSupplierFilter(promotion.supplier ?? "");
-    setProductPickerOpen(false);
+    setProductPickerTarget(null);
     setDialog(mode);
   }
 
+  function openProductPicker(target: { type: "eligible" } | { type: "reward"; ruleIndex: number }) {
+    setProductSearch("");
+    setSupplierFilter("");
+    setProductPickerTarget(target);
+  }
+
   function toggleProductSelection(productId: number) {
+    if (productPickerTarget?.type === "reward") {
+      updateRule(productPickerTarget.ruleIndex, {
+        reward_product_id: form.rules[productPickerTarget.ruleIndex]?.reward_product_id === productId ? null : productId,
+      });
+      setProductPickerTarget(null);
+      return;
+    }
     setForm((current) => ({
       ...current,
+      product_scope: "SELECTED",
+      supplier: null,
       product_ids: current.product_ids.includes(productId)
         ? current.product_ids.filter((id) => id !== productId)
         : [...current.product_ids, productId],
+      product_min_quantities: {
+        ...current.product_min_quantities,
+        [productId]: current.product_min_quantities[productId] ?? 1,
+      },
     }));
   }
 
   function addFilteredProducts() {
     const filteredIds = filteredProducts.map((product) => product.id);
+    if (productPickerTarget?.type === "reward") {
+      if (filteredIds.length > 0) updateRule(productPickerTarget.ruleIndex, { reward_product_id: filteredIds[0] });
+      setProductPickerTarget(null);
+      return;
+    }
     setForm((current) => ({
       ...current,
+      product_scope: "SELECTED",
+      supplier: null,
       product_ids: [...new Set([...current.product_ids, ...filteredIds])],
+      product_min_quantities: Object.fromEntries([
+        ...Object.entries(current.product_min_quantities).filter(([id]) => !filteredIds.includes(Number(id))),
+        ...filteredIds.map((id) => [id, current.product_min_quantities[id] ?? 1]),
+      ]),
     }));
   }
 
@@ -317,6 +362,9 @@ export default function PromotionsPage() {
         end_date: `${dateValue(form.end_date)}T23:59:59`,
         description: form.description || null,
         supplier: form.supplier || null,
+        product_min_quantities: Object.fromEntries(
+          form.product_ids.map((productId) => [productId, Math.max(1, Number(form.product_min_quantities[productId] ?? 1))]),
+        ),
         rules: form.rules.map((rule) => ({
           ...rule,
           min_quantity: rule.trigger_type === "QUANTITY" ? Number(rule.min_quantity ?? 1) : null,
@@ -324,6 +372,7 @@ export default function PromotionsPage() {
           min_amount: rule.trigger_type === "AMOUNT" ? Number(rule.min_amount ?? 0) : null,
           reward_value: Number(rule.reward_value),
           reward_unit: rule.reward_unit,
+          reward_product_id: rule.reward_type === "FREE_QUANTITY" ? rule.reward_product_id : null,
         })),
       };
       const response = await apiFetch(
@@ -467,8 +516,9 @@ export default function PromotionsPage() {
                   <input required maxLength={160} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className={inputClass} />
                 </label>
                 <label className="text-xs font-medium text-gray-600">Loại hình khuyến mãi
-                  <select value={form.promotion_type} onChange={(event) => setForm({ ...form, promotion_type: event.target.value as "ORDER" })} className={inputClass}>
+                  <select value={form.promotion_type} onChange={(event) => setForm({ ...form, promotion_type: event.target.value as PromotionForm["promotion_type"] })} className={inputClass}>
                     <option value="ORDER">Khuyến mãi trong đơn</option>
+                    <option value="AFTER_SALES">Khuyến mãi trả sau</option>
                   </select>
                 </label>
                 <label className="text-xs font-medium text-gray-600">Trạng thái
@@ -522,25 +572,13 @@ export default function PromotionsPage() {
                   <input type="number" min={0} max={100} step={0.1} value={form.vat_rate} onChange={(event) => setForm({ ...form, vat_rate: Number(event.target.value) })} className={inputClass} />
                   <span className="mt-1 block font-normal text-gray-400">Lưu cấu hình; chưa cộng vào tổng tiền đơn hàng.</span>
                 </label>
-                <label className="text-xs font-medium text-gray-600">Phạm vi sản phẩm
-                  <select value={form.product_scope} onChange={(event) => setForm({
-                    ...form,
-                    product_scope: event.target.value as PromotionForm["product_scope"],
-                    product_ids: [],
-                    supplier: event.target.value === "SELECTED" ? null : form.supplier,
-                  })} className={inputClass}>
-                    <option value="SELECTED">Chọn sản phẩm cụ thể</option>
-                    <option value="SUPPLIER">Tất cả sản phẩm của nhà cung cấp</option>
+                <label className="text-xs font-medium text-gray-600">KM dạng
+                  <select value={form.promotion_kind} onChange={(event) => setForm({ ...form, promotion_kind: event.target.value as PromotionForm["promotion_kind"] })} className={inputClass}>
+                    <option value="GENERAL">Tổng quát</option>
+                    <option value="INVOICE_AMOUNT">Tổng số tiền trên hóa đơn</option>
+                    <option value="PRODUCT_AMOUNT">Tổng số tiền các sản phẩm</option>
                   </select>
                 </label>
-                {form.product_scope === "SUPPLIER" && (
-                  <label className="text-xs font-medium text-gray-600">Nhà cung cấp áp dụng
-                    <select required value={form.supplier ?? ""} onChange={(event) => setForm({ ...form, supplier: event.target.value || null })} className={inputClass}>
-                      <option value="">Chọn nhà cung cấp</option>
-                      {suppliers.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
-                    </select>
-                  </label>
-                )}
                 <label className="text-xs font-medium text-gray-600 sm:col-span-2">Mô tả
                   <input maxLength={255} value={form.description ?? ""} onChange={(event) => setForm({ ...form, description: event.target.value })} className={inputClass} />
                 </label>
@@ -563,7 +601,10 @@ export default function PromotionsPage() {
                         min_quantity: event.target.value === "QUANTITY" ? 1 : null,
                         min_amount: event.target.value === "AMOUNT" ? 0 : null,
                       })} className={inputClass}>
-                        <option value="QUANTITY">Theo số lượng</option><option value="AMOUNT">Theo giá trị đơn</option>
+                        <option value="QUANTITY">Theo số lượng</option>
+                        <option value="AMOUNT">
+                          {form.promotion_kind === "PRODUCT_AMOUNT" ? "Theo giá trị sản phẩm" : form.promotion_kind === "INVOICE_AMOUNT" ? "Theo giá trị hóa đơn" : "Theo giá trị"}
+                        </option>
                       </select>
                     </label>
                     {rule.trigger_type === "QUANTITY" ? (
@@ -580,7 +621,8 @@ export default function PromotionsPage() {
                         </label>
                       </>
                     ) : (
-                      <label className="text-xs text-gray-600 sm:col-span-1">Giá trị đơn tối thiểu (đ)
+                      <label className="text-xs text-gray-600 sm:col-span-1">
+                        {form.promotion_kind === "PRODUCT_AMOUNT" ? "Giá trị sản phẩm tối thiểu (đ)" : form.promotion_kind === "INVOICE_AMOUNT" ? "Giá trị hóa đơn tối thiểu (đ)" : "Giá trị tối thiểu (đ)"}
                         <input type="number" min={0.01} step={1000} value={rule.min_amount ?? 0}
                           onChange={(event) => updateRule(index, { min_amount: Number(event.target.value) })}
                           className={inputClass} />
@@ -591,6 +633,23 @@ export default function PromotionsPage() {
                         <option value="FREE_QUANTITY">Tặng số lượng</option><option value="DISCOUNT_AMOUNT">Chiết khấu tiền</option><option value="DISCOUNT_PERCENT">Chiết khấu phần trăm</option>
                       </select>
                     </label>
+                    {rule.reward_type === "FREE_QUANTITY" && (
+                      <div className="text-xs text-gray-600">
+                        <span>Sản phẩm khuyến mại</span>
+                        <button
+                          type="button"
+                          onClick={() => openProductPicker({ type: "reward", ruleIndex: index })}
+                          className={cn(inputClass, "flex items-center justify-between text-left")}
+                        >
+                          <span className="truncate">
+                            {rule.reward_product_id
+                              ? products.find((product) => product.id === rule.reward_product_id)?.sku ?? `ID ${rule.reward_product_id}`
+                              : "Mặc định sản phẩm áp dụng"}
+                          </span>
+                          <Search size={14} className="ml-2 shrink-0" />
+                        </button>
+                      </div>
+                    )}
                     <label className="text-xs text-gray-600">{rule.reward_type === "FREE_QUANTITY" ? "Số lượng tặng" : rule.reward_type === "DISCOUNT_PERCENT" ? "Phần trăm CK" : "Số tiền CK"}
                       <input type="number" min={rule.reward_type === "FREE_QUANTITY" ? 1 : 0} max={rule.reward_type === "DISCOUNT_PERCENT" ? 100 : undefined}
                         step={rule.reward_type === "FREE_QUANTITY" || rule.reward_type === "DISCOUNT_PERCENT" ? 1 : 1000}
@@ -608,29 +667,21 @@ export default function PromotionsPage() {
                 ))}
               </div>
               <div className="w-full">
-                  {form.product_scope === "SUPPLIER" ? (
-                    <div className="rounded-xl border border-sky-100 bg-sky-50 px-4 py-4 text-sm text-sky-800">
-                      Áp dụng cho tất cả sản phẩm của nhà cung cấp <strong>{form.supplier || "đã chọn"}</strong>.
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
+                  <div className="space-y-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <h3 className="text-sm font-semibold text-gray-800">Sản phẩm áp dụng</h3>
-                          <p className="text-xs text-gray-500">Chọn SKU cụ thể hoặc mở danh sách để chọn theo nhà cung cấp.</p>
+                          <p className="text-xs text-gray-500">Thêm từng SKU hoặc lọc theo nhà cung cấp để chọn nhiều sản phẩm.</p>
                         </div>
                         {dialog !== "view" && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setProductSearch("");
-                              setSupplierFilter("");
-                              setProductPickerOpen(true);
-                            }}
-                            className="inline-flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100"
-                          >
-                            <Plus size={15} /> Chọn sản phẩm
-                          </button>
+                          <div className="flex flex-wrap gap-2">
+                            <button type="button" onClick={() => openProductPicker({ type: "eligible" })} className="inline-flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100">
+                              <Plus size={15} /> Thêm sản phẩm
+                            </button>
+                            <button type="button" onClick={() => openProductPicker({ type: "eligible" })} className="inline-flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100">
+                              <Plus size={15} /> Thêm SP theo hãng
+                            </button>
+                          </div>
                         )}
                       </div>
                       <div className="flex items-center justify-between">
@@ -656,6 +707,20 @@ export default function PromotionsPage() {
                               {` · ${product.basePrice.toLocaleString("vi-VN")} đ`}
                             </p>
                           </div>
+                          <label className="shrink-0 text-xs text-gray-500">SL tối thiểu
+                            <input
+                              type="number"
+                              min={1}
+                              step={1}
+                              disabled={dialog === "view"}
+                              value={form.product_min_quantities[product.id] ?? 1}
+                              onChange={(event) => setForm((current) => ({
+                                ...current,
+                                product_min_quantities: { ...current.product_min_quantities, [product.id]: Math.max(1, Number(event.target.value)) },
+                              }))}
+                              className="mt-1 w-24 rounded-md border border-gray-200 px-2 py-1 text-sm text-gray-800"
+                            />
+                          </label>
                           {dialog !== "view" && (
                             <button
                               type="button"
@@ -670,8 +735,32 @@ export default function PromotionsPage() {
                       ))}
                         </div>
                       )}
+                  </div>
+                  <section className="rounded-xl border border-sky-100 bg-sky-50/60 p-4">
+                    <h3 className="text-sm font-semibold text-gray-800">Thông tin số lượng áp dụng</h3>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      <label className="text-xs font-medium text-gray-600">Đơn vị tính áp dụng
+                        <select
+                          value={form.applied_quantity_unit}
+                          onChange={(event) => setForm({ ...form, applied_quantity_unit: event.target.value as PromotionForm["applied_quantity_unit"] })}
+                          className={inputClass}
+                        >
+                          <option value="STANDARD">Đơn vị chuẩn</option>
+                          <option value="SECONDARY">Đơn vị quy đổi</option>
+                        </select>
+                      </label>
+                      <label className="text-xs font-medium text-gray-600">Số lượng tối thiểu áp dụng
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={form.minimum_product_quantity}
+                          onChange={(event) => setForm({ ...form, minimum_product_quantity: Math.max(1, Number(event.target.value)) })}
+                          className={inputClass}
+                        />
+                      </label>
                     </div>
-                  )}
+                  </section>
               </div>
             </fieldset>
             <div className="flex shrink-0 justify-end gap-2 border-t border-gray-100 bg-white px-5 py-4 sm:px-7">
@@ -683,15 +772,21 @@ export default function PromotionsPage() {
               )}
             </div>
           </form>
-          {productPickerOpen && dialog !== "view" && (
+          {productPickerTarget && dialog !== "view" && (
             <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="product-picker-title">
               <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
                 <div className="flex items-start justify-between border-b border-gray-100 px-5 py-4">
                   <div>
-                    <h2 id="product-picker-title" className="text-lg font-semibold text-gray-900">Chọn sản phẩm khuyến mại</h2>
-                    <p className="mt-1 text-xs text-gray-500">Tìm theo mã/tên sản phẩm hoặc lọc theo nhà cung cấp. Có thể chọn nhiều sản phẩm.</p>
+                    <h2 id="product-picker-title" className="text-lg font-semibold text-gray-900">
+                      {productPickerTarget.type === "reward" ? "Chọn sản phẩm khuyến mại" : "Chọn sản phẩm áp dụng"}
+                    </h2>
+                    <p className="mt-1 text-xs text-gray-500">
+                      {productPickerTarget.type === "reward"
+                        ? "Chọn một SKU làm sản phẩm được tặng; nếu không chọn, mặc định tặng sản phẩm áp dụng."
+                        : "Tìm theo mã/tên sản phẩm hoặc lọc theo nhà cung cấp. Có thể chọn nhiều sản phẩm."}
+                    </p>
                   </div>
-                  <button type="button" onClick={() => setProductPickerOpen(false)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100" aria-label="Đóng danh sách sản phẩm">
+                  <button type="button" onClick={() => setProductPickerTarget(null)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100" aria-label="Đóng danh sách sản phẩm">
                     <X size={18} />
                   </button>
                 </div>
@@ -721,14 +816,14 @@ export default function PromotionsPage() {
                     {filteredProducts.length.toLocaleString("vi-VN")} sản phẩm phù hợp
                     {filteredProducts.length > visibleProducts.length ? ` · đang hiển thị ${visibleProducts.length} sản phẩm đầu tiên` : ""}
                   </p>
-                  <button
+                  {productPickerTarget.type === "eligible" && <button
                     type="button"
                     disabled={filteredProducts.length === 0}
                     onClick={addFilteredProducts}
                     className="rounded-lg border border-sky-200 bg-white px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-50 disabled:opacity-50"
                   >
                     Chọn tất cả {supplierFilter ? `của ${supplierFilter}` : "kết quả"} ({filteredProducts.length.toLocaleString("vi-VN")})
-                  </button>
+                  </button>}
                 </div>
                 <div className="min-h-0 flex-1 overflow-auto">
                   <table className="w-full min-w-[900px] text-left text-sm">
@@ -745,15 +840,18 @@ export default function PromotionsPage() {
                       {visibleProducts.length === 0 ? (
                         <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-gray-400">Không tìm thấy sản phẩm phù hợp.</td></tr>
                       ) : visibleProducts.map((product) => {
-                        const checked = form.product_ids.includes(product.id);
+                        const checked = productPickerTarget.type === "reward"
+                          ? form.rules[productPickerTarget.ruleIndex]?.reward_product_id === product.id
+                          : form.product_ids.includes(product.id);
                         return (
                           <tr key={product.id} className={cn("hover:bg-sky-50/60", checked && "bg-sky-50/40")}>
                             <td className="px-4 py-3">
                               <input
-                                type="checkbox"
+                                type={productPickerTarget.type === "reward" ? "radio" : "checkbox"}
                                 checked={checked}
                                 onChange={() => toggleProductSelection(product.id)}
                                 aria-label={`Chọn ${product.sku} ${product.name}`}
+                                name={productPickerTarget.type === "reward" ? "reward-product" : undefined}
                                 className="h-4 w-4 rounded border-gray-300 text-sky-600 focus:ring-sky-500"
                               />
                             </td>
@@ -775,8 +873,10 @@ export default function PromotionsPage() {
                   </table>
                 </div>
                 <div className="flex items-center justify-between gap-3 border-t border-gray-100 px-5 py-4">
-                  <p className="text-sm text-gray-600">Đã chọn <strong>{form.product_ids.length}</strong> sản phẩm</p>
-                  <button type="button" onClick={() => setProductPickerOpen(false)} className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700">
+                  <p className="text-sm text-gray-600">
+                    {productPickerTarget.type === "reward" ? "Chọn một sản phẩm quà tặng" : <>Đã chọn <strong>{form.product_ids.length}</strong> sản phẩm</>}
+                  </p>
+                  <button type="button" onClick={() => setProductPickerTarget(null)} className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700">
                     Xong
                   </button>
                 </div>

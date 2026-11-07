@@ -75,6 +75,7 @@ def test_promotion_crud_available_lock_and_clone(db):
     details = get_promotion(created.id, session, admin)
     assert details.name == "Summer deal"
     assert details.product_ids == [product_id]
+    assert details.product_min_quantities == {product_id: 1}
     assert len(details.rules) == 1
     assert details.rules[0].min_quantity == 2
     assert details.rules[0].reward_value == 3
@@ -114,6 +115,28 @@ def test_promotion_rules_validate_rewards():
         )
 
 
+def test_promotion_form_metadata_and_reward_product_round_trip(db):
+    session, product_id = db
+    admin = SimpleNamespace(username="admin", roles=[])
+    payload = _payload(product_id)
+    payload.promotion_kind = "PRODUCT_AMOUNT"
+    payload.applied_quantity_unit = "SECONDARY"
+    payload.minimum_product_quantity = 3
+    payload.product_min_quantities = {product_id: 5}
+    payload.rules[0].reward_product_id = product_id
+
+    created = create_promotion(payload, session, admin)
+    assert created.promotion_kind == "PRODUCT_AMOUNT"
+    assert created.applied_quantity_unit == "SECONDARY"
+    assert created.minimum_product_quantity == 3
+    assert created.product_min_quantities == {product_id: 5}
+    assert created.rules[0].reward_product_id == product_id
+
+    clone = clone_promotion(created.id, session, admin)
+    assert clone.product_min_quantities == {product_id: 5}
+    assert clone.rules[0].reward_product_id == product_id
+
+
 def test_promotion_can_target_supplier_and_customer_employee(db):
     session, _ = db
     admin = SimpleNamespace(username="admin", roles=[])
@@ -128,6 +151,8 @@ def test_promotion_can_target_supplier_and_customer_employee(db):
         "customer_type": "RETAIL",
         "employee_code": "NV001",
         "vat_rate": 8,
+        "promotion_type": "ORDER",
+        "promotion_kind": "INVOICE_AMOUNT",
     })
     promotion = create_promotion(supplier_payload, session, admin)
 
@@ -136,5 +161,7 @@ def test_promotion_can_target_supplier_and_customer_employee(db):
     assert promotion.customer_type == "RETAIL"
     assert promotion.employee_code == "NV001"
     assert promotion.vat_rate == 8
+    assert promotion.promotion_type == "ORDER"
+    assert promotion.promotion_kind == "INVOICE_AMOUNT"
     assert len(available_promotions(date(2026, 11, 4), "0MD", "NV001", session, admin)) == 1
     assert available_promotions(date(2026, 11, 4), "0MD", "NV002", session, admin) == []

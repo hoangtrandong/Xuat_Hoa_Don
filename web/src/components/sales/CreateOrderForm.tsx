@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { CheckCircle2, AlertTriangle, Loader2, RefreshCw, Search, ShoppingCart, Trash2, X } from "lucide-react";
 import Badge from "@/components/ui/Badge";
 import { API_URL, apiFetch } from "@/lib/api";
-import { formatVNDFull, formatNumber } from "@/lib/format";
+import { formatCustomerCode, formatVNDFull, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface SystemCustomer {
@@ -726,7 +726,9 @@ export default function CreateOrderForm({
               Khách hàng
               {selectedCustomer ? (
                 <div className="mt-0.5 flex min-h-7 items-center gap-2 rounded border border-slate-300 bg-white px-2 text-xs">
-                  <span className="shrink-0 font-semibold">{selectedCustomer.code}</span>
+                  <span className="shrink-0 font-semibold" title={selectedCustomer.code}>
+                    {formatCustomerCode(selectedCustomer.code)}
+                  </span>
                   <span className="min-w-0 flex-1 truncate text-slate-700">{selectedCustomer.name}</span>
                   <button
                     type="button"
@@ -761,7 +763,9 @@ export default function CreateOrderForm({
                       className="flex w-full items-center justify-between gap-2 border-b border-slate-100 px-2.5 py-2 text-left hover:bg-sky-50"
                     >
                       <span className="min-w-0">
-                        <span className="block truncate text-xs font-medium text-slate-800">{customer.code} · {customer.name}</span>
+                        <span className="block truncate text-xs font-medium text-slate-800" title={customer.code}>
+                          {formatCustomerCode(customer.code)} · {customer.name}
+                        </span>
                         <span className="block truncate text-[10px] text-slate-500">{customer.type}{customer.staffName ? ` · NVBH: ${customer.staffName}` : ""}</span>
                       </span>
                       {customer.tier && <Badge variant="default">Tier {customer.tier}</Badge>}

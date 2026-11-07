@@ -11,7 +11,7 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import CustomerDetail from "@/components/customers/CustomerDetail";
 import type { Customer } from "@/lib/mock-customers";
-import { formatVND } from "@/lib/format";
+import { formatCustomerCode, formatVND } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL, apiFetch } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
@@ -247,7 +247,15 @@ export default function CustomersPage() {
   }
 
   const columns: Column<Customer>[] = [
-    { key: "code", title: "Mã KH", sortable: true },
+    {
+      key: "code",
+      title: "Mã KH",
+      sortable: true,
+      render: (value) => {
+        const code = String(value ?? "");
+        return <span className="font-mono" title={code}>{formatCustomerCode(code)}</span>;
+      },
+    },
     {
       key: "name",
       title: "Tên khách hàng",

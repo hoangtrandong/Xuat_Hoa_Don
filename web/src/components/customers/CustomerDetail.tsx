@@ -8,7 +8,7 @@ import {
 import type { Customer } from "@/lib/mock-customers";
 import { getOrdersByCustomer } from "@/lib/mock-orders";
 import Badge from "@/components/ui/Badge";
-import { formatVND, formatDate, getInitials } from "@/lib/format";
+import { formatCustomerCode, formatVND, formatDate, getInitials } from "@/lib/format";
 
 interface CustomerDetailProps {
   customer: Customer;
@@ -33,7 +33,9 @@ export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDele
         </div>
         <div className="flex-1 min-w-0">
           <p className="font-bold text-gray-900 text-sm truncate">{customer.name}</p>
-          <p className="text-xs text-gray-400">{customer.code} · {customer.district}</p>
+          <p className="text-xs text-gray-400" title={customer.code}>
+            {formatCustomerCode(customer.code)} · {customer.district}
+          </p>
         </div>
         <div className="flex flex-col items-end gap-1">
           <Badge variant={customer.status === "active" ? "success" : "danger"}>

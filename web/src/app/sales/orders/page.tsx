@@ -25,7 +25,7 @@ import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
 import CreateOrderForm from "@/components/sales/CreateOrderForm";
-import { formatVND } from "@/lib/format";
+import { formatCustomerCode, formatVND } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
 import * as XLSX from "xlsx";
@@ -412,7 +412,7 @@ function formatRemoteColumnValue(title: string, value: unknown): string {
   if (title === "Ngày giao") return formatVinamilkDate(value, false);
   if (title === "Mã KH") {
     const code = displayRemoteValue(value).trim();
-    return code.toUpperCase().startsWith("NVBH") ? code : code.slice(-3);
+    return code.toUpperCase().startsWith("NVBH") ? code : formatCustomerCode(code);
   }
   return displayRemoteValue(value);
 }
@@ -3441,19 +3441,21 @@ return Array.from(map.values());
                                 className="block w-full rounded-lg border border-gray-200 bg-gray-50/70 px-2.5 py-1.5 text-xs font-medium text-gray-800 focus:border-purple-500 focus:outline-none"
                               >
                                 {!hasSelectedInFiltered && selectedCust.customer_code && (
-                                  <option value={selectedCust.customer_code}>
-                                    {selectedCust.customer_code} ({selectedCust.customer_code.slice(-3)}) — {selectedCust.customer_name || "Khách hàng hiện tại"}
+                                  <option value={selectedCust.customer_code} title={selectedCust.customer_code}>
+                                    {formatCustomerCode(selectedCust.customer_code)} — {selectedCust.customer_name || "Khách hàng hiện tại"}
                                   </option>
                                 )}
                                 {filteredCustomers.map((c) => (
-                                  <option key={c.customer_code} value={c.customer_code}>
-                                    {c.customer_code} ({c.customer_code.slice(-3)}) — {c.customer_name}
+                                  <option key={c.customer_code} value={c.customer_code} title={c.customer_code}>
+                                    {formatCustomerCode(c.customer_code)} — {c.customer_name}
                                     {c.company_name ? ` [${c.company_name}]` : ""}
                                   </option>
                                 ))}
                               </select>
                               <div className="text-[11px] text-gray-500 truncate">
-                                Đang chọn: <strong className="text-gray-800">{selectedCust.customer_code}</strong> —{" "}
+                                Đang chọn: <strong className="text-gray-800" title={selectedCust.customer_code}>
+                                  {formatCustomerCode(selectedCust.customer_code)}
+                                </strong> —{" "}
                                 <span className="text-gray-700">{selectedCust.customer_name}</span>
                               </div>
                             </>

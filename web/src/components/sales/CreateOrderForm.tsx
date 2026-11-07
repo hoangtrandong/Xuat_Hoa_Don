@@ -863,7 +863,7 @@ export default function CreateOrderForm({
                   <tr>
                     <th className="w-8 px-2 py-2 text-center">TT</th>
                     <th className="min-w-[180px] px-2 py-2">Tên SP</th>
-                    <th className="w-[168px] px-2 py-2 text-center" title="Nhập số thùng và số lượng lẻ theo đơn vị sản phẩm">SL (Thùng / ĐVT)</th>
+                    <th className="w-[168px] px-2 py-2 text-center" title="Nhập số thùng và số hộp lẻ">Thùng / Hộp</th>
                     <th className="w-[92px] px-2 py-2 text-right">Đơn giá</th>
                     <th className="w-[100px] px-2 py-2 text-right">Thành tiền</th>
                     <th className="w-[88px] px-2 py-2 text-right">Chiết khấu</th>
@@ -902,9 +902,9 @@ export default function CreateOrderForm({
                                 />
                               </label>
                               <label className="flex min-w-0 items-center gap-1 text-[9px] text-slate-500">
-                                <span className="shrink-0">{line.unit || "Hộp"}</span>
+                                <span className="shrink-0">Hộp</span>
                                 <input
-                                  aria-label={`Số lượng lẻ ${line.productCode}`}
+                                  aria-label={`Số hộp lẻ ${line.productCode}`}
                                   type="number"
                                   min={0}
                                   max={line.boxesPerCarton - 1}

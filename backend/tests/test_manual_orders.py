@@ -105,6 +105,33 @@ def test_order_list_shows_store_from_customer_code(db):
     assert response["rows"][0]["Cửa Hàng"] == "Cửa hàng Nam Thúy"
 
 
+def test_order_list_resolves_store_from_full_customer_code_suffix(db):
+    customer = Customer(
+        code="0HX",
+        name="Mẹ và bé An Hùng",
+        type="RETAIL",
+        store=Store(code="STORE-0HX", name="Cửa hàng An Hùng"),
+    )
+    db.add(customer)
+    db.commit()
+    result = _create_manual_order(db, _payload(), performed_by="admin")
+    snapshot = db.scalar(
+        select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == result["order_number"])
+    )
+    snapshot.customer_code = "MG200310HX"
+    snapshot.customer_name = customer.name
+    snapshot.raw_payload = {**snapshot.raw_payload, "Mã KH": "MG200310HX"}
+    db.commit()
+
+    response = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+
+    assert response["rows"][0]["Mã KH"] == "MG200310HX"
+    assert response["rows"][0]["Cửa Hàng"] == "Cửa hàng An Hùng"
+
+
 def test_order_list_resolves_manager_by_last_three_customer_code_characters(db):
     db.add(Customer(
         code="IMV",

@@ -1812,13 +1812,19 @@ def list_local_vinamilk_orders(
         (row.customer_code or _field(row.raw_payload, ("customerCode", "shopCode", "Mã KH")) or "").strip().upper()
         for row in rows
     }
+    customer_code_suffixes = {code[-3:] for code in customer_codes if len(code) >= 3}
     customers_by_code: dict[str, Customer] = {}
     customers_by_suffix: dict[str, list[Customer]] = defaultdict(list)
     if customer_codes:
         customer_rows = db.scalars(
             select(Customer)
             .options(joinedload(Customer.store))
-            .where(func.upper(Customer.code).in_(customer_codes))
+            .where(
+                or_(
+                    func.upper(Customer.code).in_(customer_codes),
+                    func.upper(Customer.code).in_(customer_code_suffixes),
+                )
+            )
         ).unique().all()
         for customer_row in customer_rows:
             normalized_code = (customer_row.code or "").strip().upper()

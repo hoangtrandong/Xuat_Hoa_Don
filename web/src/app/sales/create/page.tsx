@@ -35,17 +35,21 @@ interface SystemProduct {
 
 interface PromotionRule {
   id: number;
-  trigger_type: "CARTON" | "AMOUNT";
-  min_cartons: number | null;
+  trigger_type: "QUANTITY" | "AMOUNT";
+  min_quantity: number | null;
+  quantity_unit: "CARTON" | "BOX";
   min_amount: number | null;
   reward_type: "FREE_QUANTITY" | "DISCOUNT_AMOUNT" | "DISCOUNT_PERCENT";
   reward_value: number;
+  reward_unit: "CARTON" | "BOX";
 }
 
 interface PromotionOption {
   id: number;
   code: string;
   name: string;
+  product_scope: "SELECTED" | "SUPPLIER";
+  supplier: string | null;
   product_ids: number[];
   rules: PromotionRule[];
 }
@@ -267,6 +271,15 @@ export default function CreateOrderPage() {
 
   function selectCustomer(c: SystemCustomer) {
     setSelectedCustomer(c);
+    setPromotions([]);
+    setPromotionsLoaded(false);
+    setPromotionError("");
+    setLines((previous) => previous.map((line) => ({
+      ...line,
+      promotionId: null,
+      promoQuantity: 0,
+      discountAmount: 0,
+    })));
     // Tai khoan gan nhan vien: giu NVBH la nguoi dang nhap. Tai khoan quan tri: dung NVBH cua khach hang.
     if (!hasOwnStaffRef.current) {
       setStaffCode(c.staffCode);
@@ -276,6 +289,32 @@ export default function CreateOrderPage() {
     setSalesRoute(c.salesRoute);
     setCustomerOpen(false);
     setCustomerQuery("");
+  }
+
+  function clearCustomer() {
+    setSelectedCustomer(null);
+    setPromotions([]);
+    setPromotionsLoaded(false);
+    setPromotionError("");
+    setLines((previous) => previous.map((line) => ({
+      ...line,
+      promotionId: null,
+      promoQuantity: 0,
+      discountAmount: 0,
+    })));
+  }
+
+  function changeStaffCode(nextCode: string) {
+    setStaffCode(nextCode);
+    setPromotions([]);
+    setPromotionsLoaded(false);
+    setPromotionError("");
+    setLines((previous) => previous.map((line) => ({
+      ...line,
+      promotionId: null,
+      promoQuantity: 0,
+      discountAmount: 0,
+    })));
   }
 
   const filteredCustomers = useMemo(() => {
@@ -303,21 +342,32 @@ export default function CreateOrderPage() {
   const total = subtotal - totalDiscount;
   const stockOf = (code: string) => stockMap.get(code.toUpperCase());
 
-  function getPromotionReward(promotionId: number, productId: number, quantity: number, price: number, boxesPerCarton: number) {
-    const promotion = promotions.find((item) => item.id === promotionId && item.product_ids.includes(productId));
+  function getPromotionReward(promotionId: number, productId: number, quantity: number, price: number, boxesPerCarton: number, supplier: string) {
+    const promotion = promotions.find((item) =>
+      item.id === promotionId
+      && (item.product_scope === "SUPPLIER"
+        ? (item.supplier ?? "").trim().toLocaleLowerCase() === supplier.trim().toLocaleLowerCase()
+        : item.product_ids.includes(productId))
+    );
     if (!promotion) return { promoQuantity: 0, discountAmount: 0 };
     const value = quantity * price;
     const cartons = Math.floor(quantity / Math.max(1, boxesPerCarton));
     let best = { promoQuantity: 0, discountAmount: 0 };
     let bestValue = -1;
     for (const rule of promotion.rules) {
-      const threshold = rule.trigger_type === "CARTON" ? (rule.min_cartons ?? 0) : (rule.min_amount ?? 0);
-      const basis = rule.trigger_type === "CARTON" ? cartons : value;
+      const threshold = rule.trigger_type === "QUANTITY" ? (rule.min_quantity ?? 0) : (rule.min_amount ?? 0);
+      const basis = rule.trigger_type === "QUANTITY"
+        ? (rule.quantity_unit === "CARTON" ? cartons : quantity)
+        : value;
       const repeats = threshold > 0 ? Math.floor(basis / threshold) : 0;
       if (repeats < 1) continue;
       let candidate: { promoQuantity: number; discountAmount: number };
       if (rule.reward_type === "FREE_QUANTITY") {
-        candidate = { promoQuantity: rule.reward_value * repeats, discountAmount: 0 };
+        const rewardedUnits = rule.reward_value * repeats;
+        candidate = {
+          promoQuantity: rule.reward_unit === "CARTON" ? rewardedUnits * boxesPerCarton : rewardedUnits,
+          discountAmount: 0,
+        };
       } else if (rule.reward_type === "DISCOUNT_PERCENT") {
         candidate = { promoQuantity: 0, discountAmount: Math.min(value, value * rule.reward_value / 100 * repeats) };
       } else {
@@ -374,7 +424,7 @@ export default function CreateOrderPage() {
           : next.boxes;
       }
       if (orderType === "001-Xuất hàng" && next.promotionId != null) {
-        Object.assign(next, getPromotionReward(next.promotionId, next.productId, next.quantity, next.price, next.boxesPerCarton));
+        Object.assign(next, getPromotionReward(next.promotionId, next.productId, next.quantity, next.price, next.boxesPerCarton, next.supplier));
       }
       return next;
     }));
@@ -385,14 +435,19 @@ export default function CreateOrderPage() {
       if (i !== idx) return line;
       const reward = promotionId == null
         ? { promoQuantity: 0, discountAmount: 0 }
-        : getPromotionReward(promotionId, line.productId, line.quantity, line.price, line.boxesPerCarton);
+        : getPromotionReward(promotionId, line.productId, line.quantity, line.price, line.boxesPerCarton, line.supplier);
       return { ...line, promotionId, ...reward };
     }));
   }
 
   function changeOrderType(nextType: string) {
     setOrderType(nextType);
-    setLines((previous) => previous.map((line) => ({ ...line, promotionId: null })));
+    setLines((previous) => previous.map((line) => ({
+      ...line,
+      promotionId: null,
+      promoQuantity: 0,
+      discountAmount: 0,
+    })));
   }
 
   function changeOrderDate(nextDate: string) {
@@ -406,10 +461,19 @@ export default function CreateOrderPage() {
   }
 
   async function loadPromotions() {
+    if (!selectedCustomer) {
+      setPromotionError("Vui lòng chọn khách hàng trước khi tải chương trình khuyến mãi.");
+      return;
+    }
     setLoadingPromotions(true);
     setPromotionError("");
     try {
-      const response = await apiFetch(`${API_URL}/promotions/available?on_date=${orderDate}`);
+      const params = new URLSearchParams({
+        on_date: orderDate,
+        customer_code: selectedCustomer.code,
+      });
+      if (staffCode.trim()) params.set("employee_code", staffCode.trim());
+      const response = await apiFetch(`${API_URL}/promotions/available?${params.toString()}`);
       if (!response.ok) throw new Error("Không thể tải chương trình khuyến mãi khả dụng.");
       const result = (await response.json()) as PromotionOption[];
       setPromotions(result);
@@ -524,14 +588,14 @@ export default function CreateOrderPage() {
                       {selectedCustomer.storeName ? ` · ${selectedCustomer.storeName}` : ""}
                     </p>
                   </div>
-                  <button onClick={() => setSelectedCustomer(null)} className="p-1.5 rounded-lg hover:bg-white text-gray-400" aria-label="Bỏ chọn">
+                  <button onClick={clearCustomer} className="p-1.5 rounded-lg hover:bg-white text-gray-400" aria-label="Bỏ chọn">
                     <X size={16} />
                   </button>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <label className="block">
                     <span className="text-xs text-gray-500">Mã NVBH</span>
-                    <input value={staffCode} onChange={(e) => setStaffCode(e.target.value)} className={inputCls} />
+                    <input value={staffCode} onChange={(e) => changeStaffCode(e.target.value)} className={inputCls} />
                   </label>
                   <label className="block">
                     <span className="text-xs text-gray-500">Tên NVBH</span>
@@ -685,7 +749,9 @@ export default function CreateOrderPage() {
                             >
                               <option value="">{promotionsLoaded ? "Không áp dụng CTKM" : "Tải CTKM để chọn"}</option>
                               {promotions
-                                .filter((promotion) => promotion.product_ids.includes(l.productId))
+                                .filter((promotion) => promotion.product_scope === "SUPPLIER"
+                                  ? (promotion.supplier ?? "").trim().toLocaleLowerCase() === l.supplier.trim().toLocaleLowerCase()
+                                  : promotion.product_ids.includes(l.productId))
                                 .map((promotion) => (
                                   <option key={promotion.id} value={promotion.id}>{promotion.code} - {promotion.name}</option>
                                 ))}

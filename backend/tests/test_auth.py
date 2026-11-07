@@ -28,7 +28,8 @@ def auth_client(monkeypatch):
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
     read_permission = Permission(code="customers:read", description="Read customers")
-    role = Role(name="viewer", permissions=[read_permission])
+    promotion_read_permission = Permission(code="promotions:read", description="Read promotions")
+    role = Role(name="viewer", permissions=[read_permission, promotion_read_permission])
     viewer = User(
         username="viewer",
         email="viewer@example.test",
@@ -80,6 +81,23 @@ def test_login_issues_a_signed_token_and_permission_is_enforced(auth_client):
         json={},
         headers={"Authorization": f"Bearer {token}"},
     ).status_code == 403
+
+
+def test_authenticated_users_with_promotions_read_permission_can_list_promotions(auth_client):
+    client, _, _ = auth_client
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "viewer", "password": "a-strong-password"},
+    )
+    token = login.json()["access_token"]
+
+    response = client.get(
+        "/api/v1/promotions",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 @pytest.mark.parametrize("token_kind", ["invalid", "expired"])

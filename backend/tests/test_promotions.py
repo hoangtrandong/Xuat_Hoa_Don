@@ -18,6 +18,8 @@ from app.api.v1.endpoints.promotions import (
     update_promotion,
 )
 from app.core.database import Base
+from app.models.customer import Customer
+from app.models.employee import Employee
 from app.models.product import Product, ProductCategory, ProductUnit
 from app.schemas.promotion import PromotionInput, PromotionRuleInput
 
@@ -31,7 +33,7 @@ def db():
         unit = ProductUnit(code="BOX", name="Box")
         session.add_all([category, unit])
         session.flush()
-        product = Product(sku="PROMO-01", name="Product", category_id=category.id, unit_id=unit.id)
+        product = Product(sku="PROMO-01", name="Product", category_id=category.id, unit_id=unit.id, supplier="Supplier A")
         session.add(product)
         session.commit()
         yield session, product.id
@@ -48,10 +50,12 @@ def _payload(product_id: int) -> PromotionInput:
         product_ids=[product_id],
         rules=[
             PromotionRuleInput(
-                trigger_type="CARTON",
-                min_cartons=2,
+                trigger_type="QUANTITY",
+                min_quantity=2,
+                quantity_unit="CARTON",
                 reward_type="FREE_QUANTITY",
                 reward_value=3,
+                reward_unit="BOX",
             )
         ],
     )
@@ -64,8 +68,11 @@ def test_promotion_crud_available_lock_and_clone(db):
 
     assert created.code.startswith("KM-")
     assert created.product_ids == [product_id]
-    assert len(available_promotions(date(2026, 11, 4), session, admin)) == 1
-    assert len(available_promotions(date(2026, 12, 1), session, admin)) == 0
+    assert created.rules[0].trigger_type == "QUANTITY"
+    assert created.rules[0].quantity_unit == "CARTON"
+    assert created.rules[0].reward_unit == "BOX"
+    assert len(available_promotions(date(2026, 11, 4), db=session, current_user=admin)) == 1
+    assert len(available_promotions(date(2026, 12, 1), db=session, current_user=admin)) == 0
 
     locked = toggle_promotion_lock(created.id, True, session, admin)
     assert locked.is_locked
@@ -81,11 +88,12 @@ def test_promotion_crud_available_lock_and_clone(db):
     assert [promotion.id for promotion in list_promotions(session, admin)] == [created.id]
 
 
-def test_promotion_management_requires_admin(db):
-    session, _ = db
+def test_authenticated_users_can_read_promotions_but_only_admins_can_create(db):
+    session, product_id = db
     user = SimpleNamespace(username="sales", roles=[])
+    assert list_promotions(session, user) == []
     with pytest.raises(HTTPException) as exc:
-        list_promotions(session, user)
+        create_promotion(_payload(product_id), session, user)
     assert exc.value.status_code == 403
 
 
@@ -97,3 +105,29 @@ def test_promotion_rules_validate_rewards():
             reward_type="DISCOUNT_PERCENT",
             reward_value=110,
         )
+
+
+def test_promotion_can_target_supplier_and_customer_employee(db):
+    session, _ = db
+    admin = SimpleNamespace(username="admin", roles=[])
+    session.add(Customer(code="0MD", name="Retail customer", type="RETAIL"))
+    session.add(Employee(code="NV001", name="Sales representative", position="Sales", phone=""))
+    session.commit()
+    supplier_payload = _payload(1).model_copy(update={
+        "product_scope": "SUPPLIER",
+        "supplier": "Supplier A",
+        "product_ids": [],
+        "target_scope": "CUSTOMER_TYPE",
+        "customer_type": "RETAIL",
+        "employee_code": "NV001",
+        "vat_rate": 8,
+    })
+    promotion = create_promotion(supplier_payload, session, admin)
+
+    assert promotion.product_scope == "SUPPLIER"
+    assert promotion.product_ids == []
+    assert promotion.customer_type == "RETAIL"
+    assert promotion.employee_code == "NV001"
+    assert promotion.vat_rate == 8
+    assert len(available_promotions(date(2026, 11, 4), "0MD", "NV001", session, admin)) == 1
+    assert available_promotions(date(2026, 11, 4), "0MD", "NV002", session, admin) == []

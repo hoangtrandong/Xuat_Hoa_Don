@@ -2499,24 +2499,44 @@ def _create_manual_order(
                 raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} đã ngừng áp dụng hoặc bị khóa.")
             if promotion.start_date.date() > order_date or promotion.end_date.date() < order_date:
                 raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} không áp dụng trong ngày đặt hàng.")
-            if not any(item.product_id == product.id for item in promotion.items):
+            if promotion.target_scope == "CUSTOMER_TYPE" and promotion.customer_type != customer.type:
+                raise HTTPException(status_code=400, detail=f"Khách hàng không thuộc đối tượng áp dụng chương trình {promotion.name}.")
+            if promotion.employee_code and promotion.employee_code.strip().casefold() != staff_code.strip().casefold():
+                raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} không áp dụng cho nhân viên này.")
+            if promotion.product_scope == "SUPPLIER":
+                if not promotion.supplier or (product.supplier or "").strip().casefold() != promotion.supplier.strip().casefold():
+                    raise HTTPException(status_code=400, detail=f"Sản phẩm {product.sku} không thuộc nhà cung cấp áp dụng của chương trình {promotion.name}.")
+            elif not any(item.product_id == product.id for item in promotion.items):
                 raise HTTPException(status_code=400, detail=f"Sản phẩm {product.sku} không thuộc chương trình {promotion.name}.")
 
             promo_quantity = 0
             discount = 0
-            carton_count = int(line.quantity // max(int(product.boxes_per_carton or 1), 1))
+            boxes_per_carton = max(int(product.boxes_per_carton or 1), 1)
             best_reward_value = -1.0
             for rule in promotion.rules:
-                if rule.trigger_type == "CARTON":
-                    threshold = int(rule.min_cartons or rule.min_qty or 1)
-                    repeats = carton_count // threshold
+                if rule.trigger_type in ("QUANTITY", "CARTON"):
+                    quantity_unit = getattr(rule, "quantity_unit", "CARTON") or "CARTON"
+                    threshold = int(
+                        getattr(rule, "min_quantity", None)
+                        or rule.min_cartons
+                        or rule.min_qty
+                        or 1
+                    )
+                    eligible_quantity = (
+                        int(line.quantity // boxes_per_carton)
+                        if quantity_unit == "CARTON"
+                        else int(line.quantity)
+                    )
+                    repeats = eligible_quantity // threshold
                 else:
                     threshold = float(rule.min_amount or 0)
                     repeats = int(value // threshold) if threshold > 0 else 0
                 if repeats <= 0:
                     continue
                 if rule.reward_type == "FREE_QUANTITY":
-                    candidate_quantity = int(rule.reward_value or rule.free_quantity) * repeats
+                    free_quantity = int(rule.reward_value or rule.free_quantity) * repeats
+                    reward_unit = getattr(rule, "reward_unit", "BOX") or "BOX"
+                    candidate_quantity = free_quantity * boxes_per_carton if reward_unit == "CARTON" else free_quantity
                     candidate_discount = 0
                 elif rule.reward_type == "DISCOUNT_PERCENT":
                     candidate_quantity = 0

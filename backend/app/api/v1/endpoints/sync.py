@@ -25,7 +25,7 @@ from app.models.customer import Company, Customer
 from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder
 from app.models.product import Product
-from app.models.promotion import Promotion
+from app.models.promotion import Promotion, PromotionRule
 from app.models.user import User
 from app.models.vinamilk import (
     VinamilkOrderReplacement,
@@ -1808,6 +1808,24 @@ def list_local_vinamilk_orders(
                 customer_manager_by_code[normalized_code] = assignment
                 if len(normalized_code) >= 3:
                     customer_managers_by_suffix[normalized_code[-3:]].append(assignment)
+    customer_codes = {
+        (row.customer_code or _field(row.raw_payload, ("customerCode", "shopCode", "Mã KH")) or "").strip().upper()
+        for row in rows
+    }
+    customers_by_code: dict[str, Customer] = {}
+    customers_by_suffix: dict[str, list[Customer]] = defaultdict(list)
+    if customer_codes:
+        customer_rows = db.scalars(
+            select(Customer)
+            .options(joinedload(Customer.store))
+            .where(func.upper(Customer.code).in_(customer_codes))
+        ).unique().all()
+        for customer_row in customer_rows:
+            normalized_code = (customer_row.code or "").strip().upper()
+            if normalized_code:
+                customers_by_code[normalized_code] = customer_row
+                if len(normalized_code) >= 3:
+                    customers_by_suffix[normalized_code[-3:]].append(customer_row)
     output_rows: list[dict[str, Any]] = []
     replaced_by: dict[str, list[str]] = defaultdict(list)
     replaced_order_for: dict[str, str] = {}
@@ -1937,6 +1955,11 @@ def list_local_vinamilk_orders(
             or _field(row.raw_payload, ("customerCode", "shopCode", "Mã KH"))
             or ""
         ).strip().upper()
+        store_customer = customers_by_code.get(customer_code)
+        if store_customer is None and len(customer_code) >= 3:
+            suffix_customers = customers_by_suffix.get(customer_code[-3:], [])
+            if len(suffix_customers) == 1:
+                store_customer = suffix_customers[0]
         manager_assignment = customer_manager_by_code.get(customer_code)
         if manager_assignment is None and len(customer_code) >= 3:
             suffix_matches = customer_managers_by_suffix.get(customer_code[-3:], [])
@@ -1960,6 +1983,7 @@ def list_local_vinamilk_orders(
             "_supplier": supplier,
             "Tình trạng xử lý đơn hàng": order_status_label,
             "Trạng thái xử lý": order_status_label,
+            "Cửa Hàng": store_customer.store.name if store_customer and store_customer.store else "",
             "Tình trạng xuất kho": d_status or "Chưa yêu cầu",
             "_delivery_status": d_status or "Chưa yêu cầu",
             "Mã NVQL": manager_code,
@@ -2485,18 +2509,29 @@ def _create_manual_order(
         promo_quantity = float(line.promo_quantity or 0)
         discount = float(line.discount_amount or 0)
         promotion = None
+        promotion_reward_products: list[dict[str, Any]] = []
         if line.promotion_id is not None:
             if order_type != "001-Xuất hàng":
                 raise HTTPException(status_code=400, detail="Đơn Dương Số không áp dụng chương trình khuyến mãi.")
             promotion = db.scalar(
                 select(Promotion)
-                .options(selectinload(Promotion.rules), selectinload(Promotion.items))
+                .options(
+                    selectinload(Promotion.rules).selectinload(PromotionRule.reward_product_links),
+                    selectinload(Promotion.items),
+                )
                 .where(Promotion.id == line.promotion_id)
             )
             if promotion is None:
                 raise HTTPException(status_code=404, detail=f"Không tìm thấy chương trình khuyến mãi ID {line.promotion_id}.")
             if not promotion.is_active or promotion.is_locked:
                 raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} đã ngừng áp dụng hoặc bị khóa.")
+            if promotion.promotion_type != "ORDER":
+                raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} không áp dụng trực tiếp trong đơn hàng.")
+            if promotion.promotion_kind != "GENERAL" or promotion.applied_quantity_unit != "STANDARD":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Chương trình {promotion.name} dùng kiểu tính khuyến mại chưa được hỗ trợ.",
+                )
             if promotion.start_date.date() > order_date or promotion.end_date.date() < order_date:
                 raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} không áp dụng trong ngày đặt hàng.")
             if promotion.target_scope == "CUSTOMER_TYPE" and promotion.customer_type != customer.type:
@@ -2508,6 +2543,29 @@ def _create_manual_order(
                     raise HTTPException(status_code=400, detail=f"Sản phẩm {product.sku} không thuộc nhà cung cấp áp dụng của chương trình {promotion.name}.")
             elif not any(item.product_id == product.id for item in promotion.items):
                 raise HTTPException(status_code=400, detail=f"Sản phẩm {product.sku} không thuộc chương trình {promotion.name}.")
+
+            selected_product_ids = {item.product_id for item in promotion.items}
+            qualifying_product_count = 0
+            for candidate_line in payload.lines:
+                candidate_product = products[candidate_line.product_code.strip().upper()]
+                matches_scope = (
+                    (promotion.product_scope == "SUPPLIER"
+                     and (candidate_product.supplier or "").strip().casefold() == (promotion.supplier or "").strip().casefold())
+                    or (promotion.product_scope == "SELECTED" and candidate_product.id in selected_product_ids)
+                )
+                if not matches_scope:
+                    continue
+                product_minimum = next(
+                    (item.min_quantity for item in promotion.items if item.product_id == candidate_product.id),
+                    1,
+                )
+                if candidate_line.quantity >= max(1, int(product_minimum or 1)):
+                    qualifying_product_count += 1
+            if qualifying_product_count < max(1, int(promotion.minimum_product_quantity or 1)):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Đơn hàng chưa đủ số lượng sản phẩm áp dụng cho chương trình {promotion.name}.",
+                )
 
             promo_quantity = 0
             discount = 0
@@ -2527,28 +2585,80 @@ def _create_manual_order(
                         if quantity_unit == "CARTON"
                         else int(line.quantity)
                     )
+                    maximum = getattr(rule, "max_quantity", None)
+                    if maximum is not None and eligible_quantity > maximum:
+                        continue
                     repeats = eligible_quantity // threshold
                 else:
                     threshold = float(rule.min_amount or 0)
+                    maximum = getattr(rule, "max_amount", None)
+                    if maximum is not None and value > maximum:
+                        continue
                     repeats = int(value // threshold) if threshold > 0 else 0
                 if repeats <= 0:
                     continue
                 if rule.reward_type == "FREE_QUANTITY":
-                    free_quantity = int(rule.reward_value or rule.free_quantity) * repeats
-                    reward_unit = getattr(rule, "reward_unit", "BOX") or "BOX"
-                    candidate_quantity = free_quantity * boxes_per_carton if reward_unit == "CARTON" else free_quantity
+                    candidate_reward_products: list[dict[str, Any]] = []
+                    candidate_reward_value = 0.0
+                    reward_groups = getattr(rule, "reward_product_details", []) or []
+                    if reward_groups:
+                        for group_index, group in enumerate(reward_groups):
+                            if not group:
+                                continue
+                            reward_detail = group[0]
+                            reward_product = db.get(Product, int(reward_detail["product_id"]))
+                            if reward_product is None:
+                                continue
+                            reward_unit = str(reward_detail.get("unit") or "BOX")
+                            reward_item_quantity = int(reward_detail.get("quantity") or 0) * repeats
+                            reward_boxes_per_carton = max(int(reward_product.boxes_per_carton or 1), 1)
+                            base_quantity = (
+                                reward_item_quantity * reward_boxes_per_carton
+                                if reward_unit == "CARTON"
+                                else reward_item_quantity
+                            )
+                            candidate_reward_value += base_quantity * float(reward_product.base_price or 0)
+                            candidate_reward_products.append({
+                                "product_id": reward_product.id,
+                                "product_code": reward_product.sku,
+                                "product_name": reward_product.name,
+                                "quantity": reward_item_quantity,
+                                "unit": reward_unit,
+                                "group_index": group_index,
+                                "base_quantity": base_quantity,
+                            })
+                    if candidate_reward_products:
+                        candidate_quantity = sum(int(detail["base_quantity"]) for detail in candidate_reward_products)
+                    else:
+                        free_quantity = int(rule.reward_value or rule.free_quantity) * repeats
+                        reward_unit = getattr(rule, "reward_unit", "BOX") or "BOX"
+                        candidate_quantity = free_quantity * boxes_per_carton if reward_unit == "CARTON" else free_quantity
+                        candidate_reward_value = candidate_quantity * price
                     candidate_discount = 0
                 elif rule.reward_type == "DISCOUNT_PERCENT":
                     candidate_quantity = 0
                     candidate_discount = value * float(rule.reward_value or rule.discount_percent) / 100 * repeats
+                    candidate_reward_products = []
+                    candidate_reward_value = 0.0
                 else:
                     candidate_quantity = 0
                     candidate_discount = float(rule.reward_value or rule.discount_amount) * repeats
-                reward_value = candidate_quantity * price + min(value, candidate_discount)
+                    candidate_reward_products = []
+                    candidate_reward_value = 0.0
+                reward_value = candidate_reward_value + min(value, candidate_discount)
                 if reward_value > best_reward_value:
                     best_reward_value = reward_value
                     promo_quantity = candidate_quantity
                     discount = candidate_discount
+                    promotion_reward_products = [
+                        {key: value for key, value in detail.items() if key != "base_quantity"}
+                        for detail in candidate_reward_products
+                    ]
+            if best_reward_value < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Sản phẩm {product.sku} chưa đạt điều kiện của chương trình {promotion.name}.",
+                )
         discount = min(discount, value)
         total_value += value - discount
         unit_name = (product.unit.code if product.unit else "") or ""
@@ -2577,6 +2687,7 @@ def _create_manual_order(
             "Số thùng": line.cartons if line.cartons is not None else int(line.quantity // max(int(product.boxes_per_carton or 1), 1)),
             "Số hộp": line.boxes if line.boxes is not None else float(line.quantity % max(int(product.boxes_per_carton or 1), 1)),
             "Số lượng KM": promo_quantity,
+            "Sản phẩm khuyến mãi": promotion_reward_products,
             "Giá trị": value,
             "Tỉ lệ CK": round(discount / value * 100, 2) if value and discount else "",
             "Số tiền CK": discount if discount else "",

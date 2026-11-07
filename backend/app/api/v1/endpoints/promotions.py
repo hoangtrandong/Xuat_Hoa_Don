@@ -9,7 +9,7 @@ from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.models.customer import Customer
 from app.models.product import Product
-from app.models.promotion import Promotion, PromotionItem, PromotionRule
+from app.models.promotion import Promotion, PromotionItem, PromotionRule, PromotionRuleRewardProduct
 from app.models.user import User
 from app.schemas.promotion import PromotionInput, PromotionOutput, PromotionStatusUpdate
 
@@ -27,7 +27,10 @@ def _require_admin(user: User) -> None:
 def _load_promotion(db: Session, promotion_id: int) -> Promotion:
     promotion = db.scalar(
         select(Promotion)
-        .options(selectinload(Promotion.rules), selectinload(Promotion.items))
+        .options(
+            selectinload(Promotion.rules).selectinload(PromotionRule.reward_product_links),
+            selectinload(Promotion.items),
+        )
         .where(Promotion.id == promotion_id)
     )
     if promotion is None:
@@ -66,6 +69,14 @@ def _new_code() -> str:
 
 
 def _replace_details(db: Session, promotion: Promotion, payload: PromotionInput) -> None:
+    if payload.promotion_kind != "GENERAL":
+        raise HTTPException(
+            status_code=400,
+            detail="Kiểu tổng hóa đơn/tổng nhóm sản phẩm chưa được hỗ trợ.",
+        )
+    if payload.applied_quantity_unit != "STANDARD":
+        raise HTTPException(status_code=400, detail="Hiện chỉ hỗ trợ đơn vị tính chuẩn.")
+
     product_ids = set(payload.product_ids)
     if product_ids:
         existing_products = set(db.scalars(select(Product.id).where(Product.id.in_(product_ids))).all())
@@ -90,7 +101,17 @@ def _replace_details(db: Session, promotion: Promotion, payload: PromotionInput)
         if employee is None:
             raise HTTPException(status_code=400, detail="Nhân viên áp dụng không tồn tại hoặc không hoạt động.")
 
-    reward_product_ids = {rule.reward_product_id for rule in payload.rules if rule.reward_product_id is not None}
+    reward_product_ids = {
+        product_id
+        for rule in payload.rules
+        for product_id in [
+            *[item for group in rule.reward_product_groups for item in group],
+            *[item.product_id for group in rule.reward_product_details for item in group],
+            *rule.reward_product_ids,
+            rule.reward_product_id,
+        ]
+        if product_id is not None
+    }
     if reward_product_ids:
         existing_reward_products = set(
             db.scalars(select(Product.id).where(Product.id.in_(reward_product_ids))).all()
@@ -120,24 +141,65 @@ def _replace_details(db: Session, promotion: Promotion, payload: PromotionInput)
         )
         for product_id in sorted(product_ids)
     ]
-    promotion.rules = [
-        PromotionRule(
+    promotion.rules = []
+    for rule in payload.rules:
+        details = rule.reward_product_details
+        if details:
+            reward_entries = [
+                [
+                    (item.product_id, item.quantity, item.unit)
+                    for item in group
+                ]
+                for group in details
+            ]
+        else:
+            groups = rule.reward_product_groups
+            if not groups:
+                legacy_ids = list(dict.fromkeys([
+                    *rule.reward_product_ids,
+                    *([rule.reward_product_id] if rule.reward_product_id is not None else []),
+                ]))
+                groups = [legacy_ids] if rule.reward_product_operator == "OR" else [[product_id] for product_id in legacy_ids]
+            reward_entries = [
+                [
+                    (product_id, int(rule.reward_value or 1), rule.reward_unit)
+                    for product_id in group
+                ]
+                for group in groups
+            ]
+        groups = [
+            [product_id for product_id, _, _ in group]
+            for group in reward_entries
+        ]
+        product_groups = [
+            PromotionRuleRewardProduct(
+                product_id=product_id,
+                group_index=group_index,
+                quantity=quantity,
+                unit=unit,
+            )
+            for group_index, group in enumerate(reward_entries)
+            for product_id, quantity, unit in group
+        ]
+        promotion.rules.append(PromotionRule(
             trigger_type=rule.trigger_type,
             min_qty=rule.min_quantity or 1,
             min_cartons=rule.min_quantity if rule.quantity_unit == "CARTON" else None,
             min_quantity=rule.min_quantity,
+            max_quantity=rule.max_quantity,
             quantity_unit=rule.quantity_unit,
             min_amount=rule.min_amount,
+            max_amount=rule.max_amount,
             reward_type=rule.reward_type,
             reward_value=rule.reward_value,
             free_quantity=int(rule.reward_value) if rule.reward_type == "FREE_QUANTITY" else 0,
             reward_unit=rule.reward_unit,
+            reward_product_operator=rule.reward_product_operator,
             discount_amount=rule.reward_value if rule.reward_type == "DISCOUNT_AMOUNT" else 0,
             discount_percent=rule.reward_value if rule.reward_type == "DISCOUNT_PERCENT" else 0,
-            reward_product_id=rule.reward_product_id,
-        )
-        for rule in payload.rules
-    ]
+            reward_product_id=next((product_id for group in groups for product_id in group), rule.reward_product_id),
+            reward_product_links=product_groups,
+        ))
 
 
 @router.get("", response_model=list[PromotionOutput])
@@ -147,7 +209,10 @@ def list_promotions(
 ):
     promotions = db.scalars(
         select(Promotion)
-        .options(selectinload(Promotion.rules), selectinload(Promotion.items))
+        .options(
+            selectinload(Promotion.rules).selectinload(PromotionRule.reward_product_links),
+            selectinload(Promotion.items),
+        )
         .order_by(Promotion.start_date.desc(), Promotion.id.desc())
     ).all()
     return [_to_output(promotion) for promotion in promotions]
@@ -171,11 +236,16 @@ def available_promotions(
             raise HTTPException(status_code=404, detail=f"Không tìm thấy khách hàng {customer_code}.")
     promotions = db.scalars(
         select(Promotion)
-        .options(selectinload(Promotion.rules), selectinload(Promotion.items))
+        .options(
+            selectinload(Promotion.rules).selectinload(PromotionRule.reward_product_links),
+            selectinload(Promotion.items),
+        )
         .where(
             Promotion.is_active.is_(True),
             Promotion.is_locked.is_(False),
             Promotion.promotion_type == "ORDER",
+            Promotion.promotion_kind == "GENERAL",
+            Promotion.applied_quantity_unit == "STANDARD",
             Promotion.start_date < day_end,
             Promotion.end_date >= day_start,
         )
@@ -316,13 +386,25 @@ def clone_promotion(
                 trigger_type=rule.trigger_type,
                 min_cartons=rule.min_cartons,
                 min_quantity=rule.min_quantity,
+                max_quantity=rule.max_quantity,
                 quantity_unit=rule.quantity_unit,
                 min_amount=rule.min_amount,
+                max_amount=rule.max_amount,
                 free_quantity=rule.free_quantity,
                 reward_unit=rule.reward_unit,
                 reward_type=rule.reward_type,
                 reward_value=rule.reward_value,
+                reward_product_operator=rule.reward_product_operator,
                 reward_product_id=rule.reward_product_id,
+                reward_product_links=[
+                    PromotionRuleRewardProduct(
+                        product_id=link.product_id,
+                        group_index=link.group_index,
+                        quantity=link.quantity,
+                        unit=link.unit,
+                    )
+                    for link in rule.reward_product_links
+                ],
             )
             for rule in original.rules
         ],

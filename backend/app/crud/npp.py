@@ -64,3 +64,7 @@ class NppDirectory:
     def label(self, product_id: int, fallback_code: str, fallback_name: str) -> tuple[str, str]:
         rep = self.rep_of.get(product_id)
         return self.labels.get(rep, (fallback_code, fallback_name)) if rep else (fallback_code, fallback_name)
+
+    def code(self, product_id: int, fallback_code: str) -> str:
+        rep = self.rep_of.get(product_id)
+        return self.labels.get(rep, (fallback_code, ""))[0] if rep else fallback_code

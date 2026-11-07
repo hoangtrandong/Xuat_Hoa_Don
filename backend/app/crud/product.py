@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from app.models.product import Product, PriceList, PriceListItem, ProductGroup, ProductGroupItem
 from app.schemas.product import ProductCreate, PriceListCreate
+from app.crud.npp import NppDirectory
 
 
 def get(db: Session, product_id: int) -> Optional[Product]:
@@ -31,10 +32,12 @@ def list_(db: Session, skip: int = 0, limit: int = 100, category_id: Optional[in
     )).all()
 
     rep_map = {row.product_id: (row.rep_sku, row.rep_name) for row in rep_rows}
+    npp_directory = NppDirectory(db)
     for product in products:
         rep = rep_map.get(product.id)
         product._rep_sku_cache = rep[0] if rep else None
         product._rep_name_cache = rep[1] if rep else None
+        product._npp_code_cache = npp_directory.code(product.id, product.sku)
 
     return products
 

@@ -22,7 +22,8 @@ from app.core.database import Base
 from app.models.customer import Customer
 from app.models.employee import Employee
 from app.models.product import Product, ProductCategory, ProductUnit
-from app.schemas.promotion import PromotionInput, PromotionRuleInput
+from app.models.promotion import Promotion, PromotionItem, PromotionRule
+from app.schemas.promotion import PromotionInput, PromotionRuleInput, RewardProductInput
 
 
 @pytest.fixture
@@ -82,6 +83,21 @@ def test_promotion_crud_available_lock_and_clone(db):
     assert len(available_promotions(date(2026, 11, 4), db=session, current_user=admin)) == 1
     assert len(available_promotions(date(2026, 12, 1), db=session, current_user=admin)) == 0
 
+    legacy = Promotion(
+        code="KM-LEGACY-INVOICE",
+        name="Legacy invoice amount",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30, 23, 59, 59),
+        is_active=True,
+        promotion_kind="INVOICE_AMOUNT",
+        items=[PromotionItem(product_id=product_id)],
+        rules=[PromotionRule(trigger_type="AMOUNT", min_amount=50000, reward_type="DISCOUNT_AMOUNT", reward_value=1000)],
+    )
+    session.add(legacy)
+    session.commit()
+    available = available_promotions(date(2026, 11, 4), db=session, current_user=admin)
+    assert [promotion.id for promotion in available] == [created.id]
+
     locked = toggle_promotion_lock(created.id, True, session, admin)
     assert locked.is_locked
     with pytest.raises(HTTPException) as exc:
@@ -93,7 +109,7 @@ def test_promotion_crud_available_lock_and_clone(db):
     assert clone.is_active is False
     assert clone.product_ids == [product_id]
     delete_promotion(clone.id, session, admin)
-    assert [promotion.id for promotion in list_promotions(session, admin)] == [created.id]
+    assert [promotion.id for promotion in list_promotions(session, admin)] == [legacy.id, created.id]
 
 
 def test_authenticated_users_can_read_promotions_but_only_admins_can_create(db):
@@ -115,26 +131,128 @@ def test_promotion_rules_validate_rewards():
         )
 
 
+def test_promotion_rules_validate_range_bounds():
+    with pytest.raises(ValueError, match="Số lượng đến"):
+        PromotionRuleInput(
+            trigger_type="QUANTITY",
+            min_quantity=5,
+            max_quantity=4,
+            reward_type="FREE_QUANTITY",
+            reward_value=1,
+        )
+    with pytest.raises(ValueError, match="Giá trị đến"):
+        PromotionRuleInput(
+            trigger_type="AMOUNT",
+            min_amount=50000,
+            max_amount=40000,
+            reward_type="DISCOUNT_AMOUNT",
+            reward_value=1000,
+        )
+
+
+def test_promotion_rejects_unsupported_total_amount_modes(db):
+    session, product_id = db
+    payload = _payload(product_id).model_dump()
+    payload["promotion_kind"] = "INVOICE_AMOUNT"
+    with pytest.raises(ValueError, match="chưa được hỗ trợ"):
+        PromotionInput.model_validate(payload)
+
+    payload["promotion_kind"] = "GENERAL"
+    payload["applied_quantity_unit"] = "SECONDARY"
+    with pytest.raises(ValueError, match="đơn vị tính chuẩn"):
+        PromotionInput.model_validate(payload)
+
+
 def test_promotion_form_metadata_and_reward_product_round_trip(db):
     session, product_id = db
     admin = SimpleNamespace(username="admin", roles=[])
+    reward_product = Product(
+        sku="PROMO-REWARD-02",
+        name="Second reward product",
+        category_id=session.get(Product, product_id).category_id,
+        unit_id=session.get(Product, product_id).unit_id,
+        supplier="Supplier A",
+    )
+    session.add(reward_product)
+    session.commit()
     payload = _payload(product_id)
-    payload.promotion_kind = "PRODUCT_AMOUNT"
-    payload.applied_quantity_unit = "SECONDARY"
+    payload.applied_quantity_unit = "STANDARD"
     payload.minimum_product_quantity = 3
     payload.product_min_quantities = {product_id: 5}
     payload.rules[0].reward_product_id = product_id
+    payload.rules[0].reward_product_ids = [product_id, reward_product.id]
+    payload.rules[0].reward_product_operator = "OR"
+    payload.rules[0].max_quantity = 5
 
     created = create_promotion(payload, session, admin)
-    assert created.promotion_kind == "PRODUCT_AMOUNT"
-    assert created.applied_quantity_unit == "SECONDARY"
+    assert created.promotion_kind == "GENERAL"
+    assert created.applied_quantity_unit == "STANDARD"
     assert created.minimum_product_quantity == 3
     assert created.product_min_quantities == {product_id: 5}
     assert created.rules[0].reward_product_id == product_id
+    assert created.rules[0].max_quantity == 5
+
+    assert created.rules[0].reward_product_ids == [product_id, reward_product.id]
+    assert created.rules[0].reward_product_operator == "OR"
 
     clone = clone_promotion(created.id, session, admin)
     assert clone.product_min_quantities == {product_id: 5}
     assert clone.rules[0].reward_product_id == product_id
+    assert clone.rules[0].reward_product_ids == [product_id, reward_product.id]
+    assert clone.rules[0].reward_product_operator == "OR"
+    assert clone.rules[0].max_quantity == 5
+
+
+def test_promotion_reward_product_and_or_groups_round_trip_and_clone(db):
+    session, product_id = db
+    admin = SimpleNamespace(username="admin", roles=[])
+    category_id = session.get(Product, product_id).category_id
+    unit_id = session.get(Product, product_id).unit_id
+    alternative = Product(
+        sku="PROMO-ALT",
+        name="Alternative reward",
+        category_id=category_id,
+        unit_id=unit_id,
+        supplier="Supplier A",
+    )
+    additional = Product(
+        sku="PROMO-AND",
+        name="Additional reward",
+        category_id=category_id,
+        unit_id=unit_id,
+        supplier="Supplier A",
+    )
+    session.add_all([alternative, additional])
+    session.commit()
+
+    payload = _payload(product_id)
+    payload.rules[0].reward_product_details = [
+        [
+            RewardProductInput(product_id=product_id, quantity=2, unit="BOX"),
+            RewardProductInput(product_id=alternative.id, quantity=1, unit="CARTON"),
+        ],
+        [RewardProductInput(product_id=additional.id, quantity=4, unit="BOX")],
+    ]
+    created = create_promotion(payload, session, admin)
+
+    assert created.rules[0].reward_product_groups == [[product_id, alternative.id], [additional.id]]
+    expected_details = [
+        [
+            {"product_id": product_id, "quantity": 2, "unit": "BOX"},
+            {"product_id": alternative.id, "quantity": 1, "unit": "CARTON"},
+        ],
+        [{"product_id": additional.id, "quantity": 4, "unit": "BOX"}],
+    ]
+    assert [
+        [item.model_dump() for item in group]
+        for group in created.rules[0].reward_product_details
+    ] == expected_details
+    clone = clone_promotion(created.id, session, admin)
+    assert clone.rules[0].reward_product_groups == [[product_id, alternative.id], [additional.id]]
+    assert [
+        [item.model_dump() for item in group]
+        for group in clone.rules[0].reward_product_details
+    ] == expected_details
 
 
 def test_promotion_can_target_supplier_and_customer_employee(db):
@@ -152,7 +270,7 @@ def test_promotion_can_target_supplier_and_customer_employee(db):
         "employee_code": "NV001",
         "vat_rate": 8,
         "promotion_type": "ORDER",
-        "promotion_kind": "INVOICE_AMOUNT",
+        "promotion_kind": "GENERAL",
     })
     promotion = create_promotion(supplier_payload, session, admin)
 
@@ -162,6 +280,6 @@ def test_promotion_can_target_supplier_and_customer_employee(db):
     assert promotion.employee_code == "NV001"
     assert promotion.vat_rate == 8
     assert promotion.promotion_type == "ORDER"
-    assert promotion.promotion_kind == "INVOICE_AMOUNT"
+    assert promotion.promotion_kind == "GENERAL"
     assert len(available_promotions(date(2026, 11, 4), "0MD", "NV001", session, admin)) == 1
     assert available_promotions(date(2026, 11, 4), "0MD", "NV002", session, admin) == []

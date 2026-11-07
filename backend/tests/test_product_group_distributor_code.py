@@ -15,6 +15,8 @@ from app.models.product import (
     ProductGroupItem,
     ProductUnit,
 )
+from app.crud.product import list_ as list_products
+from app.schemas.product import Product as ProductSchema
 from app.schemas.product_group import ProductGroupDistributorCodeUpdate
 
 
@@ -135,3 +137,13 @@ def test_update_distributor_code_rejects_numeric_code_with_wrong_width(group_db)
         )
 
     assert error.value.status_code == 422
+
+
+def test_product_list_exposes_distributor_sku_for_inventory_lookup(group_db):
+    db, _, _, _ = group_db
+
+    product = list_products(db, limit=100)[0]
+    response = ProductSchema.model_validate(product)
+
+    assert response.sku == "NPPTEST01"
+    assert response.npp_code == "0001"

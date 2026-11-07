@@ -18,11 +18,11 @@ from app.api.v1.endpoints.sync import (
 from app.api.v1.endpoints.delivery_requests import submit_request
 from app.core.database import Base
 from app.crud import customer as customer_crud
-from app.models.customer import Customer
+from app.models.customer import Customer, Store
 from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder, Warehouse
 from app.models.product import Product, ProductCategory, ProductUnit
-from app.models.promotion import Promotion, PromotionItem, PromotionRule
+from app.models.promotion import Promotion, PromotionItem, PromotionRule, PromotionRuleRewardProduct
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.schemas.customer import CustomerCreate
 
@@ -89,6 +89,20 @@ def test_manual_order_shows_in_order_list_with_supplier(db):
     assert rows[0]["Trạng thái tạo đơn"] == "001-Xuất hàng"
     assert rows[0]["Mã NVQL"] == "NV001"
     assert rows[0]["Tên NVQL"] == "Nguyễn An"
+
+
+def test_order_list_shows_store_from_customer_code(db):
+    customer = db.scalar(select(Customer).where(Customer.code == "0MD"))
+    customer.store = Store(code="STORE-0MD", name="Cửa hàng Nam Thúy")
+    db.commit()
+    _create_manual_order(db, _payload(), performed_by="admin")
+
+    response = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+    assert response["rows"][0]["Cửa Hàng"] == "Cửa hàng Nam Thúy"
+    assert response["rows"][0]["Cửa Hàng"] == "Cửa hàng Nam Thúy"
 
 
 def test_order_list_resolves_manager_by_last_three_customer_code_characters(db):
@@ -327,6 +341,89 @@ def test_manual_order_applies_promotion_server_side_and_saves_entry_metadata(db)
     assert row.raw_payload["Tuyến bán hàng"] == "Tuyến A"
 
 
+def test_manual_order_uses_registered_reward_products_and_quantities(db):
+    product = db.scalar(select(Product).where(Product.sku == "01VD41"))
+    product.boxes_per_carton = 10
+    category = db.scalar(select(ProductCategory).where(ProductCategory.code == "SUA"))
+    unit = db.scalar(select(ProductUnit).where(ProductUnit.code == "HOP"))
+    reward_products = [
+        Product(sku="GIFT-A", name="Quà A", category_id=category.id, unit_id=unit.id,
+                supplier="Vinamilk", base_price=100, boxes_per_carton=1),
+        Product(sku="GIFT-ALT", name="Quà thay thế", category_id=category.id, unit_id=unit.id,
+                supplier="Vinamilk", base_price=200, boxes_per_carton=12),
+        Product(sku="GIFT-B", name="Quà B", category_id=category.id, unit_id=unit.id,
+                supplier="Vinamilk", base_price=300, boxes_per_carton=1),
+    ]
+    db.add_all(reward_products)
+    db.flush()
+    promotion = Promotion(
+        code="KM-TEST-GIFTS",
+        name="Quà đăng ký theo nhóm",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30, 23, 59, 59),
+        is_active=True,
+        items=[PromotionItem(product_id=product.id)],
+        rules=[
+            PromotionRule(
+                trigger_type="QUANTITY",
+                quantity_unit="CARTON",
+                min_cartons=1,
+                min_quantity=1,
+                min_qty=1,
+                reward_type="FREE_QUANTITY",
+                reward_value=99,
+                free_quantity=99,
+                reward_product_links=[
+                    PromotionRuleRewardProduct(
+                        product_id=reward_products[0].id, group_index=0, quantity=2, unit="BOX",
+                    ),
+                    PromotionRuleRewardProduct(
+                        product_id=reward_products[1].id, group_index=0, quantity=1, unit="CARTON",
+                    ),
+                    PromotionRuleRewardProduct(
+                        product_id=reward_products[2].id, group_index=1, quantity=3, unit="BOX",
+                    ),
+                ],
+            )
+        ],
+    )
+    db.add(promotion)
+    db.commit()
+
+    result = _create_manual_order(
+        db,
+        _payload(lines=[
+            ManualOrderLine(
+                product_code="01VD41",
+                quantity=10,
+                promo_quantity=999,
+                promotion_id=promotion.id,
+            )
+        ]),
+    )
+
+    row = db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == result["order_number"]))
+    assert row.raw_payload["Số lượng KM"] == 5
+    assert row.raw_payload["Sản phẩm khuyến mãi"] == [
+        {
+            "product_id": reward_products[0].id,
+            "product_code": "GIFT-A",
+            "product_name": "Quà A",
+            "quantity": 2,
+            "unit": "BOX",
+            "group_index": 0,
+        },
+        {
+            "product_id": reward_products[2].id,
+            "product_code": "GIFT-B",
+            "product_name": "Quà B",
+            "quantity": 3,
+            "unit": "BOX",
+            "group_index": 1,
+        },
+    ]
+
+
 def test_manual_order_rejects_locked_promotion(db):
     product = db.scalar(select(Product).where(Product.sku == "01VD41"))
     promotion = Promotion(
@@ -358,6 +455,90 @@ def test_manual_order_rejects_locked_promotion(db):
     assert exc.value.status_code == 400
 
 
+def test_manual_order_rejects_promotion_with_unsupported_total_amount_basis(db):
+    product = db.scalar(select(Product).where(Product.sku == "01VD41"))
+    promotion = Promotion(
+        code="KM-TEST-INVOICE",
+        name="Tổng hóa đơn chưa hỗ trợ",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30, 23, 59, 59),
+        is_active=True,
+        promotion_kind="INVOICE_AMOUNT",
+        items=[PromotionItem(product_id=product.id)],
+        rules=[PromotionRule(
+            trigger_type="AMOUNT",
+            min_amount=50000,
+            reward_type="DISCOUNT_AMOUNT",
+            reward_value=1000,
+        )],
+    )
+    db.add(promotion)
+    db.commit()
+
+    with pytest.raises(HTTPException, match="kiểu tính khuyến mại chưa được hỗ trợ"):
+        _create_manual_order(
+            db,
+            _payload(lines=[ManualOrderLine(product_code="01VD41", quantity=10, promotion_id=promotion.id)]),
+        )
+
+
+def test_manual_order_enforces_minimum_number_of_qualifying_products(db):
+    product = db.scalar(select(Product).where(Product.sku == "01VD41"))
+    second_product = Product(
+        sku="02VD41",
+        name="Sản phẩm thứ hai",
+        category_id=product.category_id,
+        unit_id=product.unit_id,
+        supplier=product.supplier,
+        base_price=1000,
+    )
+    db.add(second_product)
+    db.flush()
+    promotion = Promotion(
+        code="KM-TEST-MIN-PRODUCTS",
+        name="Hai sản phẩm áp dụng",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30, 23, 59, 59),
+        is_active=True,
+        minimum_product_quantity=2,
+        items=[
+            PromotionItem(product_id=product.id, min_quantity=2),
+            PromotionItem(product_id=second_product.id, min_quantity=2),
+        ],
+        rules=[PromotionRule(
+            trigger_type="QUANTITY",
+            quantity_unit="BOX",
+            min_quantity=1,
+            min_qty=1,
+            reward_type="DISCOUNT_AMOUNT",
+            reward_value=100,
+        )],
+    )
+    db.add(promotion)
+    db.commit()
+
+    with pytest.raises(HTTPException, match="chưa đủ số lượng sản phẩm áp dụng"):
+        _create_manual_order(
+            db,
+            _payload(lines=[
+                ManualOrderLine(product_code="01VD41", quantity=2, promotion_id=promotion.id),
+            ]),
+        )
+    result = _create_manual_order(
+        db,
+        _payload(lines=[
+            ManualOrderLine(product_code="01VD41", quantity=2, promotion_id=promotion.id),
+            ManualOrderLine(product_code="02VD41", quantity=2),
+        ]),
+    )
+    row = db.scalar(
+        select(VinamilkOrderSnapshot)
+        .where(VinamilkOrderSnapshot.order_number == result["order_number"])
+        .where(VinamilkOrderSnapshot.product_code == "01VD41")
+    )
+    assert row.raw_payload["Mã CTKM"] == "KM-TEST-MIN-PRODUCTS"
+
+
 def test_manual_order_promotion_can_trigger_and_reward_in_boxes(db):
     product = db.scalar(select(Product).where(Product.sku == "01VD41"))
     product.boxes_per_carton = 10
@@ -387,6 +568,84 @@ def test_manual_order_promotion_can_trigger_and_reward_in_boxes(db):
     )
     row = db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == result["order_number"]))
     assert row.raw_payload["Số lượng KM"] == 2
+
+
+def test_manual_order_promotion_respects_quantity_range(db):
+    product = db.scalar(select(Product).where(Product.sku == "01VD41"))
+    product.boxes_per_carton = 10
+    promotion = Promotion(
+        code="KM-TEST-RANGE",
+        name="Khuyến mại theo khoảng thùng",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30, 23, 59, 59),
+        is_active=True,
+        items=[PromotionItem(product_id=product.id)],
+        rules=[
+            PromotionRule(
+                trigger_type="QUANTITY",
+                quantity_unit="CARTON",
+                min_quantity=1,
+                max_quantity=1,
+                reward_type="FREE_QUANTITY",
+                reward_value=2,
+            )
+        ],
+    )
+    db.add(promotion)
+    db.commit()
+
+    eligible = _create_manual_order(
+        db,
+        _payload(lines=[ManualOrderLine(product_code="01VD41", quantity=10, promotion_id=promotion.id)]),
+    )
+    with pytest.raises(HTTPException, match="chưa đạt điều kiện"):
+        _create_manual_order(
+            db,
+            _payload(lines=[ManualOrderLine(product_code="01VD41", quantity=20, promotion_id=promotion.id)]),
+        )
+
+    eligible_row = db.scalar(
+        select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == eligible["order_number"])
+    )
+    assert eligible_row.raw_payload["Số lượng KM"] == 2
+
+
+def test_manual_order_promotion_respects_amount_range(db):
+    product = db.scalar(select(Product).where(Product.sku == "01VD41"))
+    promotion = Promotion(
+        code="KM-TEST-AMOUNT-RANGE",
+        name="Khuyến mại theo khoảng giá trị",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30, 23, 59, 59),
+        is_active=True,
+        items=[PromotionItem(product_id=product.id)],
+        rules=[
+            PromotionRule(
+                trigger_type="AMOUNT",
+                min_amount=40000,
+                max_amount=50000,
+                reward_type="DISCOUNT_AMOUNT",
+                reward_value=1000,
+            )
+        ],
+    )
+    db.add(promotion)
+    db.commit()
+
+    eligible = _create_manual_order(
+        db,
+        _payload(lines=[ManualOrderLine(product_code="01VD41", quantity=10, promotion_id=promotion.id)]),
+    )
+    with pytest.raises(HTTPException, match="chưa đạt điều kiện"):
+        _create_manual_order(
+            db,
+            _payload(lines=[ManualOrderLine(product_code="01VD41", quantity=20, promotion_id=promotion.id)]),
+        )
+
+    eligible_row = db.scalar(
+        select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == eligible["order_number"])
+    )
+    assert eligible_row.raw_payload["Số tiền CK"] == 1000
 
 
 def test_manual_order_accepts_supplier_promotion_for_matching_customer_employee_and_sku(db):

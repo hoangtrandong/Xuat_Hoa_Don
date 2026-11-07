@@ -19,12 +19,12 @@ import {
   XCircle,
   Download,
 } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
+import CreateOrderForm from "@/components/sales/CreateOrderForm";
 import { formatVND } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
@@ -276,7 +276,6 @@ const remoteColumnDefinitions: {
   truncate?: boolean;
 }[] = [
   { title: "Số đơn hàng", keys: ["orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"], width: "9rem" },
-  { title: "Trạng thái tạo đơn", keys: ["Trạng thái tạo đơn", "orderType", "_order_type"], width: "10.5rem" },
   { title: "Mã CTKM", keys: ["promotionCode", "campaignCode", "ctkmCode", "promotionId", "Mã CTKM"], width: "11rem", truncate: true },
   { title: "Tên CTKM", keys: ["promotionName", "campaignName", "Tên CTKM"], width: "16rem", truncate: true },
   { title: "Ngày tạo", keys: ["createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày"], width: "10.5rem" },
@@ -285,6 +284,7 @@ const remoteColumnDefinitions: {
   { title: "Tên NVBH", keys: ["staffName", "salesStaffName", "Tên NVBH"], width: "10rem", truncate: true },
   { title: "Mã KH", keys: ["customerCode", "shopCode", "Mã KH"], width: "8rem" },
   { title: "Tên KH", keys: ["customerName", "shopName", "Tên KH"], width: "12rem", truncate: true },
+  { title: "Cửa Hàng", keys: ["Cửa Hàng", "store_name", "storeName"], width: "12rem", truncate: true },
   { title: "Mã NVQL", keys: ["Mã NVQL", "_manager_code"], width: "7.5rem" },
   { title: "Tên NVQL", keys: ["Tên NVQL", "_manager_name"], width: "10rem", truncate: true },
   { title: "Địa chỉ", keys: ["address", "customerAddress", "shipTo", "Địa chỉ"], width: "14rem", truncate: true },
@@ -320,6 +320,7 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
       return [title, sourceKey ? order[sourceKey] : null];
     })
   );
+  normalized["_order_type"] = order["_order_type"] ?? order["Trạng thái tạo đơn"] ?? order.orderType ?? null;
   normalized["Trạng thái"] = order.orderStatus ?? order.status ?? null;
   const replacementDisplay = hasRemoteValue(order["_replacement_display"])
     ? order["_replacement_display"]
@@ -369,7 +370,12 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
 function addProcessingStatus(order: RemoteOrder): RemoteOrder {
   const procStatus = displayRemoteValue(order["_processing_status"]).trim();
   const whStatus = order["_warehouse_updated"] === true ? "Đã cập nhật kho" : "";
-  const finalStatus = procStatus || whStatus || "Chưa xử lý";
+  const orderType = displayRemoteValue(order["_order_type"]).trim();
+  const processingStatus = procStatus || whStatus || "Chưa xử lý";
+  const visibleProcessingStatus = processingStatus === "Đơn Tự Tạo" ? "" : processingStatus;
+  const finalStatus = orderType
+    ? [orderType, visibleProcessingStatus].filter(Boolean).join(" · ")
+    : processingStatus;
   return {
     ...order,
     "Tình trạng xử lý đơn hàng": finalStatus,
@@ -425,6 +431,7 @@ export default function SalesOrdersPage() {
   const todayInputStr = toInputDate(new Date());
 
   const [toast, setToast] = useState("");
+  const [isCreateOrderOpen, setIsCreateOrderOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const defaultDateRange = getDefaultDateRange();
   const [fromDate, setFromDate] = useState(defaultDateRange.from);
@@ -509,6 +516,15 @@ export default function SalesOrdersPage() {
     const created = window.sessionStorage.getItem("dms-order-created");
     if (created) window.sessionStorage.removeItem("dms-order-created");
   }, []);
+
+  useEffect(() => {
+    if (!isCreateOrderOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsCreateOrderOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isCreateOrderOpen]);
 
   useEffect(() => {
     apiFetch(`${API_URL}/auth/me`)
@@ -2601,6 +2617,32 @@ return Array.from(map.values());
 
   return (
     <div className="space-y-6">
+      {isCreateOrderOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 p-2 sm:p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setIsCreateOrderOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Tạo đơn hàng"
+            className="max-h-[96vh] w-full max-w-[1500px] overflow-y-auto"
+          >
+            <CreateOrderForm
+              onClose={() => setIsCreateOrderOpen(false)}
+              onSaved={(orderNumber) => {
+                setIsCreateOrderOpen(false);
+                setToast(`Đơn hàng ${orderNumber} đã được tạo.`);
+                void loadLocalOrders().catch((error) => {
+                  setRemoteError(error instanceof Error ? error.message : "Không thể tải lại danh sách đơn hàng.");
+                });
+              }}
+            />
+          </div>
+        </div>
+      )}
       {toast && (
         <div className="flex items-center justify-between gap-3 bg-sky-50 text-sky-700 rounded-xl px-4 py-3 text-sm">
           <span className="flex items-center gap-2"><CheckCircle2 size={16} /> <strong>{toast}</strong></span>
@@ -2666,10 +2708,10 @@ return Array.from(map.values());
               <Merge size={16} />
               Gộp đơn
             </button>
-            <Link href="/sales/create" className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+            <button type="button" onClick={() => setIsCreateOrderOpen(true)} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
               <Plus size={16} />
               Tạo đơn hàng
-            </Link>
+            </button>
           </div>
         }
       />

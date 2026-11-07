@@ -49,6 +49,7 @@ class Product(ProductBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
     created_at: datetime
+    npp_code: Optional[str] = None
     representative_sku: Optional[str] = None
     representative_name: Optional[str] = None
 

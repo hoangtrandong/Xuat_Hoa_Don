@@ -53,6 +53,8 @@ class Product(Base):
 
     @property
     def npp_code(self) -> str:
+        if hasattr(self, "_npp_code_cache"):
+            return self._npp_code_cache
         group = self.group_items[0].group if self.group_items else None
         if group:
             for link in group.company_links:

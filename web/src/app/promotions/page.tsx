@@ -18,7 +18,8 @@ interface ProductOption {
   basePrice: number;
 }
 
-interface EmployeeOption {
+interface StoreOption {
+  id: number;
   code: string;
   name: string;
   status: string;
@@ -60,8 +61,9 @@ interface Promotion {
   is_locked: boolean;
   promotion_type: "ORDER" | "AFTER_SALES";
   promotion_kind: "GENERAL" | "INVOICE_AMOUNT" | "PRODUCT_AMOUNT";
-  target_scope: "ALL" | "CUSTOMER_TYPE";
+  target_scope: "ALL" | "CUSTOMER_TYPE" | "STORES";
   customer_type: string | null;
+  store_ids: number[];
   employee_code: string | null;
   vat_rate: number;
   product_scope: "SELECTED" | "SUPPLIER";
@@ -114,6 +116,7 @@ function newForm(): PromotionForm {
     promotion_kind: "GENERAL",
     target_scope: "ALL",
     customer_type: null,
+    store_ids: [],
     employee_code: null,
     vat_rate: 0,
     product_scope: "SELECTED",
@@ -160,7 +163,8 @@ async function responseError(response: Response, fallback: string) {
 export default function PromotionsPage() {
   const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [products, setProducts] = useState<ProductOption[]>([]);
-  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
+  const [stores, setStores] = useState<StoreOption[]>([]);
+  const [storeSearch, setStoreSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingPromotionId, setLoadingPromotionId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -207,19 +211,28 @@ export default function PromotionsPage() {
     [form.product_ids, products],
   );
 
+  const visibleStores = useMemo(() => {
+    const query = storeSearch.trim().toLocaleLowerCase("vi");
+    return stores
+      .filter((store) => dialog !== "view" || form.store_ids.includes(store.id))
+      .filter((store) => `${store.code} ${store.name}`.toLocaleLowerCase("vi").includes(query))
+      .sort((a, b) => Number(form.store_ids.includes(b.id)) - Number(form.store_ids.includes(a.id)));
+  }, [stores, storeSearch, dialog, form.store_ids]);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const [promotionResponse, productResponse, unitResponse, userResponse, employeeResponse] = await Promise.all([
+      const [promotionResponse, productResponse, unitResponse, userResponse, storeResponse] = await Promise.all([
         apiFetch(`${API_URL}/promotions`),
         apiFetch(`${API_URL}/products/?limit=10000`),
         apiFetch(`${API_URL}/products/units/`),
         apiFetch(`${API_URL}/auth/me`),
-        apiFetch(`${API_URL}/employees/?status=active&limit=1000`),
+        apiFetch(`${API_URL}/stores/?limit=5000`),
       ]);
       if (!promotionResponse.ok) throw new Error(await responseError(promotionResponse, "Không thể tải chương trình khuyến mãi."));
       if (!productResponse.ok) throw new Error(await responseError(productResponse, "Không thể tải danh sách sản phẩm."));
+      if (!storeResponse.ok) throw new Error(await responseError(storeResponse, "Không thể tải danh sách cửa hàng."));
       const promotionRows = await promotionResponse.json() as Promotion[];
       const productRows = await productResponse.json() as Array<Record<string, unknown>>;
       const unitRows = unitResponse.ok ? await unitResponse.json() as Array<{ id: number; name: string }> : [];
@@ -237,8 +250,7 @@ export default function PromotionsPage() {
         boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
         basePrice: Number(row.base_price ?? 0),
       })));
-      const employeeRows = employeeResponse.ok ? await employeeResponse.json() as EmployeeOption[] : [];
-      setEmployees(employeeRows.filter((employee) => employee.status?.toLowerCase() === "active"));
+      setStores(await storeResponse.json() as StoreOption[]);
     } catch (loadFailure) {
       setError(loadFailure instanceof Error ? loadFailure.message : "Không thể tải dữ liệu.");
     } finally {
@@ -255,6 +267,7 @@ export default function PromotionsPage() {
     setSelected(null);
     setForm(newForm());
     setProductSearch("");
+    setStoreSearch("");
     setSupplierFilter("");
     setProductPickerTarget(null);
     setDialog("create");
@@ -273,6 +286,7 @@ export default function PromotionsPage() {
       promotion_kind: promotion.promotion_kind ?? "GENERAL",
       target_scope: promotion.target_scope ?? "ALL",
       customer_type: promotion.customer_type,
+      store_ids: [...(promotion.store_ids ?? [])],
       employee_code: promotion.employee_code,
       vat_rate: promotion.vat_rate ?? 0,
       product_scope: promotion.product_scope ?? "SELECTED",
@@ -314,6 +328,7 @@ export default function PromotionsPage() {
       })),
     });
     setProductSearch("");
+    setStoreSearch("");
     setSupplierFilter(promotion.supplier ?? "");
     setProductPickerTarget(null);
     setDialog(mode);
@@ -395,6 +410,10 @@ export default function PromotionsPage() {
 
   async function savePromotion(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (form.target_scope === "STORES" && form.store_ids.length === 0) {
+      setError("Vui lòng chọn ít nhất một cửa hàng áp dụng.");
+      return;
+    }
     if (form.product_scope === "SELECTED" && form.product_ids.length === 0) {
       setError("Vui lòng chọn ít nhất một sản phẩm áp dụng.");
       return;
@@ -573,7 +592,7 @@ export default function PromotionsPage() {
                   <p className="text-xs text-gray-500">{promotion.code}</p>
                 </td>
                 <td className="px-4 py-3 text-xs text-gray-600">
-                  <p>{promotion.target_scope === "ALL" ? "Tất cả khách hàng" : customerTypeLabels[promotion.customer_type ?? ""] ?? promotion.customer_type}</p>
+                  <p>{promotion.target_scope === "ALL" ? "Tất cả khách hàng" : promotion.target_scope === "STORES" ? `${promotion.store_ids?.length ?? 0} cửa hàng được chọn` : customerTypeLabels[promotion.customer_type ?? ""] ?? promotion.customer_type}</p>
                   <p className="text-gray-400">{promotion.product_scope === "SUPPLIER" ? promotion.supplier : `${promotion.product_ids.length} sản phẩm`}</p>
                 </td>
                 <td className="px-4 py-3 text-xs text-gray-600">
@@ -618,7 +637,7 @@ export default function PromotionsPage() {
 
       {dialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/45 p-2 sm:p-4" role="dialog" aria-modal="true" aria-labelledby="promotion-dialog-title">
-          <form onSubmit={savePromotion} className="flex max-h-[96vh] w-full max-w-7xl flex-col overflow-hidden border border-slate-500 bg-white shadow-2xl">
+          <form onSubmit={savePromotion} className="flex max-h-[calc(100dvh-1rem)] w-full max-w-7xl flex-col overflow-hidden border border-slate-500 bg-white shadow-2xl sm:max-h-[calc(100dvh-2rem)]">
             <div className="flex shrink-0 items-center justify-between bg-[#14263d] px-4 py-2.5 text-white sm:px-5">
               <div className="flex min-w-0 items-center gap-2.5">
                 <ShoppingCart size={19} className="shrink-0 text-red-500" />
@@ -632,9 +651,9 @@ export default function PromotionsPage() {
               <button type="button" onClick={() => setDialog(null)} className="rounded p-1 text-white/80 hover:bg-white/10 hover:text-white" aria-label="Đóng"><X size={17} /></button>
             </div>
             {error && <div role="alert" className="mx-4 mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 sm:mx-5">{error}</div>}
-            <fieldset disabled={dialog === "view" || saving} className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-white">
+            <div className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-white" role="region" aria-label="Nội dung chương trình khuyến mại" tabIndex={0}>
+            <fieldset disabled={dialog === "view" || saving} className="min-w-0">
               <section className="border-b border-slate-200 px-4 py-3 sm:px-5">
-                <div className="grid gap-x-4 gap-y-3 md:grid-cols-[minmax(0,2fr)_minmax(220px,1fr)]">
                   <div className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3">
                     <label className="col-span-2 text-[11px] font-semibold text-slate-600 sm:col-span-2">Chương trình KM
                       <input required maxLength={160} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className={inputClass} />
@@ -674,24 +693,19 @@ export default function PromotionsPage() {
                       <input required type="date" min={dateValue(form.start_date)} value={dateValue(form.end_date)} onChange={(event) => setForm({ ...form, end_date: event.target.value })} className={inputClass} />
                     </label>
                     <label className="text-[11px] font-semibold text-slate-600">Đối tượng KM
-                      <select value={form.target_scope} onChange={(event) => setForm({ ...form, target_scope: event.target.value as PromotionForm["target_scope"], customer_type: event.target.value === "ALL" ? null : "RETAIL" })} className={inputClass}>
+                      <select value={form.target_scope} onChange={(event) => setForm({ ...form, target_scope: event.target.value as PromotionForm["target_scope"], customer_type: event.target.value === "CUSTOMER_TYPE" ? selected?.customer_type ?? "RETAIL" : null, store_ids: event.target.value === "STORES" ? form.store_ids : [] })} className={inputClass}>
                         <option value="ALL">Tất cả khách hàng</option>
-                        <option value="CUSTOMER_TYPE">Theo loại khách hàng</option>
+                        <option value="STORES">Theo cửa hàng được chọn</option>
+                        {selected?.target_scope === "CUSTOMER_TYPE" && <option value="CUSTOMER_TYPE">Theo loại khách hàng (cũ)</option>}
                       </select>
                     </label>
                     {form.target_scope === "CUSTOMER_TYPE" && (
-                      <label className="text-[11px] font-semibold text-slate-600">Loại KH
+                      <label className="text-[11px] font-semibold text-slate-600">Loại KH (cấu hình cũ)
                         <select required value={form.customer_type ?? ""} onChange={(event) => setForm({ ...form, customer_type: event.target.value || null })} className={inputClass}>
                           <option value="">Chọn loại khách hàng</option><option value="DISTRIBUTOR">Nhà phân phối</option><option value="WHOLESALE">Đại lý</option><option value="HORECA">HORECA</option><option value="RETAIL">Cửa hàng</option>
                         </select>
                       </label>
                     )}
-                    <label className="text-[11px] font-semibold text-slate-600">Nhân viên
-                      <select value={form.employee_code ?? ""} onChange={(event) => setForm({ ...form, employee_code: event.target.value || null })} className={inputClass}>
-                        <option value="">Tất cả nhân viên</option>
-                        {employees.map((employee) => <option key={employee.code} value={employee.code}>{employee.code} - {employee.name}</option>)}
-                      </select>
-                    </label>
                     <label className="text-[11px] font-semibold text-slate-600">KM dạng
                       <select value={form.promotion_kind} onChange={(event) => setForm({ ...form, promotion_kind: event.target.value as PromotionForm["promotion_kind"] })} className={inputClass}>
                         <option value="GENERAL">Theo từng sản phẩm đủ điều kiện</option>
@@ -699,19 +713,33 @@ export default function PromotionsPage() {
                         {form.promotion_kind === "PRODUCT_AMOUNT" && <option value="PRODUCT_AMOUNT" disabled>Tổng giá trị nhóm sản phẩm (chưa hỗ trợ)</option>}
                       </select>
                     </label>
-                    <label className="text-[11px] font-semibold text-slate-600">VAT (%)
-                      <input type="number" min={0} max={100} step={0.1} value={form.vat_rate} onChange={(event) => setForm({ ...form, vat_rate: Number(event.target.value) })} className={inputClass} />
-                    </label>
                     <label className="text-[11px] font-semibold text-slate-600">Trạng thái
                       <select value={String(form.is_active)} onChange={(event) => setForm({ ...form, is_active: event.target.value === "true" })} className={inputClass}>
                         <option value="true">Hoạt động</option><option value="false">Tạm ngừng</option>
                       </select>
                     </label>
                   </div>
-                  <label className="text-[11px] font-semibold text-slate-600">Mô tả
-                    <textarea maxLength={255} rows={3} value={form.description ?? ""} onChange={(event) => setForm({ ...form, description: event.target.value })} className={cn(inputClass, "min-h-20 resize-y")} />
-                  </label>
-                </div>
+                  {form.employee_code && <p className="mt-2 text-xs text-amber-700">Chương trình cũ vẫn giới hạn nhân viên {form.employee_code}.</p>}
+                  {form.target_scope === "STORES" && (
+                    <div className="mt-3">
+                      <p className="text-[11px] font-semibold text-slate-600">Cửa hàng áp dụng ({form.store_ids.length} đã chọn)</p>
+                      {dialog !== "view" && (
+                        <input aria-label="Tìm cửa hàng áp dụng" value={storeSearch} onChange={(event) => setStoreSearch(event.target.value)} placeholder="Tìm mã hoặc tên cửa hàng" className={inputClass} />
+                      )}
+                      <div className="mt-1 max-h-40 overflow-y-auto rounded border border-slate-200 p-2">
+                        {visibleStores.map((store) => (
+                            <label key={store.id} className="flex items-center gap-2 py-1 text-xs text-slate-700">
+                              <input type="checkbox" checked={form.store_ids.includes(store.id)} onChange={(event) => setForm({
+                                ...form,
+                                store_ids: event.target.checked ? [...form.store_ids, store.id] : form.store_ids.filter((id) => id !== store.id),
+                              })} />
+                              {store.code} · {store.name}{store.status === "inactive" ? " (ngừng hoạt động)" : ""}
+                            </label>
+                          ))}
+                        {visibleStores.length === 0 && <p className="text-xs text-slate-500">{stores.length === 0 ? "Chưa có cửa hàng." : "Không tìm thấy cửa hàng."}</p>}
+                      </div>
+                    </div>
+                  )}
               </section>
 
               <section className="border-b border-slate-200">
@@ -917,6 +945,7 @@ export default function PromotionsPage() {
                 </div>
               </section>
             </fieldset>
+            </div>
             <div className="flex shrink-0 justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2.5 sm:px-5">
               <button type="button" onClick={() => setDialog(null)} className="rounded-md bg-red-700 px-4 py-2 text-sm font-medium text-white hover:bg-red-800">{dialog === "view" ? "Đóng" : "Hủy"}</button>
               {dialog !== "view" && (

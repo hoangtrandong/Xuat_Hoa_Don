@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.auth import get_current_user
 from app.core.database import get_db
-from app.models.customer import Customer
+from app.models.customer import Customer, Store
 from app.models.product import Product
-from app.models.promotion import Promotion, PromotionItem, PromotionRule, PromotionRuleRewardProduct
+from app.models.promotion import Promotion, PromotionItem, PromotionRule, PromotionRuleRewardProduct, PromotionStore
 from app.models.user import User
 from app.schemas.promotion import PromotionInput, PromotionOutput, PromotionStatusUpdate
 
@@ -30,6 +30,7 @@ def _load_promotion(db: Session, promotion_id: int) -> Promotion:
         .options(
             selectinload(Promotion.rules).selectinload(PromotionRule.reward_product_links),
             selectinload(Promotion.items),
+            selectinload(Promotion.store_links),
         )
         .where(Promotion.id == promotion_id)
     )
@@ -52,6 +53,7 @@ def _to_output(promotion: Promotion) -> PromotionOutput:
         promotion_kind=promotion.promotion_kind,
         target_scope=promotion.target_scope,
         customer_type=promotion.customer_type,
+        store_ids=[link.store_id for link in promotion.store_links],
         employee_code=promotion.employee_code,
         vat_rate=promotion.vat_rate,
         product_scope=promotion.product_scope,
@@ -68,6 +70,18 @@ def _new_code() -> str:
     return f"KM-{datetime.now():%y%m%d}-{uuid4().hex[:6].upper()}"
 
 
+def promotion_matches_customer(promotion: Promotion, customer: Customer | None) -> bool:
+    if promotion.target_scope == "ALL":
+        return True
+    if promotion.target_scope == "CUSTOMER_TYPE":
+        return customer is not None and promotion.customer_type == customer.type
+    if promotion.target_scope == "STORES":
+        return customer is not None and customer.store_id is not None and any(
+            link.store_id == customer.store_id for link in promotion.store_links
+        )
+    return False
+
+
 def _replace_details(db: Session, promotion: Promotion, payload: PromotionInput) -> None:
     if payload.promotion_kind != "GENERAL":
         raise HTTPException(
@@ -76,6 +90,10 @@ def _replace_details(db: Session, promotion: Promotion, payload: PromotionInput)
         )
     if payload.applied_quantity_unit != "STANDARD":
         raise HTTPException(status_code=400, detail="Hiện chỉ hỗ trợ đơn vị tính chuẩn.")
+
+    store_ids = set(payload.store_ids)
+    if store_ids and set(db.scalars(select(Store.id).where(Store.id.in_(store_ids))).all()) != store_ids:
+        raise HTTPException(status_code=400, detail="Một hoặc nhiều cửa hàng áp dụng không tồn tại.")
 
     product_ids = set(payload.product_ids)
     if product_ids:
@@ -128,6 +146,7 @@ def _replace_details(db: Session, promotion: Promotion, payload: PromotionInput)
     promotion.promotion_kind = payload.promotion_kind
     promotion.target_scope = payload.target_scope
     promotion.customer_type = payload.customer_type
+    promotion.store_links = [PromotionStore(store_id=store_id) for store_id in sorted(store_ids)]
     promotion.employee_code = payload.employee_code
     promotion.vat_rate = payload.vat_rate
     promotion.product_scope = payload.product_scope
@@ -212,6 +231,7 @@ def list_promotions(
         .options(
             selectinload(Promotion.rules).selectinload(PromotionRule.reward_product_links),
             selectinload(Promotion.items),
+            selectinload(Promotion.store_links),
         )
         .order_by(Promotion.start_date.desc(), Promotion.id.desc())
     ).all()
@@ -239,6 +259,7 @@ def available_promotions(
         .options(
             selectinload(Promotion.rules).selectinload(PromotionRule.reward_product_links),
             selectinload(Promotion.items),
+            selectinload(Promotion.store_links),
         )
         .where(
             Promotion.is_active.is_(True),
@@ -254,7 +275,7 @@ def available_promotions(
     promotions = [
         promotion
         for promotion in promotions
-        if (promotion.target_scope != "CUSTOMER_TYPE" or customer is None or promotion.customer_type == customer.type)
+        if (promotion_matches_customer(promotion, customer) if customer is not None else promotion.target_scope != "STORES")
         and (
             not promotion.employee_code
             or (promotion.employee_code.strip().casefold() == (employee_code or "").strip().casefold())
@@ -374,6 +395,7 @@ def clone_promotion(
         supplier=original.supplier,
         applied_quantity_unit=original.applied_quantity_unit,
         minimum_product_quantity=original.minimum_product_quantity,
+        store_links=[PromotionStore(store_id=link.store_id) for link in original.store_links],
         items=[
             PromotionItem(product_id=item.product_id, min_quantity=item.min_quantity)
             for item in original.items

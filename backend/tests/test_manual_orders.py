@@ -22,7 +22,7 @@ from app.models.customer import Customer, Store
 from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder, Warehouse
 from app.models.product import Product, ProductCategory, ProductUnit
-from app.models.promotion import Promotion, PromotionItem, PromotionRule, PromotionRuleRewardProduct
+from app.models.promotion import Promotion, PromotionItem, PromotionRule, PromotionRuleRewardProduct, PromotionStore
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.schemas.customer import CustomerCreate
 
@@ -307,6 +307,68 @@ def test_manual_order_defaults_staff_to_current_user_and_records_delivery_employ
     assert row.raw_payload["Tên NVBH"] == "Người Bán"
     assert row.raw_payload["Mã NVGH"] == "NV020"
     assert row.raw_payload["Tên NVGH"] == "Người Giao"
+    response = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+    assert response["rows"][0]["NVGH"] == "NV020 - Người Giao"
+    assert response["rows"][0]["Mã NVGH"] == "NV020"
+    warehouse = Warehouse(code="WH-MANUAL-NVGH", name="Kho", location="Kho")
+    db.add(warehouse)
+    db.flush()
+    request = DeliveryRequest(code="YC-MANUAL-NVGH", warehouse_id=warehouse.id, status="SUBMITTED")
+    db.add(request)
+    db.flush()
+    db.add(DeliveryRequestOrder(
+        delivery_request_id=request.id, order_number=result["order_number"],
+        employee_code="NV030", employee_name="Người khác",
+    ))
+    db.flush()
+    response = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+    assert response["rows"][0]["NVGH"] == "NV020 - Người Giao"
+
+
+def test_order_list_shows_only_approved_delivery_assignments(db):
+    warehouse = Warehouse(code="WH-NVGH", name="Kho", location="Kho")
+    db.add(warehouse)
+    db.flush()
+    for number in ("VM-A", "VM-B", "VM-C", "VM-D"):
+        db.add(VinamilkOrderSnapshot(
+            remote_key=f"nvgh-{number}", order_number=number,
+            order_created_date=date(2026, 11, 4), synced_from=date(2026, 11, 4),
+            synced_to=date(2026, 11, 4), raw_payload={"orderNumber": number},
+        ))
+    for index, (number, status, code, name, order_date) in enumerate([
+        ("VM-A", "DRAFT", "NV001", "Chưa duyệt", None),
+        ("VM-A", "SUBMITTED", "NV002", "Đã duyệt", date(2026, 11, 4)),
+        ("VM-A", "CANCELLED", "NV003", "Đã hủy", None),
+        ("VM-A", "COMPLETED", "NV004", "Khác ngày", date(2026, 11, 3)),
+        ("VM-B", "DRAFT", "NV001", "Chưa duyệt", None),
+        ("VM-C", "RECEIVED", "NV005", "Một", None),
+        ("VM-C", "COMPLETED", "NV006", "Hai", None),
+        ("VM-D", "CANCELLED", "NV007", "Đã hủy", None),
+    ]):
+        request = DeliveryRequest(code=f"YC-NVGH-{index}", warehouse_id=warehouse.id, status=status)
+        db.add(request)
+        db.flush()
+        db.add(DeliveryRequestOrder(
+            delivery_request_id=request.id, order_number=number,
+            order_date=order_date, employee_code=code, employee_name=name,
+        ))
+    db.flush()
+    response = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+    rows = {row["orderNumber"]: row for row in response["rows"]}
+    assert rows["VM-A"]["NVGH"] == "NV002 - Đã duyệt"
+    assert rows["VM-A"]["Mã NVGH"] == "NV002"
+    assert rows["VM-B"]["NVGH"] == rows["VM-D"]["NVGH"] == ""
+    assert rows["VM-C"]["NVGH"] == "NV005 - Một, NV006 - Hai"
+    assert rows["VM-C"]["Mã NVGH"] == ""
 
 
 def test_manual_order_rejects_unknown_delivery_employee(db):
@@ -707,6 +769,40 @@ def test_manual_order_accepts_supplier_promotion_for_matching_customer_employee_
     row = db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == result["order_number"]))
     assert row.raw_payload["Mã CTKM"] == "KM-SUPPLIER-001"
     assert row.raw_payload["Số lượng KM"] == 1
+
+
+def test_manual_order_store_target_is_enforced(db):
+    customer = db.scalar(select(Customer).where(Customer.code == "0MD"))
+    allowed = Store(code="ALLOWED", name="Allowed")
+    other = Store(code="OTHER", name="Other")
+    customer.store = allowed
+    db.add(other)
+    db.flush()
+    promotion = Promotion(
+        code="KM-STORE",
+        name="Store promotion",
+        start_date=datetime(2026, 11, 1),
+        end_date=datetime(2026, 11, 30),
+        is_active=True,
+        target_scope="STORES",
+        store_links=[PromotionStore(store_id=allowed.id)],
+        product_scope="SUPPLIER",
+        supplier="Vinamilk",
+        rules=[PromotionRule(trigger_type="QUANTITY", quantity_unit="BOX", min_quantity=1,
+                             reward_type="FREE_QUANTITY", reward_value=1, reward_unit="BOX")],
+    )
+    db.add(promotion)
+    db.commit()
+    payload = _payload(lines=[ManualOrderLine(product_code="01VD41", quantity=1, promotion_id=promotion.id)])
+    assert _create_manual_order(db, payload)["order_number"]
+    customer.store = other
+    db.flush()
+    with pytest.raises(HTTPException, match="không thuộc đối tượng"):
+        _create_manual_order(db, payload)
+    customer.store = None
+    db.flush()
+    with pytest.raises(HTTPException, match="không thuộc đối tượng"):
+        _create_manual_order(db, payload)
 
 
 def test_manual_order_rejects_supplier_promotion_for_wrong_supplier(db):

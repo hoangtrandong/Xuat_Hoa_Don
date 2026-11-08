@@ -19,7 +19,7 @@ from app.api.v1.endpoints.promotions import (
     update_promotion,
 )
 from app.core.database import Base
-from app.models.customer import Customer
+from app.models.customer import Customer, Store
 from app.models.employee import Employee
 from app.models.product import Product, ProductCategory, ProductUnit
 from app.models.promotion import Promotion, PromotionItem, PromotionRule
@@ -61,6 +61,51 @@ def _payload(product_id: int) -> PromotionInput:
             )
         ],
     )
+
+
+def test_store_targeting_create_update_clone_and_available(db):
+    session, product_id = db
+    admin = SimpleNamespace(username="admin", roles=[])
+    first = Store(code="STORE-A", name="Store A")
+    second = Store(code="STORE-B", name="Store B")
+    other = Store(code="STORE-C", name="Store C")
+    session.add_all([first, second, other])
+    session.flush()
+    session.add_all([
+        Customer(code="CA", name="A", type="RETAIL", store_id=first.id),
+        Customer(code="CA2", name="A2", type="WHOLESALE", store_id=first.id),
+        Customer(code="CB", name="B", type="RETAIL", store_id=second.id),
+        Customer(code="CC", name="C", type="RETAIL", store_id=other.id),
+        Customer(code="CN", name="No store", type="RETAIL"),
+    ])
+    session.commit()
+    data = _payload(product_id).model_dump()
+    data.update(target_scope="STORES", store_ids=[first.id, second.id])
+    created = create_promotion(PromotionInput(**data), session, admin)
+    assert created.store_ids == [first.id, second.id]
+    for code in ("CA", "CA2", "CB"):
+        assert [p.id for p in available_promotions(date(2026, 11, 4), code, db=session, current_user=admin)] == [created.id]
+    for code in ("CC", "CN", None):
+        assert available_promotions(date(2026, 11, 4), code, db=session, current_user=admin) == []
+    cloned = clone_promotion(created.id, session, admin)
+    assert cloned.store_ids == created.store_ids
+    data["store_ids"] = [second.id, other.id]
+    updated = update_promotion(created.id, PromotionInput(**data), session, admin)
+    assert updated.store_ids == [second.id, other.id]
+    assert available_promotions(date(2026, 11, 4), "CA", db=session, current_user=admin) == []
+    assert [p.id for p in available_promotions(date(2026, 11, 4), "CC", db=session, current_user=admin)] == [created.id]
+    data["store_ids"] = [999999]
+    with pytest.raises(HTTPException, match="cửa hàng áp dụng không tồn tại"):
+        create_promotion(PromotionInput(**data), session, admin)
+
+
+@pytest.mark.parametrize("store_ids", [[], [1, 1], [0]])
+def test_store_target_requires_valid_unique_store_ids(db, store_ids):
+    _, product_id = db
+    data = _payload(product_id).model_dump()
+    data.update(target_scope="STORES", store_ids=store_ids)
+    with pytest.raises(ValueError):
+        PromotionInput(**data)
 
 
 def test_promotion_crud_available_lock_and_clone(db):

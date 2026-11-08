@@ -17,6 +17,7 @@ from playwright.sync_api import sync_playwright
 from dotenv import dotenv_values, set_key
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
+from app.api.v1.endpoints.promotions import promotion_matches_customer
 from app.core.auth import get_current_user, resolve_user_employee
 from app.core.config import settings
 from app.core.database import get_db
@@ -1899,6 +1900,30 @@ def list_local_vinamilk_orders(
                 order_delivery_status[key] = delivery_status_labels.get(req_status, "Chưa yêu cầu")
     except Exception:
         pass
+    delivery_assignments: dict[tuple[str, date | None], dict[str, str]] = defaultdict(dict)
+    order_numbers = {(row.order_number or "").strip().upper() for row in rows if (row.order_number or "").strip()}
+    if order_numbers:
+        assignments = db.execute(
+            select(
+                DeliveryRequestOrder.order_number,
+                DeliveryRequestOrder.order_date,
+                DeliveryRequestOrder.employee_code,
+                DeliveryRequestOrder.employee_name,
+            )
+            .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
+            .where(
+                func.upper(func.trim(DeliveryRequestOrder.order_number)).in_(order_numbers),
+                DeliveryRequest.status.in_(("SUBMITTED", "RECEIVED", "COMPLETED")),
+            )
+        ).all()
+        for number, order_date, code, name in assignments:
+            normalized_code = (code or "").strip()
+            if normalized_code:
+                employees = delivery_assignments[(number.strip().upper(), order_date)]
+                employee_code = normalized_code.upper()
+                employee_name = (name or "").strip()
+                if employee_code not in employees or employee_name:
+                    employees[employee_code] = employee_name
     for row in rows:
         order_num = row.order_number or ""
         rep_order = replaced_order_for.get(order_num)
@@ -1973,6 +1998,20 @@ def list_local_vinamilk_orders(
                 manager_assignment = suffix_matches[0]
         manager_code, manager_name = manager_assignment or (None, None)
 
+        assigned_employees = {
+            **delivery_assignments.get((order_num.strip().upper(), None), {}),
+            **delivery_assignments.get((order_num.strip().upper(), row.order_created_date), {}),
+        }
+        manual_code = str(row.raw_payload.get("Mã NVGH") or "").strip() if row.is_synthetic else ""
+        manual_name = str(row.raw_payload.get("Tên NVGH") or "").strip() if row.is_synthetic else ""
+        if manual_code:
+            assigned_employees = {manual_code: manual_name}
+        delivery_labels = [
+            f"{code} - {name}" if name else code
+            for code, name in sorted(assigned_employees.items())
+        ]
+        delivery_code, delivery_name = next(iter(assigned_employees.items())) if len(assigned_employees) == 1 else ("", "")
+
         row_actor = (getattr(row, "performed_by", None) or "").strip()
         if not row_actor and isinstance(row.raw_payload, dict):
             row_actor = (
@@ -1990,6 +2029,9 @@ def list_local_vinamilk_orders(
             "Tình trạng xử lý đơn hàng": order_status_label,
             "Trạng thái xử lý": order_status_label,
             "Cửa Hàng": store_customer.store.name if store_customer and store_customer.store else "",
+            "NVGH": ", ".join(delivery_labels),
+            "Mã NVGH": delivery_code,
+            "Tên NVGH": delivery_name,
             "Tình trạng xuất kho": d_status or "Chưa yêu cầu",
             "_delivery_status": d_status or "Chưa yêu cầu",
             "Mã NVQL": manager_code,
@@ -2524,6 +2566,7 @@ def _create_manual_order(
                 .options(
                     selectinload(Promotion.rules).selectinload(PromotionRule.reward_product_links),
                     selectinload(Promotion.items),
+                    selectinload(Promotion.store_links),
                 )
                 .where(Promotion.id == line.promotion_id)
             )
@@ -2540,7 +2583,7 @@ def _create_manual_order(
                 )
             if promotion.start_date.date() > order_date or promotion.end_date.date() < order_date:
                 raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} không áp dụng trong ngày đặt hàng.")
-            if promotion.target_scope == "CUSTOMER_TYPE" and promotion.customer_type != customer.type:
+            if not promotion_matches_customer(promotion, customer):
                 raise HTTPException(status_code=400, detail=f"Khách hàng không thuộc đối tượng áp dụng chương trình {promotion.name}.")
             if promotion.employee_code and promotion.employee_code.strip().casefold() != staff_code.strip().casefold():
                 raise HTTPException(status_code=400, detail=f"Chương trình {promotion.name} không áp dụng cho nhân viên này.")

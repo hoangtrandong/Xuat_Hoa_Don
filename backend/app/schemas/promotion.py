@@ -9,7 +9,7 @@ QuantityUnit = Literal["CARTON", "BOX"]
 RewardType = Literal["FREE_QUANTITY", "DISCOUNT_AMOUNT", "DISCOUNT_PERCENT"]
 RewardProductOperator = Literal["AND", "OR"]
 CustomerType = Literal["DISTRIBUTOR", "WHOLESALE", "HORECA", "RETAIL"]
-TargetScope = Literal["ALL", "CUSTOMER_TYPE"]
+TargetScope = Literal["ALL", "CUSTOMER_TYPE", "STORES"]
 ProductScope = Literal["SELECTED", "SUPPLIER"]
 PromotionType = Literal["ORDER", "AFTER_SALES"]
 PromotionKind = Literal["GENERAL", "INVOICE_AMOUNT", "PRODUCT_AMOUNT"]
@@ -99,6 +99,7 @@ class PromotionInput(BaseModel):
     promotion_kind: PromotionKind = "GENERAL"
     target_scope: TargetScope = "ALL"
     customer_type: CustomerType | None = None
+    store_ids: list[int] = Field(default_factory=list)
     employee_code: str | None = Field(default=None, max_length=20)
     vat_rate: float = Field(default=0, ge=0, le=100)
     product_scope: ProductScope = "SELECTED"
@@ -124,6 +125,12 @@ class PromotionInput(BaseModel):
             raise ValueError("Vui lòng chọn loại khách hàng áp dụng.")
         if self.target_scope == "ALL" and self.customer_type is not None:
             raise ValueError("Không chọn loại khách hàng khi áp dụng cho tất cả khách hàng.")
+        if self.target_scope == "STORES" and (not self.store_ids or self.customer_type is not None):
+            raise ValueError("Vui lòng chọn ít nhất một cửa hàng và không chọn loại khách hàng.")
+        if self.target_scope != "STORES" and self.store_ids:
+            raise ValueError("Chỉ chọn cửa hàng khi áp dụng theo cửa hàng.")
+        if any(store_id <= 0 for store_id in self.store_ids) or len(self.store_ids) != len(set(self.store_ids)):
+            raise ValueError("Danh sách cửa hàng không hợp lệ hoặc bị trùng.")
         if self.product_scope == "SELECTED" and not self.product_ids:
             raise ValueError("Vui lòng thêm ít nhất một sản phẩm áp dụng.")
         if self.product_scope == "SUPPLIER" and not (self.supplier or "").strip():
@@ -149,6 +156,7 @@ class PromotionOutput(BaseModel):
     promotion_type: str
     target_scope: str
     customer_type: str | None
+    store_ids: list[int]
     employee_code: str | None
     vat_rate: float
     promotion_kind: str

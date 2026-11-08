@@ -282,6 +282,9 @@ const remoteColumnDefinitions: {
   { title: "Ngày giao", keys: ["deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao"], width: "7.5rem" },
   { title: "Mã NVBH", keys: ["staffCode", "salesStaffCode", "Mã NVBH"], width: "7.5rem" },
   { title: "Tên NVBH", keys: ["staffName", "salesStaffName", "Tên NVBH"], width: "10rem", truncate: true },
+  { title: "NVGH", keys: ["NVGH"], width: "12rem", truncate: true },
+  { title: "Mã NVGH", keys: ["Mã NVGH"], width: "7.5rem" },
+  { title: "Tên NVGH", keys: ["Tên NVGH"], width: "10rem", truncate: true },
   { title: "Mã KH", keys: ["customerCode", "shopCode", "Mã KH"], width: "8rem" },
   { title: "Tên KH", keys: ["customerName", "shopName", "Tên KH"], width: "12rem", truncate: true },
   { title: "Cửa Hàng", keys: ["Cửa Hàng", "store_name", "storeName"], width: "12rem", truncate: true },
@@ -1916,8 +1919,9 @@ return Array.from(map.values());
 
   const remoteColumns = remoteColumnDefinitions
     .filter(({ title }) => (
-      ["Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Trạng thái xử lý", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
+      ["NVGH", "Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Trạng thái xử lý", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
     ) || remoteOrders.some((order) => hasRemoteValue(order[title])))
+    .filter(({ title }) => title !== "Mã NVGH" && title !== "Tên NVGH")
     .map(({ title, width, align }): Column<RemoteOrder> => ({
       key: title,
       title,

@@ -30,6 +30,15 @@ class Promotion(Base):
 
     rules: Mapped[List["PromotionRule"]] = relationship(back_populates="promotion", cascade="all, delete-orphan")
     items: Mapped[List["PromotionItem"]] = relationship(back_populates="promotion", cascade="all, delete-orphan")
+    store_links: Mapped[List["PromotionStore"]] = relationship(back_populates="promotion", cascade="all, delete-orphan")
+
+
+class PromotionStore(Base):
+    __tablename__ = "promotion_stores"
+
+    promotion_id: Mapped[int] = mapped_column(ForeignKey("promotions.id", ondelete="CASCADE"), primary_key=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id", ondelete="RESTRICT"), primary_key=True)
+    promotion: Mapped["Promotion"] = relationship(back_populates="store_links")
 
 
 class PromotionRule(Base):

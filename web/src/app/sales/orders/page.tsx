@@ -119,7 +119,7 @@ type DeliveryRequestOrderOption = {
   original_status: string;
   delivery_employee_code: string;
   manager_code: string;
-  is_split: boolean;
+  is_split_or_merge: boolean;
 };
 
 type DeliveryRequestPreviewItem = {
@@ -476,6 +476,7 @@ export default function SalesOrdersPage() {
   const [mergeOrderSearch, setMergeOrderSearch] = useState("");
   const [selectedMergeOrderNumbers, setSelectedMergeOrderNumbers] = useState<string[]>([]);
   const [representativeOrderNumber, setRepresentativeOrderNumber] = useState("");
+  const [mergeDeliveryEmployee, setMergeDeliveryEmployee] = useState("");
   const [mergeOverrideCustomer, setMergeOverrideCustomer] = useState(false);
   const [mergeCustomerSearch, setMergeCustomerSearch] = useState("");
   const [mergeCustomCustomer, setMergeCustomCustomer] = useState<{
@@ -1827,6 +1828,7 @@ return Array.from(map.values());
           customer_address: mergeOverrideCustomer ? mergeCustomCustomer.customer_address.trim() || undefined : undefined,
           staff_code: mergeOverrideStaff ? mergeCustomStaff.staff_code.trim() || undefined : undefined,
           staff_name: mergeOverrideStaff ? mergeCustomStaff.staff_name.trim() || undefined : undefined,
+          delivery_employee_code: mergeDeliveryEmployee || null,
         }),
       });
       const result = await response.json() as {
@@ -1840,6 +1842,7 @@ return Array.from(map.values());
       setRepresentativeOrderNumber("");
       setMergeOverrideCustomer(false);
       setMergeOverrideStaff(false);
+      setMergeDeliveryEmployee("");
       setToast(
         `Đã gộp ${(result.merged_order_numbers ?? []).join(", ")} thành đơn mới ${result.new_order_number}.`
       );
@@ -2196,7 +2199,7 @@ return Array.from(map.values());
         original_status: displayRemoteValue(row["Trạng thái"]).trim(),
         delivery_employee_code: displayRemoteValue(row["Mã NVGH"]).trim(),
         manager_code: displayRemoteValue(row["Mã NVQL"]).trim(),
-        is_split: row["_replacement_type"] === "SPLIT",
+        is_split_or_merge: row["_replacement_type"] === "SPLIT" || row["_replacement_type"] === "MERGE",
       });
       return orders;
     }, new Map<string, DeliveryRequestOrderOption>())
@@ -2219,7 +2222,7 @@ return Array.from(map.values());
   function defaultDeliveryEmployee(order: DeliveryRequestOrderOption): DeliveryEmployeeOption | undefined {
     const managerCode = order.manager_code.trim().toUpperCase();
     const existingDeliveryCode = order.delivery_employee_code.trim().toUpperCase();
-    if (order.is_split && existingDeliveryCode) {
+    if (order.is_split_or_merge && existingDeliveryCode) {
       return deliveryEmployees.find((employee) => employee.code.toUpperCase() === existingDeliveryCode);
     }
     return deliveryEmployees.find((employee) => employee.code.toUpperCase() === managerCode)
@@ -2240,6 +2243,22 @@ return Array.from(map.values());
   async function openSplitDrawer() {
     setSplitError("");
     setIsSplitDrawerOpen(true);
+    setIsLoadingDeliveryEmployees(true);
+    setDeliveryEmployeeError("");
+    try {
+      const employees = await loadDeliveryEmployees();
+      setDeliveryEmployees(employees);
+      if (!employees.length) setDeliveryEmployeeError("Không tìm thấy nhân viên đang hoạt động có mã bắt đầu bằng NV.");
+    } catch (error) {
+      setDeliveryEmployeeError(error instanceof Error ? error.message : "Không tải được danh sách NVGH.");
+    } finally {
+      setIsLoadingDeliveryEmployees(false);
+    }
+  }
+
+  async function openMergeDrawer() {
+    setMergeError("");
+    setIsMergeDrawerOpen(true);
     setIsLoadingDeliveryEmployees(true);
     setDeliveryEmployeeError("");
     try {
@@ -2744,10 +2763,7 @@ return Array.from(map.values());
             </button>
             <button
               type="button"
-              onClick={() => {
-                setMergeError("");
-                setIsMergeDrawerOpen(true);
-              }}
+              onClick={() => void openMergeDrawer()}
               className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3.5 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 transition-colors"
             >
               <Merge size={16} />
@@ -4246,6 +4262,22 @@ return Array.from(map.values());
               </label>
             )}
           </div>
+
+          <label className="block text-sm text-gray-700">
+            NVGH cho đơn gộp (không bắt buộc)
+            <select
+              value={mergeDeliveryEmployee}
+              onChange={(event) => setMergeDeliveryEmployee(event.target.value)}
+              disabled={isLoadingDeliveryEmployees || !!deliveryEmployeeError}
+              className="mt-1 block w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
+            >
+              <option value="">Chưa chọn NVGH</option>
+              {deliveryEmployees.map((employee) => (
+                <option key={employee.code} value={employee.code}>{employee.code} - {employee.name}</option>
+              ))}
+            </select>
+            {deliveryEmployeeError && <span className="mt-1 block text-xs text-red-600">{deliveryEmployeeError}</span>}
+          </label>
 
           {selectedMergeOrderNumbers.length >= 2 && selectedRepresentativeMergeGroup && (
             <div className="rounded-xl border border-indigo-200 bg-indigo-50/30 p-4 space-y-3">

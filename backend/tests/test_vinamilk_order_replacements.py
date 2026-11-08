@@ -591,6 +591,8 @@ def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
                     "totalDiscount": 0,
                     "voucherAmount": 0,
                     "deliveryDate": "01/10/2026",
+                    "Mã NVGH": f"NV0{idx + 1}",
+                    "Tên NVGH": "NVGH đơn gốc",
                 },
             )
         )
@@ -631,6 +633,7 @@ def test_merge_orders_creates_gd_order_and_aggregates_lines(db):
     assert by_order[new_order_no]["quantity"] == 10.0
     assert by_order[new_order_no]["promotionQuantity"] == 3.0
     assert by_order[new_order_no]["totalValue"] == 100000.0
+    assert by_order[new_order_no]["NVGH"] == ""
     assert by_order["PO-201"]["_replacement_display"] == f"BTT: {new_order_no}"
     assert by_order["PO-201"]["_performed_by"] == "Hệ thống"
     assert by_order["PO-202"]["_replacement_display"] == f"BTT: {new_order_no}"

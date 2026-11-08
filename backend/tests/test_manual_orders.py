@@ -11,6 +11,7 @@ import app.models  # noqa: F401  (đăng ký toàn bộ model)
 from app.api.v1.endpoints.sync import (
     ManualOrderLine,
     ManualOrderRequest,
+    MergeOrdersRequest,
     SplitOrderItemAllocation,
     SplitOrderRequest,
     SplitOrderTarget,
@@ -18,6 +19,7 @@ from app.api.v1.endpoints.sync import (
     _create_split_order_request,
     _create_manual_order,
     _delete_manual_order,
+    _merge_vinamilk_orders,
     list_local_vinamilk_orders,
 )
 from app.api.v1.endpoints.delivery_requests import submit_request
@@ -438,6 +440,74 @@ def test_split_rejects_invalid_delivery_employee(db):
     ])
     with pytest.raises(HTTPException, match="NVGH đang hoạt động"):
         _create_split_order_request(db, payload)
+
+
+def test_merge_delivery_employee_persists_on_all_lines_and_follows_delivery_status(db):
+    shipper = Employee(code="NV020", name="Người Giao", position="Giao hàng", phone="0900000020")
+    db.add(shipper)
+    for index in range(2):
+        db.add(VinamilkOrderSnapshot(
+            remote_key=f"merge-delivery-{index}", order_number=f"VM-MERGE-{index}",
+            customer_code="0MD", customer_name="Khách hàng", product_code=f"SP-{index}",
+            order_created_date=date(2026, 11, 4), synced_from=date(2026, 11, 4),
+            synced_to=date(2026, 11, 4),
+            raw_payload={"quantity": 1, "Mã NVGH": "NV099", "Tên NVGH": "Không kế thừa"},
+        ))
+    db.flush()
+    result = _merge_vinamilk_orders(db, MergeOrdersRequest(
+        order_numbers=["VM-MERGE-0", "VM-MERGE-1"], delivery_employee_code="nv020",
+    ))
+    number = result["new_order_number"]
+    snapshots = db.scalars(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == number)).all()
+    assert len(snapshots) == 2
+    assert all(row.raw_payload["Mã NVGH"] == "NV020" and row.raw_payload["Tên NVGH"] == "Người Giao" for row in snapshots)
+
+    def merged_rows():
+        response = list_local_vinamilk_orders(
+            from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+            search=None, status=None, skip=0, limit=100, db=db,
+        )
+        rows = [row for row in response["rows"] if row.get("Số đơn hàng") == number]
+        assert len(rows) == 2
+        return rows
+
+    assert all(row["NVGH"] == "NV020 - Người Giao" for row in merged_rows())
+    warehouse = Warehouse(code="WH-MERGE", name="Kho", location="Kho")
+    db.add(warehouse)
+    db.flush()
+    delivery = DeliveryRequest(code="YC-MERGE", warehouse_id=warehouse.id, status="DRAFT")
+    db.add(delivery)
+    db.flush()
+    db.add(DeliveryRequestOrder(delivery_request_id=delivery.id, order_number=number,
+                                employee_code="NV030", employee_name="Người khác"))
+    db.flush()
+    assert all(row["NVGH"] == "NV020 - Người Giao" for row in merged_rows())
+    delivery.status = "SUBMITTED"
+    db.flush()
+    assert all(row["NVGH"] == "NV030 - Người khác" for row in merged_rows())
+    delivery.status = "CANCELLED"
+    db.flush()
+    assert all(row["NVGH"] == "NV020 - Người Giao" for row in merged_rows())
+
+
+@pytest.mark.parametrize("employee_code", ["NV999", "NV021", "KT001"])
+def test_merge_rejects_invalid_delivery_employee(db, employee_code):
+    db.add_all([
+        Employee(code="NV021", name="Ngừng hoạt động", position="Giao hàng", status="inactive", phone="0900000021"),
+        Employee(code="KT001", name="Kế toán", position="Kế toán", status="active", phone="0900000022"),
+    ])
+    for index in range(2):
+        db.add(VinamilkOrderSnapshot(
+            remote_key=f"merge-invalid-{index}", order_number=f"VM-INVALID-{index}",
+            customer_code="0MD", product_code="01VD41", order_created_date=date(2026, 11, 4),
+            synced_from=date(2026, 11, 4), synced_to=date(2026, 11, 4), raw_payload={"quantity": 1},
+        ))
+    db.flush()
+    with pytest.raises(HTTPException, match="NVGH đang hoạt động"):
+        _merge_vinamilk_orders(db, MergeOrdersRequest(
+            order_numbers=["VM-INVALID-0", "VM-INVALID-1"], delivery_employee_code=employee_code,
+        ))
+    assert db.scalar(select(VinamilkOrderSnapshot.id).where(VinamilkOrderSnapshot.is_synthetic.is_(True))) is None
 
 
 @pytest.mark.parametrize("automatic", [True, False])

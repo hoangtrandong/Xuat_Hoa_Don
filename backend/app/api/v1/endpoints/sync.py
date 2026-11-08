@@ -183,6 +183,7 @@ class MergeOrdersRequest(BaseModel):
     customer_address: str | None = None
     staff_code: str | None = None
     staff_name: str | None = None
+    delivery_employee_code: str | None = Field(default=None, max_length=20)
 
 
 class DeliveryRequestFormOrder(BaseModel):
@@ -1106,6 +1107,12 @@ def _merge_vinamilk_orders(
     custom_cust_addr = (payload.customer_address or "").strip()
     custom_staff_code = (payload.staff_code or "").strip()
     custom_staff_name = (payload.staff_name or "").strip()
+    delivery_code = (payload.delivery_employee_code or "").strip().upper()
+    delivery_employee = None
+    if delivery_code:
+        delivery_employee = db.scalar(select(Employee).where(func.upper(Employee.code) == delivery_code))
+        if not delivery_code.startswith("NV") or delivery_employee is None or (delivery_employee.status or "").lower() != "active":
+            raise HTTPException(status_code=400, detail=f"Không tìm thấy NVGH đang hoạt động {delivery_code}.")
 
     final_cust_code = custom_cust_code or (
         rep_row.customer_code
@@ -1225,6 +1232,8 @@ def _merge_vinamilk_orders(
             merged_raw["Tên NVBH"] = final_staff_name
             merged_raw["staffName"] = final_staff_name
             merged_raw["salesStaffName"] = final_staff_name
+        merged_raw["Mã NVGH"] = delivery_employee.code if delivery_employee else ""
+        merged_raw["Tên NVGH"] = delivery_employee.name if delivery_employee else ""
 
         fmt_q = _format_qty_value(group_info["qty"])
         fmt_p = _format_qty_value(group_info["promo_qty"])
@@ -2045,7 +2054,7 @@ def list_local_vinamilk_orders(
         }
         manual_code = str(row.raw_payload.get("Mã NVGH") or "").strip() if row.is_synthetic else ""
         manual_name = str(row.raw_payload.get("Tên NVGH") or "").strip() if row.is_synthetic else ""
-        if manual_code and (replacement_type_for.get(order_num) != "SPLIT" or not assigned_employees):
+        if manual_code and (replacement_type_for.get(order_num) not in ("SPLIT", "MERGE") or not assigned_employees):
             assigned_employees = {manual_code: manual_name}
         delivery_labels = [
             f"{code} - {name}" if name else code

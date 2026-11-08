@@ -24,6 +24,7 @@ import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
+import OrderActionModal from "@/components/ui/OrderActionModal";
 import CreateOrderForm from "@/components/sales/CreateOrderForm";
 import { formatCustomerCode, formatVND } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
@@ -3229,36 +3230,40 @@ return Array.from(map.values());
         )}
       </Drawer>
 
-      {/* Drawer Tách đơn hàng (Split Order) */}
-      <Drawer
+      <OrderActionModal
         open={isSplitDrawerOpen}
-        onClose={() => setIsSplitDrawerOpen(false)}
-        title="Tách đơn hàng (Đơn Tách)"
-        subtitle="Tách 1 đơn hàng gốc thành nhiều đơn hàng mới với tổng số lượng khớp 100% đơn gốc"
-        size="4xl"
-      >
-        <div className="space-y-5 p-5">
-          {splitError && (
-            <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">
-              <AlertTriangle size={16} />
-              <span>{splitError}</span>
+        onClose={() => { if (!isSubmittingSplit) setIsSplitDrawerOpen(false); }}
+        title="Tách đơn"
+        subtitle="Phân bổ sản phẩm từ đơn gốc"
+        footer={
+          <div className="space-y-2">
+            {splitError && <div role="alert" className="max-h-20 overflow-y-auto text-sm text-red-700">{splitError}</div>}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-amber-800">Đơn tách chờ Kế toán duyệt.</p>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setIsSplitDrawerOpen(false)} disabled={isSubmittingSplit} className="min-h-11 flex-1 rounded-lg border border-gray-200 px-4 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50 sm:flex-none">Hủy</button>
+                <button type="button" onClick={() => void submitSplitOrder()} disabled={isSubmittingSplit || !selectedSplitOrderGroup} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-purple-600 px-4 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50 sm:flex-none">
+                  <Split size={16} />{isSubmittingSplit ? "Đang gửi..." : "Gửi Kế toán duyệt"}
+                </button>
+              </div>
             </div>
-          )}
+          </div>
+        }
+      >
+        <div className="min-w-0 space-y-5 p-3 sm:p-5">
 
           {!effectiveIsAdmin && (
             <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-2.5 text-xs text-amber-800">
               <Clock3 size={15} className="shrink-0" />
               <span>
-                Tài khoản hiện tại chỉ được phép <strong>Tách đơn</strong> đối với các đơn hàng trong ngày hôm nay (
-                <strong>{toVinamilkDate(todayInputStr)}</strong>) để tránh tác động vào dữ liệu các ngày cũ. Chỉ tài khoản{" "}
-                <strong>Admin</strong> mới có thể tách đơn ngày cũ.
+                Chỉ được tách đơn ngày <strong>{toVinamilkDate(todayInputStr)}</strong>. Đơn ngày cũ cần Admin xử lý.
               </span>
             </div>
           )}
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <label className="block text-sm text-gray-700">
-              1. Tìm đơn hàng cần tách
+              1. Tìm đơn
               <input
                 value={splitOrderSearch}
                 onChange={(e) => setSplitOrderSearch(e.target.value)}
@@ -3267,13 +3272,13 @@ return Array.from(map.values());
               />
             </label>
             <label className="block text-sm text-gray-700">
-              2. Chọn đơn hàng gốc ({filteredSplitOrderOptions.length} đơn khả dụng)
+              2. Đơn gốc ({filteredSplitOrderOptions.length})
               <select
                 value={selectedSplitOrderNumber}
                 onChange={(e) => handleSelectSplitOrder(e.target.value)}
                 className="mt-1 block w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
               >
-                <option value="">-- Chọn số đơn hàng --</option>
+                <option value="">-- Chọn đơn --</option>
                 {filteredSplitOrderOptions.map((group) => (
                   <option key={group.orderNumber} value={group.orderNumber}>
                     {group.orderNumber} — {group.customerName || group.customerCode} ({group.lines.length} SP, {formatVND(group.totalValue)})
@@ -3282,7 +3287,7 @@ return Array.from(map.values());
               </select>
             </label>
             <label className="block text-sm text-gray-700">
-              3. Số lượng đơn muốn tách ra (chọn 1 nếu chỉ đổi Mã KH)
+              3. Số đơn tách (chọn 1 để đổi KH)
               <input
                 type="number"
                 min={1}
@@ -3301,19 +3306,19 @@ return Array.from(map.values());
                   <div>
                     <strong>Đơn gốc:</strong> <span className="font-mono text-purple-700">{selectedSplitOrderGroup.orderNumber}</span>
                     {" | "}
-                    <strong>Khách hàng gốc:</strong> {selectedSplitOrderGroup.customerName} ({selectedSplitOrderGroup.customerCode})
+                    <strong>KH:</strong> {selectedSplitOrderGroup.customerName} ({selectedSplitOrderGroup.customerCode})
                     {" | "}
                     <strong>NVBH:</strong> {selectedSplitOrderGroup.staffName}
                   </div>
                   <div>
-                    <strong>Tổng đơn gốc:</strong>{" "}
-                    Số lượng: <strong>{selectedSplitOrderGroup.totalQty}</strong>
+                    <strong>Tổng:</strong>{" "}
+                    SL: <strong>{selectedSplitOrderGroup.totalQty}</strong>
                     {" | "}
-                    Số lượng KM: <strong className="text-amber-700">{selectedSplitOrderGroup.totalPromoQty}</strong>
+                    SL KM: <strong className="text-amber-700">{selectedSplitOrderGroup.totalPromoQty}</strong>
                     {" | "}
                     Giá trị: <strong className="text-emerald-700">{formatVND(selectedSplitOrderGroup.totalValue)}</strong>
                     {" | "}
-                    Số tiền CK: <strong className="text-rose-700">{formatVND(selectedSplitOrderGroup.totalDiscount)}</strong>
+                    CK: <strong className="text-rose-700">{formatVND(selectedSplitOrderGroup.totalDiscount)}</strong>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -3335,7 +3340,7 @@ return Array.from(map.values());
                     className="rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50"
                     title="Tính lại Giá trị & Số tiền CK tự động theo tỷ lệ Số lượng"
                   >
-                    Tính lại GT & CK theo SL
+                    Tính lại giá trị & CK
                   </button>
                   {splitCount >= 2 && (
                     <>
@@ -3351,13 +3356,13 @@ return Array.from(map.values());
                         onClick={fillRemainderToLastSplit}
                         className="rounded-lg border border-purple-300 bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-800 hover:bg-purple-100"
                       >
-                        Điền phần còn lại vào Đơn tách {splitCount}
+                        Điền phần còn lại vào đơn {splitCount}
                       </button>
                     </>
                   )}
-                  <label className="text-xs font-medium text-gray-700">
+                  <label className="flex flex-wrap items-center gap-2 text-xs font-medium text-gray-700">
                     NVGH nhận phần thiếu
-                    <select aria-label="NVGH nhận phần thiếu" value={remainderDeliveryEmployee} onChange={(event) => setRemainderDeliveryEmployee(event.target.value)} disabled={isLoadingDeliveryEmployees || !!deliveryEmployeeError} className="ml-2 rounded border border-gray-300 bg-white px-2 py-1">
+                    <select aria-label="NVGH nhận phần thiếu" value={remainderDeliveryEmployee} onChange={(event) => setRemainderDeliveryEmployee(event.target.value)} disabled={isLoadingDeliveryEmployees || !!deliveryEmployeeError} className="min-h-10 max-w-full rounded border border-gray-300 bg-white px-2 py-1">
                       <option value="">Chọn NVGH</option>
                       {deliveryEmployees.map((employee) => <option key={employee.code} value={employee.code}>{employee.code} - {employee.name}</option>)}
                     </select>
@@ -3376,7 +3381,7 @@ return Array.from(map.values());
               {/* Chọn Mã KH và xem Tổng hợp Giá trị / Số tiền CK cho từng đơn tách */}
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-600">
-                  4. Chọn khách hàng hoặc NVGH nhận phần thiếu & tổng hợp từng đơn tách
+                  4. Người nhận & tổng đơn tách
                 </h3>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   {Array.from({ length: splitCount }, (_, splitIdx) => {
@@ -3440,7 +3445,7 @@ return Array.from(map.values());
                         <div className="space-y-1.5">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <span className="font-medium text-gray-700">
-                              Đối tượng nhận đơn tách {splitIdx + 1}:
+                              Người nhận:
                             </span>
                             <div className="flex items-center gap-2">
                               {!isStaffDebt ? (
@@ -3449,7 +3454,7 @@ return Array.from(map.values());
                                   onClick={() => handleSetSplitToStaffDebt(splitIdx)}
                                   className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
                                 >
-                                  Gắn phần thiếu cho NVGH
+                                  Gắn cho NVGH
                                 </button>
                               ) : (
                                 <button
@@ -3459,7 +3464,7 @@ return Array.from(map.values());
                                   }
                                   className="rounded border border-purple-200 bg-white px-2 py-0.5 text-[11px] font-medium text-purple-700 hover:bg-purple-50"
                                 >
-                                  Chuyển về Khách hàng
+                                  Chọn khách hàng
                                 </button>
                               )}
                               {!isStaffDebt && selectedCust.customer_code !== selectedSplitOrderGroup.customerCode && (
@@ -3479,11 +3484,8 @@ return Array.from(map.values());
                           {isStaffDebt ? (
                             <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-900 space-y-1">
                               <div className="font-semibold">
-                                Gắn trách nhiệm / Công nợ NVGH:{" "}
+                                NVGH nhận phần thiếu:{" "}
                                 {deliveryEmployees.find((employee) => employee.code === splitDeliveryEmployees[splitIdx])?.name || "Chưa chọn NVGH"}
-                              </div>
-                              <div className="text-[11px] text-amber-700">
-                                Phần hàng thiếu được tạo thành đơn riêng gắn cho NVGH đã chọn.
                               </div>
                             </div>
                           ) : (
@@ -3519,12 +3521,6 @@ return Array.from(map.values());
                                   </option>
                                 ))}
                               </select>
-                              <div className="text-[11px] text-gray-500 truncate">
-                                Đang chọn: <strong className="text-gray-800" title={selectedCust.customer_code}>
-                                  {formatCustomerCode(selectedCust.customer_code)}
-                                </strong> —{" "}
-                                <span className="text-gray-700">{selectedCust.customer_name}</span>
-                              </div>
                             </>
                           )}
                         </div>
@@ -3561,6 +3557,8 @@ return Array.from(map.values());
                             <span className="font-medium text-gray-600">Tổng giá trị:</span>
                             <input
                               type="number"
+                              inputMode="decimal"
+                              aria-label={`Tổng giá trị đơn tách ${splitIdx + 1}`}
                               min={0}
                               step={1}
                               value={totals.totalValue}
@@ -3596,11 +3594,12 @@ return Array.from(map.values());
                 </div>
               </div>
 
-              <div className="overflow-x-auto rounded-xl border border-gray-200">
-                <table className="min-w-full divide-y divide-gray-200 text-xs">
+              <p className="text-xs text-gray-500">Vuốt ngang để xem các đơn tách.</p>
+              <div role="region" aria-label="Bảng phân bổ đơn tách, cuộn ngang để xem thêm" tabIndex={0} className="max-w-full overflow-x-auto rounded-xl border border-gray-200">
+                <table className="min-w-max w-full divide-y divide-gray-200 text-xs">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th rowSpan={2} className="px-3 py-2.5 text-left font-semibold text-gray-700 border-r border-gray-200">
+                      <th rowSpan={2} className="sticky left-0 z-10 w-28 min-w-28 max-w-28 border-r border-gray-200 bg-gray-50 px-3 py-2.5 text-left font-semibold text-gray-700 sm:w-48 sm:min-w-48 sm:max-w-48">
                         Sản phẩm
                       </th>
                       <th rowSpan={2} className="px-2 py-2.5 text-center font-semibold text-gray-700 border-r border-gray-200">
@@ -3696,8 +3695,8 @@ return Array.from(map.values());
 
                       return (
                         <tr key={localId} className="hover:bg-gray-50/60">
-                          <td className="px-3 py-2 align-top border-r border-gray-100">
-                            <div className="font-medium text-gray-900">{prodCode} — {prodName}</div>
+                          <td className="sticky left-0 z-10 w-28 min-w-28 max-w-28 border-r border-gray-200 bg-white px-3 py-2 align-top sm:w-48 sm:min-w-48 sm:max-w-48">
+                            <div className="break-words font-medium text-gray-900">{prodCode} — {prodName}</div>
                             {promoCode && <div className="text-[11px] text-gray-500">CTKM: {promoCode}</div>}
                             <div className="text-[11px] text-emerald-700">
                               Giá trị gốc: {formatVND(origVal)}
@@ -3729,11 +3728,13 @@ return Array.from(map.values());
                                       type="number"
                                       min={0}
                                       step="any"
+                                      aria-label={`Số lượng ${prodCode}, đơn tách ${splitIdx + 1}`}
+                                      inputMode="decimal"
                                       value={cell.quantity}
                                       onChange={(e) =>
                                         updateSplitCell(localId, splitIdx, "quantity", Number(e.target.value))
                                       }
-                                      className="w-20 rounded border border-gray-200 bg-white px-2 py-1 text-right text-xs font-medium text-gray-900 focus:border-purple-500 focus:outline-none"
+                                      className="min-h-10 w-20 rounded border border-gray-200 bg-white px-2 py-1 text-right text-xs font-medium text-gray-900 focus:border-purple-500 focus:outline-none"
                                     />
                                     {(cell.quantity > 0 || cell.promoQuantity > 0) && (
                                       <div className="w-full rounded bg-white/90 px-1.5 py-1 text-[10px] leading-tight border border-purple-100 space-y-1">
@@ -3741,6 +3742,8 @@ return Array.from(map.values());
                                           <span>GT:</span>
                                           <input
                                             type="number"
+                                            inputMode="decimal"
+                                            aria-label={`Giá trị ${prodCode}, đơn tách ${splitIdx + 1}`}
                                             min={0}
                                             step={1}
                                             value={cellFin.value}
@@ -3752,7 +3755,7 @@ return Array.from(map.values());
                                               )
                                             }
                                             title="Chỉnh sửa Giá trị của dòng sản phẩm này"
-                                            className="w-20 rounded border border-emerald-200 bg-emerald-50/20 px-1 py-0.5 text-right text-[10px] font-semibold text-emerald-800 focus:border-emerald-500 focus:outline-none"
+                                            className="min-h-10 w-20 rounded border border-emerald-200 bg-emerald-50/20 px-1 py-0.5 text-right text-xs font-semibold text-emerald-800 focus:border-emerald-500 focus:outline-none"
                                           />
                                         </label>
                                         {selectedSplitOrderGroup.totalDiscount > 0 && (
@@ -3760,6 +3763,8 @@ return Array.from(map.values());
                                             <span>CK:</span>
                                             <input
                                               type="number"
+                                              inputMode="decimal"
+                                              aria-label={`Chiết khấu ${prodCode}, đơn tách ${splitIdx + 1}`}
                                               min={0}
                                               step={1}
                                               value={cellFin.discount}
@@ -3770,7 +3775,7 @@ return Array.from(map.values());
                                                   Number(e.target.value)
                                                 )
                                               }
-                                              className="w-20 rounded border border-rose-200 bg-rose-50/20 px-1 py-0.5 text-right text-[10px] font-medium text-rose-800 focus:border-rose-500 focus:outline-none"
+                                              className="min-h-10 w-20 rounded border border-rose-200 bg-rose-50/20 px-1 py-0.5 text-right text-xs font-medium text-rose-800 focus:border-rose-500 focus:outline-none"
                                             />
                                           </label>
                                         )}
@@ -3786,13 +3791,15 @@ return Array.from(map.values());
                                   <div className="flex flex-col items-end">
                                     <input
                                       type="number"
+                                      inputMode="decimal"
+                                      aria-label={`Số lượng khuyến mại ${prodCode}, đơn tách ${splitIdx + 1}`}
                                       min={0}
                                       step="any"
                                       value={cell.promoQuantity}
                                       onChange={(e) =>
                                         updateSplitCell(localId, splitIdx, "promoQuantity", Number(e.target.value))
                                       }
-                                      className="w-20 rounded border border-amber-200 bg-white px-2 py-1 text-right text-xs font-medium text-amber-900 focus:border-amber-500 focus:outline-none"
+                                      className="min-h-10 w-20 rounded border border-amber-200 bg-white px-2 py-1 text-right text-xs font-medium text-amber-900 focus:border-amber-500 focus:outline-none"
                                     />
                                   </div>
                                 </td>
@@ -3841,7 +3848,7 @@ return Array.from(map.values());
                   </tbody>
                   <tfoot className="bg-gray-50 font-semibold text-gray-900 border-t border-gray-200">
                     <tr>
-                      <td colSpan={2} className="px-3 py-2.5 text-right align-top border-r border-gray-200">
+                      <td className="sticky left-0 z-10 w-28 min-w-28 max-w-28 border-r border-gray-200 bg-gray-50 px-3 py-2.5 text-right align-top sm:w-48 sm:min-w-48 sm:max-w-48">
                         <div>Tổng cộng:</div>
                         <div className="text-[11px] font-normal text-emerald-700">
                           GT gốc: {formatVND(selectedSplitOrderGroup.totalValue)}
@@ -3850,6 +3857,7 @@ return Array.from(map.values());
                           CK gốc: {formatVND(selectedSplitOrderGroup.totalDiscount)}
                         </div>
                       </td>
+                      <td className="border-r border-gray-200 bg-gray-50" />
                       <td className="px-2.5 py-2.5 text-right align-top border-r border-gray-200">
                         {selectedSplitOrderGroup.totalQty}
                       </td>
@@ -3909,38 +3917,14 @@ return Array.from(map.values());
                 </table>
               </div>
 
-              <div className="flex items-center justify-between gap-2 border-t border-gray-100 pt-4">
-                <div className="text-xs text-amber-800">
-                  * Khi gửi yêu cầu, đơn tách sẽ chuyển sang trạng thái <strong>Chờ Kế toán xác nhận</strong> trước khi chính thức tách trên hệ thống DMS nội bộ.
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsSplitDrawerOpen(false)}
-                    disabled={isSubmittingSplit}
-                    className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
-                  >
-                    Hủy
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void submitSplitOrder()}
-                    disabled={isSubmittingSplit}
-                    className="flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
-                  >
-                    <Split size={16} />
-                    {isSubmittingSplit ? "Đang gửi yêu cầu..." : "Gửi Kế toán duyệt tách đơn"}
-                  </button>
-                </div>
-              </div>
             </div>
           ) : (
             <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 p-8 text-center text-sm text-gray-500">
-              Chọn một đơn hàng ở trên để bắt đầu phân bổ số lượng tách đơn.
+              Chọn đơn gốc để bắt đầu.
             </div>
           )}
         </div>
-      </Drawer>
+      </OrderActionModal>
 
       {/* Drawer Kế toán xác nhận duyệt Tách đơn */}
       <Drawer
@@ -4208,36 +4192,37 @@ return Array.from(map.values());
         </div>
       </Drawer>
 
-      {/* Drawer Gộp đơn hàng (Merge Orders) */}
-      <Drawer
+      <OrderActionModal
         open={isMergeDrawerOpen}
-        onClose={() => setIsMergeDrawerOpen(false)}
-        title="Gộp đơn hàng (Đơn Gộp)"
-        subtitle="Chọn từ 2 đơn hàng trở lên để tự động tổng hợp sản phẩm, số lượng, số lượng KM và giá trị thành 1 đơn mới"
-        size="4xl"
-      >
-        <div className="space-y-5 p-5">
-          {mergeError && (
-            <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">
-              <AlertTriangle size={16} />
-              <span>{mergeError}</span>
+        onClose={() => { if (!isSubmittingMerge) setIsMergeDrawerOpen(false); }}
+        title="Gộp đơn"
+        subtitle="Chọn ít nhất 2 đơn"
+        footer={
+          <div className="space-y-2">
+            {mergeError && <div role="alert" className="max-h-20 overflow-y-auto text-sm text-red-700">{mergeError}</div>}
+            <div className="flex gap-2 sm:justify-end">
+              <button type="button" onClick={() => setIsMergeDrawerOpen(false)} disabled={isSubmittingMerge} className="min-h-11 flex-1 rounded-lg border border-gray-200 px-4 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50 sm:flex-none">Hủy</button>
+              <button type="button" onClick={() => void submitMergeOrders()} disabled={isSubmittingMerge || selectedMergeOrderNumbers.length < 2} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 sm:flex-none">
+                <Merge size={16} />{isSubmittingMerge ? "Đang gộp đơn..." : `Xác nhận gộp (${selectedMergeOrderNumbers.length} đơn)`}
+              </button>
             </div>
-          )}
+          </div>
+        }
+      >
+        <div className="min-w-0 space-y-5 p-3 sm:p-5">
 
           {!effectiveIsAdmin && (
             <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-2.5 text-xs text-amber-800">
               <Clock3 size={15} className="shrink-0" />
               <span>
-                Tài khoản hiện tại chỉ được phép <strong>Gộp đơn</strong> đối với các đơn hàng trong ngày hôm nay (
-                <strong>{toVinamilkDate(todayInputStr)}</strong>) để tránh tác động vào dữ liệu các ngày cũ. Chỉ tài khoản{" "}
-                <strong>Admin</strong> mới có thể gộp đơn ngày cũ.
+                Chỉ được gộp đơn ngày <strong>{toVinamilkDate(todayInputStr)}</strong>. Đơn ngày cũ cần Admin xử lý.
               </span>
             </div>
           )}
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <label className="block text-sm text-gray-700">
-              Tìm kiếm đơn hàng để gộp
+              Tìm đơn
               <input
                 value={mergeOrderSearch}
                 onChange={(e) => setMergeOrderSearch(e.target.value)}
@@ -4247,7 +4232,7 @@ return Array.from(map.values());
             </label>
             {selectedMergeOrderNumbers.length >= 2 && (
               <label className="block text-sm text-gray-700">
-                Đơn đại diện lấy thông tin chung (Ngày đơn, mặc định KH & NVBH)
+                Đơn đại diện (ngày, KH và NVBH mặc định)
                 <select
                   value={representativeOrderNumber || selectedMergeOrderNumbers[0]}
                   onChange={(e) => setRepresentativeOrderNumber(e.target.value)}
@@ -4264,7 +4249,7 @@ return Array.from(map.values());
           </div>
 
           <label className="block text-sm text-gray-700">
-            NVGH cho đơn gộp (không bắt buộc)
+            NVGH (không bắt buộc)
             <select
               value={mergeDeliveryEmployee}
               onChange={(event) => setMergeDeliveryEmployee(event.target.value)}
@@ -4284,19 +4269,8 @@ return Array.from(map.values());
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h4 className="text-xs font-semibold text-indigo-950">
-                    Tùy chọn thay đổi thông tin đại diện cho Đơn Gộp (Khách hàng & NVBH khác với các đơn gộp)
+                    Thông tin đại diện
                   </h4>
-                  <p className="text-[11px] text-gray-600">
-                    Mặc định lấy theo đơn đại diện{" "}
-                    <strong className="font-mono">{selectedRepresentativeMergeGroup.orderNumber}</strong>:{" "}
-                    KH <strong>{selectedRepresentativeMergeGroup.customerCode}</strong> (
-                    {selectedRepresentativeMergeGroup.customerName || "—"}) | NVBH:{" "}
-                    <strong>
-                      {selectedRepresentativeMergeGroup.staffName ||
-                        selectedRepresentativeMergeGroup.staffCode ||
-                        "—"}
-                    </strong>
-                  </p>
                 </div>
               </div>
 
@@ -4304,7 +4278,7 @@ return Array.from(map.values());
                 {/* Cột 1: Tùy chọn đổi Khách hàng đại diện */}
                 <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2.5 text-xs">
                   <label className="flex cursor-pointer items-center justify-between gap-2 font-semibold text-gray-800">
-                    <span>Thay đổi Mã / Tên Khách hàng khác</span>
+                    <span>Đổi khách hàng</span>
                     <input
                       type="checkbox"
                       checked={mergeOverrideCustomer}
@@ -4419,7 +4393,7 @@ return Array.from(map.values());
                 {/* Cột 2: Tùy chọn đổi NVBH đại diện */}
                 <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2.5 text-xs">
                   <label className="flex cursor-pointer items-center justify-between gap-2 font-semibold text-gray-800">
-                    <span>Thay đổi NVBH đại diện khác</span>
+                    <span>Đổi NVBH</span>
                     <input
                       type="checkbox"
                       checked={mergeOverrideStaff}
@@ -4517,7 +4491,7 @@ return Array.from(map.values());
           <div className="max-h-60 overflow-y-auto rounded-xl border border-gray-200 divide-y divide-gray-100">
             {filteredMergeOrderOptions.length === 0 ? (
               <div className="p-6 text-center text-sm text-gray-400">
-                Không có đơn hàng khả dụng phù hợp với bộ lọc.
+                Không tìm thấy đơn phù hợp.
               </div>
             ) : (
               filteredMergeOrderOptions.map((group) => {
@@ -4525,25 +4499,25 @@ return Array.from(map.values());
                 return (
                   <label
                     key={group.orderNumber}
-                    className={`flex cursor-pointer items-center justify-between gap-3 px-4 py-2.5 text-xs transition-colors ${
+                    className={`flex cursor-pointer flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs transition-colors ${
                       checked ? "bg-indigo-50/70" : "hover:bg-gray-50"
                     }`}
                   >
-                    <div className="flex items-center gap-3">
+                    <div className="flex min-w-0 items-center gap-3">
                       <input
                         type="checkbox"
                         checked={checked}
                         onChange={() => toggleMergeOrderNumber(group.orderNumber)}
                         className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                       />
-                      <div>
+                      <div className="min-w-0 break-words">
                         <span className="font-mono font-semibold text-gray-900">{group.orderNumber}</span>
                         <span className="mx-2 text-gray-300">|</span>
                         <span className="font-medium text-gray-800">{group.customerName || group.customerCode}</span>
                         <span className="ml-2 text-gray-500">({group.staffName})</span>
                       </div>
                     </div>
-                    <div className="text-right text-gray-600">
+                    <div className="pl-7 text-left text-gray-600 sm:pl-0 sm:text-right">
                       <span className="mr-3">{group.lines.length} dòng SP (SL: {group.totalQty})</span>
                       <span className="font-semibold text-emerald-700">{formatVND(group.totalValue)}</span>
                     </div>
@@ -4573,10 +4547,11 @@ return Array.from(map.values());
               </div>
 
               <h3 className="text-sm font-semibold text-gray-800">
-                Xem trước danh mục sản phẩm sau khi gộp ({mergedProductPreview.length} dòng sản phẩm)
+                Sản phẩm sau khi gộp ({mergedProductPreview.length} dòng)
               </h3>
-              <div className="overflow-x-auto rounded-xl border border-gray-200">
-                <table className="min-w-full divide-y divide-gray-200 text-xs">
+              <p className="text-xs text-gray-500">Vuốt ngang để xem thêm.</p>
+              <div role="region" aria-label="Bảng sản phẩm đơn gộp, cuộn ngang để xem thêm" tabIndex={0} className="max-w-full overflow-x-auto rounded-xl border border-gray-200">
+                <table className="min-w-max w-full divide-y divide-gray-200 text-xs">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-3 py-2 text-left font-semibold text-gray-700">Mã SP</th>
@@ -4625,27 +4600,8 @@ return Array.from(map.values());
             </div>
           )}
 
-          <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-4">
-            <button
-              type="button"
-              onClick={() => setIsMergeDrawerOpen(false)}
-              disabled={isSubmittingMerge}
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
-            >
-              Hủy
-            </button>
-            <button
-              type="button"
-              onClick={() => void submitMergeOrders()}
-              disabled={isSubmittingMerge || selectedMergeOrderNumbers.length < 2}
-              className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-            >
-              <Merge size={16} />
-              {isSubmittingMerge ? "Đang gộp đơn..." : `Xác nhận gộp (${selectedMergeOrderNumbers.length} đơn)`}
-            </button>
-          </div>
         </div>
-      </Drawer>
+      </OrderActionModal>
     </div>
   );
 }

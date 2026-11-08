@@ -11,6 +11,11 @@ import app.models  # noqa: F401  (đăng ký toàn bộ model)
 from app.api.v1.endpoints.sync import (
     ManualOrderLine,
     ManualOrderRequest,
+    SplitOrderItemAllocation,
+    SplitOrderRequest,
+    SplitOrderTarget,
+    _approve_split_order_request,
+    _create_split_order_request,
     _create_manual_order,
     _delete_manual_order,
     list_local_vinamilk_orders,
@@ -369,6 +374,143 @@ def test_order_list_shows_only_approved_delivery_assignments(db):
     assert rows["VM-B"]["NVGH"] == rows["VM-D"]["NVGH"] == ""
     assert rows["VM-C"]["NVGH"] == "NV005 - Một, NV006 - Hai"
     assert rows["VM-C"]["Mã NVGH"] == ""
+
+
+def test_split_delivery_employee_survives_approval_and_delivery_override(db):
+    shipper = Employee(code="NV020", name="Người Giao", position="Giao hàng", phone="0900000020")
+    source = VinamilkOrderSnapshot(
+        remote_key="split-nvgh", order_number="VM-SPLIT",
+        customer_code="0MD", customer_name="Khách hàng", product_code="01VD41", product_name="SP",
+        order_created_date=date(2026, 11, 4), synced_from=date(2026, 11, 4), synced_to=date(2026, 11, 4),
+        raw_payload={"orderNumber": "VM-SPLIT", "quantity": 2, "totalValue": 200,
+                     "Mã NVGH": "NV099", "Tên NVGH": "Không kế thừa"},
+    )
+    db.add_all([shipper, source])
+    db.flush()
+    payload = SplitOrderRequest(order_number="VM-SPLIT", splits=[
+        SplitOrderTarget(customer_code="0MD", delivery_employee_code="nv020",
+                         items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=1)]),
+        SplitOrderTarget(customer_code="OTHER",
+                         items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=1)]),
+    ])
+    request = _create_split_order_request(db, payload, requested_by="admin")
+    assert request["preview"]["splits"][0]["delivery_employee_code"] == "NV020"
+    assert request["preview"]["splits"][0]["delivery_employee_name"] == "Người Giao"
+    assert request["preview"]["splits"][1]["delivery_employee_code"] == ""
+    _approve_split_order_request(db, request["id"], reviewed_by="admin")
+
+    def rows():
+        result = list_local_vinamilk_orders(
+            from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+            search=None, status=None, skip=0, limit=100, db=db,
+        )
+        return {row["Số đơn hàng"]: row for row in result["rows"] if row.get("Số đơn hàng")}
+
+    assert rows()["TD-VM-SPLIT-01"]["NVGH"] == "NV020 - Người Giao"
+    assert rows()["TD-VM-SPLIT-02"]["NVGH"] == ""
+    warehouse = Warehouse(code="WH-SPLIT", name="Kho", location="Kho")
+    db.add(warehouse)
+    db.flush()
+    delivery = DeliveryRequest(code="YC-SPLIT", warehouse_id=warehouse.id, status="SUBMITTED")
+    db.add(delivery)
+    db.flush()
+    db.add(DeliveryRequestOrder(delivery_request_id=delivery.id, order_number="TD-VM-SPLIT-01",
+                                employee_code="NV030", employee_name="Người khác"))
+    db.flush()
+    assert rows()["TD-VM-SPLIT-01"]["NVGH"] == "NV030 - Người khác"
+    delivery.status = "CANCELLED"
+    db.flush()
+    assert rows()["TD-VM-SPLIT-01"]["NVGH"] == "NV020 - Người Giao"
+
+
+def test_split_rejects_invalid_delivery_employee(db):
+    source = VinamilkOrderSnapshot(
+        remote_key="split-invalid", order_number="VM-INVALID", customer_code="0MD",
+        product_code="01VD41", order_created_date=date(2026, 11, 4),
+        synced_from=date(2026, 11, 4), synced_to=date(2026, 11, 4),
+        raw_payload={"quantity": 1},
+    )
+    db.add(source)
+    db.flush()
+    payload = SplitOrderRequest(order_number="VM-INVALID", splits=[
+        SplitOrderTarget(customer_code="OTHER", delivery_employee_code="NV999",
+                         items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=1)])
+    ])
+    with pytest.raises(HTTPException, match="NVGH đang hoạt động"):
+        _create_split_order_request(db, payload)
+
+
+@pytest.mark.parametrize("automatic", [True, False])
+def test_split_shortage_is_assigned_to_selected_delivery_employee(db, automatic):
+    shipper = Employee(code="NV020", name="Người Giao", position="Giao hàng", phone="0900000020")
+    source = VinamilkOrderSnapshot(
+        remote_key="split-shortage", order_number="VM-SHORT",
+        customer_code="0MD", customer_name="Khách hàng", product_code="01VD41",
+        order_created_date=date(2026, 11, 4), synced_from=date(2026, 11, 4), synced_to=date(2026, 11, 4),
+        raw_payload={"quantity": 10, "promotionQuantity": 2, "totalValue": 1000,
+                     "Mã NVBH": "SALE01", "Tên NVBH": "Người Bán"},
+    )
+    db.add_all([shipper, source])
+    db.flush()
+    targets = [SplitOrderTarget(
+        customer_code="0MD", items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=6, promo_quantity=1)]
+    )]
+    if not automatic:
+        targets.append(SplitOrderTarget(
+            is_staff_debt=True, debt_target="DELIVERY", delivery_employee_code="nv020",
+            customer_code="NVBH-SALE01", customer_name="Sai đối tượng",
+            items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=4, promo_quantity=1)],
+        ))
+    payload = SplitOrderRequest(
+        order_number="VM-SHORT", splits=targets, auto_assign_remainder_to_delivery=automatic,
+        remainder_delivery_employee_code="nv020" if automatic else None,
+    )
+    request = _create_split_order_request(db, payload, requested_by="admin")
+    shortage = request["preview"]["splits"][1]
+    assert shortage["customer_code"] == "NVGH-NV020"
+    assert "Người Giao" in shortage["customer_name"]
+    assert shortage["delivery_employee_code"] == "NV020"
+    assert shortage["status_label"] == "Đơn Tách (Nợ NVGH)"
+    assert shortage["total_qty"] == 4
+    assert shortage["total_promo_qty"] == 1
+    _approve_split_order_request(db, request["id"], reviewed_by="accountant")
+
+    row = db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == "TD-VM-SHORT-02"))
+    assert row.customer_code == "NVGH-NV020"
+    assert row.raw_payload["Mã NVGH"] == "NV020"
+    assert row.raw_payload["Mã NVBH"] == "SALE01"
+    listed = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+    shortage_row = next(row for row in listed["rows"] if row["orderNumber"] == "TD-VM-SHORT-02")
+    assert shortage_row["NVGH"] == "NV020 - Người Giao"
+    assert shortage_row["_processing_status"] == "Đơn Tách (Nợ NVGH)"
+
+
+@pytest.mark.parametrize("automatic,employee_code", [
+    (True, None), (True, "NV999"), (False, None), (False, "NV999"), (True, "NV021"), (False, "NV021"),
+])
+def test_split_shortage_requires_active_delivery_employee(db, automatic, employee_code):
+    db.add(Employee(code="NV021", name="Ngừng hoạt động", position="Giao hàng", status="inactive", phone="0900000021"))
+    source = VinamilkOrderSnapshot(
+        remote_key="invalid-shortage", order_number="VM-SHORT-INVALID", customer_code="0MD",
+        product_code="01VD41", order_created_date=date(2026, 11, 4),
+        synced_from=date(2026, 11, 4), synced_to=date(2026, 11, 4), raw_payload={"quantity": 2},
+    )
+    db.add(source)
+    db.flush()
+    target = SplitOrderTarget(
+        customer_code="OTHER", is_staff_debt=not automatic, debt_target=None if automatic else "DELIVERY",
+        delivery_employee_code=None if automatic else employee_code,
+        items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=1)],
+    )
+    payload = SplitOrderRequest(
+        order_number="VM-SHORT-INVALID", splits=[target], auto_assign_remainder_to_delivery=automatic,
+        remainder_delivery_employee_code=employee_code if automatic else None,
+    )
+    with pytest.raises(HTTPException, match="NVGH"):
+        _create_split_order_request(db, payload)
 
 
 def test_manual_order_rejects_unknown_delivery_employee(db):

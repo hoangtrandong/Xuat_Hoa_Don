@@ -151,6 +151,25 @@ def test_delivery_request_form_uses_employee_and_order_data_from_database(db):
     ]
 
 
+@pytest.mark.parametrize("customer_code", ["NVGH-NV008", "NVBH-SALE01"])
+def test_delivery_request_form_preserves_staff_debt_customer_code(db, customer_code):
+    db.add(Employee(code="NV008", name="Nhân viên giao", position="Đội xe", phone="0900000000", status="active"))
+    add_snapshot(db, "IN001")
+    snapshot = db.query(VinamilkOrderSnapshot).filter_by(order_number="IN001").one()
+    snapshot.customer_code = customer_code
+    db.flush()
+    response = download_vinamilk_delivery_request_form(
+        DeliveryRequestFormRequest(orders=[
+            DeliveryRequestFormOrder(order_number="IN001", delivery_employee_code="NV008"),
+        ]),
+        db,
+        SimpleNamespace(username="admin", roles=[]),
+    )
+    workbook = load_workbook(BytesIO(response.body), data_only=True)
+    assert workbook["DSDonHang"]["E5"].value == customer_code
+    assert _read_new_workbook_order_rows(workbook)[0]["customer_code"] == customer_code
+
+
 @pytest.mark.parametrize(
     ("employee_code", "employee_status"),
     [("KT001", "active"), ("NV008", "inactive")],

@@ -11,6 +11,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+import app.models  # noqa: F401
+from app.core.database import Base
 from app.api.v1.endpoints.sync import (
     MergeOrdersRequest,
     SplitOrderItemAllocation,
@@ -32,10 +34,7 @@ from app.api.v1.endpoints.sync import (
 from app.models.vinamilk import (
     VinamilkOrderReplacement,
     VinamilkOrderSnapshot,
-    VinamilkOrderSplitRequest,
-    VinamilkSyncRun,
 )
-from app.models.customer import Customer
 from app.services.vinamilk_sales_summary import build_sales_summary
 
 
@@ -46,11 +45,7 @@ def db():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Customer.__table__.create(engine)
-    VinamilkOrderSnapshot.__table__.create(engine)
-    VinamilkOrderReplacement.__table__.create(engine)
-    VinamilkOrderSplitRequest.__table__.create(engine)
-    VinamilkSyncRun.__table__.create(engine)
+    Base.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
     engine.dispose()

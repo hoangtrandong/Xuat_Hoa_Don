@@ -156,6 +156,8 @@ class SplitOrderTarget(BaseModel):
     is_staff_debt: bool = False
     staff_code: str | None = None
     staff_name: str | None = None
+    delivery_employee_code: str | None = Field(default=None, max_length=20)
+    debt_target: str | None = Field(default=None, pattern="^DELIVERY$")
     items: list[SplitOrderItemAllocation] = Field(default_factory=list)
 
 
@@ -164,6 +166,8 @@ class SplitOrderRequest(BaseModel):
     order_number: str | None = None
     splits: list[SplitOrderTarget]
     auto_assign_remainder_to_staff: bool = False
+    auto_assign_remainder_to_delivery: bool = False
+    remainder_delivery_employee_code: str | None = Field(default=None, max_length=20)
 
 
 class RejectSplitOrderRequest(BaseModel):
@@ -446,6 +450,31 @@ def _prepare_split_vinamilk_order(
 
     source_by_id = {row.id: row for row in source_rows}
     effective_splits: list[SplitOrderTarget] = list(payload.splits)
+    delivery_codes = {
+        target.delivery_employee_code.strip().upper()
+        for target in effective_splits
+        if target.delivery_employee_code and target.delivery_employee_code.strip()
+    }
+    if payload.auto_assign_remainder_to_delivery:
+        remainder_code = (payload.remainder_delivery_employee_code or "").strip().upper()
+        if not remainder_code:
+            raise HTTPException(status_code=400, detail="Vui lòng chọn NVGH nhận phần thiếu.")
+        delivery_codes.add(remainder_code)
+    if payload.auto_assign_remainder_to_staff and payload.auto_assign_remainder_to_delivery:
+        raise HTTPException(status_code=400, detail="Chỉ được chọn một cách phân bổ phần thiếu.")
+    for target in effective_splits:
+        if target.debt_target == "DELIVERY" and (
+            not target.is_staff_debt or not (target.delivery_employee_code or "").strip()
+        ):
+            raise HTTPException(status_code=400, detail="Vui lòng chọn NVGH nhận phần thiếu.")
+    delivery_employees = {
+        employee.code.strip().upper(): employee
+        for employee in db.scalars(select(Employee).where(func.upper(Employee.code).in_(delivery_codes))).all()
+    } if delivery_codes else {}
+    for code in delivery_codes:
+        employee = delivery_employees.get(code)
+        if not code.startswith("NV") or employee is None or (employee.status or "").lower() != "active":
+            raise HTTPException(status_code=400, detail=f"Không tìm thấy NVGH đang hoạt động {code}.")
     alloc_by_split: list[dict[int, tuple[float, float]]] = []
     custom_val_by_split_item: dict[tuple[int, int], float] = {}
     custom_disc_by_split_item: dict[tuple[int, int], float] = {}
@@ -512,7 +541,7 @@ def _prepare_split_vinamilk_order(
         rem_q = max(0.0, round(orig_qty - got_qty, 4))
         rem_p = max(0.0, round(orig_promo - got_promo, 4))
         if rem_q > 1e-6 or rem_p > 1e-6:
-            if not payload.auto_assign_remainder_to_staff:
+            if not (payload.auto_assign_remainder_to_staff or payload.auto_assign_remainder_to_delivery):
                 if abs(got_qty - orig_qty) > 1e-6:
                     raise HTTPException(
                         status_code=400,
@@ -564,6 +593,8 @@ def _prepare_split_vinamilk_order(
         effective_splits.append(
             SplitOrderTarget(
                 is_staff_debt=True,
+                debt_target="DELIVERY" if payload.auto_assign_remainder_to_delivery else None,
+                delivery_employee_code=payload.remainder_delivery_employee_code if payload.auto_assign_remainder_to_delivery else None,
                 items=remainder_items,
             )
         )
@@ -689,21 +720,25 @@ def _prepare_split_vinamilk_order(
         chosen_cust_code = (split_target.customer_code or "").strip()
         chosen_cust_name = (split_target.customer_name or "").strip()
         chosen_cust_addr = (split_target.customer_address or "").strip()
+        delivery_employee = delivery_employees.get((split_target.delivery_employee_code or "").strip().upper())
 
         if is_staff_debt:
-            staff_code_val = (split_target.staff_code or default_staff_code).strip()
-            staff_name_val = (split_target.staff_name or default_staff_name).strip()
-            if not chosen_cust_code:
-                chosen_cust_code = f"NVBH-{staff_code_val}" if staff_code_val else "NVBH"
-            if not chosen_cust_name:
-                staff_label = (
-                    f"{staff_name_val} ({staff_code_val})"
-                    if (staff_name_val and staff_code_val)
-                    else (staff_name_val or staff_code_val or "Nhân viên")
-                )
-                chosen_cust_name = f"NVBH: {staff_label} — Công nợ tách thiếu"
-            if not chosen_cust_addr:
-                chosen_cust_addr = "Đơn tách phần thiếu gắn công nợ NVBH"
+            if split_target.debt_target == "DELIVERY":
+                if delivery_employee is None:
+                    raise HTTPException(status_code=400, detail="Vui lòng chọn NVGH nhận phần thiếu.")
+                chosen_cust_code = f"NVGH-{delivery_employee.code}"
+                chosen_cust_name = f"NVGH: {delivery_employee.name} ({delivery_employee.code}) — Công nợ tách thiếu"
+                chosen_cust_addr = "Đơn tách phần thiếu gắn công nợ NVGH"
+            else:
+                staff_code_val = (split_target.staff_code or default_staff_code).strip()
+                staff_name_val = (split_target.staff_name or default_staff_name).strip()
+                if not chosen_cust_code:
+                    chosen_cust_code = f"NVBH-{staff_code_val}" if staff_code_val else "NVBH"
+                if not chosen_cust_name:
+                    staff_label = f"{staff_name_val} ({staff_code_val})" if staff_name_val and staff_code_val else (staff_name_val or staff_code_val or "Nhân viên")
+                    chosen_cust_name = f"NVBH: {staff_label} — Công nợ tách thiếu"
+                if not chosen_cust_addr:
+                    chosen_cust_addr = "Đơn tách phần thiếu gắn công nợ NVBH"
         elif chosen_cust_code and not chosen_cust_name:
             snap_cust = db.scalar(
                 select(VinamilkOrderSnapshot)
@@ -720,7 +755,7 @@ def _prepare_split_vinamilk_order(
 
         final_cust_code = chosen_cust_code or orig_cust_code
         final_cust_name = chosen_cust_name or orig_cust_name
-        status_label = "Đơn Tách (Nợ NVBH)" if is_staff_debt else "Đơn Tách"
+        status_label = ("Đơn Tách (Nợ NVGH)" if split_target.debt_target == "DELIVERY" else "Đơn Tách (Nợ NVBH)") if is_staff_debt else "Đơn Tách"
 
         resolved_targets.append({
             "new_order_number": new_order_num,
@@ -729,6 +764,8 @@ def _prepare_split_vinamilk_order(
             "customer_address": chosen_cust_addr,
             "is_staff_debt": is_staff_debt,
             "status_label": status_label,
+            "delivery_employee_code": delivery_employee.code if delivery_employee else "",
+            "delivery_employee_name": delivery_employee.name if delivery_employee else "",
         })
 
         split_items_preview: list[dict[str, Any]] = []
@@ -767,6 +804,8 @@ def _prepare_split_vinamilk_order(
             "customer_address": chosen_cust_addr,
             "is_staff_debt": is_staff_debt,
             "status_label": status_label,
+            "delivery_employee_code": delivery_employee.code if delivery_employee else "",
+            "delivery_employee_name": delivery_employee.name if delivery_employee else "",
             "total_qty": _format_qty_value(split_qty_sum),
             "total_promo_qty": _format_qty_value(split_promo_sum),
             "total_value": _format_qty_value(split_val_sum),
@@ -875,6 +914,8 @@ def _split_vinamilk_order(
             base_raw["voucherAmount"] = fmt_voucher
             base_raw["orderStatus"] = status_label
             base_raw["status"] = status_label
+            base_raw["Mã NVGH"] = target_info["delivery_employee_code"]
+            base_raw["Tên NVGH"] = target_info["delivery_employee_name"]
             base_raw["_is_staff_debt"] = is_staff_debt
             base_raw["Người thực hiện"] = actor
             base_raw["performedBy"] = actor
@@ -2004,7 +2045,7 @@ def list_local_vinamilk_orders(
         }
         manual_code = str(row.raw_payload.get("Mã NVGH") or "").strip() if row.is_synthetic else ""
         manual_name = str(row.raw_payload.get("Tên NVGH") or "").strip() if row.is_synthetic else ""
-        if manual_code:
+        if manual_code and (replacement_type_for.get(order_num) != "SPLIT" or not assigned_employees):
             assigned_employees = {manual_code: manual_name}
         delivery_labels = [
             f"{code} - {name}" if name else code
@@ -2177,12 +2218,15 @@ def download_vinamilk_delivery_request_form(
     for normalized_number, request_order in orders_by_number.items():
         snapshot = latest_snapshot_by_number[normalized_number]
         employee = employees_by_code[request_order.delivery_employee_code.strip().upper()]
+        customer_code = (snapshot.customer_code or "").strip()
+        if not customer_code.upper().startswith(("NVBH-", "NVGH-")) and customer_code.upper() != "NVBH":
+            customer_code = customer_code[-3:]
         form_orders.append({
             "order_date": snapshot.order_created_date.strftime("%d/%m/%Y") if snapshot.order_created_date else "",
             "order_number": snapshot.order_number or request_order.order_number,
             "employee_code": employee.code,
             "employee_name": employee.name,
-            "customer_code": (snapshot.customer_code or "").strip()[-3:],
+            "customer_code": customer_code,
             "customer_name": snapshot.customer_name or "",
             "status": request_order.status,
         })

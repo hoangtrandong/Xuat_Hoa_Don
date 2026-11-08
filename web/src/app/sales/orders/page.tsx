@@ -119,6 +119,7 @@ type DeliveryRequestOrderOption = {
   original_status: string;
   delivery_employee_code: string;
   manager_code: string;
+  is_split: boolean;
 };
 
 type DeliveryRequestPreviewItem = {
@@ -228,6 +229,8 @@ type SplitRequestPreviewSplit = {
   customer_code: string;
   customer_name: string;
   customer_address?: string;
+  delivery_employee_code?: string;
+  delivery_employee_name?: string;
   is_staff_debt?: boolean;
   status_label: string;
   total_qty: number;
@@ -415,7 +418,7 @@ function formatRemoteColumnValue(title: string, value: unknown): string {
   if (title === "Ngày giao") return formatVinamilkDate(value, false);
   if (title === "Mã KH") {
     const code = displayRemoteValue(value).trim();
-    return code.toUpperCase().startsWith("NVBH") ? code : formatCustomerCode(code);
+    return /^(NVBH|NVGH)-/i.test(code) || code.toUpperCase() === "NVBH" ? code : formatCustomerCode(code);
   }
   return displayRemoteValue(value);
 }
@@ -461,6 +464,8 @@ export default function SalesOrdersPage() {
   const [splitCount, setSplitCount] = useState(2);
   const [splitAllocs, setSplitAllocs] = useState<SplitAllocMap>({});
   const [splitCustomers, setSplitCustomers] = useState<SplitCustomerSelection[]>([]);
+  const [splitDeliveryEmployees, setSplitDeliveryEmployees] = useState<string[]>([]);
+  const [remainderDeliveryEmployee, setRemainderDeliveryEmployee] = useState("");
   const [splitCustomerSearches, setSplitCustomerSearches] = useState<string[]>([]);
   const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([]);
   const [isSubmittingSplit, setIsSubmittingSplit] = useState(false);
@@ -736,9 +741,11 @@ return Array.from(map.values());
 
   // Khởi tạo bảng phân bổ số lượng và khách hàng khi chọn đơn cần tách
   function initializeSplitAllocations(group: GroupedOrderSummary | null, count: number) {
+    setRemainderDeliveryEmployee("");
     if (!group) {
       setSplitAllocs({});
       setSplitCustomers([]);
+      setSplitDeliveryEmployees([]);
       setSplitCustomerSearches([]);
       return;
     }
@@ -762,6 +769,7 @@ return Array.from(map.values());
       }))
     );
     setSplitCustomerSearches(Array.from({ length: count }, () => ""));
+    setSplitDeliveryEmployees(Array.from({ length: count }, () => ""));
   }
 
   function handleSelectSplitOrder(orderNumber: string) {
@@ -815,6 +823,7 @@ return Array.from(map.values());
     setSplitCustomerSearches((prev) =>
       Array.from({ length: clamped }, (_, idx) => prev[idx] ?? "")
     );
+    setSplitDeliveryEmployees((prev) => Array.from({ length: clamped }, (_, idx) => prev[idx] ?? ""));
   }
 
   function handleSelectSplitCustomer(splitIdx: number, customerCode: string) {
@@ -848,15 +857,12 @@ return Array.from(map.values());
 
   function handleSetSplitToStaffDebt(splitIdx: number) {
     if (!selectedSplitOrderGroup) return;
-    const staffCode = selectedSplitOrderGroup.staffCode || "";
-    const staffName = selectedSplitOrderGroup.staffName || "";
-    const staffLabel = staffName && staffCode ? `${staffName} (${staffCode})` : staffName || staffCode || "Nhân viên";
     setSplitCustomers((prev) => {
       const next = [...prev];
       next[splitIdx] = {
-        customer_code: staffCode ? `NVBH-${staffCode}` : "NVBH",
-        customer_name: `NVBH: ${staffLabel} — Công nợ tách thiếu`,
-        customer_address: "Đơn tách phần thiếu gắn công nợ NVBH",
+        customer_code: "",
+        customer_name: "",
+        customer_address: "",
         is_staff_debt: true,
       };
       return next;
@@ -866,18 +872,20 @@ return Array.from(map.values());
   function assignRemainderToStaffSplit() {
     if (!selectedSplitOrderGroup) return;
     setSplitError("");
-    const staffCode = selectedSplitOrderGroup.staffCode || "";
-    const staffName = selectedSplitOrderGroup.staffName || "";
-    const staffLabel = staffName && staffCode ? `${staffName} (${staffCode})` : staffName || staffCode || "Nhân viên";
+    if (!remainderDeliveryEmployee) {
+      setSplitError("Vui lòng chọn NVGH nhận phần thiếu.");
+      return;
+    }
     const staffCust: SplitCustomerSelection = {
-      customer_code: staffCode ? `NVBH-${staffCode}` : "NVBH",
-      customer_name: `NVBH: ${staffLabel} — Công nợ tách thiếu`,
-      customer_address: "Đơn tách phần thiếu gắn công nợ NVBH",
+      customer_code: "",
+      customer_name: "",
+      customer_address: "",
       is_staff_debt: true,
     };
 
-    // Tìm xem có đơn tách nào đã đánh dấu Nợ NVBH hoặc đang trống hoàn toàn không
-    const existingStaffIdx = splitCustomers.findIndex((c) => c?.is_staff_debt === true);
+    const existingStaffIdx = splitCustomers.findIndex(
+      (c, idx) => c?.is_staff_debt === true && splitDeliveryEmployees[idx] === remainderDeliveryEmployee
+    );
     let targetIdx = existingStaffIdx;
     if (targetIdx === -1) {
       // Kiểm tra đơn tách cuối cùng có đang trống (SL = 0, KM = 0 trên mọi dòng) không
@@ -893,7 +901,11 @@ return Array.from(map.values());
     }
 
     if (targetIdx !== -1) {
-      // Gán phần còn lại vào đơn tách targetIdx và chuyển sang Nợ NVBH
+      setSplitDeliveryEmployees((prev) => {
+        const next = [...prev];
+        next[targetIdx] = remainderDeliveryEmployee;
+        return next;
+      });
       setSplitCustomers((prev) => {
         const next = [...prev];
         next[targetIdx] = staffCust;
@@ -950,10 +962,10 @@ return Array.from(map.values());
         return next;
       });
     } else if (splitCount < 10) {
-      // Thêm 1 đơn tách mới ở cuối dành riêng cho Nợ NVBH và điền toàn bộ phần thiếu vào đó
       const newCount = splitCount + 1;
       const newIdx = newCount - 1;
       setSplitCount(newCount);
+      setSplitDeliveryEmployees((prev) => [...prev.slice(0, splitCount), remainderDeliveryEmployee]);
       setSplitCustomers((prev) => [...prev.slice(0, splitCount), staffCust]);
       setSplitCustomerSearches((prev) => [...prev.slice(0, splitCount), ""]);
       setSplitAllocs((prev) => {
@@ -1467,7 +1479,7 @@ return Array.from(map.values());
     let totalShortageQty = 0;
     let totalShortagePromo = 0;
 
-    // Kiểm tra tổng số lượng từng dòng (không được vượt quá đơn gốc; nếu thiếu sẽ tách phần thiếu cho NVBH)
+    // Kiểm tra tổng số lượng từng dòng trước khi phân bổ phần thiếu.
     for (const line of selectedSplitOrderGroup.lines) {
       const localId = Number(line["_local_id"]);
       const prodCode = displayRemoteValue(line["Mã sản phẩm"]);
@@ -1535,8 +1547,10 @@ return Array.from(map.values());
         customer_name: chosenCust.customer_name,
         customer_address: chosenCust.customer_address,
         is_staff_debt: Boolean(chosenCust.is_staff_debt),
+        debt_target: chosenCust.is_staff_debt ? "DELIVERY" : null,
         staff_code: selectedSplitOrderGroup.staffCode || undefined,
         staff_name: selectedSplitOrderGroup.staffName || undefined,
+        delivery_employee_code: splitDeliveryEmployees[splitIdx] || null,
         items,
       };
     });
@@ -1547,6 +1561,10 @@ return Array.from(map.values());
 
     if (splitsPayload.length === 0) {
       setSplitError("Vui lòng nhập số lượng phân bổ lớn hơn 0 cho ít nhất 1 đơn tách.");
+      return;
+    }
+    if (splitsPayload.some((split) => split.is_staff_debt && !split.delivery_employee_code)) {
+      setSplitError("Vui lòng chọn NVGH cho từng đơn tách gắn phần thiếu.");
       return;
     }
 
@@ -1562,18 +1580,21 @@ return Array.from(map.values());
         const origCode = (selectedSplitOrderGroup.customerCode ?? "").trim();
         if (!onlySplit.is_staff_debt && (!targetCode || targetCode.toUpperCase() === origCode.toUpperCase())) {
           setSplitError(
-            "Khi tách thành 1 đơn (đổi khách hàng), vui lòng chọn Mã khách hàng mới khác với khách hàng của đơn gốc (hoặc gắn Công nợ NVBH)."
+            "Khi tách thành 1 đơn (đổi khách hàng), vui lòng chọn khách hàng khác hoặc gắn phần thiếu cho NVGH."
           );
           return;
         }
       }
     } else {
-      const staffLabel =
-        selectedSplitOrderGroup.staffName || selectedSplitOrderGroup.staffCode || "NVBH của đơn";
+      const employee = deliveryEmployees.find((item) => item.code === remainderDeliveryEmployee);
+      if (!employee) {
+        setSplitError("Vui lòng chọn NVGH nhận phần thiếu.");
+        return;
+      }
       const confirmStaffRemainder = window.confirm(
         `Tổng số lượng phân bổ cho khách đang còn thiếu (SL thiếu: ${totalShortageQty}${
           totalShortagePromo > 0 ? `, SL KM thiếu: ${totalShortagePromo}` : ""
-        }).\n\nHệ thống sẽ tự động tách phần thiếu này thành 1 đơn riêng gắn Công nợ cho NVBH (${staffLabel}). Bạn có đồng ý tiếp tục?`
+        }).\n\nHệ thống sẽ tự động tách phần thiếu này thành 1 đơn riêng gắn cho NVGH ${employee.code} - ${employee.name}. Bạn có đồng ý tiếp tục?`
       );
       if (!confirmStaffRemainder) {
         return;
@@ -1588,7 +1609,8 @@ return Array.from(map.values());
         body: JSON.stringify({
           order_number: selectedSplitOrderGroup.orderNumber,
           splits: splitsPayload,
-          auto_assign_remainder_to_staff: hasShortage,
+          auto_assign_remainder_to_delivery: hasShortage,
+          remainder_delivery_employee_code: hasShortage ? remainderDeliveryEmployee : null,
         }),
       });
       const result = (await response.json()) as {
@@ -2077,8 +2099,8 @@ return Array.from(map.values());
               </button>
             );
           }
-          if (text === "Đơn Tách" || text === "Đơn Tách (Nợ NVBH)") {
-            const isStaffDebt = text === "Đơn Tách (Nợ NVBH)";
+          if (text === "Đơn Tách" || text === "Đơn Tách (Nợ NVBH)" || text === "Đơn Tách (Nợ NVGH)") {
+            const isStaffDebt = text !== "Đơn Tách";
             return (
               <div className="flex flex-wrap items-center gap-1">
                 <span
@@ -2174,6 +2196,7 @@ return Array.from(map.values());
         original_status: displayRemoteValue(row["Trạng thái"]).trim(),
         delivery_employee_code: displayRemoteValue(row["Mã NVGH"]).trim(),
         manager_code: displayRemoteValue(row["Mã NVQL"]).trim(),
+        is_split: row["_replacement_type"] === "SPLIT",
       });
       return orders;
     }, new Map<string, DeliveryRequestOrderOption>())
@@ -2196,8 +2219,38 @@ return Array.from(map.values());
   function defaultDeliveryEmployee(order: DeliveryRequestOrderOption): DeliveryEmployeeOption | undefined {
     const managerCode = order.manager_code.trim().toUpperCase();
     const existingDeliveryCode = order.delivery_employee_code.trim().toUpperCase();
+    if (order.is_split && existingDeliveryCode) {
+      return deliveryEmployees.find((employee) => employee.code.toUpperCase() === existingDeliveryCode);
+    }
     return deliveryEmployees.find((employee) => employee.code.toUpperCase() === managerCode)
       ?? deliveryEmployees.find((employee) => employee.code.toUpperCase() === existingDeliveryCode);
+  }
+
+  async function loadDeliveryEmployees() {
+    const response = await apiFetch(`${API_URL}/employees/?status=active&limit=1000`);
+    const payload = await response.json() as DeliveryEmployeeOption[] | { detail?: string };
+    if (!response.ok || !Array.isArray(payload)) {
+      throw new Error(!Array.isArray(payload) ? payload.detail ?? "Không tải được danh sách nhân viên." : "Không tải được danh sách nhân viên.");
+    }
+    return payload.filter((employee) =>
+      employee.status?.toLowerCase() === "active" && employee.code?.trim().toUpperCase().startsWith("NV")
+    );
+  }
+
+  async function openSplitDrawer() {
+    setSplitError("");
+    setIsSplitDrawerOpen(true);
+    setIsLoadingDeliveryEmployees(true);
+    setDeliveryEmployeeError("");
+    try {
+      const employees = await loadDeliveryEmployees();
+      setDeliveryEmployees(employees);
+      if (!employees.length) setDeliveryEmployeeError("Không tìm thấy nhân viên đang hoạt động có mã bắt đầu bằng NV.");
+    } catch (error) {
+      setDeliveryEmployeeError(error instanceof Error ? error.message : "Không tải được danh sách NVGH.");
+    } finally {
+      setIsLoadingDeliveryEmployees(false);
+    }
   }
 
   async function openDeliveryRequestDrawer() {
@@ -2213,23 +2266,14 @@ return Array.from(map.values());
     setIsDeliveryRequestDrawerOpen(true);
     setIsLoadingDeliveryEmployees(true);
     try {
-      const [employeeResponse, warehouseResponse] = await Promise.all([
-        apiFetch(`${API_URL}/employees/?status=active&limit=1000`),
+      const [employees, warehouseResponse] = await Promise.all([
+        loadDeliveryEmployees(),
         apiFetch(`${API_URL}/inventory/warehouses/`),
       ]);
-      const employeePayload = await employeeResponse.json() as DeliveryEmployeeOption[] | { detail?: string };
-      if (!employeeResponse.ok) {
-        throw new Error(!Array.isArray(employeePayload) ? employeePayload.detail ?? "Không tải được danh sách nhân viên." : "Không tải được danh sách nhân viên.");
-      }
       const warehouses = await warehouseResponse.json() as DeliveryWarehouseOption[] | { detail?: string };
       if (!warehouseResponse.ok || !Array.isArray(warehouses)) {
         throw new Error(!Array.isArray(warehouses) ? warehouses.detail ?? "Không tải được danh sách kho." : "Không tải được danh sách kho.");
       }
-      const employees = Array.isArray(employeePayload)
-        ? employeePayload.filter((employee) =>
-            employee.status?.toLowerCase() === "active" && employee.code?.trim().toUpperCase().startsWith("NV")
-          )
-        : [];
       setDeliveryEmployees(employees);
       setDeliveryWarehouses(warehouses);
       setDeliveryWarehouseId((current) => current && warehouses.some((warehouse) => String(warehouse.id) === current)
@@ -2692,10 +2736,7 @@ return Array.from(map.values());
             </button>
             <button
               type="button"
-              onClick={() => {
-                setSplitError("");
-                setIsSplitDrawerOpen(true);
-              }}
+              onClick={() => void openSplitDrawer()}
               className="flex items-center gap-2 rounded-lg border border-purple-200 bg-purple-50 px-3.5 py-2 text-sm font-medium text-purple-700 hover:bg-purple-100 transition-colors"
             >
               <Split size={16} />
@@ -2832,7 +2873,7 @@ return Array.from(map.values());
                 });
                 setSelectedDeliveryOrderNumbers(next);
                 if (!allVisibleSelected) {
-                  // Ưu tiên NVQL của khách hàng, sau đó dùng NVGH đã lưu trên đơn.
+                  // Đơn tách ưu tiên NVGH đã chọn; các đơn khác ưu tiên NVQL.
                   setDeliveryEmployeeAssignments((current) => {
                     const updated = { ...current };
                     filteredDeliveryRequestOrders.forEach((order) => {
@@ -3298,13 +3339,20 @@ return Array.from(map.values());
                       </button>
                     </>
                   )}
+                  <label className="text-xs font-medium text-gray-700">
+                    NVGH nhận phần thiếu
+                    <select aria-label="NVGH nhận phần thiếu" value={remainderDeliveryEmployee} onChange={(event) => setRemainderDeliveryEmployee(event.target.value)} disabled={isLoadingDeliveryEmployees || !!deliveryEmployeeError} className="ml-2 rounded border border-gray-300 bg-white px-2 py-1">
+                      <option value="">Chọn NVGH</option>
+                      {deliveryEmployees.map((employee) => <option key={employee.code} value={employee.code}>{employee.code} - {employee.name}</option>)}
+                    </select>
+                  </label>
                   <button
                     type="button"
                     onClick={assignRemainderToStaffSplit}
                     className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700"
-                    title="Tự động gom phần SL & SL KM còn thiếu vào đơn tách gắn công nợ cho NVBH của đơn"
+                    title="Tự động gom phần thiếu vào đơn tách gắn cho NVGH đã chọn"
                   >
-                    Tách phần thiếu cho NVBH ({selectedSplitOrderGroup.staffName || selectedSplitOrderGroup.staffCode || "NVBH"})
+                    Tách phần thiếu cho NVGH
                   </button>
                 </div>
               </div>
@@ -3312,7 +3360,7 @@ return Array.from(map.values());
               {/* Chọn Mã KH và xem Tổng hợp Giá trị / Số tiền CK cho từng đơn tách */}
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-600">
-                  4. Chọn Khách hàng (hoặc gắn Công nợ NVBH) & Tổng hợp theo từng đơn tách
+                  4. Chọn khách hàng hoặc NVGH nhận phần thiếu & tổng hợp từng đơn tách
                 </h3>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   {Array.from({ length: splitCount }, (_, splitIdx) => {
@@ -3364,7 +3412,7 @@ return Array.from(map.values());
                             <span className="font-mono text-[11px] text-gray-500">{splitOrderCode}</span>
                             {isStaffDebt && (
                               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 border border-amber-300">
-                                Nợ NVBH
+                                Nợ NVGH
                               </span>
                             )}
                           </div>
@@ -3385,7 +3433,7 @@ return Array.from(map.values());
                                   onClick={() => handleSetSplitToStaffDebt(splitIdx)}
                                   className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
                                 >
-                                  Gắn Công nợ NVBH
+                                  Gắn phần thiếu cho NVGH
                                 </button>
                               ) : (
                                 <button
@@ -3415,12 +3463,11 @@ return Array.from(map.values());
                           {isStaffDebt ? (
                             <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-900 space-y-1">
                               <div className="font-semibold">
-                                Gắn trách nhiệm / Công nợ NVBH:{" "}
-                                {selectedSplitOrderGroup.staffName || "Nhân viên"} (
-                                {selectedSplitOrderGroup.staffCode || "NVBH"})
+                                Gắn trách nhiệm / Công nợ NVGH:{" "}
+                                {deliveryEmployees.find((employee) => employee.code === splitDeliveryEmployees[splitIdx])?.name || "Chưa chọn NVGH"}
                               </div>
                               <div className="text-[11px] text-amber-700">
-                                Phần hàng thiếu chưa giao/tách cho khách sẽ được tạo thành đơn riêng gắn cho NVBH này.
+                                Phần hàng thiếu được tạo thành đơn riêng gắn cho NVGH đã chọn.
                               </div>
                             </div>
                           ) : (
@@ -3465,6 +3512,25 @@ return Array.from(map.values());
                             </>
                           )}
                         </div>
+
+                        <label className="block font-medium text-gray-700">
+                          NVGH đơn tách {splitIdx + 1}
+                          <select
+                            aria-label={`NVGH đơn tách ${splitIdx + 1}`}
+                            value={splitDeliveryEmployees[splitIdx] ?? ""}
+                            onChange={(event) => setSplitDeliveryEmployees((current) => {
+                              const next = [...current];
+                              next[splitIdx] = event.target.value;
+                              return next;
+                            })}
+                            disabled={isLoadingDeliveryEmployees || !!deliveryEmployeeError}
+                            className="mt-1 block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs"
+                          >
+                            <option value="">Chưa chọn NVGH</option>
+                            {deliveryEmployees.map((employee) => <option key={employee.code} value={employee.code}>{employee.code} - {employee.name}</option>)}
+                          </select>
+                          {deliveryEmployeeError && <span className="mt-1 block text-red-600">{deliveryEmployeeError}</span>}
+                        </label>
 
                         <div className="grid grid-cols-2 gap-2 rounded-lg bg-gray-50 p-2 text-[11px]">
                           <div className="flex items-center justify-between pr-2 border-r border-gray-200/70">
@@ -3541,12 +3607,12 @@ return Array.from(map.values());
                             }`}
                           >
                             <div>
-                              Đơn tách {idx + 1} {isStaffDebt ? "(Nợ NVBH)" : ""}
+                              Đơn tách {idx + 1} {isStaffDebt ? "(Nợ NVGH)" : ""}
                             </div>
                             <div className="text-[10px] font-normal text-gray-500">
                               TD-{selectedSplitOrderGroup.orderNumber}-{String(idx + 1).padStart(2, "0")}
                             </div>
-                            {cust?.customer_code && (
+                            {(cust?.customer_code || isStaffDebt) && (
                               <div
                                 className={`text-[10px] font-medium truncate max-w-[180px] mx-auto ${
                                   isStaffDebt ? "text-amber-700" : "text-purple-600"
@@ -3554,7 +3620,7 @@ return Array.from(map.values());
                                 title={`${cust.customer_code} - ${cust.customer_name}`}
                               >
                                 {isStaffDebt
-                                  ? `NVBH: ${selectedSplitOrderGroup.staffName || selectedSplitOrderGroup.staffCode}`
+                                  ? `NVGH: ${splitDeliveryEmployees[idx] || "Chưa chọn"}`
                                   : `KH: ${cust.customer_code.slice(-3)} — ${cust.customer_name}`}
                               </div>
                             )}
@@ -3865,7 +3931,7 @@ return Array.from(map.values());
         open={isSplitApprovalDrawerOpen}
         onClose={() => setIsSplitApprovalDrawerOpen(false)}
         title="Kế toán xác nhận Tách đơn hàng"
-        subtitle="Kiểm tra chi tiết số lượng, số lượng KM, giá trị, chiết khấu và công nợ NVBH trước khi duyệt tách đơn trên hệ thống DMS nội bộ"
+        subtitle="Kiểm tra chi tiết số lượng, số lượng KM, giá trị, chiết khấu và đối tượng nhận trước khi duyệt tách đơn trên hệ thống DMS nội bộ"
         size="4xl"
       >
         <div className="space-y-4 p-5">
@@ -4063,6 +4129,9 @@ return Array.from(map.values());
                             </div>
                             <div className="text-[11px] text-gray-700">
                               <strong>Đối tượng nhận:</strong> {sp.customer_code} — {sp.customer_name}
+                            </div>
+                            <div className="text-gray-600">
+                              <strong>NVGH:</strong> {sp.delivery_employee_code ? `${sp.delivery_employee_code} - ${sp.delivery_employee_name || ""}` : "Chưa chọn"}
                             </div>
                             <div className="flex items-center justify-between rounded bg-gray-50 px-2 py-1 text-[11px]">
                               <span>

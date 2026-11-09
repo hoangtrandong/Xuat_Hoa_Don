@@ -8,6 +8,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.api.v1.endpoints.delivery_requests import _preview_new_workbook
+from app.api.v1.endpoints.sync import (
+    SplitOrderItemAllocation,
+    SplitOrderRequest,
+    SplitOrderTarget,
+    _approve_split_order_request,
+    _build_delivery_request_form,
+    _create_split_order_request,
+)
 from app.core.database import Base
 from app.crud.delivery_request import create as create_delivery_request
 from app.models.employee_borrow import EmployeeBorrowBatch, EmployeeBorrowEntry
@@ -179,6 +187,42 @@ def build_new_workbook() -> bytes:
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def test_split_delivery_recipient_exports_as_normal_order_without_sales_borrow(workbook_db):
+    db, warehouse = workbook_db
+    driver = Employee(code="NV020", name="Delivery recipient", position="Driver", phone="3")
+    db.add(driver)
+    source = db.query(VinamilkOrderSnapshot).filter_by(order_number="EX1").one()
+    request = _create_split_order_request(db, SplitOrderRequest(
+        order_number="EX1",
+        splits=[SplitOrderTarget(
+            customer_code="CUST1",
+            items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=2, promo_quantity=1)],
+        )],
+        auto_assign_remainder_to_delivery_customer=True,
+        remainder_delivery_employee_code="NV020",
+    ))
+    recipient = request["preview"]["splits"][1]
+    _approve_split_order_request(db, request["id"])
+    form = _build_delivery_request_form([{
+        "order_date": "30/10/2026", "order_number": recipient["new_order_number"],
+        "employee_code": driver.code, "employee_name": driver.name,
+        "customer_code": recipient["customer_code"], "customer_name": recipient["customer_name"],
+        "status": "001-Xuất hàng",
+    }])
+    preview = _preview_new_workbook(
+        file_bytes=form, filename="delivery.xlsx", warehouse_id=warehouse.id, db=db,
+    )
+    assert preview is not None
+    assert preview.can_create
+    assert preview.statuses == {"Xuất Hàng": 1}
+    assert preview.total_quantity == 2
+    assert preview.borrow_entries == []
+    assert preview.items[0].borrowed_employee_offsets == []
+    assert preview.orders[0].order_number == recipient["new_order_number"]
+    assert preview.orders[0].customer_code == "NVGH-NV020"
+    assert preview.orders[0].employee_code == "NV020"
 
 
 def test_new_workbook_reconciles_orders_and_routes_borrowing(workbook_db):

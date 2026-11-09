@@ -20,6 +20,7 @@ from app.api.v1.endpoints.sync import (
     _create_manual_order,
     _delete_manual_order,
     _merge_vinamilk_orders,
+    list_grouped_vinamilk_orders,
     list_local_vinamilk_orders,
 )
 from app.api.v1.endpoints.delivery_requests import submit_request
@@ -96,6 +97,79 @@ def test_manual_order_shows_in_order_list_with_supplier(db):
     assert rows[0]["Trạng thái tạo đơn"] == "001-Xuất hàng"
     assert rows[0]["Mã NVQL"] == "NV001"
     assert rows[0]["Tên NVQL"] == "Nguyễn An"
+
+
+def test_order_list_supplies_product_carton_conversion_and_unknown_sku(db):
+    product = db.scalar(select(Product).where(Product.sku == "01VD41"))
+    product.boxes_per_carton = 24
+    for index, code in enumerate(("01VD41", "MISSING")):
+        db.add(VinamilkOrderSnapshot(
+            remote_key=f"conversion-{index}", order_number="VM-CONVERSION", product_code=code,
+            order_created_date=date(2026, 11, 4), synced_from=date(2026, 11, 4),
+            synced_to=date(2026, 11, 4),
+            raw_payload={"productCode": code, "quantity": 27, "promotionQuantity": 3},
+        ))
+    db.flush()
+    result = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+    rows = {row["productCode"]: row for row in result["rows"]}
+    assert rows["01VD41"]["_boxes_per_carton"] == 24
+    assert rows["MISSING"]["_boxes_per_carton"] is None
+
+
+def test_grouped_order_pagination_filter_and_detail(db):
+    day = date(2026, 11, 4)
+    for index, (order, product, value, discount) in enumerate((
+        ("ORD-1", "01VD41", 100, 10),
+        ("ORD-1", "OTHER", 200, 30),
+        ("ORD-2", "01VD41", 300, 20),
+    )):
+        db.add(VinamilkOrderSnapshot(
+            remote_key=f"grouped-{index}", order_number=order, product_code=product,
+            customer_code="0MD", customer_name="Nam thúy 1", order_created_date=day,
+            synced_from=day, synced_to=day,
+            raw_payload={"orderNumber": order, "productCode": product, "totalValue": value,
+                         "totalDiscount": discount, "customerCode": "0MD"},
+        ))
+    db.flush()
+    first = list_grouped_vinamilk_orders(day, day, skip=0, limit=1, db=db)
+    second = list_grouped_vinamilk_orders(day, day, skip=1, limit=1, db=db)
+    assert first["total"] == 2
+    assert first["rows"][0]["orderNumber"] != second["rows"][0]["orderNumber"]
+    matching = list_grouped_vinamilk_orders(day, day, product="OTHER", skip=0, limit=20, db=db)
+    assert matching["total"] == 1
+    assert matching["rows"][0]["_product_count"] == 2
+    assert matching["rows"][0]["totalValue"] == 300
+    assert matching["rows"][0]["totalDiscount"] == 40
+    assert "productCode" not in matching["rows"][0]
+    assert "quantity" not in matching["rows"][0]
+    assert list_grouped_vinamilk_orders(day, day, product="Vinamilk", skip=0, limit=20, db=db)["total"] == 2
+    detail = list_local_vinamilk_orders(
+        from_date=day, to_date=day, source="sync", search=None, status=None,
+        skip=0, limit=100, db=db, order_number="ORD-1",
+    )
+    assert {row["productCode"] for row in detail["rows"]} == {"01VD41", "OTHER"}
+
+
+def test_grouped_order_keeps_all_lines_across_snapshot_pages(db):
+    day = date(2026, 11, 4)
+    db.add_all([
+        VinamilkOrderSnapshot(
+            remote_key=f"large-{index}", order_number="LARGE", product_code="01VD41",
+            order_created_date=day, synced_from=day, synced_to=day,
+            raw_payload={"productCode": "01VD41", "totalValue": 10, "totalDiscount": 1},
+        )
+        for index in range(2001)
+    ])
+    db.flush()
+    result = list_grouped_vinamilk_orders(day, day, skip=0, limit=20, db=db)
+    assert result["total"] == 1
+    assert result["rows"][0]["orderNumber"] == "LARGE"
+    assert result["rows"][0]["_product_count"] == 2001
+    assert result["rows"][0]["totalValue"] == 20010
+    assert result["rows"][0]["totalDiscount"] == 2001
 
 
 def test_order_list_shows_store_from_customer_code(db):
@@ -556,6 +630,67 @@ def test_split_shortage_is_assigned_to_selected_delivery_employee(db, automatic)
     shortage_row = next(row for row in listed["rows"] if row["orderNumber"] == "TD-VM-SHORT-02")
     assert shortage_row["NVGH"] == "NV020 - Người Giao"
     assert shortage_row["_processing_status"] == "Đơn Tách (Nợ NVGH)"
+
+
+@pytest.mark.parametrize("mode", ["automatic", "explicit", "all_missing"])
+def test_delivery_recipient_is_separate_normal_order(db, mode):
+    shipper = Employee(code="NV020", name="Người Giao", position="Giao hàng", phone="0900000020")
+    source = VinamilkOrderSnapshot(
+        remote_key="split-new-delivery", order_number="VM-NEW-DELIVERY",
+        customer_code="0MD", customer_name="Khách hàng", product_code="01VD41",
+        order_created_date=date(2026, 11, 4), synced_from=date(2026, 11, 4), synced_to=date(2026, 11, 4),
+        raw_payload={"quantity": 2400, "promotionQuantity": 24, "totalValue": 240000,
+                     "totalDiscount": 24000, "Mã NVBH": "SALE01",
+                     "_order_type": "002-Dương Số",
+                     "Trạng thái tạo đơn": "002-Dương Số", "orderType": "002-Dương Số"},
+    )
+    db.add_all([shipper, source])
+    db.flush()
+    targets = [] if mode == "all_missing" else [SplitOrderTarget(
+        customer_code="0MD", items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=1200, promo_quantity=12)]
+    )]
+    if mode == "explicit":
+        targets.append(SplitOrderTarget(
+            delivery_recipient=True, delivery_employee_code="nv020",
+            items=[SplitOrderItemAllocation(snapshot_id=source.id, quantity=1200, promo_quantity=12)],
+        ))
+    payload = SplitOrderRequest(
+        order_number="VM-NEW-DELIVERY", splits=targets,
+        auto_assign_remainder_to_delivery_customer=mode != "explicit",
+        remainder_delivery_employee_code="nv020" if mode != "explicit" else None,
+    )
+    request = _create_split_order_request(db, payload)
+    splits = request["preview"]["splits"]
+    assert len(splits) == (1 if mode == "all_missing" else 2)
+    recipient = splits[-1]
+    assert recipient["customer_code"] == "NVGH-NV020"
+    assert recipient["delivery_recipient"] is True
+    assert recipient["is_staff_debt"] is False
+    assert recipient["status_label"] == "Đơn Tách"
+    _approve_split_order_request(db, request["id"])
+    row = db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == recipient["new_order_number"]))
+    assert row.customer_code == "NVGH-NV020"
+    assert row.raw_payload["quantity"] == (2400 if mode == "all_missing" else 1200)
+    assert row.raw_payload["Mã NVGH"] == "NV020"
+    assert row.raw_payload["_is_staff_debt"] is False
+    assert row.raw_payload["_delivery_recipient"] is True
+    assert row.raw_payload["_order_type"] == row.raw_payload["orderType"] == row.raw_payload["Trạng thái tạo đơn"] == "001-Xuất hàng"
+    assert row.raw_payload["Mã NVBH"] == "SALE01"
+
+
+@pytest.mark.parametrize("code", [None, "NV999"])
+def test_new_delivery_recipient_requires_valid_employee(db, code):
+    db.add(VinamilkOrderSnapshot(
+        remote_key="all-missing-invalid", order_number="VM-ALL-MISSING", product_code="01VD41",
+        order_created_date=date(2026, 11, 4), synced_from=date(2026, 11, 4), synced_to=date(2026, 11, 4),
+        raw_payload={"quantity": 2400},
+    ))
+    db.flush()
+    with pytest.raises(HTTPException, match="NVGH"):
+        _create_split_order_request(db, SplitOrderRequest(
+            order_number="VM-ALL-MISSING", splits=[], auto_assign_remainder_to_delivery_customer=True,
+            remainder_delivery_employee_code=code,
+        ))
 
 
 @pytest.mark.parametrize("automatic,employee_code", [

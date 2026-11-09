@@ -158,6 +158,7 @@ class SplitOrderTarget(BaseModel):
     staff_name: str | None = None
     delivery_employee_code: str | None = Field(default=None, max_length=20)
     debt_target: str | None = Field(default=None, pattern="^DELIVERY$")
+    delivery_recipient: bool = False
     items: list[SplitOrderItemAllocation] = Field(default_factory=list)
 
 
@@ -167,6 +168,7 @@ class SplitOrderRequest(BaseModel):
     splits: list[SplitOrderTarget]
     auto_assign_remainder_to_staff: bool = False
     auto_assign_remainder_to_delivery: bool = False
+    auto_assign_remainder_to_delivery_customer: bool = False
     remainder_delivery_employee_code: str | None = Field(default=None, max_length=20)
 
 
@@ -425,7 +427,7 @@ def _prepare_split_vinamilk_order(
     source_order_number = (payload.source_order_number or payload.order_number or "").strip()
     if not source_order_number:
         raise HTTPException(status_code=400, detail="Mã đơn hàng gốc không được để trống.")
-    if len(payload.splits) < 1:
+    if not payload.splits and not payload.auto_assign_remainder_to_delivery_customer:
         raise HTTPException(status_code=400, detail="Cần có ít nhất 1 đơn nhận tách.")
 
     source_rows = db.scalars(
@@ -456,14 +458,17 @@ def _prepare_split_vinamilk_order(
         for target in effective_splits
         if target.delivery_employee_code and target.delivery_employee_code.strip()
     }
-    if payload.auto_assign_remainder_to_delivery:
+    if payload.auto_assign_remainder_to_delivery or payload.auto_assign_remainder_to_delivery_customer:
         remainder_code = (payload.remainder_delivery_employee_code or "").strip().upper()
         if not remainder_code:
             raise HTTPException(status_code=400, detail="Vui lòng chọn NVGH nhận phần thiếu.")
         delivery_codes.add(remainder_code)
-    if payload.auto_assign_remainder_to_staff and payload.auto_assign_remainder_to_delivery:
+    if sum((payload.auto_assign_remainder_to_staff, payload.auto_assign_remainder_to_delivery,
+            payload.auto_assign_remainder_to_delivery_customer)) > 1:
         raise HTTPException(status_code=400, detail="Chỉ được chọn một cách phân bổ phần thiếu.")
     for target in effective_splits:
+        if target.delivery_recipient and (target.is_staff_debt or target.debt_target or not (target.delivery_employee_code or "").strip()):
+            raise HTTPException(status_code=400, detail="Vui lòng chọn NVGH hợp lệ cho đơn nhận phần thiếu.")
         if target.debt_target == "DELIVERY" and (
             not target.is_staff_debt or not (target.delivery_employee_code or "").strip()
         ):
@@ -542,7 +547,7 @@ def _prepare_split_vinamilk_order(
         rem_q = max(0.0, round(orig_qty - got_qty, 4))
         rem_p = max(0.0, round(orig_promo - got_promo, 4))
         if rem_q > 1e-6 or rem_p > 1e-6:
-            if not (payload.auto_assign_remainder_to_staff or payload.auto_assign_remainder_to_delivery):
+            if not (payload.auto_assign_remainder_to_staff or payload.auto_assign_remainder_to_delivery or payload.auto_assign_remainder_to_delivery_customer):
                 if abs(got_qty - orig_qty) > 1e-6:
                     raise HTTPException(
                         status_code=400,
@@ -593,9 +598,10 @@ def _prepare_split_vinamilk_order(
             sum_promo[s_id] += rem_p
         effective_splits.append(
             SplitOrderTarget(
-                is_staff_debt=True,
+                is_staff_debt=not payload.auto_assign_remainder_to_delivery_customer,
                 debt_target="DELIVERY" if payload.auto_assign_remainder_to_delivery else None,
-                delivery_employee_code=payload.remainder_delivery_employee_code if payload.auto_assign_remainder_to_delivery else None,
+                delivery_recipient=payload.auto_assign_remainder_to_delivery_customer,
+                delivery_employee_code=payload.remainder_delivery_employee_code if (payload.auto_assign_remainder_to_delivery or payload.auto_assign_remainder_to_delivery_customer) else None,
                 items=remainder_items,
             )
         )
@@ -616,7 +622,7 @@ def _prepare_split_vinamilk_order(
     if len(effective_splits) == 1:
         only_target = effective_splits[0]
         target_code = (only_target.customer_code or "").strip()
-        if not only_target.is_staff_debt and (
+        if not only_target.is_staff_debt and not only_target.delivery_recipient and (
             not target_code or target_code.upper() == orig_cust_code_check.upper()
         ):
             raise HTTPException(
@@ -723,7 +729,13 @@ def _prepare_split_vinamilk_order(
         chosen_cust_addr = (split_target.customer_address or "").strip()
         delivery_employee = delivery_employees.get((split_target.delivery_employee_code or "").strip().upper())
 
-        if is_staff_debt:
+        if split_target.delivery_recipient:
+            if delivery_employee is None:
+                raise HTTPException(status_code=400, detail="Vui lòng chọn NVGH nhận phần thiếu.")
+            chosen_cust_code = f"NVGH-{delivery_employee.code}"
+            chosen_cust_name = f"NVGH: {delivery_employee.name} ({delivery_employee.code})"
+            chosen_cust_addr = "Đơn tách giao NVGH"
+        elif is_staff_debt:
             if split_target.debt_target == "DELIVERY":
                 if delivery_employee is None:
                     raise HTTPException(status_code=400, detail="Vui lòng chọn NVGH nhận phần thiếu.")
@@ -764,6 +776,7 @@ def _prepare_split_vinamilk_order(
             "customer_name": final_cust_name,
             "customer_address": chosen_cust_addr,
             "is_staff_debt": is_staff_debt,
+            "delivery_recipient": split_target.delivery_recipient,
             "status_label": status_label,
             "delivery_employee_code": delivery_employee.code if delivery_employee else "",
             "delivery_employee_name": delivery_employee.name if delivery_employee else "",
@@ -804,6 +817,7 @@ def _prepare_split_vinamilk_order(
             "customer_name": final_cust_name,
             "customer_address": chosen_cust_addr,
             "is_staff_debt": is_staff_debt,
+            "delivery_recipient": split_target.delivery_recipient,
             "status_label": status_label,
             "delivery_employee_code": delivery_employee.code if delivery_employee else "",
             "delivery_employee_name": delivery_employee.name if delivery_employee else "",
@@ -918,6 +932,11 @@ def _split_vinamilk_order(
             base_raw["Mã NVGH"] = target_info["delivery_employee_code"]
             base_raw["Tên NVGH"] = target_info["delivery_employee_name"]
             base_raw["_is_staff_debt"] = is_staff_debt
+            if target_info["delivery_recipient"]:
+                base_raw["_delivery_recipient"] = True
+                base_raw["_order_type"] = "001-Xuất hàng"
+                base_raw["Trạng thái tạo đơn"] = "001-Xuất hàng"
+                base_raw["orderType"] = "001-Xuất hàng"
             base_raw["Người thực hiện"] = actor
             base_raw["performedBy"] = actor
 
@@ -1806,11 +1825,14 @@ def list_local_vinamilk_orders(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=2000, ge=1, le=2000),
     db: Session = Depends(get_db),
+    order_number: str | None = None,
 ):
     filters = [
         VinamilkOrderSnapshot.order_created_date >= from_date,
         VinamilkOrderSnapshot.order_created_date <= to_date,
     ]
+    if order_number is not None:
+        filters.append(VinamilkOrderSnapshot.order_number == order_number)
     if search and search.strip():
         term = f"%{search.strip()}%"
         filters.append(or_(
@@ -1918,15 +1940,10 @@ def list_local_vinamilk_orders(
             if src_num and src_num not in pending_split_for:
                 pending_split_for[src_num] = req_item
 
-    product_supplier_map: dict[str, str] = {}
-    try:
-        product_supplier_map = {
-            p.sku.upper(): p.supplier
-            for p in db.scalars(select(Product)).all()
-            if p.supplier
-        }
-    except Exception:
-        pass
+    products_by_sku = {
+        product.sku.strip().upper(): product
+        for product in db.scalars(select(Product)).all()
+    }
 
     order_delivery_status: dict[str, str] = {}
     try:
@@ -2029,7 +2046,8 @@ def list_local_vinamilk_orders(
             proc_status = "Đơn Gộp"
 
         prod_sku = (row.product_code or "").strip().upper()
-        supplier = product_supplier_map.get(prod_sku, "")
+        product = products_by_sku.get(prod_sku)
+        supplier = (product.supplier or "") if product else ""
         order_status_label = proc_status or "Chưa xử lý"
         customer_code = (
             row.customer_code
@@ -2076,6 +2094,7 @@ def list_local_vinamilk_orders(
             "Nhà cung cấp": supplier,
             "supplier": supplier,
             "_supplier": supplier,
+            "_boxes_per_carton": product.boxes_per_carton if product and product.boxes_per_carton and product.boxes_per_carton > 0 else None,
             "Tình trạng xử lý đơn hàng": order_status_label,
             "Trạng thái xử lý": order_status_label,
             "Cửa Hàng": store_customer.store.name if store_customer and store_customer.store else "",
@@ -2091,6 +2110,7 @@ def list_local_vinamilk_orders(
             "Người thực hiện": performed_by,
             "_performed_by": performed_by,
             "_local_id": row.id,
+            "_snapshot_order_number": row.order_number,
             "_order_created_date": row.order_created_date.isoformat() if row.order_created_date else None,
             "_synced_at": _iso_utc(row.synced_at),
             "_allocation_id": None,
@@ -2134,6 +2154,119 @@ def list_local_vinamilk_orders(
         "limit": limit,
         "source": source,
         "last_synced_at": _iso_utc(latest.finished_at) if latest else None,
+    }
+
+
+@router.get("/vinamilk-orders/grouped")
+def list_grouped_vinamilk_orders(
+    from_date: date,
+    to_date: date,
+    order_search: str = "",
+    customer: str = "",
+    staff: str = "",
+    product: str = "",
+    processing_status: str = "",
+    delivery_status: str = "",
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    if to_date < from_date:
+        raise HTTPException(status_code=422, detail="Ngày kết thúc phải lớn hơn hoặc bằng ngày bắt đầu.")
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    offset = 0
+    last_synced_at = None
+    while True:
+        page = list_local_vinamilk_orders(
+            from_date=from_date, to_date=to_date, source="sync", search=None,
+            status=None, skip=offset, limit=2000, db=db,
+        )
+        last_synced_at = page["last_synced_at"]
+        for row in page["rows"]:
+            number = row.get("_snapshot_order_number") or _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
+            key = number or f"__snapshot_{row['_local_id']}"
+            groups.setdefault(key, []).append(row)
+        offset += page["snapshot_count"]
+        if not page["snapshot_count"] or offset >= page["snapshot_total"]:
+            break
+
+    def field(row: dict[str, Any], keys: tuple[str, ...]) -> str:
+        return (_field(row, keys) or "").strip()
+
+    def status_for(row: dict[str, Any]) -> str:
+        status = field(row, ("_processing_status",)) or ("Đã cập nhật kho" if row.get("_warehouse_updated") is True else "Chưa xử lý")
+        kind = field(row, ("_order_type", "Trạng thái tạo đơn", "orderType"))
+        if status == "Đơn Tách" or not kind:
+            return status
+        return " · ".join(part for part in (kind, "" if status == "Đơn Tự Tạo" else status) if part)
+
+    def includes(value: str, query: str) -> bool:
+        return not query or query.strip().casefold() in value.casefold()
+
+    order_search, customer, staff, product = (value.strip() for value in (order_search, customer, staff, product))
+    summaries = []
+    statuses = set()
+    delivery_statuses = set()
+    total_value = total_discount = confirmed = 0
+    for key, lines in groups.items():
+        row = lines[0]
+        status = status_for(row)
+        delivery = field(row, ("Tình trạng xuất kho", "_delivery_status")) or "Chưa yêu cầu"
+        statuses.add(status)
+        delivery_statuses.add(delivery)
+        related = " ".join(str(item or "") for item in (
+            key, row.get("_replacement_display"), row.get("_replaced_order_number"),
+            *(row.get("_replaced_by_order_numbers") or []),
+        ))
+        if not includes(related, order_search):
+            continue
+        if not any(includes(field(line, ("customerCode", "shopCode", "Mã KH")), customer) or
+                   includes(field(line, ("customerName", "shopName", "Tên KH")), customer) for line in lines):
+            continue
+        if not any(includes(field(line, ("staffCode", "salesStaffCode", "Mã NVBH")), staff) or
+                   includes(field(line, ("staffName", "salesStaffName", "Tên NVBH")), staff) for line in lines):
+            continue
+        if not any(includes(field(line, ("productCode", "itemCode", "sku", "Mã sản phẩm")), product) or
+                   includes(field(line, ("productName", "itemName", "product", "Sản phẩm")), product) or
+                   includes(field(line, ("Nhà cung cấp",)), product) for line in lines):
+            continue
+        if processing_status and status != processing_status:
+            continue
+        if delivery_status and delivery != delivery_status:
+            continue
+        value = sum(_float_from_payload(line, ("totalValue", "total", "amount", "Giá trị")) for line in lines)
+        discount = sum(_float_from_payload(line, ("totalDiscount", "discountAmount", "Số tiền CK")) for line in lines)
+        summary_fields = {
+            "orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng",
+            "createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày",
+            "deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao",
+            "staffCode", "salesStaffCode", "Mã NVBH", "staffName", "salesStaffName", "Tên NVBH",
+            "customerCode", "shopCode", "Mã KH", "customerName", "shopName", "Tên KH",
+            "Cửa Hàng", "store_name", "storeName", "NVGH", "Mã NVGH", "Tên NVGH",
+            "Mã NVQL", "Tên NVQL", "_manager_code", "_manager_name",
+            "address", "customerAddress", "shipTo", "Địa chỉ", "orderStatus", "status",
+            "_order_type", "Trạng thái tạo đơn", "orderType", "_order_created_date",
+            "_processing_status", "_warehouse_updated", "_is_synthetic", "_local_id",
+            "_delivery_status", "Tình trạng xuất kho", "_replacement_type", "_replacement_display",
+            "_replaced_order_number", "_replaced_by_order_numbers", "_pending_split_request_id",
+            "_performed_by", "performedBy", "Người thực hiện",
+        }
+        summary = {k: v for k, v in row.items() if k in summary_fields}
+        if row.get("_snapshot_order_number"):
+            summary["orderNumber"] = row["_snapshot_order_number"]
+        summary.update({"totalValue": value, "totalDiscount": discount, "_product_count": len(lines), "_summary_key": key})
+        summaries.append(summary)
+        replaced = row.get("_replacement_type") in ("SPLIT", "MERGE") and bool(row.get("_replaced_by_order_numbers"))
+        if not replaced:
+            total_value += value
+            total_discount += discount
+            confirmed += bool(field(row, ("deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate")))
+    return {
+        "rows": summaries[skip:skip + limit], "total": len(summaries), "all_total": len(groups),
+        "total_value": total_value, "total_discount": total_discount, "confirmed": confirmed,
+        "statuses": sorted(statuses), "delivery_statuses": sorted(delivery_statuses),
+        "last_synced_at": last_synced_at,
     }
 
 

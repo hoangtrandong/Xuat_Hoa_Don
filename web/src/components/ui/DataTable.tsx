@@ -33,6 +33,7 @@ interface DataTableProps<T> {
   fitColumns?: boolean;
   defaultSortKey?: string;
   defaultSortDir?: "asc" | "desc";
+  hidePagination?: boolean;
 }
 
 function getByKey<T>(row: T, key: string): unknown {
@@ -57,6 +58,7 @@ export default function DataTable<T>({
   fitColumns = false,
   defaultSortKey,
   defaultSortDir = "asc",
+  hidePagination = false,
 }: DataTableProps<T>) {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -239,7 +241,7 @@ export default function DataTable<T>({
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100">
+      {!hidePagination && <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100">
         <span className="text-xs text-gray-400">
           {filtered.length} kết quả {search && `cho "${search}"`}
         </span>
@@ -313,7 +315,7 @@ export default function DataTable<T>({
             <button type="submit" className="h-7 rounded border border-gray-200 px-2 font-medium text-gray-600 hover:bg-gray-100">Đi</button>
           </form>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

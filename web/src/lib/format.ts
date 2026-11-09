@@ -48,6 +48,10 @@ export function formatNumber(value: number): string {
   return value.toLocaleString("vi-VN");
 }
 
+export function formatBorrowStatusText(value: string): string {
+  return value.replace(/Mượn Số/gi, "Dương Số").replace(/Trả Số/gi, "Âm Số");
+}
+
 export function formatCustomerCode(code: string | null | undefined): string {
   return (code ?? "").trim().slice(-3);
 }

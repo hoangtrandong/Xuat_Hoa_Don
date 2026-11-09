@@ -26,7 +26,7 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
 import OrderActionModal from "@/components/ui/OrderActionModal";
 import CreateOrderForm from "@/components/sales/CreateOrderForm";
-import { formatCustomerCode, formatVND } from "@/lib/format";
+import { formatCustomerCode, formatNumber, formatVND, formatVNDFull } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
 import * as XLSX from "xlsx";
@@ -233,6 +233,7 @@ type SplitRequestPreviewSplit = {
   delivery_employee_code?: string;
   delivery_employee_name?: string;
   is_staff_debt?: boolean;
+  delivery_recipient?: boolean;
   status_label: string;
   total_qty: number;
   total_promo_qty: number;
@@ -302,8 +303,8 @@ const remoteColumnDefinitions: {
   { title: "Số lượng", keys: ["quantity", "qty", "Số lượng"], width: "6.5rem", align: "right" },
   { title: "Số lượng KM", keys: ["promotionQuantity", "freeQuantity", "giftQuantity", "Số lượng KM"], width: "7.5rem", align: "right" },
   { title: "Giá trị", keys: ["totalValue", "total", "amount", "Giá trị"], width: "8rem", align: "right" },
-  { title: "Tỉ lệ CK", keys: ["discountRate", "saleOrderDiscount", "discountPercent", "Tỉ lệ CK"], width: "6.5rem", align: "right" },
   { title: "Số tiền CK", keys: ["totalDiscount", "discountAmount", "Số tiền CK"], width: "8rem", align: "right" },
+  { title: "Thành tiền", keys: [], width: "9rem", align: "right" },
   { title: "Đơn giá", keys: ["unitPrice", "price", "Đơn giá"], width: "7.5rem", align: "right" },
   { title: "Thời gian xác nhận giao hàng", keys: ["deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate"], width: "14rem" },
   { title: "Ngày đơn hàng gốc", keys: ["initialOrderDate", "originalOrderDate", "Ngày đơn hàng gốc"], width: "10.5rem" },
@@ -363,12 +364,15 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
   normalized["Người thực hiện"] = performedBy;
   normalized["_performed_by"] = performedBy;
   normalized["_local_id"] = order["_local_id"] ?? null;
+  normalized["_boxes_per_carton"] = order["_boxes_per_carton"] ?? null;
+  normalized["Thành tiền"] = numericValue(normalized["Giá trị"]) - numericValue(normalized["Số tiền CK"]);
   normalized["_order_created_date"] = order["_order_created_date"] ?? null;
   normalized["_replaced_order_number"] = order["_replaced_order_number"] ?? null;
   normalized["_replaced_by_order_numbers"] = order["_replaced_by_order_numbers"] ?? null;
   normalized["_replacement_type"] = order["_replacement_type"] ?? null;
   normalized["_replacement_display"] = replacementDisplay;
   normalized["_processing_status"] = order["_processing_status"] ?? null;
+  normalized["_pending_split_request_id"] = order["_pending_split_request_id"] ?? null;
   normalized["_is_synthetic"] = order["_is_synthetic"] ?? false;
   normalized["_warehouse_updated"] = order["_warehouse_updated"] ?? null;
   return normalized;
@@ -380,9 +384,11 @@ function addProcessingStatus(order: RemoteOrder): RemoteOrder {
   const orderType = displayRemoteValue(order["_order_type"]).trim();
   const processingStatus = procStatus || whStatus || "Chưa xử lý";
   const visibleProcessingStatus = processingStatus === "Đơn Tự Tạo" ? "" : processingStatus;
-  const finalStatus = orderType
-    ? [orderType, visibleProcessingStatus].filter(Boolean).join(" · ")
-    : processingStatus;
+  const finalStatus = processingStatus === "Đơn Tách"
+    ? processingStatus
+    : orderType
+      ? [orderType, visibleProcessingStatus].filter(Boolean).join(" · ")
+      : processingStatus;
   return {
     ...order,
     "Tình trạng xử lý đơn hàng": finalStatus,
@@ -417,6 +423,7 @@ function formatVinamilkDate(value: unknown, withTime: boolean): string {
 function formatRemoteColumnValue(title: string, value: unknown): string {
   if (title === "Ngày tạo") return formatVinamilkDate(value, true);
   if (title === "Ngày giao") return formatVinamilkDate(value, false);
+  if (title === "Thành tiền" && typeof value === "number") return formatNumber(value);
   if (title === "Mã KH") {
     const code = displayRemoteValue(value).trim();
     return /^(NVBH|NVGH)-/i.test(code) || code.toUpperCase() === "NVBH" ? code : formatCustomerCode(code);
@@ -428,6 +435,52 @@ function numericValue(value: unknown) {
   if (typeof value === "number") return value;
   if (typeof value === "string") return Number(value.replaceAll(",", "")) || 0;
   return 0;
+}
+
+function splitQuantityUnits(quantity: number, boxesPerCarton: number) {
+  return {
+    cartons: boxesPerCarton > 1 ? Math.floor(quantity / boxesPerCarton) : 0,
+    boxes: boxesPerCarton > 1 ? Number((quantity % boxesPerCarton).toFixed(4)) : quantity,
+  };
+}
+
+function SplitOriginalQuantity({ quantity, boxesPerCarton }: {
+  quantity: number;
+  boxesPerCarton: number | null;
+}) {
+  if (!boxesPerCarton) return <span title="Chưa có quy cách; số lượng theo ĐVT gốc">{quantity}</span>;
+  const { cartons, boxes } = splitQuantityUnits(quantity, boxesPerCarton);
+  return (
+    <span className="whitespace-nowrap" title={`1 thùng = ${boxesPerCarton} hộp`}>
+      {cartons}/{boxes}
+    </span>
+  );
+}
+
+function SplitQuantityInput({ quantity, boxesPerCarton, label, onChange }: {
+  quantity: number;
+  boxesPerCarton: number | null;
+  label: string;
+  onChange: (quantity: number) => void;
+}) {
+  if (!boxesPerCarton) {
+    return <input type="number" min={0} step="any" inputMode="decimal" aria-label={label}
+      value={quantity} onChange={(event) => onChange(Number(event.target.value))}
+      className="min-h-10 w-20 rounded border border-gray-200 bg-white px-2 py-1 text-right text-xs" />;
+  }
+  const { cartons, boxes } = splitQuantityUnits(quantity, boxesPerCarton);
+  return (
+    <div className="flex items-center gap-1">
+      <input type="number" min={0} step={1} inputMode="numeric" aria-label={`Thùng ${label}`}
+        disabled={boxesPerCarton === 1} value={cartons}
+        onChange={(event) => onChange(Math.max(0, Math.floor(Number(event.target.value) || 0)) * boxesPerCarton + boxes)}
+        className="block min-h-10 w-16 rounded border border-gray-200 bg-white px-2 py-1 text-right text-xs disabled:bg-gray-100" />
+      <input type="number" min={0} step="any" inputMode="decimal" aria-label={`Hộp ${label}`}
+        value={boxes}
+        onChange={(event) => onChange(Number((cartons * boxesPerCarton + Math.max(0, Number(event.target.value) || 0)).toFixed(4)))}
+        className="block min-h-10 w-16 rounded border border-gray-200 bg-white px-2 py-1 text-right text-xs" />
+    </div>
+  );
 }
 
 export default function SalesOrdersPage() {
@@ -444,6 +497,20 @@ export default function SalesOrdersPage() {
   const [fromDate, setFromDate] = useState(defaultDateRange.from);
   const [toDate, setToDate] = useState(defaultDateRange.to);
   const [remoteOrders, setRemoteOrders] = useState<RemoteOrder[]>([]);
+  const [workflowOrders, setWorkflowOrders] = useState<RemoteOrder[]>([]);
+  const [detailOrderNumber, setDetailOrderNumber] = useState<string | null>(null);
+  const [detailOrderLines, setDetailOrderLines] = useState<RemoteOrder[]>([]);
+  const [detailError, setDetailError] = useState("");
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [listLoading, setListLoading] = useState(false);
+  const [listPage, setListPage] = useState(1);
+  const [listTotal, setListTotal] = useState(0);
+  const [allOrderCount, setAllOrderCount] = useState(0);
+  const [listTotals, setListTotals] = useState({ value: 0, discount: 0, confirmed: 0 });
+  const [serverStatuses, setServerStatuses] = useState<string[]>([]);
+  const [serverDeliveryStatuses, setServerDeliveryStatuses] = useState<string[]>([]);
+  const listRequestVersion = useRef(0);
+  const detailRequestVersion = useRef(0);
   const [remoteError, setRemoteError] = useState("");
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(20);
@@ -571,13 +638,12 @@ export default function SalesOrdersPage() {
     }
   }, [splitApprovalFilter]);
 
-  const loadLocalOrders = useCallback(async () => {
+  const loadOrderLines = useCallback(async (orderNumber?: string) => {
     const allRows: RemoteOrder[] = [];
     let skip = 0;
-    let lastSynced: string | null = null;
     while (true) {
       const response = await apiFetch(
-        `${API_URL}/sync/vinamilk-orders?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&source=sync&skip=${skip}&limit=${LOCAL_PAGE_SIZE}`
+        `${API_URL}/sync/vinamilk-orders?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&source=sync&skip=${skip}&limit=${LOCAL_PAGE_SIZE}${orderNumber ? `&order_number=${encodeURIComponent(orderNumber)}` : ""}`
       );
       const payload = await response.json() as {
         rows?: unknown;
@@ -589,7 +655,6 @@ export default function SalesOrdersPage() {
       if (!response.ok) throw new Error(payload.detail ?? "Không thể tải dữ liệu đơn hàng đã đồng bộ.");
       const rows = Array.isArray(payload.rows) ? payload.rows : [];
       allRows.push(...rows.filter((row): row is RemoteOrder => typeof row === "object" && row !== null));
-      lastSynced = payload.last_synced_at ?? lastSynced;
       const snapshotCount = payload.snapshot_count ?? rows.length;
       const snapshotTotal = payload.snapshot_total;
       skip += snapshotCount;
@@ -597,15 +662,72 @@ export default function SalesOrdersPage() {
       if (snapshotTotal != null && skip >= snapshotTotal) break;
       if (snapshotCount < LOCAL_PAGE_SIZE) break;
     }
-    const normalizedRows = allRows.map(normalizeRemoteOrder);
-    setRemoteOrders(normalizedRows.map(addProcessingStatus));
-    setLastSyncedAt(lastSynced);
+    return allRows.map(normalizeRemoteOrder).map(addProcessingStatus);
+  }, [fromDate, toDate]);
+
+  const loadLocalOrders = useCallback(async () => {
+    const version = ++listRequestVersion.current;
+    setListLoading(true);
+    const params = new URLSearchParams({
+      from_date: fromDate, to_date: toDate, skip: String((listPage - 1) * pageSize), limit: String(pageSize),
+      order_search: orderFilter, customer: customerFilter, staff: staffFilter, product: productFilter,
+      processing_status: statusFilter === "Tất cả" ? "" : statusFilter,
+      delivery_status: deliveryStatusFilter === "Tất cả" ? "" : deliveryStatusFilter,
+    });
+    try {
+      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/grouped?${params}`);
+      const payload = await response.json() as {
+        rows?: RemoteOrder[]; total?: number; all_total?: number; total_value?: number;
+        total_discount?: number; confirmed?: number; statuses?: string[]; delivery_statuses?: string[];
+        last_synced_at?: string | null; detail?: string;
+      };
+      if (!response.ok || !Array.isArray(payload.rows)) throw new Error(payload.detail ?? "Không thể tải danh sách đơn hàng.");
+      if (version !== listRequestVersion.current) return;
+      setRemoteOrders(payload.rows.map((row) => ({ ...addProcessingStatus(normalizeRemoteOrder(row)), _summary_key: row._summary_key, "Số sản phẩm": row._product_count })));
+      setListTotal(payload.total ?? 0);
+      if (listPage > Math.max(1, Math.ceil((payload.total ?? 0) / pageSize))) {
+        setListPage(Math.max(1, Math.ceil((payload.total ?? 0) / pageSize)));
+      }
+      setAllOrderCount(payload.all_total ?? 0);
+      setListTotals({ value: payload.total_value ?? 0, discount: payload.total_discount ?? 0, confirmed: payload.confirmed ?? 0 });
+      setServerStatuses(payload.statuses ?? []);
+      setServerDeliveryStatuses(payload.delivery_statuses ?? []);
+      setLastSyncedAt(payload.last_synced_at ?? null);
+      setRemoteError("");
+    } finally {
+      if (version === listRequestVersion.current) setListLoading(false);
+    }
     void loadSplitApprovalRequests();
-  }, [fromDate, toDate, loadSplitApprovalRequests]);
+  }, [fromDate, toDate, listPage, pageSize, orderFilter, customerFilter, staffFilter, productFilter, statusFilter, deliveryStatusFilter, loadSplitApprovalRequests]);
 
   useEffect(() => {
-    loadLocalOrders().catch((error) => setRemoteError(error instanceof Error ? error.message : "Không thể tải dữ liệu."));
+    const requestVersion = listRequestVersion;
+    const timer = window.setTimeout(() => {
+      loadLocalOrders().catch((error) => setRemoteError(error instanceof Error ? error.message : "Không thể tải dữ liệu."));
+    }, 250);
+    return () => { window.clearTimeout(timer); requestVersion.current++; };
   }, [loadLocalOrders]);
+
+  async function openOrderDetail(order: RemoteOrder) {
+    const number = displayRemoteValue(order["Số đơn hàng"]).trim();
+    if (!number) {
+      setRemoteError("Đơn hàng không có số đơn, không thể tải chi tiết.");
+      return;
+    }
+    const version = ++detailRequestVersion.current;
+    setDetailOrderNumber(number);
+    setDetailOrderLines([]);
+    setDetailError("");
+    setDetailLoading(true);
+    try {
+      const lines = await loadOrderLines(number);
+      if (version === detailRequestVersion.current) setDetailOrderLines(lines);
+    } catch (error) {
+      if (version === detailRequestVersion.current) setDetailError(error instanceof Error ? error.message : "Không thể tải chi tiết đơn hàng.");
+    } finally {
+      if (version === detailRequestVersion.current) setDetailLoading(false);
+    }
+  }
 
   const loadCustomerOptions = useCallback(async () => {
     try {
@@ -699,7 +821,7 @@ export default function SalesOrdersPage() {
   // Gom nhóm các đơn đủ điều kiện để Tách hoặc Gộp (chưa là đơn tách/gộp, chưa bị thay thế, chưa đang chờ KT duyệt tách; tài khoản không phải Admin chỉ được tách/gộp đơn ngày hôm nay)
   const eligibleOrderGroups = useMemo<GroupedOrderSummary[]>(() => {
     const map = new Map<string, GroupedOrderSummary>();
-    for (const row of remoteOrders) {
+    for (const row of workflowOrders) {
       const orderNum = displayRemoteValue(row["Số đơn hàng"]).trim();
       if (!orderNum) continue;
       if (row["_is_synthetic"] === true) continue;
@@ -734,7 +856,7 @@ export default function SalesOrdersPage() {
   group.totalPromoQty += numericValue(row["Số lượng KM"]);
 }
 return Array.from(map.values());
-  }, [remoteOrders, effectiveIsAdmin, todayInputStr]);
+  }, [workflowOrders, effectiveIsAdmin, todayInputStr]);
 
   const selectedSplitOrderGroup = useMemo(
     () => eligibleOrderGroups.find((g) => g.orderNumber === selectedSplitOrderNumber) ?? null,
@@ -878,6 +1000,15 @@ return Array.from(map.values());
       setSplitError("Vui lòng chọn NVGH nhận phần thiếu.");
       return;
     }
+    const hasRemainder = selectedSplitOrderGroup.lines.some((line) => {
+      const allocs = splitAllocs[Number(line["_local_id"])] ?? [];
+      return numericValue(line["Số lượng"]) - allocs.reduce((sum, item) => sum + item.quantity, 0) > 1e-4
+        || numericValue(line["Số lượng KM"]) - allocs.reduce((sum, item) => sum + item.promoQuantity, 0) > 1e-4;
+    });
+    if (!hasRemainder) {
+      setSplitError("Không còn phần thiếu. Hãy giảm số lượng đã phân bổ trước.");
+      return;
+    }
     const staffCust: SplitCustomerSelection = {
       customer_code: "",
       customer_name: "",
@@ -1014,6 +1145,8 @@ return Array.from(map.values());
         }
         return next;
       });
+    } else {
+      setSplitError("Đã đủ 10 đơn tách. Hãy dùng một đơn trống để gán cho NVGH.");
     }
   }
 
@@ -1548,8 +1681,7 @@ return Array.from(map.values());
         customer_code: chosenCust.customer_code,
         customer_name: chosenCust.customer_name,
         customer_address: chosenCust.customer_address,
-        is_staff_debt: Boolean(chosenCust.is_staff_debt),
-        debt_target: chosenCust.is_staff_debt ? "DELIVERY" : null,
+        delivery_recipient: Boolean(chosenCust.is_staff_debt),
         staff_code: selectedSplitOrderGroup.staffCode || undefined,
         staff_name: selectedSplitOrderGroup.staffName || undefined,
         delivery_employee_code: splitDeliveryEmployees[splitIdx] || null,
@@ -1557,22 +1689,23 @@ return Array.from(map.values());
       };
     });
 
-    const splitsPayload = hasShortage
+    const hasDeliveryRecipient = rawSplitsPayload.some((split) => split.delivery_recipient && split.items.length > 0);
+    const splitsPayload = hasShortage || hasDeliveryRecipient
       ? rawSplitsPayload.filter((s) => s.items.length > 0)
       : rawSplitsPayload;
 
-    if (splitsPayload.length === 0) {
+    if (splitsPayload.length === 0 && !hasShortage) {
       setSplitError("Vui lòng nhập số lượng phân bổ lớn hơn 0 cho ít nhất 1 đơn tách.");
       return;
     }
-    if (splitsPayload.some((split) => split.is_staff_debt && !split.delivery_employee_code)) {
+    if (splitsPayload.some((split) => split.delivery_recipient && !split.delivery_employee_code)) {
       setSplitError("Vui lòng chọn NVGH cho từng đơn tách gắn phần thiếu.");
       return;
     }
 
     if (!hasShortage) {
       const emptySplitIndex = rawSplitsPayload.findIndex((s) => s.items.length === 0);
-      if (emptySplitIndex !== -1) {
+      if (emptySplitIndex !== -1 && !hasDeliveryRecipient) {
         setSplitError(`Đơn tách thứ ${emptySplitIndex + 1} chưa có sản phẩm nào có số lượng > 0.`);
         return;
       }
@@ -1580,7 +1713,7 @@ return Array.from(map.values());
         const onlySplit = splitsPayload[0];
         const targetCode = (onlySplit.customer_code ?? "").trim();
         const origCode = (selectedSplitOrderGroup.customerCode ?? "").trim();
-        if (!onlySplit.is_staff_debt && (!targetCode || targetCode.toUpperCase() === origCode.toUpperCase())) {
+        if (!onlySplit.delivery_recipient && (!targetCode || targetCode.toUpperCase() === origCode.toUpperCase())) {
           setSplitError(
             "Khi tách thành 1 đơn (đổi khách hàng), vui lòng chọn khách hàng khác hoặc gắn phần thiếu cho NVGH."
           );
@@ -1611,7 +1744,7 @@ return Array.from(map.values());
         body: JSON.stringify({
           order_number: selectedSplitOrderGroup.orderNumber,
           splits: splitsPayload,
-          auto_assign_remainder_to_delivery: hasShortage,
+          auto_assign_remainder_to_delivery_customer: hasShortage,
           remainder_delivery_employee_code: hasShortage ? remainderDeliveryEmployee : null,
         }),
       });
@@ -1945,8 +2078,8 @@ return Array.from(map.values());
 
   const remoteColumns = remoteColumnDefinitions
     .filter(({ title }) => (
-      ["NVGH", "Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Trạng thái xử lý", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
-    ) || remoteOrders.some((order) => hasRemoteValue(order[title])))
+      ["NVGH", "Thành tiền", "Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Trạng thái xử lý", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
+    ) || remoteOrders.some((order) => hasRemoteValue(order[title])) || detailOrderLines.some((order) => hasRemoteValue(order[title])))
     .filter(({ title }) => title !== "Mã NVGH" && title !== "Tên NVGH")
     .map(({ title, width, align }): Column<RemoteOrder> => ({
       key: title,
@@ -2149,11 +2282,7 @@ return Array.from(map.values());
       },
     }));
 
-  const remoteStatuses = Array.from(new Set(
-    remoteOrders
-      .map((order) => displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]))
-      .filter((status) => status.length > 0)
-  ));
+  const remoteStatuses = serverStatuses;
   const deliveryStatuses = Array.from(new Set([
     "Chưa yêu cầu",
     "Chờ Admin duyệt",
@@ -2162,9 +2291,9 @@ return Array.from(map.values());
     "Đã xuất một phần",
     "Đã xuất kho",
     "Đã hủy yêu cầu",
-    ...remoteOrders.map((order) => displayRemoteValue(order["Tình trạng xuất kho"])).filter(Boolean),
+    ...serverDeliveryStatuses,
   ]));
-  const filteredRemoteOrders = remoteOrders.filter((order) => {
+  const matchesFilters = (order: RemoteOrder) => {
     const matches = (key: string, query: string) =>
       !query || displayRemoteValue(order[key]).toLocaleLowerCase("vi").includes(query.trim().toLocaleLowerCase("vi"));
     // Tìm đơn cũ thì vẫn thấy đơn thay thế nó (và ngược lại).
@@ -2181,10 +2310,32 @@ return Array.from(map.values());
     if (statusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]) !== statusFilter) return false;
     if (deliveryStatusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xuất kho"]) !== deliveryStatusFilter) return false;
     return true;
-  });
-
+  };
+  const orderSummaries = remoteOrders;
+  const summaryColumns: Column<RemoteOrder>[] = [
+    {
+      key: "Số đơn hàng",
+      title: "Số đơn hàng",
+      sortable: true,
+      width: "11rem",
+      render: (value, order) => (
+        <button type="button" className="font-semibold text-sky-700 hover:underline"
+          onClick={() => void openOrderDetail(order)}>
+          {displayRemoteValue(value) || "Xem chi tiết"}
+        </button>
+      ),
+    },
+    ...remoteColumns.filter((column) => [
+      "Ngày tạo", "Mã KH", "Tên KH", "Mã NVBH", "Tên NVBH", "NVGH",
+    ].includes(column.title)),
+    { key: "Số sản phẩm", title: "Số sản phẩm", sortable: true, align: "right", width: "8rem" },
+    ...remoteColumns.filter((column) => [
+      "Giá trị", "Số tiền CK", "Thành tiền", "Tình trạng xử lý đơn hàng",
+      "Tình trạng xuất kho", "Thay thế cho đơn",
+    ].includes(column.title)),
+  ];
   const deliveryRequestOrderOptions = Array.from(
-    filteredRemoteOrders.reduce((orders, row) => {
+    workflowOrders.filter(matchesFilters).reduce((orders, row) => {
       const orderNumber = displayRemoteValue(row["Số đơn hàng"]).trim();
       if (
         !orderNumber ||
@@ -2244,10 +2395,12 @@ return Array.from(map.values());
   async function openSplitDrawer() {
     setSplitError("");
     setIsSplitDrawerOpen(true);
+    setWorkflowOrders([]);
     setIsLoadingDeliveryEmployees(true);
     setDeliveryEmployeeError("");
     try {
-      const employees = await loadDeliveryEmployees();
+      const [employees, orders] = await Promise.all([loadDeliveryEmployees(), loadOrderLines()]);
+      setWorkflowOrders(orders);
       setDeliveryEmployees(employees);
       if (!employees.length) setDeliveryEmployeeError("Không tìm thấy nhân viên đang hoạt động có mã bắt đầu bằng NV.");
     } catch (error) {
@@ -2260,10 +2413,12 @@ return Array.from(map.values());
   async function openMergeDrawer() {
     setMergeError("");
     setIsMergeDrawerOpen(true);
+    setWorkflowOrders([]);
     setIsLoadingDeliveryEmployees(true);
     setDeliveryEmployeeError("");
     try {
-      const employees = await loadDeliveryEmployees();
+      const [employees, orders] = await Promise.all([loadDeliveryEmployees(), loadOrderLines()]);
+      setWorkflowOrders(orders);
       setDeliveryEmployees(employees);
       if (!employees.length) setDeliveryEmployeeError("Không tìm thấy nhân viên đang hoạt động có mã bắt đầu bằng NV.");
     } catch (error) {
@@ -2284,12 +2439,15 @@ return Array.from(map.values());
     setDeliveryRequestPlan(null);
     setAcknowledgeDeliveryWarnings(false);
     setIsDeliveryRequestDrawerOpen(true);
+    setWorkflowOrders([]);
     setIsLoadingDeliveryEmployees(true);
     try {
-      const [employees, warehouseResponse] = await Promise.all([
+      const [employees, warehouseResponse, orders] = await Promise.all([
         loadDeliveryEmployees(),
         apiFetch(`${API_URL}/inventory/warehouses/`),
+        loadOrderLines(),
       ]);
+      setWorkflowOrders(orders);
       const warehouses = await warehouseResponse.json() as DeliveryWarehouseOption[] | { detail?: string };
       if (!warehouseResponse.ok || !Array.isArray(warehouses)) {
         throw new Error(!Array.isArray(warehouses) ? warehouses.detail ?? "Không tải được danh sách kho." : "Không tải được danh sách kho.");
@@ -2562,6 +2720,7 @@ return Array.from(map.values());
   }
 
   function clearFilters() {
+    setListPage(1);
     setOrderFilter("");
     setCustomerFilter("");
     setStaffFilter("");
@@ -2633,33 +2792,33 @@ return Array.from(map.values());
     }
   }
 
-  function downloadExcel() {
-    if (filteredRemoteOrders.length === 0) return;
-    // Xuất đúng các cột đang hiển thị và các dòng sau lọc; mã khách hàng giữ nguyên đầy đủ.
-    const exportRows = filteredRemoteOrders.map((order) =>
-      Object.fromEntries(remoteColumns.map(({ key }) => [
+  async function downloadExcel() {
+    try {
+    const lines = (await loadOrderLines()).filter(matchesFilters);
+    if (lines.length === 0) {
+      setRemoteError("Không có dòng sản phẩm phù hợp để xuất Excel.");
+      return;
+    }
+    const exportColumns = remoteColumnDefinitions.filter(({ title }) =>
+      ["NVGH", "Thành tiền", "Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
+      || lines.some((line) => hasRemoteValue(line[title]))
+    ).filter(({ title }) => title !== "Mã NVGH" && title !== "Tên NVGH");
+    const exportRows = lines.map((order) =>
+      Object.fromEntries(exportColumns.map(({ title: key }) => [
         key,
-        key === "Mã KH" ? displayRemoteValue(order[key]) : formatRemoteColumnValue(key, order[key]),
+        key === "Thành tiền" ? order[key] : key === "Mã KH" ? displayRemoteValue(order[key]) : formatRemoteColumnValue(key, order[key]),
       ]))
     );
-    const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: remoteColumns.map(({ key }) => key) });
+    const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: exportColumns.map(({ title }) => title) });
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Don hang");
     XLSX.writeFile(workbook, `don-hang-vinamilk-${fromDate}-den-${toDate}.xlsx`);
+    } catch (error) {
+      setRemoteError(error instanceof Error ? error.message : "Không thể xuất Excel.");
+    }
   }
 
-  // Loại trừ các đơn gốc đã bị tách/gộp (BTT) khi cộng tổng thẻ thống kê để không bị tính trùng
-  const primaryOrders = filteredRemoteOrders.filter((order) => {
-    const repType = displayRemoteValue(order["_replacement_type"]).trim();
-    const isReplacedOriginal =
-      (repType === "SPLIT" || repType === "MERGE") &&
-      Array.isArray(order["_replaced_by_order_numbers"]) &&
-      order["_replaced_by_order_numbers"].length > 0;
-    return !isReplacedOriginal;
-  });
-  const totalValue = primaryOrders.reduce((sum, order) => sum + numericValue(order["Giá trị"]), 0);
-  const totalDiscount = primaryOrders.reduce((sum, order) => sum + numericValue(order["Số tiền CK"]), 0);
-  const confirmedDeliveries = primaryOrders.filter((order) => hasRemoteValue(order["Thời gian xác nhận giao hàng"])).length;
+  const { value: totalValue, discount: totalDiscount, confirmed: confirmedDeliveries } = listTotals;
 
   const filteredSplitOrderOptions = eligibleOrderGroups.filter((group) => {
     if (!splitOrderSearch.trim()) return true;
@@ -2726,7 +2885,7 @@ return Array.from(map.values());
               <button
                 type="button"
                 onClick={() => void openDeliveryRequestDrawer()}
-                disabled={deliveryRequestOrderOptions.length === 0}
+                disabled={listTotal === 0}
                 className="flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3.5 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Download size={16} />
@@ -2779,7 +2938,7 @@ return Array.from(map.values());
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Tổng bản ghi" value={remoteOrders.length} icon={<ShoppingCart size={20} />} color="bg-sky-50 text-sky-600" />
+        <StatCard label="Tổng đơn hàng" value={allOrderCount} icon={<ShoppingCart size={20} />} color="bg-sky-50 text-sky-600" />
         <StatCard label="Tổng giá trị" value={formatVND(totalValue)} icon={<CircleCheck size={20} />} color="bg-emerald-50 text-emerald-600" />
         <StatCard label="Đã xác nhận giao" value={confirmedDeliveries} icon={<Clock3 size={20} />} color="bg-amber-50 text-amber-600" />
         <StatCard label="Tổng chiết khấu" value={formatVND(totalDiscount)} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />
@@ -2787,47 +2946,49 @@ return Array.from(map.values());
 
       <section className="space-y-4">
         <div className="flex flex-wrap items-end gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm">
-          <label className="text-sm text-gray-600">Từ ngày<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm" aria-label="Từ ngày" /></label>
-          <label className="text-sm text-gray-600">Đến ngày<input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm" aria-label="Đến ngày" /></label>
+          <label className="text-sm text-gray-600">Từ ngày<input type="date" value={fromDate} onChange={(event) => { setListPage(1); setFromDate(event.target.value); }} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm" aria-label="Từ ngày" /></label>
+          <label className="text-sm text-gray-600">Đến ngày<input type="date" value={toDate} onChange={(event) => { setListPage(1); setToDate(event.target.value); }} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm" aria-label="Đến ngày" /></label>
           <button onClick={handleSyncVinamilk} disabled={isSyncing} className="flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50">
             <RefreshCw size={16} className={isSyncing ? "animate-spin" : ""} />{isSyncing ? "Đang đồng bộ..." : "Đồng bộ Vinamilk DMS"}
           </button>
-          <label className="text-sm text-gray-600">Số dòng
-            <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm">
-              {[20, 50, 100, 500].map((size) => <option key={size} value={size}>{size} dòng/trang</option>)}
+          <label className="text-sm text-gray-600">Số đơn
+            <select value={pageSize} onChange={(event) => { setListPage(1); setPageSize(Number(event.target.value)); }} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm">
+              {[20, 50, 100, 500].map((size) => <option key={size} value={size}>{size} đơn/trang</option>)}
             </select>
           </label>
-          <button onClick={downloadExcel} disabled={filteredRemoteOrders.length === 0} className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">
+          <button onClick={() => void downloadExcel()} disabled={listTotal === 0} className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">
             Tải Excel toàn bộ
           </button>
         </div>
         <div className="grid grid-cols-1 gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-7">
-          <input value={orderFilter} onChange={(event) => setOrderFilter(event.target.value)} placeholder="Lọc số đơn hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)} placeholder="Lọc mã/tên khách hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={staffFilter} onChange={(event) => setStaffFilter(event.target.value)} placeholder="Lọc mã/tên NVBH" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={productFilter} onChange={(event) => setProductFilter(event.target.value)} placeholder="Lọc mã/tên SP, Nhà cung cấp" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm">
+          <input value={orderFilter} onChange={(event) => { setListPage(1); setOrderFilter(event.target.value); }} placeholder="Lọc số đơn hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <input value={customerFilter} onChange={(event) => { setListPage(1); setCustomerFilter(event.target.value); }} placeholder="Lọc mã/tên khách hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <input value={staffFilter} onChange={(event) => { setListPage(1); setStaffFilter(event.target.value); }} placeholder="Lọc mã/tên NVBH" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <input value={productFilter} onChange={(event) => { setListPage(1); setProductFilter(event.target.value); }} placeholder="Lọc mã/tên SP, Nhà cung cấp" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+          <select value={statusFilter} onChange={(event) => { setListPage(1); setStatusFilter(event.target.value); }} className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm">
             <option value="Tất cả">Tất cả tình trạng xử lý</option>
             {remoteStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
           </select>
-          <select value={deliveryStatusFilter} onChange={(event) => setDeliveryStatusFilter(event.target.value)} className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm">
+          <select value={deliveryStatusFilter} onChange={(event) => { setListPage(1); setDeliveryStatusFilter(event.target.value); }} className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm">
             <option value="Tất cả">Tất cả tình trạng xuất kho</option>
             {deliveryStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
           </select>
           <button onClick={clearFilters} className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">Xóa lọc</button>
         </div>
-        {remoteOrders.length > 0 && <p className="text-sm text-gray-500">Đang hiển thị {filteredRemoteOrders.length}/{remoteOrders.length} bản ghi sau lọc. {lastSyncedAt && ` Cập nhật gần nhất: ${formatVinamilkDate(lastSyncedAt, true)}`}</p>}
+        <p className="text-sm text-gray-500">{listLoading ? "Đang tải đơn hàng..." : `Có ${listTotal}/${allOrderCount} đơn hàng sau lọc.`} {lastSyncedAt && ` Cập nhật gần nhất: ${formatVinamilkDate(lastSyncedAt, true)}`}</p>
         {remoteError && <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700"><AlertTriangle size={16} />{remoteError}</div>}
       </section>
 
       {remoteColumns.length > 0 ? (
         <DataTable
-          data={filteredRemoteOrders}
-          columns={remoteColumns}
+          key={`${orderFilter}|${customerFilter}|${staffFilter}|${productFilter}|${statusFilter}|${deliveryStatusFilter}|${pageSize}`}
+          data={orderSummaries}
+          columns={summaryColumns.map((column) => ({ ...column, sortable: false }))}
           searchable={false}
-          pageSize={pageSize}
+          pageSize={500}
+          hidePagination
           emptyMessage="Không có đơn hàng trong khoảng ngày đã chọn"
-          getRowKey={orderRowKey}
+          getRowKey={(order) => displayRemoteValue(order["_summary_key"])}
           fitColumns
         />
       ) : (
@@ -2835,6 +2996,52 @@ return Array.from(map.values());
           Chưa có dữ liệu trong database. Chọn khoảng ngày rồi bấm “Đồng bộ Vinamilk DMS” để cập nhật.
         </div>
       )}
+      <div className="flex items-center justify-end gap-3 text-sm text-gray-700">
+        <button type="button" disabled={listLoading || listPage <= 1} onClick={() => setListPage((page) => page - 1)} className="rounded border px-3 py-2 disabled:opacity-40">Trang trước</button>
+        <span>Trang {listPage} / {Math.max(1, Math.ceil(listTotal / pageSize))}</span>
+        <button type="button" disabled={listLoading || listPage * pageSize >= listTotal} onClick={() => setListPage((page) => page + 1)} className="rounded border px-3 py-2 disabled:opacity-40">Trang sau</button>
+      </div>
+
+      <OrderActionModal
+        open={detailOrderNumber !== null}
+        onClose={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }}
+        title={`Chi tiết đơn hàng ${detailOrderNumber ?? ""}`}
+        subtitle={detailLoading ? "Đang tải chi tiết..." : `${detailOrderLines.length} dòng sản phẩm`}
+        footer={<div className="flex justify-end"><button type="button" onClick={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }} className="min-h-11 rounded-lg border border-gray-200 px-5 text-sm font-medium text-gray-700 hover:bg-gray-50">Đóng</button></div>}
+      >
+        <div className="space-y-4 p-3 sm:p-5">
+          {detailError && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-700">{detailError}</p>}
+          {detailLoading && <p className="text-sm text-gray-500">Đang tải sản phẩm...</p>}
+          {detailOrderLines.length > 0 && (
+            <div className="grid gap-2 rounded-lg bg-gray-50 p-3 text-sm text-gray-700 sm:grid-cols-2">
+              <div><strong>Khách hàng:</strong> {displayRemoteValue(detailOrderLines[0]["Tên KH"]) || "—"}</div>
+              <div><strong>NVGH:</strong> {displayRemoteValue(detailOrderLines[0]["NVGH"]) || "—"}</div>
+              <div><strong>Giá trị:</strong> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Giá trị"]), 0))}</div>
+              <div><strong>Chiết khấu:</strong> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Số tiền CK"]), 0))}</div>
+              <div><strong>Thành tiền:</strong> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Thành tiền"]), 0))}</div>
+            </div>
+          )}
+          {!detailLoading && !detailError && <DataTable
+            data={detailOrderLines}
+            columns={remoteColumns.filter((column) => [
+              "Mã sản phẩm", "Sản phẩm", "Nhà cung cấp", "ĐVT", "Số lượng",
+              "Số lượng KM", "Giá trị", "Số tiền CK", "Thành tiền", "Đơn giá", "Mã CTKM",
+            ].includes(column.title))}
+            searchable={false}
+            pageSize={20}
+            getRowKey={orderRowKey}
+            fitColumns
+            emptyMessage="Không tìm thấy chi tiết đơn hàng."
+          />}
+          {!detailLoading && !detailError && <details className="rounded-lg border border-gray-200 p-3">
+            <summary className="cursor-pointer text-sm font-medium text-gray-700">Thông tin đầy đủ</summary>
+            <div className="mt-3">
+              <DataTable data={detailOrderLines} columns={remoteColumns} searchable={false}
+                pageSize={20} getRowKey={orderRowKey} fitColumns />
+            </div>
+          </details>}
+        </div>
+      </OrderActionModal>
 
       <Drawer
         open={isDeliveryRequestDrawerOpen}
@@ -3433,7 +3640,7 @@ return Array.from(map.values());
                             <span className="font-mono text-[11px] text-gray-500">{splitOrderCode}</span>
                             {isStaffDebt && (
                               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 border border-amber-300">
-                                Nợ NVGH
+                                Nhận NVGH
                               </span>
                             )}
                           </div>
@@ -3622,7 +3829,7 @@ return Array.from(map.values());
                             }`}
                           >
                             <div>
-                              Đơn tách {idx + 1} {isStaffDebt ? "(Nợ NVGH)" : ""}
+                              Đơn tách {idx + 1} {isStaffDebt ? "(NVGH nhận)" : ""}
                             </div>
                             <div className="text-[10px] font-normal text-gray-500">
                               TD-{selectedSplitOrderGroup.orderNumber}-{String(idx + 1).padStart(2, "0")}
@@ -3648,18 +3855,18 @@ return Array.from(map.values());
                     </tr>
                     <tr className="bg-gray-50/90 text-[11px]">
                       <th className="px-2 py-1.5 text-right font-semibold text-gray-700 border-r border-gray-200">
-                        Số lượng
+                        SL (Thùng / Hộp)
                       </th>
                       <th className="px-2 py-1.5 text-right font-semibold text-amber-700 border-r border-gray-200 bg-amber-50/30">
-                        Số lượng KM
+                        KM (Thùng / Hộp)
                       </th>
                       {Array.from({ length: splitCount }, (_, idx) => (
                         <Fragment key={`sub-${idx}`}>
                           <th className="px-2 py-1.5 text-right font-semibold text-gray-700 border-r border-gray-100">
-                            Số lượng
+                            SL (Thùng / Hộp)
                           </th>
                           <th className="px-2 py-1.5 text-right font-semibold text-amber-700 border-r border-gray-200 bg-amber-50/20">
-                            Số lượng KM
+                            KM (Thùng / Hộp)
                           </th>
                         </Fragment>
                       ))}
@@ -3678,6 +3885,9 @@ return Array.from(map.values());
                       const prodName = displayRemoteValue(line["Sản phẩm"]);
                       const promoCode = displayRemoteValue(line["Mã CTKM"]);
                       const unit = displayRemoteValue(line["ĐVT"]);
+                      const rawBoxesPerCarton = line["_boxes_per_carton"];
+                      const boxesPerCarton = typeof rawBoxesPerCarton === "number" && Number.isInteger(rawBoxesPerCarton) && rawBoxesPerCarton > 0
+                        ? rawBoxesPerCarton : null;
                       const origQty = numericValue(line["Số lượng"]);
                       const origPromo = numericValue(line["Số lượng KM"]);
                       const origVal = numericValue(line["Giá trị"]);
@@ -3698,6 +3908,9 @@ return Array.from(map.values());
                           <td className="sticky left-0 z-10 w-28 min-w-28 max-w-28 border-r border-gray-200 bg-white px-3 py-2 align-top sm:w-48 sm:min-w-48 sm:max-w-48">
                             <div className="break-words font-medium text-gray-900">{prodCode} — {prodName}</div>
                             {promoCode && <div className="text-[11px] text-gray-500">CTKM: {promoCode}</div>}
+                            {!boxesPerCarton && (
+                              <div className="text-[11px] text-gray-500">Chưa có quy cách; nhập theo ĐVT gốc</div>
+                            )}
                             <div className="text-[11px] text-emerald-700">
                               Giá trị gốc: {formatVND(origVal)}
                               {origDisc > 0 ? ` | CK gốc: ${formatVND(origDisc)}` : ""}
@@ -3707,10 +3920,10 @@ return Array.from(map.values());
                             {unit}
                           </td>
                           <td className="px-2.5 py-2 text-right align-middle font-semibold text-gray-900 border-r border-gray-100">
-                            {origQty}
+                            <SplitOriginalQuantity quantity={origQty} boxesPerCarton={boxesPerCarton} />
                           </td>
                           <td className="px-2.5 py-2 text-right align-middle font-semibold text-amber-700 border-r border-gray-200 bg-amber-50/20">
-                            {origPromo}
+                            <SplitOriginalQuantity quantity={origPromo} boxesPerCarton={boxesPerCarton} />
                           </td>
                           {Array.from({ length: splitCount }, (_, splitIdx) => {
                             const cell = allocs[splitIdx] ?? { quantity: 0, promoQuantity: 0 };
@@ -3724,18 +3937,9 @@ return Array.from(map.values());
                                   }`}
                                 >
                                   <div className="flex flex-col items-end gap-1">
-                                    <input
-                                      type="number"
-                                      min={0}
-                                      step="any"
-                                      aria-label={`Số lượng ${prodCode}, đơn tách ${splitIdx + 1}`}
-                                      inputMode="decimal"
-                                      value={cell.quantity}
-                                      onChange={(e) =>
-                                        updateSplitCell(localId, splitIdx, "quantity", Number(e.target.value))
-                                      }
-                                      className="min-h-10 w-20 rounded border border-gray-200 bg-white px-2 py-1 text-right text-xs font-medium text-gray-900 focus:border-purple-500 focus:outline-none"
-                                    />
+                                    <SplitQuantityInput quantity={cell.quantity} boxesPerCarton={boxesPerCarton}
+                                      label={`số lượng ${prodCode}, đơn tách ${splitIdx + 1}`}
+                                      onChange={(value) => updateSplitCell(localId, splitIdx, "quantity", value)} />
                                     {(cell.quantity > 0 || cell.promoQuantity > 0) && (
                                       <div className="w-full rounded bg-white/90 px-1.5 py-1 text-[10px] leading-tight border border-purple-100 space-y-1">
                                         <label className="flex items-center justify-between gap-1 text-emerald-700 font-medium">
@@ -3789,18 +3993,9 @@ return Array.from(map.values());
                                   }`}
                                 >
                                   <div className="flex flex-col items-end">
-                                    <input
-                                      type="number"
-                                      inputMode="decimal"
-                                      aria-label={`Số lượng khuyến mại ${prodCode}, đơn tách ${splitIdx + 1}`}
-                                      min={0}
-                                      step="any"
-                                      value={cell.promoQuantity}
-                                      onChange={(e) =>
-                                        updateSplitCell(localId, splitIdx, "promoQuantity", Number(e.target.value))
-                                      }
-                                      className="min-h-10 w-20 rounded border border-amber-200 bg-white px-2 py-1 text-right text-xs font-medium text-amber-900 focus:border-amber-500 focus:outline-none"
-                                    />
+                                    <SplitQuantityInput quantity={cell.promoQuantity} boxesPerCarton={boxesPerCarton}
+                                      label={`số lượng khuyến mại ${prodCode}, đơn tách ${splitIdx + 1}`}
+                                      onChange={(value) => updateSplitCell(localId, splitIdx, "promoQuantity", value)} />
                                   </div>
                                 </td>
                               </Fragment>
@@ -3856,13 +4051,16 @@ return Array.from(map.values());
                         <div className="text-[11px] font-normal text-rose-700">
                           CK gốc: {formatVND(selectedSplitOrderGroup.totalDiscount)}
                         </div>
+                        <div className="mt-1 text-[11px] text-indigo-800">
+                          Tổng thành tiền: {formatVNDFull(selectedSplitOrderGroup.totalValue - selectedSplitOrderGroup.totalDiscount)}
+                        </div>
                       </td>
                       <td className="border-r border-gray-200 bg-gray-50" />
                       <td className="px-2.5 py-2.5 text-right align-top border-r border-gray-200">
-                        {selectedSplitOrderGroup.totalQty}
+                        <span title="Tổng theo ĐVT gốc">{selectedSplitOrderGroup.totalQty} <span className="text-[10px] font-normal text-gray-500">ĐVT gốc</span></span>
                       </td>
                       <td className="px-2.5 py-2.5 text-right align-top text-amber-700 border-r border-gray-200 bg-amber-50/30">
-                        {selectedSplitOrderGroup.totalPromoQty}
+                        <span title="Tổng theo ĐVT gốc">{selectedSplitOrderGroup.totalPromoQty} <span className="text-[10px] font-normal text-gray-500">ĐVT gốc</span></span>
                       </td>
                       {Array.from({ length: splitCount }, (_, splitIdx) => {
                         const totals = splitFinancials.splitTotals[splitIdx] ?? {
@@ -3874,16 +4072,19 @@ return Array.from(map.values());
                         return (
                           <Fragment key={`foot-${splitIdx}`}>
                             <td className="px-2 py-2.5 text-right align-top bg-purple-50/30 border-r border-gray-100">
-                              <div className="text-gray-900">{totals.totalQty}</div>
+                              <div className="text-gray-900">{totals.totalQty} <span className="text-[10px] font-normal text-gray-500">ĐVT gốc</span></div>
                               <div className="text-[11px] text-emerald-700">
                                 GT: {formatVND(totals.totalValue)}
                               </div>
                               <div className="text-[11px] text-rose-700">
                                 CK: {formatVND(totals.totalDiscount)}
                               </div>
+                              <div className="mt-1 text-[11px] text-indigo-800">
+                                Thành tiền: {formatVNDFull(totals.totalValue - totals.totalDiscount)}
+                              </div>
                             </td>
                             <td className="px-2 py-2.5 text-right align-top text-amber-700 bg-amber-50/25 border-r border-gray-200">
-                              {totals.totalPromoQty}
+                              {totals.totalPromoQty} <span className="text-[10px] font-normal text-gray-500">ĐVT gốc</span>
                             </td>
                           </Fragment>
                         );
@@ -3902,6 +4103,12 @@ return Array.from(map.values());
                         </div>
                         <div className="text-[11px] text-rose-700">
                           ∑CK: {formatVND(splitFinancials.splitTotals.reduce((s, t) => s + t.totalDiscount, 0))}
+                        </div>
+                        <div className="mt-1 text-[11px] text-indigo-800">
+                          Còn: {formatVNDFull(
+                            selectedSplitOrderGroup.totalValue - selectedSplitOrderGroup.totalDiscount
+                            - splitFinancials.splitTotals.reduce((sum, totals) => sum + totals.totalValue - totals.totalDiscount, 0)
+                          )}
                         </div>
                       </td>
                       <td className="px-2 py-2.5 text-right align-top text-amber-700 bg-amber-50/30">
@@ -4097,7 +4304,7 @@ return Array.from(map.values());
 
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                       {splits.map((sp, sIdx) => {
-                        const isStaffDebt = Boolean(sp.is_staff_debt);
+                        const isStaffDebt = Boolean(sp.is_staff_debt || sp.delivery_recipient);
                         return (
                           <div
                             key={sIdx}
@@ -4562,6 +4769,7 @@ return Array.from(map.values());
                       <th className="px-3 py-2 text-right font-semibold text-gray-700">Tổng SL KM</th>
                       <th className="px-3 py-2 text-right font-semibold text-gray-700">Tổng CK</th>
                       <th className="px-3 py-2 text-right font-semibold text-gray-700">Tổng Giá trị</th>
+                      <th className="px-3 py-2 text-right font-semibold text-gray-700">Thành tiền</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 bg-white">
@@ -4575,6 +4783,7 @@ return Array.from(map.values());
                         <td className="px-3 py-2 text-right font-semibold text-amber-700">{item.promoQuantity}</td>
                         <td className="px-3 py-2 text-right text-rose-700">{formatVND(item.totalDiscount)}</td>
                         <td className="px-3 py-2 text-right font-semibold text-emerald-700">{formatVND(item.totalValue)}</td>
+                        <td className="px-3 py-2 text-right font-semibold text-indigo-700">{formatNumber(item.totalValue - item.totalDiscount)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -4592,6 +4801,9 @@ return Array.from(map.values());
                       </td>
                       <td className="px-3 py-2 text-right text-emerald-700">
                         {formatVND(mergedProductPreview.reduce((s, i) => s + i.totalValue, 0))}
+                      </td>
+                      <td className="px-3 py-2 text-right text-indigo-700">
+                        {formatNumber(mergedProductPreview.reduce((s, i) => s + i.totalValue - i.totalDiscount, 0))}
                       </td>
                     </tr>
                   </tfoot>

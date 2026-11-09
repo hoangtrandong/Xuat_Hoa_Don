@@ -7,7 +7,7 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import { API_URL, apiFetch } from "@/lib/api";
-import { formatVND } from "@/lib/format";
+import { formatBorrowStatusText, formatVND } from "@/lib/format";
 
 type BorrowBalance = {
   employee_id: number | null;
@@ -116,11 +116,11 @@ export default function EmployeeBorrowingPage() {
       render: (value) =>
         value === "BORROW" ? (
           <span className="inline-flex items-center gap-1 rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-xs font-medium text-rose-700">
-            <ArrowDownLeft size={12} /> Mượn Số
+            <ArrowDownLeft size={12} /> Dương Số
           </span>
         ) : (
           <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
-            <ArrowUpRight size={12} /> Trả Số
+            <ArrowUpRight size={12} /> Âm Số
           </span>
         ),
     },
@@ -150,7 +150,7 @@ export default function EmployeeBorrowingPage() {
         );
       },
     },
-    { key: "note", title: "Chi tiết đơn / Phiếu xuất" },
+    { key: "note", title: "Chi tiết đơn / Phiếu xuất", render: (value) => formatBorrowStatusText(String(value ?? "")) },
   ];
 
   const filteredEntries = useMemo(() => {
@@ -177,7 +177,7 @@ export default function EmployeeBorrowingPage() {
     <div className="space-y-6">
       <PageHeader
         title="Hàng vay mượn NVBH"
-        subtitle="Theo dõi trạng thái Mượn Số (-SL, -Tiền) và bù trừ Trả Số (+SL, +Tiền) của NVBH từ dữ liệu đơn hàng DMS."
+        subtitle="Theo dõi trạng thái Dương Số (-SL, -Tiền) và bù trừ Âm Số (+SL, +Tiền) của NVBH từ dữ liệu đơn hàng DMS."
         actions={
           <div className="flex flex-wrap gap-2">
             <button
@@ -217,8 +217,8 @@ export default function EmployeeBorrowingPage() {
           color="bg-rose-50 text-rose-700"
         />
         <StatCard
-          label="Giao dịch Mượn Số / Trả Số"
-          value={`${borrowCount} Mượn · ${offsetCount} Trả`}
+          label="Giao dịch Dương Số / Âm Số"
+          value={`${borrowCount} Dương · ${offsetCount} Âm`}
           icon={<ArrowUpRight size={20} />}
           color="bg-sky-50 text-sky-700"
         />
@@ -226,26 +226,26 @@ export default function EmployeeBorrowingPage() {
 
       <div className="rounded-xl border border-sky-100 bg-sky-50/60 px-4 py-3 text-xs text-sky-900">
         <strong>Quy tắc hạch toán mới:</strong> Khi upload file <code>DSDonHang</code> để tạo Yêu cầu xuất kho, các đơn trạng thái{" "}
-        <span className="font-semibold text-rose-700">Mượn Số</span> được ghi nhận âm (<code>-SL</code>, <code>-Tiền</code>) theo{" "}
+        <span className="font-semibold text-rose-700">Dương Số</span> được ghi nhận âm (<code>-SL</code>, <code>-Tiền</code>) theo{" "}
         <strong>NVBH trên DMS</strong> ngay khi tạo yêu cầu; các đơn trạng thái{" "}
-        <span className="font-semibold text-emerald-700">Trả Số</span> sẽ tự động ghi nhận dương (<code>+SL</code>, <code>+Tiền</code>) và bù trừ vào số dư của NVBH ngay khi Thủ kho bấm{" "}
+        <span className="font-semibold text-emerald-700">Âm Số</span> sẽ tự động ghi nhận dương (<code>+SL</code>, <code>+Tiền</code>) và bù trừ vào số dư của NVBH ngay khi Thủ kho bấm{" "}
         <strong>Hoàn tất xuất kho thực tế</strong>.
       </div>
 
       <section className="space-y-3">
-        <h2 className="text-lg font-semibold text-gray-900">Số dư Mượn Số / Trả Số theo NVBH và mã NPP</h2>
+        <h2 className="text-lg font-semibold text-gray-900">Số dư Dương Số / Âm Số theo NVBH và mã NPP</h2>
         <DataTable
           data={ledger.balances}
           columns={balanceColumns}
           searchKeys={["employee_code", "employee_name", "product_code", "product_name"]}
           pageSize={20}
-          emptyMessage="Chưa có số dư Mượn Số / Trả Số của NVBH."
+          emptyMessage="Chưa có số dư Dương Số / Âm Số của NVBH."
         />
       </section>
 
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-gray-900">Lịch sử Mượn Số và Trả Số</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Lịch sử Dương Số và Âm Số</h2>
           <div className="flex flex-wrap items-center gap-2">
             <input
               type="text"
@@ -257,8 +257,8 @@ export default function EmployeeBorrowingPage() {
             <div className="inline-flex rounded-lg border border-gray-200 bg-white p-0.5 text-xs">
               {[
                 { key: "ALL", label: "Tất cả" },
-                { key: "BORROW", label: "Mượn Số" },
-                { key: "OFFSET", label: "Trả Số" },
+                { key: "BORROW", label: "Dương Số" },
+                { key: "OFFSET", label: "Âm Số" },
               ].map((tab) => (
                 <button
                   key={tab.key}
@@ -279,7 +279,7 @@ export default function EmployeeBorrowingPage() {
           columns={historyColumns}
           searchable={false}
           pageSize={20}
-          emptyMessage="Chưa có giao dịch Mượn Số hoặc Trả Số."
+          emptyMessage="Chưa có giao dịch Dương Số hoặc Âm Số."
         />
       </section>
     </div>

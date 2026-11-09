@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardList, Download, MapPin, Upload } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
-import { splitCartons } from "@/lib/format";
+import { formatBorrowStatusText, splitCartons } from "@/lib/format";
 import * as XLSX from "xlsx";
 
 type Warehouse = { id: number; name: string };
@@ -312,11 +312,11 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
       });
       const result = await response.json() as { detail?: string; batch_id?: number };
       if (!response.ok) {
-        setError(result.detail ?? "Không thể đưa các đơn mượn số vào hàng chờ vay mượn.");
+        setError(result.detail ?? "Không thể ghi nhận các đơn Dương Số.");
         return;
       }
       clearPreview();
-      setMessage("Đã ghi nhận các đơn Mượn Số vào sổ Hàng vay mượn NVBH.");
+      setMessage("Đã ghi nhận các đơn Dương Số vào sổ Hàng vay mượn NVBH.");
       return;
     }
     if (preview.length === 0) {
@@ -541,7 +541,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Yêu cầu giao hàng</h1>
             <p className="text-sm text-gray-500">Admin lập và phân bổ; thủ kho tiếp nhận và xác nhận hoàn thành</p>
-            <p className="text-xs text-amber-700">Mượn Số lấy NVBH từ DMS; Trả Số xuất hàng và ghi công nợ cho NVGH trong file, đồng thời bù trừ hàng vay của NVBH trên DMS.</p>
+            <p className="text-xs text-amber-700">Dương Số lấy NVBH từ DMS; Âm Số xuất hàng và ghi công nợ cho NVGH trong file, đồng thời bù trừ hàng vay của NVBH trên DMS.</p>
           </div>
           <div className="flex gap-2 items-center">
             <select value={warehouseId} onChange={(event) => { setWarehouseId(event.target.value); setPlan(null); }} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm">
@@ -558,7 +558,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
           <div>
             <h3 className="font-semibold text-gray-900">Tạo yêu cầu từ Excel</h3>
             <p className="text-sm text-gray-500">Upload file có sheet DSDonHang; hệ thống tra dữ liệu DMS, tổng hợp sản phẩm theo NVGH và lập FEFO.</p>
-            <p className="text-xs text-amber-700">Mượn Số lấy NVBH từ DMS; Trả Số ghi công nợ cho NVGH trong file và bù trừ hàng vay của NVBH trên DMS.</p>
+            <p className="text-xs text-amber-700">Dương Số lấy NVBH từ DMS; Âm Số ghi công nợ cho NVGH trong file và bù trừ hàng vay của NVBH trên DMS.</p>
           </div>
           <div className="flex flex-wrap gap-2 items-center">
           <select value={warehouseId} onChange={(event) => { setWarehouseId(event.target.value); setPlan(null); }} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm">
@@ -570,7 +570,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         </div>
         </div>
       )}
-      {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">{error}</div>}
+      {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">{formatBorrowStatusText(error)}</div>}
       {message && <div className="bg-emerald-50 text-emerald-700 rounded-lg px-4 py-3 text-sm">{message}</div>}
 
       {warnings.length > 0 && (
@@ -580,7 +580,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
           </div>
           <ul className="list-disc list-inside space-y-0.5">
             {warnings.map((w, idx) => (
-              <li key={idx}>{w}</li>
+              <li key={idx}>{formatBorrowStatusText(w)}</li>
             ))}
           </ul>
           <label className="mt-3 flex items-start gap-2 border-t border-amber-200 pt-3 font-medium">
@@ -594,7 +594,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
           <p className="font-semibold">Cần xử lý trước khi tạo yêu cầu</p>
           <ul className="mt-1 list-disc space-y-0.5 pl-5">
-            {issues.map((issue, index) => <li key={`${index}-${issue}`}>{issue}</li>)}
+            {issues.map((issue, index) => <li key={`${index}-${issue}`}>{formatBorrowStatusText(issue)}</li>)}
           </ul>
         </div>
       )}
@@ -771,15 +771,15 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
         <div className="bg-white rounded-xl border border-rose-100 overflow-hidden shadow-sm">
           <div className="px-5 py-4 border-b border-rose-100 bg-rose-50/40 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h4 className="font-semibold text-gray-900">Tổng hợp Mượn Số & Trả Số (chuyển sang Hàng vay mượn NVBH)</h4>
+              <h4 className="font-semibold text-gray-900">Tổng hợp Dương Số & Âm Số (chuyển sang Hàng vay mượn NVBH)</h4>
               <p className="text-xs text-gray-600">
-                Đơn <span className="font-semibold text-rose-700">Mượn Số</span> ghi nhận âm ngay khi tạo yêu cầu; đơn{" "}
-                <span className="font-semibold text-emerald-700">Trả Số</span> sẽ tự động ghi nhận dương và bù trừ khi Thủ kho hoàn tất xuất kho thực tế.
+                Đơn <span className="font-semibold text-rose-700">Dương Số</span> ghi nhận âm ngay khi tạo yêu cầu; đơn{" "}
+                <span className="font-semibold text-emerald-700">Âm Số</span> sẽ tự động ghi nhận dương và bù trừ khi Thủ kho hoàn tất xuất kho thực tế.
               </p>
             </div>
             <span className="text-xs font-medium px-2.5 py-1 bg-rose-100 text-rose-800 rounded-full">
-              {borrowEntries.length} dòng Mượn Số ·{" "}
-              {preview.reduce((sum, item) => sum + (item.borrowed_employee_offsets?.length ?? 0), 0)} dòng Trả Số
+              {borrowEntries.length} dòng Dương Số ·{" "}
+              {preview.reduce((sum, item) => sum + (item.borrowed_employee_offsets?.length ?? 0), 0)} dòng Âm Số
             </span>
           </div>
           <div className="overflow-x-auto">
@@ -802,7 +802,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                     <tr key={`borrow-${idx}`} className="hover:bg-rose-50/20">
                       <td className="px-4 py-2">
                         <span className="rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-700 border border-rose-200">
-                          Mượn Số
+                          Dương Số
                         </span>
                       </td>
                       <td className="px-4 py-2 font-mono font-medium text-gray-900">{entry.external_employee_code || "—"}</td>
@@ -817,7 +817,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                         {entry.amount.toLocaleString("vi-VN")} đ
                       </td>
                       <td className="px-4 py-2 text-gray-600">
-                        {entry.note || "Ghi nhận ngay khi tạo yêu cầu"}
+                        {formatBorrowStatusText(entry.note || "Ghi nhận ngay khi tạo yêu cầu")}
                       </td>
                     </tr>
                   );
@@ -827,7 +827,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                     <tr key={`offset-${item.product_id}-${idx}`} className="hover:bg-emerald-50/20">
                       <td className="px-4 py-2">
                         <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 border border-emerald-200">
-                          Trả Số
+                          Âm Số
                         </span>
                       </td>
                       <td className="px-4 py-2 font-mono font-medium text-gray-900">{offset.external_employee_code}</td>

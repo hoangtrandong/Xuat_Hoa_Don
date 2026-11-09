@@ -35,6 +35,7 @@ from app.models.vinamilk import VinamilkOrderSnapshot
 from app.schemas.delivery_request import (
     DeliveryRequestCreate,
     DeliveryRequestItemCreate,
+    DeliveryRequestOrderCreate,
     EmployeeBorrowEntryCreate,
 )
 
@@ -333,13 +334,31 @@ def test_new_workbook_allows_orders_from_cancelled_delivery_request(workbook_db)
     assert preview.can_create
     assert not any("Đơn EX1 đã có" in issue for issue in preview.issues)
 
+    request = create_delivery_request(
+        db,
+        DeliveryRequestCreate(
+            warehouse_id=warehouse.id,
+            items=[DeliveryRequestItemCreate(
+                product_id=preview.items[0].product_id,
+                quantity=preview.items[0].quantity,
+            )],
+            orders=[DeliveryRequestOrderCreate(
+                order_number="ex1", employee_code="DRIVER1", employee_name="Driver One",
+            )],
+        ),
+        created_by="admin",
+    )
+    assert request.status == "DRAFT"
+    assert [order.order_number for order in request.orders] == ["ex1"]
 
-def test_new_workbook_still_rejects_orders_in_active_delivery_request(workbook_db):
+
+@pytest.mark.parametrize("status", ["DRAFT", "SUBMITTED", "RECEIVED", "COMPLETED"])
+def test_new_workbook_still_rejects_orders_in_active_delivery_request(workbook_db, status):
     db, warehouse = workbook_db
     active_request = DeliveryRequest(
         code="DR-ACTIVE",
         warehouse_id=warehouse.id,
-        status="SUBMITTED",
+        status=status,
     )
     active_request.orders.append(DeliveryRequestOrder(
         order_number="EX1",
@@ -362,6 +381,20 @@ def test_new_workbook_still_rejects_orders_in_active_delivery_request(workbook_d
 
     assert not preview.can_create
     assert any("Đơn EX1 đã có trong một yêu cầu xuất kho trước đó." == issue for issue in preview.issues)
+    with pytest.raises(ValueError, match="Các đơn đã được đưa vào yêu cầu xuất kho trước đó"):
+        create_delivery_request(
+            db,
+            DeliveryRequestCreate(
+                warehouse_id=warehouse.id,
+                items=[DeliveryRequestItemCreate(
+                    product_id=preview.items[0].product_id,
+                    quantity=preview.items[0].quantity,
+                )],
+                orders=[DeliveryRequestOrderCreate(
+                    order_number="ex1", employee_code="DRIVER1", employee_name="Driver One",
+                )],
+            ),
+        )
 
 
 def test_borrow_status_uses_dms_sales_employee_and_warns_when_file_has_driver(workbook_db):

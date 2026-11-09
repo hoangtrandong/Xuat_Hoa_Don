@@ -286,8 +286,11 @@ def create(
     if len(normalized_order_numbers) != len(set(normalized_order_numbers)):
         raise ValueError("Danh sách yêu cầu có số đơn hàng bị lặp.")
     existing_orders = db.scalars(
-        select(DeliveryRequestOrder.order_number).where(
-            func.upper(DeliveryRequestOrder.order_number).in_([number.upper() for number in order_numbers])
+        select(DeliveryRequestOrder.order_number)
+        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
+        .where(
+            func.upper(DeliveryRequestOrder.order_number).in_([number.upper() for number in order_numbers]),
+            DeliveryRequest.status != "CANCELLED",
         )
     ).all() if order_numbers else []
     if existing_orders:

@@ -18,6 +18,14 @@ PAGE_SIZE = 500
 
 
 def _cookie_header() -> str:
+    try:
+        from app.services.vinamilk_credentials import load_db_session_cookie
+
+        db_cookie = load_db_session_cookie()
+        if db_cookie:
+            return db_cookie
+    except Exception:
+        pass
     env_path = Path(__file__).resolve().parents[2] / ".env.local"
     local_cookie = dotenv_values(env_path).get("VINAMILK_SESSION_COOKIE", "")
     return (local_cookie or settings.VINAMILK_SESSION_COOKIE).strip()
@@ -59,9 +67,15 @@ def _fetch_rows(page, cookie_header: str, page_number: int) -> dict[str, Any]:
 
 
 def _persist_cookie(cookie_header: str) -> None:
-    """Lưu cookie mới vào backend/.env.local để lần chạy sau không cần đăng nhập lại."""
+    """Lưu cookie mới vào database và backend/.env.local để lần chạy sau không cần đăng nhập lại."""
     if not cookie_header:
         return
+    try:
+        from app.services.vinamilk_credentials import save_db_session_cookie
+
+        save_db_session_cookie(cookie_header)
+    except Exception:
+        pass
     try:
         env_path = Path(__file__).resolve().parents[2] / ".env.local"
         set_key(str(env_path), "VINAMILK_SESSION_COOKIE", cookie_header, quote_mode="never")

@@ -18,6 +18,9 @@ import {
   ClipboardCheck,
   XCircle,
   Download,
+  KeyRound,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import PageHeader from "@/components/ui/PageHeader";
@@ -588,6 +591,118 @@ export default function SalesOrdersPage() {
   const [deliveryRequestPreview, setDeliveryRequestPreview] = useState<DeliveryRequestPreview | null>(null);
   const [deliveryRequestPlan, setDeliveryRequestPlan] = useState<DeliveryPlanItem[] | null>(null);
   const [acknowledgeDeliveryWarnings, setAcknowledgeDeliveryWarnings] = useState(false);
+
+  // State cho Tài khoản Vinamilk DMS (chỉ Admin)
+  const [isDmsCredModalOpen, setIsDmsCredModalOpen] = useState(false);
+  const [dmsCredUsername, setDmsCredUsername] = useState("");
+  const [dmsCredPassword, setDmsCredPassword] = useState("");
+  const [dmsCredShowPassword, setDmsCredShowPassword] = useState(false);
+  const [dmsCredVerifyLogin, setDmsCredVerifyLogin] = useState(true);
+  const [dmsCredStatus, setDmsCredStatus] = useState<{
+    username: string;
+    has_password: boolean;
+    source: string;
+    has_session_cookie: boolean;
+    updated_by: string | null;
+    updated_at: string | null;
+  } | null>(null);
+  const [isLoadingDmsCred, setIsLoadingDmsCred] = useState(false);
+  const [isSavingDmsCred, setIsSavingDmsCred] = useState(false);
+  const [dmsCredError, setDmsCredError] = useState("");
+  const [dmsCredSuccess, setDmsCredSuccess] = useState("");
+
+  async function openDmsCredentialModal() {
+    setIsDmsCredModalOpen(true);
+    setDmsCredError("");
+    setDmsCredSuccess("");
+    setDmsCredPassword("");
+    setDmsCredShowPassword(false);
+    setIsLoadingDmsCred(true);
+    try {
+      const response = await apiFetch(`${API_URL}/sync/vinamilk/credentials`);
+      const data = (await response.json().catch(() => ({}))) as {
+        username?: string;
+        has_password?: boolean;
+        source?: string;
+        has_session_cookie?: boolean;
+        updated_by?: string | null;
+        updated_at?: string | null;
+        detail?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Không thể tải thông tin tài khoản Vinamilk DMS.");
+      }
+      setDmsCredStatus({
+        username: data.username ?? "",
+        has_password: Boolean(data.has_password),
+        source: data.source ?? "NONE",
+        has_session_cookie: Boolean(data.has_session_cookie),
+        updated_by: data.updated_by ?? null,
+        updated_at: data.updated_at ?? null,
+      });
+      setDmsCredUsername(data.username ?? "");
+    } catch (err) {
+      setDmsCredError(err instanceof Error ? err.message : "Không thể tải thông tin tài khoản Vinamilk DMS.");
+    } finally {
+      setIsLoadingDmsCred(false);
+    }
+  }
+
+  async function handleSaveDmsCredentials() {
+    setDmsCredError("");
+    setDmsCredSuccess("");
+    if (!dmsCredUsername.trim()) {
+      setDmsCredError("Vui lòng nhập tài khoản (username) Vinamilk DMS.");
+      return;
+    }
+    if (!dmsCredPassword.trim() && (!dmsCredStatus?.has_password || dmsCredStatus.source !== "DATABASE")) {
+      setDmsCredError("Vui lòng nhập mật khẩu mới cho tài khoản Vinamilk DMS.");
+      return;
+    }
+    setIsSavingDmsCred(true);
+    try {
+      const response = await apiFetch(`${API_URL}/sync/vinamilk/credentials`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: dmsCredUsername.trim(),
+          password: dmsCredPassword.trim() || null,
+          verify_login: dmsCredVerifyLogin,
+        }),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        username?: string;
+        has_password?: boolean;
+        source?: string;
+        verified?: boolean;
+        has_session_cookie?: boolean;
+        updated_by?: string | null;
+        updated_at?: string | null;
+        detail?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Không thể cập nhật tài khoản Vinamilk DMS.");
+      }
+      setDmsCredStatus({
+        username: data.username ?? dmsCredUsername.trim(),
+        has_password: Boolean(data.has_password),
+        source: data.source ?? "DATABASE",
+        has_session_cookie: Boolean(data.has_session_cookie),
+        updated_by: data.updated_by ?? null,
+        updated_at: data.updated_at ?? null,
+      });
+      setDmsCredPassword("");
+      const successMsg = data.verified
+        ? "Đã lưu tài khoản và đăng nhập thử Vinamilk DMS thành công!"
+        : "Đã lưu tài khoản Vinamilk DMS vào hệ thống.";
+      setDmsCredSuccess(successMsg);
+      setToast(successMsg);
+    } catch (err) {
+      setDmsCredError(err instanceof Error ? err.message : "Không thể cập nhật tài khoản Vinamilk DMS.");
+    } finally {
+      setIsSavingDmsCred(false);
+    }
+  }
 
   useEffect(() => {
     const created = window.sessionStorage.getItem("dms-order-created");
@@ -2951,6 +3066,17 @@ return Array.from(map.values());
           <button onClick={handleSyncVinamilk} disabled={isSyncing} className="flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50">
             <RefreshCw size={16} className={isSyncing ? "animate-spin" : ""} />{isSyncing ? "Đang đồng bộ..." : "Đồng bộ Vinamilk DMS"}
           </button>
+          {effectiveIsAdmin && (
+            <button
+              type="button"
+              onClick={() => void openDmsCredentialModal()}
+              className="flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100 transition-colors"
+              title="Cập nhật tài khoản và mật khẩu đăng nhập hệ thống Vinamilk DMS"
+            >
+              <KeyRound size={15} />
+              Tài khoản DMS
+            </button>
+          )}
           <label className="text-sm text-gray-600">Số đơn
             <select value={pageSize} onChange={(event) => { setListPage(1); setPageSize(Number(event.target.value)); }} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm">
               {[20, 50, 100, 500].map((size) => <option key={size} value={size}>{size} đơn/trang</option>)}
@@ -4814,6 +4940,146 @@ return Array.from(map.values());
 
         </div>
       </OrderActionModal>
+
+      <Drawer
+        open={isDmsCredModalOpen}
+        onClose={() => {
+          if (!isSavingDmsCred) setIsDmsCredModalOpen(false);
+        }}
+        title="Tài khoản Vinamilk DMS"
+        subtitle="Cập nhật tài khoản & mật khẩu dùng để tự động đăng nhập đồng bộ dữ liệu"
+      >
+        <div className="p-5 space-y-4">
+          {dmsCredError && (
+            <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+              <span>{dmsCredError}</span>
+            </div>
+          )}
+          {dmsCredSuccess && (
+            <div className="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-700">
+              <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+              <span>{dmsCredSuccess}</span>
+            </div>
+          )}
+
+          {isLoadingDmsCred ? (
+            <div className="py-8 text-center text-sm text-gray-500">Đang tải thông tin cấu hình...</div>
+          ) : (
+            <>
+              {dmsCredStatus && (
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-3.5 text-xs text-gray-600 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-500">Nguồn cấu hình hiện tại:</span>
+                    <span className="font-semibold text-gray-800">
+                      {dmsCredStatus.source === "DATABASE"
+                        ? "Đã lưu trên hệ thống (Database)"
+                        : dmsCredStatus.source === "ENVIRONMENT"
+                        ? "Biến môi trường (Render / .env)"
+                        : "Chưa cấu hình"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-500">Trạng thái phiên (Cookie):</span>
+                    <span className={dmsCredStatus.has_session_cookie ? "font-medium text-emerald-700" : "text-amber-700"}>
+                      {dmsCredStatus.has_session_cookie ? "Đã có cookie phiên đăng nhập" : "Chưa có cookie (sẽ tự đăng nhập khi đồng bộ)"}
+                    </span>
+                  </div>
+                  {dmsCredStatus.updated_at && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-500">Cập nhật lần cuối:</span>
+                      <span>
+                        {formatVinamilkDate(dmsCredStatus.updated_at, true)}
+                        {dmsCredStatus.updated_by ? ` (${dmsCredStatus.updated_by})` : ""}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <label className="block">
+                <span className="text-xs font-medium text-gray-700">Tài khoản đăng nhập DMS (Username)</span>
+                <input
+                  type="text"
+                  value={dmsCredUsername}
+                  onChange={(e) => setDmsCredUsername(e.target.value)}
+                  placeholder="Nhập mã đăng nhập Vinamilk DMS..."
+                  className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-sky-500 focus:outline-none"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-xs font-medium text-gray-700">
+                  Mật khẩu mới {dmsCredStatus?.source === "DATABASE" && dmsCredStatus.has_password ? "(để trống nếu giữ nguyên mật khẩu cũ)" : ""}
+                </span>
+                <div className="relative mt-1">
+                  <input
+                    type={dmsCredShowPassword ? "text" : "password"}
+                    value={dmsCredPassword}
+                    onChange={(e) => setDmsCredPassword(e.target.value)}
+                    placeholder={
+                      dmsCredStatus?.source === "DATABASE" && dmsCredStatus.has_password
+                        ? "•••••••• (Nhập mật khẩu mới khi cần thay đổi)"
+                        : "Nhập mật khẩu Vinamilk DMS..."
+                    }
+                    className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-3 pr-10 text-sm focus:border-sky-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setDmsCredShowPassword((prev) => !prev)}
+                    className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600"
+                    title={dmsCredShowPassword ? "Ẩn mật khẩu" : "Hiện mật khẩu"}
+                  >
+                    {dmsCredShowPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+                <span className="mt-1 block text-[11px] text-gray-400">
+                  Mật khẩu được mã hóa bảo mật (Fernet AES) trước khi lưu vào cơ sở dữ liệu.
+                </span>
+              </label>
+
+              <label className="flex items-start gap-2.5 rounded-lg border border-gray-200 bg-gray-50/70 p-3 text-xs text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={dmsCredVerifyLogin}
+                  onChange={(e) => setDmsCredVerifyLogin(e.target.checked)}
+                  className="mt-0.5 rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                />
+                <div>
+                  <div className="font-medium text-gray-800">Kiểm tra đăng nhập & làm mới phiên ngay khi lưu</div>
+                  <div className="text-gray-500 mt-0.5">
+                    Hệ thống sẽ thử đăng nhập vào Vinamilk DMS ngay lập tức để chắc chắn mật khẩu đúng và lấy phiên mới (mất khoảng 5–15 giây).
+                  </div>
+                </div>
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={isSavingDmsCred}
+                  onClick={() => setIsDmsCredModalOpen(false)}
+                  className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Đóng
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingDmsCred}
+                  onClick={() => void handleSaveDmsCredentials()}
+                  className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:opacity-50"
+                >
+                  <Save size={16} />
+                  {isSavingDmsCred
+                    ? dmsCredVerifyLogin
+                      ? "Đang kiểm tra & lưu..."
+                      : "Đang lưu..."
+                    : "Lưu cấu hình"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </Drawer>
     </div>
   );
 }

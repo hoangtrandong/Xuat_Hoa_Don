@@ -77,3 +77,15 @@ class VinamilkOrderSplitRequest(Base):
     request_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     preview_data: Mapped[dict[str, Any]] = mapped_column(JSON)
     result_order_numbers: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
+
+
+class VinamilkCredential(Base):
+    __tablename__ = "vinamilk_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(120), nullable=False)
+    encrypted_password: Mapped[str] = mapped_column(Text, nullable=False)
+    session_cookie: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    updated_by: Mapped[str | None] = mapped_column(String(120), nullable=True, default=None)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+

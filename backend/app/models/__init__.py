@@ -18,6 +18,7 @@ from app.models.finance import (
     DeliveryReturn, DeliveryReturnItem, BankReceipt, PaymentAllocation,
 )
 from app.models.vinamilk import (
+    VinamilkCredential,
     VinamilkOrderReplacement,
     VinamilkOrderSnapshot,
     VinamilkOrderSplitRequest,
@@ -41,6 +42,7 @@ __all__ = [
     "Payment", "Receivable", "DebtLedgerEntry", "DebtTransfer", "CashReceipt",
     "DeliveryReturn", "DeliveryReturnItem", "BankReceipt", "PaymentAllocation",
     "VinamilkOrderSnapshot", "VinamilkSyncRun", "VinamilkOrderReplacement", "VinamilkOrderSplitRequest",
+    "VinamilkCredential",
     "VinamilkOrderAllocation",
     "EmployeeBorrowBatch", "EmployeeBorrowEntry",
 ]

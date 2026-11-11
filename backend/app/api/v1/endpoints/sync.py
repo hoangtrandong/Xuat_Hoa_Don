@@ -35,6 +35,13 @@ from app.models.vinamilk import (
     VinamilkSyncRun,
 )
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
+from app.services.vinamilk_credentials import (
+    get_credentials_status,
+    load_db_credentials,
+    load_db_session_cookie,
+    save_db_session_cookie,
+    upsert_db_credentials,
+)
 from app.services.vinamilk_dates import iter_inclusive_dates
 from scripts.vinamilk_login import configure_playwright_browser_path, login_and_get_cookie
 
@@ -199,6 +206,12 @@ class DeliveryRequestFormOrder(BaseModel):
 
 class DeliveryRequestFormRequest(BaseModel):
     orders: list[DeliveryRequestFormOrder] = Field(min_length=1, max_length=500)
+
+
+class VinamilkCredentialUpdateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    password: str | None = Field(default=None, max_length=255)
+    verify_login: bool = True
 
 
 def _order_numbers(payload: Any) -> set[str]:
@@ -1563,6 +1576,9 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
 def read_cookie() -> str:
     if _runtime_cookie:
         return _runtime_cookie
+    db_cookie = load_db_session_cookie()
+    if db_cookie:
+        return db_cookie
     local_cookie = dotenv_values(_ENV_LOCAL).get("VINAMILK_SESSION_COOKIE", "")
     return (local_cookie or settings.VINAMILK_SESSION_COOKIE).strip()
 
@@ -1570,6 +1586,7 @@ def read_cookie() -> str:
 def _persist_cookie(cookie: str) -> None:
     if not cookie:
         return
+    save_db_session_cookie(cookie)
     try:
         set_key(str(_ENV_LOCAL), "VINAMILK_SESSION_COOKIE", cookie, quote_mode="never")
     except Exception:
@@ -1585,6 +1602,98 @@ async def refresh_cookie() -> str:
         _runtime_cookie = cookie
         _persist_cookie(cookie)
         return cookie
+
+
+@router.get("/vinamilk/credentials")
+def get_vinamilk_credentials(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not _is_admin_user(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Chỉ tài khoản Admin mới được phép xem hoặc cập nhật tài khoản Vinamilk DMS.",
+        )
+    status_info = get_credentials_status(db)
+    return {
+        "username": status_info["username"],
+        "has_password": status_info["has_password"],
+        "source": status_info["source"],
+        "has_session_cookie": bool(_runtime_cookie or status_info["has_session_cookie"]),
+        "updated_by": status_info["updated_by"],
+        "updated_at": _iso_utc(status_info["updated_at"]),
+    }
+
+
+@router.put("/vinamilk/credentials")
+async def update_vinamilk_credentials(
+    payload: VinamilkCredentialUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    global _runtime_cookie
+    if not _is_admin_user(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Chỉ tài khoản Admin mới được phép cập nhật tài khoản Vinamilk DMS.",
+        )
+    clean_username = payload.username.strip()
+    if not clean_username:
+        raise HTTPException(status_code=400, detail="Tên đăng nhập Vinamilk DMS không được để trống.")
+
+    raw_password = (payload.password or "").strip() or None
+    existing_creds = load_db_credentials(db)
+    if raw_password is None and existing_creds is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Vui lòng nhập mật khẩu Vinamilk DMS.",
+        )
+    effective_password = raw_password or (existing_creds[1] if existing_creds else "")
+
+    new_cookie: str | None = None
+    verified = False
+    if payload.verify_login:
+        try:
+            async with _cookie_refresh_lock:
+                new_cookie = await asyncio.to_thread(
+                    login_and_get_cookie,
+                    clean_username,
+                    effective_password,
+                )
+            verified = bool(new_cookie)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Đăng nhập thử vào Vinamilk DMS thất bại: {exc}",
+            ) from exc
+
+    actor = getattr(current_user, "username", None) or "admin"
+    try:
+        record = upsert_db_credentials(
+            db,
+            username=clean_username,
+            password=raw_password,
+            updated_by=actor,
+            session_cookie=new_cookie,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if new_cookie:
+        _runtime_cookie = new_cookie
+        _persist_cookie(new_cookie)
+    else:
+        _runtime_cookie = ""
+
+    return {
+        "username": record.username,
+        "has_password": True,
+        "source": "DATABASE",
+        "verified": verified,
+        "has_session_cookie": bool(_runtime_cookie or record.session_cookie),
+        "updated_by": record.updated_by,
+        "updated_at": _iso_utc(record.updated_at),
+    }
 
 
 def _browser_cookies(session_cookie: str) -> list[dict[str, str]]:

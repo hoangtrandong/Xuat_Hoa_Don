@@ -88,7 +88,18 @@ def _load_from_windows_credmgr() -> tuple[str, str] | None:
 
 
 def load_credentials(env_path: Path) -> tuple[str, str]:
-    """Lấy credentials portable cho Render/Linux và local Windows."""
+    """Lấy credentials: ưu tiên Database → Environment Variables → .env.local → Windows Credential Manager."""
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from app.services.vinamilk_credentials import load_db_credentials
+
+        db_creds = load_db_credentials()
+        if db_creds:
+            return db_creds
+    except Exception:
+        pass
+
     values = dotenv_values(env_path)
     username = os.environ.get("VINAMILK_USERNAME") or values.get("VINAMILK_USERNAME", "")
     password = os.environ.get("VINAMILK_PASSWORD") or values.get("VINAMILK_PASSWORD", "")
@@ -99,8 +110,8 @@ def load_credentials(env_path: Path) -> tuple[str, str]:
 
     if not username or not password:
         raise RuntimeError(
-            "Thiếu VINAMILK_USERNAME / VINAMILK_PASSWORD. "
-            f"Trên Windows có thể dùng Generic Credential '{CREDENTIAL_TARGET}'."
+            "Thiếu tài khoản / mật khẩu Vinamilk DMS. "
+            "Admin vui lòng bấm nút 'Tài khoản DMS' trên web để cập nhật."
         )
     return username, password
 
@@ -116,12 +127,18 @@ def build_cookie_header(cookies: list[dict]) -> str:
     return "; ".join(parts)
 
 
-def login_and_get_cookie() -> str:
+def login_and_get_cookie(
+    username_override: str | None = None,
+    password_override: str | None = None,
+) -> str:
     """
     Mở Chromium headless, đăng nhập Vinamilk DMS One, trả về chuỗi Cookie header.
     Ném RuntimeError nếu đăng nhập thất bại.
     """
-    username, password = load_credentials(ENV_FILE)
+    if username_override and password_override:
+        username, password = username_override, password_override
+    else:
+        username, password = load_credentials(ENV_FILE)
     configure_playwright_browser_path()
 
     with sync_playwright() as p:

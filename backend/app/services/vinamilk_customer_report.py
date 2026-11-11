@@ -22,6 +22,14 @@ VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def _cookie_header() -> str:
+    try:
+        from app.services.vinamilk_credentials import load_db_session_cookie
+
+        db_cookie = load_db_session_cookie()
+        if db_cookie:
+            return db_cookie
+    except Exception:
+        pass
     env_path = Path(__file__).resolve().parents[2] / ".env.local"
     local_cookie = dotenv_values(env_path).get("VINAMILK_SESSION_COOKIE", "")
     return (local_cookie or os.getenv("VINAMILK_SESSION_COOKIE", "")).strip()

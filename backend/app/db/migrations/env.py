@@ -27,11 +27,16 @@ target_metadata = Base.metadata
 
 def get_database_url() -> str:
     """Prefer an explicit Alembic URL without changing the local config."""
-    return (
+    url = (
         context.get_x_argument(as_dictionary=True).get("database_url")
         or os.getenv("DATABASE_URL")
         or config.get_main_option("sqlalchemy.url")
     )
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif url.startswith("postgresql://") and not url.startswith("postgresql+"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

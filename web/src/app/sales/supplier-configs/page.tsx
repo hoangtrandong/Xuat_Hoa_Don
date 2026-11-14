@@ -395,6 +395,72 @@ export default function MultiTenantSupplierConfigsPage() {
     return [];
   }, [testResult]);
 
+  const handleColumnMappingChange = (colKey: string, newCanonicalKey: string) => {
+    setSupForm((prev) => {
+      const nextMapping = { ...prev.field_mapping };
+      // Xóa ánh xạ cũ của cột này nếu có
+      for (const [k, v] of Object.entries(nextMapping)) {
+        if (v === colKey) {
+          delete nextMapping[k];
+        }
+      }
+      // Nếu chọn trường chuẩn mới, gán vào cột này
+      if (newCanonicalKey) {
+        delete nextMapping[newCanonicalKey];
+        nextMapping[newCanonicalKey] = colKey;
+      }
+      return { ...prev, field_mapping: nextMapping };
+    });
+  };
+
+  const autoMapColumnsFromData = useCallback(() => {
+    const newMapping: Record<string, string> = {};
+    availableDetectedFields.forEach((f) => {
+      const col = f.key.toLowerCase().trim();
+      if (col === "số đơn hàng" || col === "code" || col === "ordernumber" || col === "ordercode" || col === "mã đơn hàng") {
+        newMapping["order_number"] = f.key;
+      } else if (col === "ngày đơn hàng" || col === "ngày" || col === "purchasedate" || col === "orderdate" || col === "createddate") {
+        newMapping["order_date"] = f.key;
+      } else if (col === "ngày giao hàng" || col === "deliverydate") {
+        newMapping["delivery_date"] = f.key;
+      } else if (col === "mã kh" || col === "customercode" || col === "mã khách hàng") {
+        newMapping["customer_code"] = f.key;
+      } else if (col === "tên kh" || col === "customername" || col === "tên khách hàng") {
+        newMapping["customer_name"] = f.key;
+      } else if (col === "mã số thuế" || col === "taxcode" || col === "customertaxcode") {
+        newMapping["customer_tax_code"] = f.key;
+      } else if (col === "địa chỉ" || col === "address" || col === "customeraddress") {
+        newMapping["customer_address"] = f.key;
+      } else if (col === "mã sản phẩm" || col === "productcode" || col === "sku") {
+        newMapping["product_code"] = f.key;
+      } else if (col === "tên sản phẩm" || col === "sản phẩm" || col === "productname") {
+        newMapping["product_name"] = f.key;
+      } else if (col === "đvt" || col === "unit") {
+        newMapping["unit"] = f.key;
+      } else if (col === "số lượng" || col === "quantity" || col === "totalquantity") {
+        newMapping["quantity"] = f.key;
+      } else if (col === "số lượng km" || col === "promoquantity" || col === "promotionquantity") {
+        newMapping["promo_quantity"] = f.key;
+      } else if (col === "giá bán" || col === "đơn giá" || col === "price" || col === "unitprice") {
+        newMapping["unit_price"] = f.key;
+      } else if (col === "số tiền ck" || col === "chiết khấu" || col === "discount" || col === "discountamount") {
+        newMapping["discount_amount"] = f.key;
+      } else if (col === "thuế suất" || col === "vat" || col === "vatrate") {
+        newMapping["vat_rate"] = f.key;
+      } else if (col === "thành tiền" || col === "giá trị" || col === "total" || col === "totalpayment" || col === "linetotal") {
+        newMapping["line_total"] = f.key;
+      } else if (col === "mã nvbh" || col === "staffcode") {
+        newMapping["staff_code"] = f.key;
+      } else if (col === "tên nvbh" || col === "staffname") {
+        newMapping["staff_name"] = f.key;
+      }
+    });
+    setSupForm((prev) => ({
+      ...prev,
+      field_mapping: { ...prev.field_mapping, ...newMapping },
+    }));
+  }, [availableDetectedFields]);
+
   const [invDrawerOpen, setInvDrawerOpen] = useState(false);
   const [editingInvId, setEditingInvId] = useState<number | null>(null);
   const [invForm, setInvForm] = useState({
@@ -522,6 +588,50 @@ export default function MultiTenantSupplierConfigsPage() {
       });
       const data = await res.json();
       setTestResult(data);
+      if (data.detected_fields && data.detected_fields.length > 0) {
+        const newMapping: Record<string, string> = { ...supForm.field_mapping };
+        data.detected_fields.forEach((f: { key: string }) => {
+          const col = f.key.toLowerCase().trim();
+          if (col === "số đơn hàng" || col === "code" || col === "ordernumber" || col === "ordercode" || col === "mã đơn hàng") {
+            newMapping["order_number"] = f.key;
+          } else if (col === "ngày đơn hàng" || col === "ngày" || col === "purchasedate" || col === "orderdate" || col === "createddate") {
+            newMapping["order_date"] = f.key;
+          } else if (col === "ngày giao hàng" || col === "deliverydate") {
+            newMapping["delivery_date"] = f.key;
+          } else if (col === "mã kh" || col === "customercode" || col === "mã khách hàng") {
+            newMapping["customer_code"] = f.key;
+          } else if (col === "tên kh" || col === "customername" || col === "tên khách hàng") {
+            newMapping["customer_name"] = f.key;
+          } else if (col === "mã số thuế" || col === "taxcode" || col === "customertaxcode") {
+            newMapping["customer_tax_code"] = f.key;
+          } else if (col === "địa chỉ" || col === "address" || col === "customeraddress") {
+            newMapping["customer_address"] = f.key;
+          } else if (col === "mã sản phẩm" || col === "productcode" || col === "sku") {
+            newMapping["product_code"] = f.key;
+          } else if (col === "tên sản phẩm" || col === "sản phẩm" || col === "productname") {
+            newMapping["product_name"] = f.key;
+          } else if (col === "đvt" || col === "unit") {
+            newMapping["unit"] = f.key;
+          } else if (col === "số lượng" || col === "quantity" || col === "totalquantity") {
+            newMapping["quantity"] = f.key;
+          } else if (col === "số lượng km" || col === "promoquantity" || col === "promotionquantity") {
+            newMapping["promo_quantity"] = f.key;
+          } else if (col === "giá bán" || col === "đơn giá" || col === "price" || col === "unitprice") {
+            newMapping["unit_price"] = f.key;
+          } else if (col === "số tiền ck" || col === "chiết khấu" || col === "discount" || col === "discountamount") {
+            newMapping["discount_amount"] = f.key;
+          } else if (col === "thuế suất" || col === "vat" || col === "vatrate") {
+            newMapping["vat_rate"] = f.key;
+          } else if (col === "thành tiền" || col === "giá trị" || col === "total" || col === "totalpayment" || col === "linetotal") {
+            newMapping["line_total"] = f.key;
+          } else if (col === "mã nvbh" || col === "staffcode") {
+            newMapping["staff_code"] = f.key;
+          } else if (col === "tên nvbh" || col === "staffname") {
+            newMapping["staff_name"] = f.key;
+          }
+        });
+        setSupForm((prev) => ({ ...prev, field_mapping: newMapping }));
+      }
     } catch (err) {
       setTestResult({
         success: false,
@@ -1394,79 +1504,211 @@ export default function MultiTenantSupplierConfigsPage() {
             )}
           </div>
 
-          {/* BẢNG 10 DÒNG DỮ LIỆU MẪU THỰC TẾ PHÁT HIỆN ĐƯỢC TỪ URL / NCC */}
-          <div className="border border-slate-300 rounded overflow-hidden shadow-xs">
-            <div className="bg-[#14263d] px-3.5 py-2 text-white flex flex-wrap items-center justify-between gap-2">
+          {/* BẢNG DỮ LIỆU THỰC TẾ & CHỌN ÁNH XẠ TRỰC TIẾP TRÊN CỘT */}
+          <div className="border border-slate-300 rounded overflow-hidden shadow-xs bg-white">
+            <div className="bg-[#14263d] px-3.5 py-2.5 text-white flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
-                <Database size={15} className="text-emerald-400" />
-                <h4 className="text-xs font-bold uppercase tracking-wide">
-                  Bảng Dữ Liệu Mẫu Thực Tế Phát Hiện Được (10 Dòng Mẫu Từ URL)
-                </h4>
+                <Database size={16} className="text-emerald-400" />
+                <div>
+                  <h4 className="text-xs font-bold uppercase tracking-wide">
+                    Bảng Dữ Liệu Thực Tế & Chọn Ánh Xạ Trực Tiếp Trên Từng Cột
+                  </h4>
+                  <p className="text-[10px] text-slate-300">
+                    Chọn trường hệ thống tương ứng ngay tại dòng "Ánh xạ:" ở đầu mỗi cột dữ liệu thực tế bên dưới.
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {testResult?.is_live ? (
-                  <span className="rounded bg-emerald-600 text-white font-bold px-2.5 py-0.5 text-[10px] shadow-xs">
-                    ✓ Dữ liệu thật từ máy chủ (LIVE)
+                  <span className="rounded bg-emerald-600 text-white font-bold px-2.5 py-1 text-[10px] shadow-xs flex items-center gap-1">
+                    <CheckCircle2 size={12} /> DỮ LIỆU THẬT TỪ MÁY CHỦ (LIVE)
                   </span>
                 ) : testResult ? (
-                  <span className="rounded bg-amber-600 text-white font-bold px-2.5 py-0.5 text-[10px] shadow-xs">
-                    ⚠ Mẫu tham khảo (Chưa kết nối live)
+                  <span className="rounded bg-amber-600 text-white font-bold px-2.5 py-1 text-[10px] shadow-xs flex items-center gap-1">
+                    <AlertCircle size={12} /> MẪU THAM KHẢO (CHƯA LIVE)
                   </span>
                 ) : null}
-                <span className="rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-mono font-semibold">
-                  {displaySampleRows.length} dòng mẫu thực tế
-                </span>
-                <span className="rounded bg-sky-500/20 text-sky-200 border border-sky-500/30 px-2 py-0.5 text-[10px] font-mono font-semibold">
-                  {availableDetectedFields.length} cột dữ liệu
+
+                {availableDetectedFields.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={autoMapColumnsFromData}
+                    className="inline-flex items-center gap-1 rounded bg-sky-500 hover:bg-sky-400 text-white px-2.5 py-1 text-[11px] font-semibold transition-colors shadow-xs"
+                    title="Hệ thống tự động so khớp tên cột với trường chuẩn"
+                  >
+                    <Sparkles size={12} /> Tự động nhận diện cột (Auto-Map)
+                  </button>
+                )}
+
+                <span className="rounded bg-slate-800 text-slate-200 border border-slate-600 px-2 py-1 text-[10px] font-mono">
+                  {displaySampleRows.length} dòng thực tế · {availableDetectedFields.length} cột
                 </span>
               </div>
             </div>
 
+            {/* Checklist các trường bắt buộc */}
+            <div className="border-b border-slate-200 bg-sky-50/70 px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <div className="flex items-center gap-1.5 text-slate-700 font-semibold">
+                <span>Trường bắt buộc tạo đơn:</span>
+                {[
+                  { key: "order_number", label: "Số đơn" },
+                  { key: "order_date", label: "Ngày đơn" },
+                  { key: "customer_name", label: "Khách hàng" },
+                  { key: "product_code", label: "Mã SKU" },
+                  { key: "quantity", label: "Số lượng" },
+                  { key: "unit_price", label: "Đơn giá" },
+                ].map((req) => {
+                  const isMapped = Boolean(supForm.field_mapping[req.key]);
+                  return (
+                    <span
+                      key={req.key}
+                      className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-mono font-medium ${
+                        isMapped
+                          ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                          : "bg-amber-100 text-amber-800 border border-amber-300"
+                      }`}
+                    >
+                      {isMapped ? "✓" : "○"} {req.label}
+                    </span>
+                  );
+                })}
+              </div>
+              <span className="text-[10px] text-slate-500 font-mono">
+                Đã ánh xạ:{" "}
+                <strong className="text-emerald-700">
+                  {Object.keys(supForm.field_mapping).length}
+                </strong>{" "}
+                trường chuẩn
+              </span>
+            </div>
+
             {displaySampleRows.length === 0 ? (
-              <div className="p-4 text-center text-xs text-slate-500 bg-slate-50">
-                Chưa có dữ liệu mẫu. Vui lòng bấm{" "}
-                <strong className="text-sky-700">"Test Kết Nối & Lấy Mẫu Trường"</strong> ở phía trên để tải 10 dòng mẫu thực tế từ URL.
+              <div className="p-8 text-center text-xs text-slate-500 bg-slate-50">
+                <Database size={28} className="mx-auto text-slate-300 mb-2" />
+                <p className="font-semibold text-slate-700">Chưa có dữ liệu mẫu thực tế.</p>
+                <p className="mt-1">
+                  Vui lòng bấm nút{" "}
+                  <strong className="text-sky-700">"Test Kết Nối & Lấy Mẫu Trường"</strong> ở phía trên để tải bảng 10 dòng dữ liệu thực tế từ URL của Nhà cung cấp.
+                </p>
               </div>
             ) : (
-              <div className="overflow-x-auto max-h-64 overflow-y-auto">
+              <div className="overflow-x-auto max-h-[500px] overflow-y-auto pb-4">
                 <table className="w-full border-collapse text-left text-xs">
-                  <thead className="sticky top-0 z-10 bg-slate-100 text-[10px] font-semibold text-slate-600 shadow-xs border-b border-slate-200">
-                    <tr>
-                      <th className="px-2 py-1.5 w-10 text-center sticky left-0 bg-slate-100 z-20 border-r border-slate-200">
+                  <thead className="sticky top-0 z-20 bg-slate-100 shadow-xs border-b border-slate-300">
+                    {/* Dòng 1 Header: Tên cột gốc từ URL */}
+                    <tr className="border-b border-slate-200 text-[10px] font-semibold text-slate-600">
+                      <th className="px-2 py-2 w-10 text-center sticky left-0 bg-slate-100 z-30 border-r border-slate-300">
                         #
                       </th>
-                      {availableDetectedFields.map((f) => (
-                        <th
-                          key={f.key}
-                          className="px-2.5 py-1.5 whitespace-nowrap border-r border-slate-200 last:border-r-0"
-                        >
-                          <div className="font-mono font-bold text-sky-900">{f.key}</div>
-                          {f.type && (
-                            <div className="text-[9px] text-slate-400 font-normal">[{f.type}]</div>
-                          )}
-                        </th>
-                      ))}
+                      {availableDetectedFields.map((f) => {
+                        const mappedKey = Object.entries(supForm.field_mapping).find(
+                          ([, v]) => v === f.key
+                        )?.[0];
+                        return (
+                          <th
+                            key={f.key}
+                            className={`px-2.5 py-1.5 whitespace-nowrap border-r border-slate-200 last:border-r-0 min-w-[190px] ${
+                              mappedKey ? "bg-emerald-50/80" : ""
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-mono font-bold text-sky-900 truncate" title={f.key}>
+                                {f.key}
+                              </span>
+                              {f.type && (
+                                <span className="text-[9px] text-slate-400 font-normal">
+                                  [{f.type}]
+                                </span>
+                              )}
+                            </div>
+                          </th>
+                        );
+                      })}
+                    </tr>
+
+                    {/* Dòng 2 Header: Ô chọn ánh xạ (Mapping Selector) */}
+                    <tr className="bg-sky-50/50 border-b border-slate-300 text-[10px]">
+                      <th className="px-1 py-1.5 text-center font-bold text-sky-800 sticky left-0 bg-sky-100 z-30 border-r border-slate-300">
+                        Ánh xạ:
+                      </th>
+                      {availableDetectedFields.map((f) => {
+                        const mappedKey = Object.entries(supForm.field_mapping).find(
+                          ([, v]) => v === f.key
+                        )?.[0] || "";
+                        return (
+                          <th
+                            key={`map-${f.key}`}
+                            className={`px-2 py-1.5 border-r border-slate-200 last:border-r-0 ${
+                              mappedKey ? "bg-emerald-100/60" : ""
+                            }`}
+                          >
+                            <select
+                              value={mappedKey}
+                              onChange={(e) => handleColumnMappingChange(f.key, e.target.value)}
+                              className={`w-full rounded border px-1.5 py-1 text-[11px] font-medium transition-colors focus:outline-none ${
+                                mappedKey
+                                  ? "border-emerald-500 bg-emerald-50 text-emerald-900 font-bold shadow-xs ring-1 ring-emerald-400"
+                                  : "border-slate-300 bg-white text-slate-600 hover:border-slate-400"
+                              }`}
+                            >
+                              <option value="">-- Bỏ qua cột này --</option>
+                              <optgroup label="Thông tin Đơn hàng">
+                                <option value="order_number">★ Số đơn hàng</option>
+                                <option value="order_date">★ Ngày đơn hàng</option>
+                                <option value="delivery_date">Ngày giao hàng</option>
+                              </optgroup>
+                              <optgroup label="Khách hàng">
+                                <option value="customer_code">Mã khách hàng</option>
+                                <option value="customer_name">★ Tên khách hàng</option>
+                                <option value="customer_tax_code">Mã số thuế</option>
+                                <option value="customer_address">Địa chỉ giao/xuất HĐ</option>
+                              </optgroup>
+                              <optgroup label="Hàng hóa & Tiền">
+                                <option value="product_code">★ Mã sản phẩm (SKU)</option>
+                                <option value="product_name">★ Tên sản phẩm</option>
+                                <option value="unit">Đơn vị tính (ĐVT)</option>
+                                <option value="quantity">★ Số lượng bán</option>
+                                <option value="promo_quantity">Số lượng KM</option>
+                                <option value="unit_price">★ Đơn giá bán</option>
+                                <option value="discount_amount">Tiền chiết khấu</option>
+                                <option value="vat_rate">Thuế suất VAT (%)</option>
+                                <option value="line_total">Thành tiền dòng</option>
+                              </optgroup>
+                              <optgroup label="Nhân viên">
+                                <option value="staff_code">Mã NVBH</option>
+                                <option value="staff_name">Tên NVBH</option>
+                              </optgroup>
+                            </select>
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
+
                   <tbody className="divide-y divide-slate-100">
                     {displaySampleRows.map((row, rIdx) => (
                       <tr
                         key={rIdx}
-                        className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/60 transition-colors text-[11px] font-mono"
+                        className="border-b border-slate-100 even:bg-amber-50/30 hover:bg-sky-50/60 transition-colors text-[11px] font-mono"
                       >
-                        <td className="px-2 py-1.5 text-center text-[10px] text-slate-400 font-semibold sticky left-0 bg-white even:bg-amber-50/40 z-10 border-r border-slate-200">
+                        <td className="px-2 py-1.5 text-center text-[10px] text-slate-400 font-semibold sticky left-0 bg-white even:bg-amber-50/30 z-10 border-r border-slate-300">
                           {rIdx + 1}
                         </td>
                         {availableDetectedFields.map((f) => {
                           const val = row[f.key];
                           const isNull = val === null || val === undefined;
                           const isNumber = typeof val === "number";
+                          const mappedKey = Object.entries(supForm.field_mapping).find(
+                            ([, v]) => v === f.key
+                          )?.[0];
                           return (
                             <td
                               key={f.key}
                               className={`px-2.5 py-1.5 whitespace-nowrap border-r border-slate-100 last:border-r-0 text-slate-800 ${
                                 isNumber ? "text-right font-medium" : ""
-                              } ${isNull ? "text-slate-300 italic" : ""}`}
+                              } ${isNull ? "text-slate-300 italic" : ""} ${
+                                mappedKey ? "bg-emerald-50/30 font-medium" : ""
+                              }`}
                               title={`${f.key}: ${String(val ?? "null")}`}
                             >
                               {isNull ? "(null)" : String(val)}
@@ -1479,78 +1721,12 @@ export default function MultiTenantSupplierConfigsPage() {
                 </table>
               </div>
             )}
-            <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-200 text-[10px] text-slate-500 flex items-center justify-between">
-              <span>* Cuộn ngang bảng để xem toàn bộ các cột dữ liệu nhận được từ máy chủ</span>
-              <span className="font-mono font-medium text-slate-600">Hiển thị {displaySampleRows.length} dòng dữ liệu mẫu thực tế</span>
-            </div>
-          </div>
 
-          <div className="border border-slate-300 rounded overflow-hidden mt-3 shadow-xs">
-            <div className="border-b border-sky-100 bg-sky-50/80 px-3 py-2 flex items-center justify-between">
-              <div>
-                <h4 className="text-[11px] font-bold uppercase tracking-wide text-sky-900">
-                  Bảng Ánh Xạ Trường Dữ Liệu Động (Dynamic Field Mapping)
-                </h4>
-                <p className="text-[10px] text-slate-500">
-                  Click vào ô để chọn trường từ dữ liệu URL hoặc gõ tìm kiếm. Hệ thống hiển thị mẫu dữ liệu thực tế bên dưới.
-                </p>
-              </div>
-              {availableDetectedFields.length > 0 && (
-                <span className="rounded bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800">
-                  {availableDetectedFields.length} trường nguồn khả dụng
-                </span>
-              )}
-            </div>
-
-            <div className="overflow-x-auto max-h-[460px] overflow-y-auto divide-y divide-slate-100 pb-16">
-              <table className="w-full border-collapse text-left">
-                <thead className="sticky top-0 z-10 bg-slate-100 text-[10px] font-semibold text-slate-600 shadow-xs">
-                  <tr>
-                    <th className="px-2.5 py-1.5 w-8 text-center">#</th>
-                    <th className="px-2.5 py-1.5 w-48">Trường Chuẩn Hệ Thống (Canonical CDM)</th>
-                    <th className="px-2.5 py-1.5 w-8 text-center"></th>
-                    <th className="px-2.5 py-1.5 min-w-[280px]">
-                      Trường Của NCC & Dữ Liệu Mẫu (Click để chọn hoặc gõ tìm kiếm)
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {CANONICAL_FIELDS.map((field, idx) => (
-                    <tr
-                      key={field.key}
-                      className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/50 text-[11px]"
-                    >
-                      <td className="px-2.5 py-2 text-center text-[10px] text-slate-400 font-mono">
-                        {idx + 1}
-                      </td>
-                      <td className="px-2.5 py-2">
-                        <div className="font-semibold text-slate-800 text-xs">{field.label}</div>
-                        <div className="font-mono text-[10px] text-slate-500">{field.key}</div>
-                      </td>
-                      <td className="px-1 py-2 text-center text-slate-400">
-                        <ArrowRight size={13} className="mx-auto" />
-                      </td>
-                      <td className="px-2.5 py-2">
-                        <FieldMappingCombobox
-                          fieldKey={field.key}
-                          fieldLabel={field.label}
-                          value={supForm.field_mapping[field.key] || ""}
-                          onChange={(val) =>
-                            setSupForm((prev) => ({
-                              ...prev,
-                              field_mapping: {
-                                ...prev.field_mapping,
-                                [field.key]: val,
-                              },
-                            }))
-                          }
-                          detectedFields={availableDetectedFields}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-200 text-[10px] text-slate-500 flex flex-wrap items-center justify-between gap-2">
+              <span>* Cuộn ngang bảng để xem tất cả các cột dữ liệu nhận được từ máy chủ</span>
+              <span className="font-mono font-medium text-slate-700">
+                Hiển thị {displaySampleRows.length} dòng dữ liệu thực tế từ máy chủ
+              </span>
             </div>
           </div>
 

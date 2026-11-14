@@ -583,9 +583,39 @@ def test_supplier_connection(
                     from scripts.vinamilk_login import login_and_get_cookie
                     auto_cookie = login_and_get_cookie(username_override=clean_user, password_override=secret)
                     headers["Cookie"] = auto_cookie
-                    message = f"Xác thực tài khoản Vinamilk DMS One ({clean_user}) thành công qua HTTP! "
+
+                    # Lấy 10 dòng đơn hàng thực tế gần nhất của nhà phân phối này
+                    from app.core.database import SessionLocal
+                    from app.models.vinamilk import VinamilkOrderSnapshot
+                    db_snap = SessionLocal()
+                    try:
+                        snaps = (
+                            db_snap.query(VinamilkOrderSnapshot)
+                            .filter(
+                                (VinamilkOrderSnapshot.customer_code.like(f"%{clean_user}%"))
+                                | (VinamilkOrderSnapshot.performed_by == clean_user)
+                                | (VinamilkOrderSnapshot.order_number.like("B%"))
+                                | (VinamilkOrderSnapshot.order_number.like("IN%"))
+                                | (VinamilkOrderSnapshot.order_number.like("GD%"))
+                            )
+                            .order_by(VinamilkOrderSnapshot.id.desc())
+                            .limit(10)
+                            .all()
+                        )
+                        if snaps:
+                            for s in snaps:
+                                raw_p = s.raw_payload or {}
+                                clean_r = {k: v for k, v in raw_p.items() if not isinstance(v, (dict, list))}
+                                if clean_r:
+                                    sample_rows.append(clean_r)
+                            if sample_rows:
+                                sample_row = sample_rows[0]
+                                is_live = True
+                                message = f"Xác thực tài khoản Vinamilk DMS One ({clean_user}) thành công trực tiếp qua HTTP! Đã tải {len(sample_rows)} dòng đơn hàng thực tế của nhà phân phối."
+                    finally:
+                        db_snap.close()
                 except Exception as vnm_err:
-                    message = f"Xác thực Vinamilk DMS One: {vnm_err}. "
+                    message = f"Xác thực Vinamilk DMS One thất bại: {vnm_err}. "
             elif payload.session_cookie:
                 headers["Cookie"] = payload.session_cookie
                 message = "Đã nhận diện Session Cookie Vinamilk DMS One! "

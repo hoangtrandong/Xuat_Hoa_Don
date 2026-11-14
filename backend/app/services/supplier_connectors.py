@@ -31,6 +31,7 @@ class CanonicalOrder(BaseModel):
     """Mô hình Đơn hàng chuẩn hóa duy nhất (Canonical Order Model - CDM)."""
 
     supplier_code: str
+    supplier_name: str | None = None
     distributor_code: str | None = None
     order_number: str
     order_date: date
@@ -56,6 +57,7 @@ SUPPLIER_FIELD_MAPPING_PRESETS: dict[str, dict[str, Any]] = {
             "order_number": "Số đơn hàng",
             "order_date": "Ngày đơn hàng",
             "delivery_date": "Ngày giao hàng",
+            "supplier_name": "Nhà cung cấp",
             "customer_code": "Mã KH",
             "customer_name": "Tên KH",
             "customer_tax_code": "Mã số thuế",
@@ -329,6 +331,15 @@ class DynamicFieldMapper:
                 or ""
             ).strip() or None
 
+            supplier_name = str(
+                _extract_value(
+                    row,
+                    field_mapping.get("supplier_name"),
+                    ("supplierName", "ten_nha_cung_cap", "supplier", "Nhà cung cấp", "NCC"),
+                )
+                or supplier_code
+            ).strip()
+
             product_code = str(
                 _extract_value(
                     row,
@@ -406,6 +417,7 @@ class DynamicFieldMapper:
             if order_number not in orders_by_number:
                 orders_by_number[order_number] = CanonicalOrder(
                     supplier_code=supplier_code.upper(),
+                    supplier_name=supplier_name,
                     distributor_code=distributor_code,
                     order_number=order_number,
                     order_date=order_date,
@@ -473,8 +485,7 @@ def persist_canonical_orders_to_snapshots(
                 "Mã NVBH": order.staff_code or "",
                 "Tên NVBH": order.staff_name or "",
                 "Trạng thái": order.status,
-                "Nhà cung cấp": order.supplier_code,
-                "Mã NPP": distributor_code or "",
+                "Nhà cung cấp": order.supplier_name or order.supplier_code,
             }
 
             existing = db.scalar(

@@ -606,6 +606,8 @@ def test_supplier_connection(
                             for s in snaps:
                                 raw_p = s.raw_payload or {}
                                 clean_r = {k: v for k, v in raw_p.items() if not isinstance(v, (dict, list))}
+                                clean_r.pop("Mã NPP", None)
+                                clean_r["Nhà cung cấp"] = "VINAMILK"
                                 if clean_r:
                                     sample_rows.append(clean_r)
                             if sample_rows:
@@ -712,11 +714,17 @@ def test_supplier_connection(
                                         if isinstance(det_line, dict):
                                             merged = {**r_item, **det_line}
                                             clean_r = {k: v for k, v in merged.items() if not isinstance(v, (dict, list))}
+                                            clean_r.pop("Mã NPP", None)
+                                            if "Nhà cung cấp" not in clean_r and "supplier" not in clean_r:
+                                                clean_r["Nhà cung cấp"] = (payload.supplier_code or "KIOTVIET").upper()
                                             sample_rows.append(clean_r)
                                             if len(sample_rows) >= 10:
                                                 break
                                 else:
                                     clean_r = {k: v for k, v in r_item.items() if not isinstance(v, (dict, list))}
+                                    clean_r.pop("Mã NPP", None)
+                                    if "Nhà cung cấp" not in clean_r and "supplier" not in clean_r:
+                                        clean_r["Nhà cung cấp"] = (payload.supplier_code or "KIOTVIET").upper()
                                     sample_rows.append(clean_r)
 
                                 if len(sample_rows) >= 10:
@@ -750,6 +758,9 @@ def test_supplier_connection(
         if samples:
             for s in samples:
                 clean_s = {k: v for k, v in s.items() if not isinstance(v, (dict, list))}
+                clean_s.pop("Mã NPP", None)
+                if "Nhà cung cấp" not in clean_s:
+                    clean_s["Nhà cung cấp"] = sup_code
                 sample_rows.append(clean_s)
             sample_row = sample_rows[0]
             if not message:
@@ -782,7 +793,7 @@ def test_supplier_connection(
             cur_idx += 1
 
     for k, v in sample_row.items():
-        if isinstance(v, (dict, list)):
+        if isinstance(v, (dict, list)) or k == "Mã NPP":
             continue
         v_str = str(v)
         detected_fields.append({

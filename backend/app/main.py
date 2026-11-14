@@ -45,6 +45,12 @@ async def lifespan(_: FastAPI):
         from app.core.database import Base, engine
         import app.models.multi_tenant_invoice  # noqa: F401
         Base.metadata.create_all(bind=engine)
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE vinamilk_order_snapshots ADD COLUMN IF NOT EXISTS processing_status VARCHAR(40)"))
+            conn.execute(text("ALTER TABLE vinamilk_order_snapshots ADD COLUMN IF NOT EXISTS performed_by VARCHAR(120)"))
+            conn.execute(text("ALTER TABLE vinamilk_order_snapshots ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN DEFAULT FALSE NOT NULL"))
+            conn.commit()
     except Exception as exc:
         logger.warning("Could not auto-create tables: %s", exc)
     sync_default_roles()

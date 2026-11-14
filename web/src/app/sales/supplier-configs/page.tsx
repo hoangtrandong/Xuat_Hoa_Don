@@ -96,6 +96,7 @@ const CANONICAL_FIELDS: Array<{ key: string; label: string; group: string }> = [
   { key: "order_number", label: "Số đơn hàng", group: "Thông tin Đơn" },
   { key: "order_date", label: "Ngày đơn hàng", group: "Thông tin Đơn" },
   { key: "delivery_date", label: "Ngày giao hàng", group: "Thông tin Đơn" },
+  { key: "supplier_name", label: "Nhà cung cấp", group: "Thông tin Đơn" },
   { key: "customer_code", label: "Mã khách hàng", group: "Khách hàng" },
   { key: "customer_name", label: "Tên khách hàng", group: "Khách hàng" },
   { key: "customer_tax_code", label: "Mã số thuế người mua", group: "Khách hàng" },
@@ -423,6 +424,8 @@ export default function MultiTenantSupplierConfigsPage() {
         newMapping["order_date"] = f.key;
       } else if (col === "ngày giao hàng" || col === "deliverydate") {
         newMapping["delivery_date"] = f.key;
+      } else if (col === "nhà cung cấp" || col === "ncc" || col === "supplier" || col === "suppliername") {
+        newMapping["supplier_name"] = f.key;
       } else if (col === "mã kh" || col === "customercode" || col === "mã khách hàng") {
         newMapping["customer_code"] = f.key;
       } else if (col === "tên kh" || col === "customername" || col === "tên khách hàng") {
@@ -657,6 +660,7 @@ export default function MultiTenantSupplierConfigsPage() {
         if (cf.key === "order_number" && (dkl.includes("order") || dkl === "code" || dkl === "so_don" || dkl.includes("docnum"))) return true;
         if (cf.key === "order_date" && (dkl.includes("date") || dkl.includes("ngay") || dkl === "createddate")) return true;
         if (cf.key === "delivery_date" && (dkl.includes("deliv") || dkl.includes("ship") || dkl === "modifieddate")) return true;
+        if (cf.key === "supplier_name" && (dkl.includes("supplier") || dkl.includes("nhacungcap") || dkl.includes("nhà cung cấp") || dkl === "ncc")) return true;
         if (cf.key === "customer_code" && ((dkl.includes("cust") && dkl.includes("code")) || dkl === "customercode" || dkl.includes("makh"))) return true;
         if (cf.key === "customer_name" && ((dkl.includes("cust") && dkl.includes("name")) || dkl === "customername" || dkl.includes("tenkh"))) return true;
         if (cf.key === "customer_tax_code" && (dkl.includes("tax") || dkl.includes("mst"))) return true;
@@ -1470,36 +1474,7 @@ export default function MultiTenantSupplierConfigsPage() {
                     )}
                     {testResult.message}
                   </span>
-                  {testResult.detected_fields?.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={autoMapFields}
-                      className="px-2.5 py-1 rounded bg-white border border-indigo-200 text-indigo-700 font-bold hover:bg-indigo-50 shadow-xs"
-                    >
-                      ✨ Tự động ánh xạ thông minh
-                    </button>
-                  )}
                 </div>
-
-                {testResult.detected_fields?.length > 0 && (
-                  <div>
-                    <p className="text-[11px] font-medium text-gray-600 mb-1">
-                      Các trường dữ liệu phát hiện được từ phản hồi (bấm vào để xem mẫu):
-                    </p>
-                    <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                      {testResult.detected_fields.map((f) => (
-                        <span
-                          key={f.key}
-                          title={`Ví dụ giá trị: ${f.sample || "rỗng"}`}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-gray-200 text-[11px] font-mono text-gray-700 shadow-xs"
-                        >
-                          <span className="font-bold text-indigo-600">{f.key}</span>
-                          {f.sample && <span className="text-gray-400 text-[10px]">({f.sample})</span>}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
             )}
           </div>
@@ -1656,6 +1631,7 @@ export default function MultiTenantSupplierConfigsPage() {
                                 <option value="order_number">★ Số đơn hàng</option>
                                 <option value="order_date">★ Ngày đơn hàng</option>
                                 <option value="delivery_date">Ngày giao hàng</option>
+                                <option value="supplier_name">Nhà cung cấp</option>
                               </optgroup>
                               <optgroup label="Khách hàng">
                                 <option value="customer_code">Mã khách hàng</option>

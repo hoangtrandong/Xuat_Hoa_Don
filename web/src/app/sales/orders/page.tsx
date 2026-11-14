@@ -2441,7 +2441,7 @@ return Array.from(map.values());
       ),
     },
     ...remoteColumns.filter((column) => [
-      "Ngày tạo", "Mã KH", "Tên KH", "Mã NVBH", "Tên NVBH", "NVGH",
+      "Ngày tạo", "Nhà cung cấp", "Mã KH", "Tên KH", "Mã NVBH", "Tên NVBH", "NVGH",
     ].includes(column.title)),
     { key: "Số sản phẩm", title: "Số sản phẩm", sortable: true, align: "right", width: "8rem" },
     ...remoteColumns.filter((column) => [

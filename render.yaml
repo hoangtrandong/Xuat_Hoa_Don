@@ -3,12 +3,10 @@ services:
     name: dms-backend
     env: python
     rootDir: backend
-    buildCommand: pip install -r requirements.txt && python -m playwright install --with-deps chromium
+    buildCommand: pip install -r requirements.txt
     preDeployCommand: alembic upgrade head && python -m scripts.bootstrap_admin_from_env
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: PLAYWRIGHT_BROWSERS_PATH
-        value: "/opt/render/project/src/pw-browsers"
       - key: SECRET_KEY
         sync: false
       - key: INITIAL_ADMIN_USERNAME

@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from zipfile import BadZipFile
 from pydantic import BaseModel, Field
-from playwright.sync_api import sync_playwright
+import httpx
 from dotenv import dotenv_values, set_key
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -1710,9 +1710,8 @@ def _browser_cookies(session_cookie: str) -> list[dict[str, str]]:
 
 
 def _fetch_vinamilk_sync(session_cookie: str, form: dict[str, str]) -> dict[str, object]:
-    """Gọi DMS bằng Playwright sync. Phải chạy trong thread, không chạy trực tiếp trong loop FastAPI."""
-    import tempfile
-    import os
+    """Gọi DMS bằng HTTP client thuần (httpx). Nhanh, nhẹ, không cần Chromium/Playwright."""
+    import io
     import openpyxl
 
     form["page"] = str(form.get("page", "1"))
@@ -1748,63 +1747,67 @@ def _fetch_vinamilk_sync(session_cookie: str, form: dict[str, str]) -> dict[str,
     if scope == "warehouse":
         del export_form["saleOrderType"]
         export_form.update({"approved": "1", "approvedStep": "3"})
-    configure_playwright_browser_path()
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, args=_PLAYWRIGHT_LAUNCH_ARGS)
-        try:
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/140.0.0.0 Safari/537.36"
-                ),
-                locale="en-US",
-            )
-            context.add_cookies(_browser_cookies(session_cookie))
-            resp = context.request.post(
-                "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel",
-                form=export_form,
-                headers={
-                    "accept": "application/json, text/javascript, */*; q=0.01",
-                    "x-requested-with": "XMLHttpRequest",
-                    "referer": "https://vinamilk.dmsone.vn/sale-product/search-sale/info",
-                },
-            )
-            if resp.status in (401, 403):
-                return {"status": resp.status, "body": ""}
-            try:
-                data = resp.json()
-            except Exception:
-                return {"status": 401, "body": ""}
-            if data and data.get("hasData") is False and not data.get("path"):
-                return {"status": 200, "body": "[]"}
-            if not data or not data.get("path"):
-                raise RuntimeError(f"Failed to export excel: {data}")
 
-            excel_bytes = context.request.get(data["path"]).body()
-            fd, temp_path = tempfile.mkstemp(suffix=".xlsx")
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(excel_bytes)
-                workbook = openpyxl.load_workbook(temp_path, data_only=True)
-                sheet = workbook.active
-                headers = [cell.value for cell in sheet[1]]
-                rows = []
-                for row in sheet.iter_rows(min_row=2, values_only=True):
-                    row_dict = dict(zip(headers, row))
-                    if row_dict.get("Số đơn hàng") and str(row_dict.get("Số đơn hàng")) != "None":
-                        for key, value in row_dict.items():
-                            if hasattr(value, "isoformat"):
-                                row_dict[key] = value.isoformat()
-                        rows.append(row_dict)
-            finally:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-            return {"status": 200, "body": json.dumps(rows)}
-        finally:
-            browser.close()
+    cookie_dict = {}
+    for part in (session_cookie or "").split(";"):
+        if "=" in part:
+            k, v = part.strip().split("=", 1)
+            if k.strip():
+                cookie_dict[k.strip()] = v.strip()
+
+    req_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://vinamilk.dmsone.vn/sale-product/search-sale/info",
+        "Origin": "https://vinamilk.dmsone.vn",
+    }
+
+    with httpx.Client(timeout=60.0, headers=req_headers, cookies=cookie_dict, follow_redirects=True) as client:
+        resp = client.post(
+            "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel",
+            data=export_form,
+        )
+
+        if resp.status_code in (401, 403) or resp.headers.get("requires_auth") == "1":
+            return {"status": 401, "body": ""}
+
+        try:
+            data = resp.json()
+        except Exception:
+            return {"status": 401, "body": ""}
+
+        if data and data.get("hasData") is False and not data.get("path"):
+            return {"status": 200, "body": "[]"}
+        if not data or not data.get("path"):
+            raise RuntimeError(f"Failed to export excel: {data}")
+
+        file_url = data["path"]
+        if not file_url.startswith("http"):
+            file_url = "https://vinamilk.dmsone.vn" + file_url
+
+        dl_resp = client.get(file_url)
+        if dl_resp.status_code != 200:
+            raise RuntimeError(f"Không thể tải file excel từ DMS (HTTP {dl_resp.status_code})")
+
+        excel_bytes = dl_resp.content
+        workbook = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
+        sheet = workbook.active
+        headers = [cell.value for cell in sheet[1]]
+        rows = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            row_dict = dict(zip(headers, row))
+            if row_dict.get("Số đơn hàng") and str(row_dict.get("Số đơn hàng")) != "None":
+                for key, value in row_dict.items():
+                    if hasattr(value, "isoformat"):
+                        row_dict[key] = value.isoformat()
+                rows.append(row_dict)
+
+        return {"status": 200, "body": json.dumps(rows)}
 
 
 async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str, object]:
@@ -1812,7 +1815,7 @@ async def fetch_vinamilk(session_cookie: str, form: dict[str, str]) -> dict[str,
         return await asyncio.to_thread(_fetch_vinamilk_sync, session_cookie, form)
     except Exception as exc:
         detail = str(exc).strip() or repr(exc)
-        raise RuntimeError(f"Playwright không thể gọi Vinamilk: {type(exc).__name__}: {detail}") from exc
+        raise RuntimeError(f"Không thể kết nối hoặc tải dữ liệu từ Vinamilk DMS: {type(exc).__name__}: {detail}") from exc
 
 
 async def _fetch_vinamilk_payload(session_cookie: str, form: dict[str, str]) -> tuple[str, Any]:

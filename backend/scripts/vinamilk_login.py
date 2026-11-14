@@ -1,24 +1,22 @@
 """
-vinamilk_login.py — Tự động đăng nhập Vinamilk DMS One bằng Playwright.
+vinamilk_login.py — Tự động đăng nhập Vinamilk DMS One bằng HTTP client thuần (httpx).
 
-Chạy:  python backend/scripts/vinamilk_login.py
-Yêu cầu:  pip install playwright python-dotenv  &&  playwright install chromium
+Không phụ thuộc vào Playwright hay Chromium — hoạt động nhẹ, nhanh và ổn định trên mọi môi trường (Render, VPS, Docker, Windows).
 
 Luồng:
-  1. Lấy username/password: Environment Variables → Windows Credential Manager → .env.local
-  2. Mở Chromium headless → truy cập https://vinamilk.dmsone.vn/
-  3. Điền username/password → click nút Đăng nhập
-  4. Đợi menu "Bán Hàng" xuất hiện (đảm bảo đăng nhập thành công)
-  5. Lấy toàn bộ cookies → tạo chuỗi Cookie header (JSESSIONID=...; _ga=...; ...)
-  6. Khi chạy độc lập, ghi cookie vào .env.local; backend dùng trực tiếp giá trị trả về
+  1. Lấy username/password: Database → Environment Variables → .env.local → Windows Credential Manager
+  2. Gửi HTTP GET tới https://vinamilk.dmsone.vn/ để khởi tạo session cookie (JSESSIONID)
+  3. Gửi HTTP POST tới https://vinamilk.dmsone.vn/login với username/password
+  4. Kiểm tra phản hồi: redirect về /home và chứa menu Bán Hàng
+  5. Trả về chuỗi Cookie header (JSESSIONID=...; ...)
+  6. Lưu vào Database và .env.local để tái sử dụng
 """
 
 import os
 import sys
-import time
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import httpx
 from dotenv import dotenv_values, set_key
 
 # Khi stdout bị chuyển hướng (Windows, cp1252) print tiếng Việt sẽ ném UnicodeEncodeError.
@@ -45,31 +43,14 @@ LOGIN_URL = "https://vinamilk.dmsone.vn/"
 # Tên "Generic Credential" trong Windows Credential Manager
 CREDENTIAL_TARGET = "vinamilk_account"
 
-LOGIN_TIMEOUT = 30_000
-MENU_TIMEOUT = 15_000
-
 
 def configure_playwright_browser_path() -> None:
-    """Bỏ PLAYWRIGHT_BROWSERS_PATH nếu thư mục đó không có Chromium.
-
-    Một số môi trường (terminal sandbox) gán biến này tới cache trống, khiến
-    Playwright báo 'Executable doesn't exist' dù Chromium đã cài ở máy.
-    Giữ nguyên '0' (cài trong package, dùng trên Render) và thư mục thật sự có browser.
-    """
-    path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-    if not path or path == "0":
-        return
-    root = Path(path)
-    if not root.exists():
-        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
-        return
-    if any(root.glob("chromium*")) or any(root.glob("chromium_headless_shell*")):
-        return
-    os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+    """Giữ hàm này để tương thích ngược với các file import cũ; không còn cần Playwright."""
+    pass
 
 
 def _load_from_windows_credmgr() -> tuple[str, str] | None:
-    """Lấy thông tin đăng nhập từ Windows Credential Manager (giống script cũ)."""
+    """Lấy thông tin đăng nhập từ Windows Credential Manager."""
     if not _HAS_WIN32CRED:
         return None
     try:
@@ -100,7 +81,7 @@ def load_credentials(env_path: Path) -> tuple[str, str]:
     except Exception:
         pass
 
-    values = dotenv_values(env_path)
+    values = dotenv_values(env_path) if env_path.exists() else {}
     username = os.environ.get("VINAMILK_USERNAME") or values.get("VINAMILK_USERNAME", "")
     password = os.environ.get("VINAMILK_PASSWORD") or values.get("VINAMILK_PASSWORD", "")
     if (not username or not password) and _HAS_WIN32CRED:
@@ -132,80 +113,85 @@ def login_and_get_cookie(
     password_override: str | None = None,
 ) -> str:
     """
-    Mở Chromium headless, đăng nhập Vinamilk DMS One, trả về chuỗi Cookie header.
+    Đăng nhập Vinamilk DMS One bằng HTTP client thuần (httpx), trả về chuỗi Cookie header.
     Ném RuntimeError nếu đăng nhập thất bại.
     """
     if username_override and password_override:
         username, password = username_override, password_override
     else:
         username, password = load_credentials(ENV_FILE)
-    configure_playwright_browser_path()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
+    login_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
+    with httpx.Client(timeout=30.0, headers=login_headers, follow_redirects=True) as client:
+        # Bước 1: Khởi tạo phiên và lấy token CSRF
+        try:
+            init_res = client.get(LOGIN_URL)
+        except Exception as exc:
+            raise RuntimeError(f"Không thể kết nối đến máy chủ Vinamilk DMS: {exc}") from exc
+
+        if init_res.status_code != 200:
+            raise RuntimeError(f"Lỗi khi tải trang đăng nhập Vinamilk DMS (HTTP {init_res.status_code})")
+
+        import re
+        token_match = re.search(r'name="token"\s+value="([^"]+)"', init_res.text)
+        token_val = token_match.group(1) if token_match else None
+
+        # Bước 2: Gửi thông tin đăng nhập kèm token
+        login_data = {
+            "username": username,
+            "password": password,
+            "lt": "",
+            "_eventId": "submit",
+            "submit": "Đăng nhập",
+            "loginCount": "",
+        }
+        if token_val:
+            login_data["token"] = token_val
+
+        post_headers = {
+            **login_headers,
+            "Referer": LOGIN_URL,
+            "Origin": "https://vinamilk.dmsone.vn",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
 
         try:
-            context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
+            resp = client.post("https://vinamilk.dmsone.vn/login", data=login_data, headers=post_headers)
+        except Exception as exc:
+            raise RuntimeError(f"Lỗi gửi yêu cầu đăng nhập: {exc}") from exc
 
-            print(f"[vinamilk_login] Mở trang: {LOGIN_URL}")
-            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=LOGIN_TIMEOUT)
-            time.sleep(2)  # chờ JS render form
-
-            # ---- Bước 1: Điền thông tin đăng nhập ----
-            try:
-                username_input = page.wait_for_selector(
-                    "input#username, input#UserName, input[type='text']",
-                    timeout=LOGIN_TIMEOUT,
-                )
-                username_input.fill(username)
-
-                password_input = page.wait_for_selector(
-                    "input#password, input#Password, input[type='password']",
-                    timeout=LOGIN_TIMEOUT,
-                )
-                password_input.fill(password)
-
-                print("[vinamilk_login] Điền thông tin. Click nút Đăng nhập...")
-                page.click(
-                    "input#btnLogin, input[type='submit'], button:has-text('Đăng nhập')",
-                    timeout=LOGIN_TIMEOUT,
-                )
-
-            except PlaywrightTimeoutError:
-                # Có thể đã đăng nhập từ lần truy cập trước (session cookie còn hạn)
-                print("[vinamilk_login] Không tìm thấy form login — có thể đã đăng nhập sẵn.")
-
-            # ---- Bước 2: Đợi menu "Bán Hàng" hiện ra ----
-            try:
-                page.wait_for_selector('//*[@id="424"]/a', timeout=MENU_TIMEOUT)
-                print("[vinamilk_login] Đăng nhập thành công — menu 'Bán Hàng' đã xuất hiện.")
-            except PlaywrightTimeoutError:
-                raise RuntimeError(
-                    "Đăng nhập thất bại — không thấy menu 'Bán Hàng' sau thời gian chờ. "
-                    "Kiểm tra lại thông tin đăng nhập hoặc CAPTCHA."
-                )
-
-            # ---- Bước 3: Lấy toàn bộ cookies ----
-            cookies = context.cookies()
+        # Bước 3: Kiểm tra tính hợp lệ của phản hồi
+        # Nếu đăng nhập thành công, server redirect 302 -> /home
+        if "home" in str(resp.url) or any(r.status_code == 302 for r in resp.history):
+            cookies = [f"{k}={v}" for k, v in client.cookies.items() if v]
             if not cookies:
-                raise RuntimeError("Không lấy được cookie nào sau khi đăng nhập.")
+                raise RuntimeError("Đăng nhập thành công nhưng không lấy được cookie phiên.")
+            return "; ".join(cookies)
 
-            cookie_header = build_cookie_header(cookies)
-            print(f"[vinamilk_login] Đã lấy {len(cookies)} cookie(s).")
-            print(f"[vinamilk_login] Cookie header (ẩn giấu): {cookie_header[:60]}...")
+        resp_text = resp.text
+        if "không đúng" in resp_text or "kh&ocirc;ng đ&uacute;ng" in resp_text:
+            raise RuntimeError("Đăng nhập thất bại: Tên đăng nhập hoặc mật khẩu Vinamilk DMS không đúng.")
+        if "Mã bảo vệ" in resp_text or "capcha" in resp_text.lower():
+            raise RuntimeError("Đăng nhập yêu cầu mã bảo vệ CAPTCHA. Vui lòng đăng nhập trên trình duyệt một lần để mở khóa.")
 
-            return cookie_header
+        if "Bán Hàng" not in resp_text and "424" not in resp_text:
+            raise RuntimeError(f"Đăng nhập không thành công, URL phản hồi: {resp.url}")
 
-        finally:
-            browser.close()
+        cookies = [f"{k}={v}" for k, v in client.cookies.items() if v]
+        if not cookies:
+            raise RuntimeError("Đăng nhập thành công nhưng không lấy được cookie phiên.")
+
+        cookie_header = "; ".join(cookies)
+        return cookie_header
 
 
 def save_cookie_to_env(cookie_header: str, env_path: Path) -> None:

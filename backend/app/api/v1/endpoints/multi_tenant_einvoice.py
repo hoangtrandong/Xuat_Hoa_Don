@@ -672,8 +672,8 @@ def test_supplier_connection(
                                     detail_resp = client.get(f"{base_endpoint}/{first_item['Id']}?format=json", headers=headers)
                                     if detail_resp.status_code == 200:
                                         first_item = detail_resp.json()
-                                    except Exception:
-                                        pass
+                                except Exception:
+                                    pass
 
                             # Flatten nếu có mảng con (KiotViet InvoiceDetails, OrderDetails, etc.)
                             details = (

@@ -159,6 +159,15 @@ export default function MultiTenantSupplierConfigsPage() {
     field_mapping: {},
   });
 
+  const [testLoading, setTestLoading] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    success: boolean;
+    is_live: boolean;
+    message: string;
+    detected_fields: Array<{ key: string; sample: string; type: string }>;
+    sample_row: Record<string, unknown>;
+  } | null>(null);
+
   const [invDrawerOpen, setInvDrawerOpen] = useState(false);
   const [editingInvId, setEditingInvId] = useState<number | null>(null);
   const [invForm, setInvForm] = useState({
@@ -261,6 +270,76 @@ export default function MultiTenantSupplierConfigsPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Lỗi khi lưu Nhà phân phối.");
     }
+  }
+
+  async function handleTestConnection() {
+    setTestLoading(true);
+    setTestResult(null);
+    try {
+      const res = await apiFetch(`${API_URL}/einvoice/supplier-configs/test-connection`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          connector_type: supForm.connector_type,
+          api_endpoint_url: supForm.api_endpoint_url,
+          auth_type: supForm.auth_type,
+          username: supForm.username,
+          encrypted_secret: supForm.encrypted_secret,
+          session_cookie: supForm.session_cookie,
+          supplier_code: supForm.supplier_code,
+        }),
+      });
+      const data = await res.json();
+      setTestResult(data);
+    } catch (err) {
+      setTestResult({
+        success: false,
+        is_live: false,
+        message: err instanceof Error ? err.message : "Lỗi khi kiểm tra kết nối.",
+        detected_fields: [],
+        sample_row: {},
+      });
+    } finally {
+      setTestLoading(false);
+    }
+  }
+
+  function autoMapFields() {
+    if (!testResult?.detected_fields?.length) return;
+    const detectedKeys = testResult.detected_fields.map((f) => f.key);
+    const newMapping = { ...supForm.field_mapping };
+
+    CANONICAL_FIELDS.forEach((cf) => {
+      const match = detectedKeys.find((dk) => {
+        const dkl = dk.toLowerCase();
+        if (dkl === cf.key.toLowerCase()) return true;
+        if (cf.key === "order_number" && (dkl.includes("order") || dkl === "code" || dkl === "so_don" || dkl.includes("docnum"))) return true;
+        if (cf.key === "order_date" && (dkl.includes("date") || dkl.includes("ngay") || dkl === "createddate")) return true;
+        if (cf.key === "delivery_date" && (dkl.includes("deliv") || dkl.includes("ship") || dkl === "modifieddate")) return true;
+        if (cf.key === "customer_code" && ((dkl.includes("cust") && dkl.includes("code")) || dkl === "customercode" || dkl.includes("makh"))) return true;
+        if (cf.key === "customer_name" && ((dkl.includes("cust") && dkl.includes("name")) || dkl === "customername" || dkl.includes("tenkh"))) return true;
+        if (cf.key === "customer_tax_code" && (dkl.includes("tax") || dkl.includes("mst"))) return true;
+        if (cf.key === "customer_address" && (dkl.includes("addr") || dkl.includes("diachi"))) return true;
+        if (cf.key === "product_code" && ((dkl.includes("prod") && dkl.includes("code")) || dkl === "productcode" || dkl.includes("sku") || dkl.includes("itemcode") || dkl.includes("masanpham"))) return true;
+        if (cf.key === "product_name" && ((dkl.includes("prod") && dkl.includes("name")) || dkl === "productname" || dkl.includes("itemname") || dkl.includes("tensanpham"))) return true;
+        if (cf.key === "unit" && (dkl === "unit" || dkl === "uom" || dkl.includes("dvt"))) return true;
+        if (cf.key === "quantity" && (dkl === "quantity" || dkl === "qty" || dkl.includes("soluong"))) return true;
+        if (cf.key === "promo_quantity" && (dkl.includes("bonus") || dkl.includes("free") || dkl.includes("km"))) return true;
+        if (cf.key === "unit_price" && (dkl === "price" || dkl === "unitprice" || dkl.includes("giaban") || dkl.includes("dongia"))) return true;
+        if (cf.key === "discount_amount" && (dkl.includes("disc") || dkl.includes("chietkhau") || dkl.includes("ck"))) return true;
+        if (cf.key === "vat_rate" && (dkl.includes("vat") || dkl.includes("taxrate") || dkl.includes("thue"))) return true;
+        if (cf.key === "line_total" && (dkl === "subtotal" || dkl === "total" || dkl.includes("thanhtien") || dkl.includes("giatri"))) return true;
+        if (cf.key === "staff_code" && (dkl.includes("staff") || dkl.includes("usercode") || dkl.includes("nvbh"))) return true;
+        if (cf.key === "staff_name" && (dkl.includes("username") || dkl.includes("tennv"))) return true;
+        return false;
+      });
+      if (match) {
+        newMapping[cf.key] = match;
+      }
+    });
+
+    setSupForm({ ...supForm, field_mapping: newMapping });
+    setMessage("Đã tự động ánh xạ các trường khớp với dữ liệu Nhà cung cấp!");
   }
 
   async function saveSupplierConfig() {
@@ -1001,6 +1080,89 @@ export default function MultiTenantSupplierConfigsPage() {
             </div>
           </div>
 
+          {/* NÚT TEST KẾT NỐI & LẤY MẪU TRƯỜNG DỮ LIỆU */}
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
+                  <Sparkles size={14} className="text-amber-500" /> Kiểm tra kết nối & Phân tích cấu trúc dữ liệu
+                </p>
+                <p className="text-[11px] text-gray-500">
+                  Gửi thử yêu cầu tới URL của NCC để lấy mẫu các trường dữ liệu thực tế và hỗ trợ ánh xạ tự động.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleTestConnection}
+                disabled={testLoading}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
+              >
+                <RefreshCw size={13} className={testLoading ? "animate-spin" : ""} />
+                {testLoading ? "Đang gọi thử URL..." : "Test Kết Nối & Lấy Mẫu Trường"}
+              </button>
+            </div>
+
+            {testResult && (
+              <div
+                className={`p-3 rounded-lg border text-xs space-y-2 ${
+                  testResult.is_live
+                    ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                    : testResult.success
+                    ? "bg-amber-50 border-amber-200 text-amber-800"
+                    : "bg-red-50 border-red-200 text-red-800"
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-semibold flex items-center gap-1.5">
+                    {testResult.is_live ? (
+                      <CheckCircle2 size={14} className="text-emerald-600" />
+                    ) : (
+                      <AlertCircle size={14} />
+                    )}
+                    {testResult.message}
+                  </span>
+                  {testResult.detected_fields?.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={autoMapFields}
+                      className="px-2.5 py-1 rounded bg-white border border-indigo-200 text-indigo-700 font-bold hover:bg-indigo-50 shadow-xs"
+                    >
+                      ✨ Tự động ánh xạ thông minh
+                    </button>
+                  )}
+                </div>
+
+                {testResult.detected_fields?.length > 0 && (
+                  <div>
+                    <p className="text-[11px] font-medium text-gray-600 mb-1">
+                      Các trường dữ liệu phát hiện được từ phản hồi (bấm vào để xem mẫu):
+                    </p>
+                    <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                      {testResult.detected_fields.map((f) => (
+                        <span
+                          key={f.key}
+                          title={`Ví dụ giá trị: ${f.sample || "rỗng"}`}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-gray-200 text-[11px] font-mono text-gray-700 shadow-xs"
+                        >
+                          <span className="font-bold text-indigo-600">{f.key}</span>
+                          {f.sample && <span className="text-gray-400 text-[10px]">({f.sample})</span>}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <datalist id="detected-fields-list">
+            {testResult?.detected_fields?.map((f) => (
+              <option key={f.key} value={f.key}>
+                {f.key} (Mẫu: {f.sample})
+              </option>
+            ))}
+          </datalist>
+
           <div className="border-t border-gray-200 pt-4">
             <h4 className="text-sm font-bold text-gray-900 mb-1">
               Bảng Ánh Xạ Trường Dữ Liệu Động (Dynamic Field Mapping)
@@ -1020,6 +1182,7 @@ export default function MultiTenantSupplierConfigsPage() {
                   </div>
                   <ArrowRight size={13} className="text-gray-400 flex-shrink-0" />
                   <input
+                    list="detected-fields-list"
                     value={supForm.field_mapping[field.key] || ""}
                     onChange={(e) =>
                       setSupForm({
@@ -1030,8 +1193,8 @@ export default function MultiTenantSupplierConfigsPage() {
                         },
                       })
                     }
-                    placeholder="Tên trường nguồn..."
-                    className="w-full rounded border border-gray-300 bg-white px-2 py-1 text-xs font-mono text-sky-800"
+                    placeholder="Tên trường nguồn (hoặc chọn gợi ý)..."
+                    className="w-full rounded border border-gray-300 bg-white px-2 py-1 text-xs font-mono text-sky-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
               ))}

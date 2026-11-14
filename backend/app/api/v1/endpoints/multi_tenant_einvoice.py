@@ -82,6 +82,17 @@ class InvoiceConfigUpsertRequest(BaseModel):
     status: str = "active"
 
 
+class SupplierTestConnectionRequest(BaseModel):
+    connector_type: str = "REST_API"
+    api_endpoint_url: str | None = None
+    auth_type: str = "BEARER_TOKEN"
+    username: str | None = None
+    encrypted_secret: str | None = None
+    session_cookie: str | None = None
+    supplier_code: str | None = None
+    request_config: dict[str, Any] | None = None
+
+
 class SyncSupplierOrdersRequest(BaseModel):
     from_date: date | None = None
     to_date: date | None = None
@@ -513,6 +524,121 @@ def delete_supplier_config(
     db.delete(cfg)
     db.commit()
     return {"deleted": True, "id": config_id}
+
+
+@router.post("/supplier-configs/test-connection")
+def test_supplier_connection(
+    payload: SupplierTestConnectionRequest,
+) -> dict[str, Any]:
+    """Kiểm tra kết nối tới URL của Nhà cung cấp và lấy mẫu các trường dữ liệu thực tế
+    để hỗ trợ người dùng ánh xạ (mapping) trường dữ liệu dễ dàng trên giao diện."""
+    import httpx
+
+    url = (payload.api_endpoint_url or "").strip()
+    auth_type = payload.auth_type
+    secret = (payload.encrypted_secret or "").strip()
+    username = (payload.username or "").strip()
+
+    detected_fields: list[dict[str, Any]] = []
+    sample_row: dict[str, Any] = {}
+    is_live = False
+    message = ""
+
+    if url and (url.startswith("http://") or url.startswith("https://")):
+        headers = {"Accept": "application/json"}
+        if auth_type == "BEARER_TOKEN" and secret:
+            headers["Authorization"] = f"Bearer {secret}"
+        elif auth_type == "API_KEY" and secret:
+            headers["X-API-Key"] = secret
+        elif auth_type == "COOKIE" and (payload.session_cookie or secret):
+            headers["Cookie"] = payload.session_cookie or secret
+        elif auth_type == "BASIC_AUTH" and (username or secret):
+            import base64
+            token = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("utf-8")
+            headers["Authorization"] = f"Basic {token}"
+
+        # Header Retailer đặc thù của KiotViet
+        if username:
+            headers["Retailer"] = username
+
+        try:
+            with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+                resp = client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    is_live = True
+                    raw_list: list[Any] = []
+                    if isinstance(data, list):
+                        raw_list = data
+                    elif isinstance(data, dict):
+                        raw_list = (
+                            data.get("data")
+                            or data.get("orders")
+                            or data.get("invoices")
+                            or data.get("rows")
+                            or [data]
+                        )
+
+                    if raw_list and isinstance(raw_list[0], dict):
+                        first_item = raw_list[0]
+                        # Flatten nếu có mảng con (KiotViet orderDetails, etc.)
+                        details = (
+                            first_item.get("orderDetails")
+                            or first_item.get("invoiceDetails")
+                            or first_item.get("items")
+                            or first_item.get("lines")
+                        )
+                        if isinstance(details, list) and len(details) > 0 and isinstance(details[0], dict):
+                            sample_row = {**first_item, **details[0]}
+                        else:
+                            sample_row = first_item
+
+                        message = f"Kết nối trực tiếp thành công (HTTP 200)! Đã phát hiện {len(sample_row)} trường dữ liệu."
+                elif resp.status_code in (401, 403):
+                    message = f"Đã kết nối tới máy chủ nhưng chưa được cấp quyền (HTTP {resp.status_code}). Vui lòng kiểm tra Token / Mật khẩu."
+                else:
+                    message = f"Máy chủ phản hồi mã HTTP {resp.status_code}."
+        except Exception as exc:
+            message = f"Không thể kết nối tới URL: {exc}."
+
+    # Nếu không kết nối live được, lấy từ bộ Preset mẫu
+    if not sample_row:
+        sup_code = (payload.supplier_code or "MASAN").upper()
+        from app.services.supplier_connectors import generate_sample_raw_rows_for_supplier
+        dummy_cfg = DistributorSupplierConfig(
+            distributor_id=1,
+            supplier_code=sup_code,
+            supplier_name=sup_code,
+            connector_type=payload.connector_type,
+            api_endpoint_url=url,
+            auth_type=payload.auth_type,
+            field_mapping=SUPPLIER_FIELD_MAPPING_PRESETS.get(sup_code, {}).get("field_mapping", {}),
+        )
+        samples = generate_sample_raw_rows_for_supplier(dummy_cfg, datetime.utcnow().date())
+        if samples:
+            sample_row = samples[0]
+            if not message:
+                message = f"Đã tải mẫu {len(sample_row)} trường dữ liệu chuẩn của {sup_code}."
+            else:
+                message += f" Đang hiển thị mẫu cấu trúc trường chuẩn của {sup_code} để bạn tham khảo ánh xạ."
+
+    for k, v in sample_row.items():
+        if isinstance(v, (dict, list)):
+            continue
+        v_str = str(v)
+        detected_fields.append({
+            "key": k,
+            "sample": v_str[:60] if len(v_str) > 60 else v_str,
+            "type": type(v).__name__,
+        })
+
+    return {
+        "success": is_live or bool(sample_row),
+        "is_live": is_live,
+        "message": message,
+        "detected_fields": detected_fields,
+        "sample_row": sample_row,
+    }
 
 
 @router.post("/supplier-configs/{config_id}/sync-orders")

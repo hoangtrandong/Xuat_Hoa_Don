@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Building2,
   Plus,
@@ -17,6 +17,9 @@ import {
   ArrowRight,
   Database,
   FileSpreadsheet,
+  Check,
+  ChevronDown,
+  X,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
@@ -110,6 +113,201 @@ const CANONICAL_FIELDS: Array<{ key: string; label: string; group: string }> = [
   { key: "staff_name", label: "Tên NVBH", group: "Nhân viên" },
 ];
 
+function FieldMappingCombobox({
+  fieldKey,
+  fieldLabel,
+  value,
+  onChange,
+  detectedFields,
+}: {
+  fieldKey: string;
+  fieldLabel: string;
+  value: string;
+  onChange: (val: string) => void;
+  detectedFields: Array<{ key: string; sample?: string; type?: string }>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [openUpward, setOpenUpward] = useState(false);
+  const [filterText, setFilterText] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const handleOpen = () => {
+    if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      setOpenUpward(spaceBelow < 250);
+    }
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    if (open) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [open]);
+
+  const selectedField = detectedFields.find(
+    (f) => f.key.toLowerCase() === value.trim().toLowerCase()
+  );
+
+  const filteredFields = detectedFields.filter((f) => {
+    if (!filterText) return true;
+    const q = filterText.toLowerCase();
+    return (
+      f.key.toLowerCase().includes(q) ||
+      (f.sample && String(f.sample).toLowerCase().includes(q))
+    );
+  });
+
+  return (
+    <div className="relative w-full min-w-0" ref={containerRef}>
+      <div className="flex items-center rounded border border-slate-300 bg-white focus-within:border-sky-500 focus-within:ring-1 focus-within:ring-sky-500">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={handleOpen}
+          placeholder="Chọn hoặc gõ tên trường..."
+          className="w-full min-w-0 bg-transparent px-2 py-1 text-xs font-mono text-slate-800 placeholder:text-slate-400 focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={() => (open ? setOpen(false) : handleOpen())}
+          className="px-1.5 py-1 text-slate-400 hover:text-slate-700 transition-colors"
+          tabIndex={-1}
+          title="Xem danh sách trường & dữ liệu mẫu từ URL"
+        >
+          <ChevronDown
+            size={14}
+            className={open ? "rotate-180 transition-transform" : "transition-transform"}
+          />
+        </button>
+      </div>
+
+      {/* Hiển thị mẫu dữ liệu trực tiếp dưới ô nếu trường đã được chọn */}
+      {selectedField && (
+        <div
+          className="mt-1 flex items-center gap-1.5 text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded truncate"
+          title={`Giá trị mẫu từ URL: ${selectedField.sample}`}
+        >
+          <span className="shrink-0 font-semibold text-emerald-700">✓ Mẫu URL:</span>
+          <span className="font-mono truncate text-emerald-900 font-medium">
+            {selectedField.sample !== "" && selectedField.sample != null
+              ? `"${selectedField.sample}"`
+              : "(rỗng)"}
+          </span>
+          {selectedField.type && (
+            <span className="ml-auto shrink-0 text-[9px] text-emerald-600 opacity-75">
+              [{selectedField.type}]
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Dropdown danh sách các trường và mẫu trả về */}
+      {open && (
+        <div
+          className={`absolute left-0 right-0 z-50 max-h-64 overflow-hidden rounded-lg border border-slate-300 bg-white shadow-2xl flex flex-col ${
+            openUpward ? "bottom-full mb-1" : "top-full mt-1"
+          }`}
+        >
+          {detectedFields.length > 5 && (
+            <div className="border-b border-slate-100 p-1.5 bg-slate-50 flex items-center gap-1.5">
+              <input
+                type="text"
+                autoFocus
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                placeholder="Tìm tên trường hoặc giá trị mẫu..."
+                className="w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-sky-500 focus:outline-none"
+              />
+              {filterText && (
+                <button
+                  type="button"
+                  onClick={() => setFilterText("")}
+                  className="text-slate-400 hover:text-slate-600"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="overflow-y-auto max-h-56 divide-y divide-slate-100">
+            {value && (
+              <button
+                type="button"
+                onClick={() => {
+                  onChange("");
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 transition-colors"
+              >
+                <X size={12} />
+                <span>Bỏ ánh xạ (để trống trường này)</span>
+              </button>
+            )}
+
+            {filteredFields.length === 0 ? (
+              <div className="px-3 py-3 text-center text-xs text-slate-400">
+                {detectedFields.length === 0
+                  ? "Chưa có trường mẫu. Hãy bấm 'Test Kết Nối & Lấy Mẫu Trường' ở phía trên."
+                  : "Không tìm thấy trường khớp với từ khóa tìm kiếm."}
+              </div>
+            ) : (
+              filteredFields.map((f) => {
+                const isSelected = f.key.toLowerCase() === value.trim().toLowerCase();
+                return (
+                  <button
+                    key={f.key}
+                    type="button"
+                    onClick={() => {
+                      onChange(f.key);
+                      setOpen(false);
+                      setFilterText("");
+                    }}
+                    className={`flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left transition-colors ${
+                      isSelected
+                        ? "bg-sky-50 font-semibold text-sky-900"
+                        : "hover:bg-slate-50 text-slate-800"
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono text-xs font-bold text-sky-700">{f.key}</span>
+                        {f.type && (
+                          <span className="rounded bg-slate-100 px-1 text-[9px] font-mono text-slate-500">
+                            {f.type}
+                          </span>
+                        )}
+                        {isSelected && <Check size={12} className="text-emerald-600 shrink-0" />}
+                      </div>
+                      <p className="truncate text-[10px] text-slate-500 mt-0.5">
+                        Mẫu:{" "}
+                        <span className="font-mono text-slate-700">
+                          {f.sample !== "" && f.sample != null ? `"${f.sample}"` : "(rỗng)"}
+                        </span>
+                      </p>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function MultiTenantSupplierConfigsPage() {
   const [activeTab, setActiveTab] = useState<"suppliers" | "invoices" | "distributors">("suppliers");
   const [distributors, setDistributors] = useState<DistributorItem[]>([]);
@@ -167,6 +365,24 @@ export default function MultiTenantSupplierConfigsPage() {
     detected_fields: Array<{ key: string; sample: string; type: string }>;
     sample_row: Record<string, unknown>;
   } | null>(null);
+
+  const availableDetectedFields = useMemo(() => {
+    if (testResult?.detected_fields && testResult.detected_fields.length > 0) {
+      return testResult.detected_fields;
+    }
+    const currentPreset = presets[supForm.supplier_code];
+    if (currentPreset && typeof currentPreset.field_mapping === "object" && currentPreset.field_mapping) {
+      const mapping = currentPreset.field_mapping as Record<string, string>;
+      return Object.values(mapping)
+        .filter(Boolean)
+        .map((fieldVal) => ({
+          key: fieldVal,
+          sample: `Mẫu chuẩn ${supForm.supplier_code}`,
+          type: "str",
+        }));
+    }
+    return [];
+  }, [testResult, presets, supForm.supplier_code]);
 
   const [invDrawerOpen, setInvDrawerOpen] = useState(false);
   const [editingInvId, setEditingInvId] = useState<number | null>(null);
@@ -1167,49 +1383,72 @@ export default function MultiTenantSupplierConfigsPage() {
             )}
           </div>
 
-          <datalist id="detected-fields-list">
-            {testResult?.detected_fields?.map((f) => (
-              <option key={f.key} value={f.key}>
-                {f.key} (Mẫu: {f.sample})
-              </option>
-            ))}
-          </datalist>
+          <div className="border border-slate-300 rounded overflow-hidden mt-3 shadow-xs">
+            <div className="border-b border-sky-100 bg-sky-50/80 px-3 py-2 flex items-center justify-between">
+              <div>
+                <h4 className="text-[11px] font-bold uppercase tracking-wide text-sky-900">
+                  Bảng Ánh Xạ Trường Dữ Liệu Động (Dynamic Field Mapping)
+                </h4>
+                <p className="text-[10px] text-slate-500">
+                  Click vào ô để chọn trường từ dữ liệu URL hoặc gõ tìm kiếm. Hệ thống hiển thị mẫu dữ liệu thực tế bên dưới.
+                </p>
+              </div>
+              {availableDetectedFields.length > 0 && (
+                <span className="rounded bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800">
+                  {availableDetectedFields.length} trường nguồn khả dụng
+                </span>
+              )}
+            </div>
 
-          <div className="border-t border-gray-200 pt-4">
-            <h4 className="text-sm font-bold text-gray-900 mb-1">
-              Bảng Ánh Xạ Trường Dữ Liệu Động (Dynamic Field Mapping)
-            </h4>
-            <p className="text-xs text-gray-500 mb-3">
-              Khai báo tên trường JSON hoặc tên cột Excel của Nhà cung cấp tương ứng với trường chuẩn của hệ thống:
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-80 overflow-y-auto pr-1">
-              {CANONICAL_FIELDS.map((field) => (
-                <div
-                  key={field.key}
-                  className="flex items-center justify-between gap-2 bg-gray-50 p-2 rounded-lg border border-gray-200"
-                >
-                  <div className="min-w-[135px]">
-                    <p className="text-xs font-semibold text-gray-800">{field.label}</p>
-                    <p className="text-[10px] font-mono text-gray-400">{field.key}</p>
-                  </div>
-                  <ArrowRight size={13} className="text-gray-400 flex-shrink-0" />
-                  <input
-                    list="detected-fields-list"
-                    value={supForm.field_mapping[field.key] || ""}
-                    onChange={(e) =>
-                      setSupForm({
-                        ...supForm,
-                        field_mapping: {
-                          ...supForm.field_mapping,
-                          [field.key]: e.target.value,
-                        },
-                      })
-                    }
-                    placeholder="Tên trường nguồn (hoặc chọn gợi ý)..."
-                    className="w-full rounded border border-gray-300 bg-white px-2 py-1 text-xs font-mono text-sky-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                  />
-                </div>
-              ))}
+            <div className="overflow-x-auto max-h-[460px] overflow-y-auto divide-y divide-slate-100 pb-16">
+              <table className="w-full border-collapse text-left">
+                <thead className="sticky top-0 z-10 bg-slate-100 text-[10px] font-semibold text-slate-600 shadow-xs">
+                  <tr>
+                    <th className="px-2.5 py-1.5 w-8 text-center">#</th>
+                    <th className="px-2.5 py-1.5 w-48">Trường Chuẩn Hệ Thống (Canonical CDM)</th>
+                    <th className="px-2.5 py-1.5 w-8 text-center"></th>
+                    <th className="px-2.5 py-1.5 min-w-[280px]">
+                      Trường Của NCC & Dữ Liệu Mẫu (Click để chọn hoặc gõ tìm kiếm)
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {CANONICAL_FIELDS.map((field, idx) => (
+                    <tr
+                      key={field.key}
+                      className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/50 text-[11px]"
+                    >
+                      <td className="px-2.5 py-2 text-center text-[10px] text-slate-400 font-mono">
+                        {idx + 1}
+                      </td>
+                      <td className="px-2.5 py-2">
+                        <div className="font-semibold text-slate-800 text-xs">{field.label}</div>
+                        <div className="font-mono text-[10px] text-slate-500">{field.key}</div>
+                      </td>
+                      <td className="px-1 py-2 text-center text-slate-400">
+                        <ArrowRight size={13} className="mx-auto" />
+                      </td>
+                      <td className="px-2.5 py-2">
+                        <FieldMappingCombobox
+                          fieldKey={field.key}
+                          fieldLabel={field.label}
+                          value={supForm.field_mapping[field.key] || ""}
+                          onChange={(val) =>
+                            setSupForm((prev) => ({
+                              ...prev,
+                              field_mapping: {
+                                ...prev.field_mapping,
+                                [field.key]: val,
+                              },
+                            }))
+                          }
+                          detectedFields={availableDetectedFields}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 

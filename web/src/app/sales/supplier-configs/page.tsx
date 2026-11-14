@@ -390,49 +390,10 @@ export default function MultiTenantSupplierConfigsPage() {
       return testResult.sample_rows.slice(0, 10);
     }
     if (testResult?.sample_row && Object.keys(testResult.sample_row).length > 0) {
-      return Array.from({ length: 10 }, (_, i) => {
-        const row: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(testResult.sample_row)) {
-          if (typeof v === "number") {
-            row[k] = i === 0 ? v : Math.round(v * (1 + i * 0.05));
-          } else if (typeof v === "string" && (v.includes("001") || v.includes("01") || v.includes("101"))) {
-            row[k] = v.replace("001", String(i + 1).padStart(3, "0")).replace("101", String(i + 101)).replace("01", String(i + 1).padStart(2, "0"));
-          } else {
-            row[k] = v;
-          }
-        }
-        return row;
-      });
-    }
-    // Fallback if test not run yet: use preset fields with sample mock rows
-    const currentPreset = presets[supForm.supplier_code];
-    if (currentPreset && typeof currentPreset.field_mapping === "object" && currentPreset.field_mapping) {
-      const mapping = currentPreset.field_mapping as Record<string, string>;
-      const keys = Object.values(mapping).filter(Boolean);
-      if (keys.length > 0) {
-        return Array.from({ length: 10 }, (_, i) => {
-          const row: Record<string, unknown> = {};
-          keys.forEach((k) => {
-            if (k.toLowerCase().includes("qty") || k.toLowerCase().includes("soluong") || k.toLowerCase().includes("quantity")) {
-              row[k] = (i + 1) * 2;
-            } else if (k.toLowerCase().includes("price") || k.toLowerCase().includes("gia")) {
-              row[k] = 150000 + i * 20000;
-            } else if (k.toLowerCase().includes("total") || k.toLowerCase().includes("tien")) {
-              row[k] = (150000 + i * 20000) * ((i + 1) * 2);
-            } else if (k.toLowerCase().includes("order") || k.toLowerCase().includes("code") || k.toLowerCase().includes("ma")) {
-              row[k] = `${supForm.supplier_code}-${String(i + 1).padStart(3, "0")}`;
-            } else if (k.toLowerCase().includes("date") || k.toLowerCase().includes("ngay")) {
-              row[k] = "2026-11-14";
-            } else {
-              row[k] = `Mẫu ${k} #${i + 1}`;
-            }
-          });
-          return row;
-        });
-      }
+      return [testResult.sample_row];
     }
     return [];
-  }, [testResult, presets, supForm.supplier_code]);
+  }, [testResult]);
 
   const [invDrawerOpen, setInvDrawerOpen] = useState(false);
   const [editingInvId, setEditingInvId] = useState<number | null>(null);
@@ -1443,6 +1404,15 @@ export default function MultiTenantSupplierConfigsPage() {
                 </h4>
               </div>
               <div className="flex items-center gap-2">
+                {testResult?.is_live ? (
+                  <span className="rounded bg-emerald-600 text-white font-bold px-2.5 py-0.5 text-[10px] shadow-xs">
+                    ✓ Dữ liệu thật từ máy chủ (LIVE)
+                  </span>
+                ) : testResult ? (
+                  <span className="rounded bg-amber-600 text-white font-bold px-2.5 py-0.5 text-[10px] shadow-xs">
+                    ⚠ Mẫu tham khảo (Chưa kết nối live)
+                  </span>
+                ) : null}
                 <span className="rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-mono font-semibold">
                   {displaySampleRows.length} dòng mẫu thực tế
                 </span>

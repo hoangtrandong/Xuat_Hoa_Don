@@ -583,35 +583,15 @@ def test_supplier_connection(
                     from scripts.vinamilk_login import login_and_get_cookie
                     auto_cookie = login_and_get_cookie(username_override=clean_user, password_override=secret)
                     headers["Cookie"] = auto_cookie
-                    is_live = True
                     message = f"Xác thực tài khoản Vinamilk DMS One ({clean_user}) thành công qua HTTP! "
                 except Exception as vnm_err:
                     message = f"Xác thực Vinamilk DMS One: {vnm_err}. "
             elif payload.session_cookie:
                 headers["Cookie"] = payload.session_cookie
-                is_live = True
                 message = "Đã nhận diện Session Cookie Vinamilk DMS One! "
 
-            from app.services.supplier_connectors import generate_sample_raw_rows_for_supplier
-            dummy_cfg = DistributorSupplierConfig(
-                distributor_id=1,
-                supplier_code="VINAMILK",
-                supplier_name="Vinamilk (DMS One)",
-                connector_type="PORTAL_PLAYWRIGHT",
-                api_endpoint_url=url,
-                auth_type=payload.auth_type,
-                field_mapping=SUPPLIER_FIELD_MAPPING_PRESETS.get("VINAMILK", {}).get("field_mapping", {}),
-            )
-            samples = generate_sample_raw_rows_for_supplier(dummy_cfg, datetime.utcnow().date())
-            if samples:
-                sample_row = samples[0]
-            if is_live:
-                message += "Đã tải cấu trúc 17 cột dữ liệu chuẩn từ báo cáo xuất hàng Vinamilk DMS One."
-            elif not message:
-                message = "Đã tải cấu trúc 17 cột dữ liệu chuẩn của Vinamilk DMS One. Vui lòng nhập Tài khoản / Mật khẩu để xác thực."
-
         # Hỗ trợ tự động cấu hình riêng cho KiotViet
-        is_kiotviet = ("kiotviet" in (payload.supplier_code or "").lower() or "kiotviet" in url)
+        is_kiotviet = ("kiotviet" in (payload.supplier_code or "").lower() or "kiotviet" in url or "kiotapi" in url)
         if is_kiotviet:
             retailer = "ctyquyanhna"
             clean_user = username
@@ -630,6 +610,8 @@ def test_supplier_connection(
             headers["Origin"] = f"https://{retailer}.kiotviet.vn"
             headers["Referer"] = f"https://{retailer}.kiotviet.vn/"
             headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            if clean_token:
+                headers["Authorization"] = f"Bearer {clean_token}"
 
             if auth_type == "COOKIE" and secret and not secret.startswith("eyJ"):
                 try:
@@ -646,33 +628,31 @@ def test_supplier_connection(
                     resp = client.get(url, headers=headers)
                     if resp.status_code == 200:
                         data = resp.json()
-                        is_live = True
                         raw_list: list[Any] = []
                         if isinstance(data, list):
                             raw_list = data
                         elif isinstance(data, dict):
-                            raw_list = (
-                                data.get("Data")
-                                or data.get("data")
-                                or data.get("orders")
-                                or data.get("invoices")
-                                or data.get("rows")
-                                or [data]
-                            )
+                            for candidate in ["Data", "data", "orders", "invoices", "rows"]:
+                                val = data.get(candidate)
+                                if isinstance(val, list) and len(val) > 0:
+                                    raw_list = val
+                                    break
 
-                        if isinstance(raw_list, list):
+                        # KiotViet fallback: nếu gọi /orders mà rỗng (Data: []), tự động thử gọi /invoices
+                        if is_kiotviet and (not raw_list or len(raw_list) == 0) and "/api/orders" in url:
+                            try:
+                                alt_url = url.replace("/api/orders", "/api/invoices")
+                                alt_resp = client.get(alt_url, headers=headers)
+                                if alt_resp.status_code == 200:
+                                    alt_data = alt_resp.json()
+                                    if isinstance(alt_data, dict) and isinstance(alt_data.get("Data"), list) and len(alt_data["Data"]) > 0:
+                                        raw_list = alt_data["Data"]
+                                        url = alt_url
+                            except Exception:
+                                pass
+
+                        if isinstance(raw_list, list) and len(raw_list) > 0:
                             raw_list = [r for r in raw_list if isinstance(r, dict) and r.get("Id") != -1]
-
-                        if raw_list and isinstance(raw_list[0], dict):
-                            # KiotViet: Nếu list view chưa có InvoiceDetails thì gọi chi tiết cho một vài hóa đơn
-                            if is_kiotviet and raw_list[0].get("Id") and not raw_list[0].get("InvoiceDetails") and not raw_list[0].get("OrderDetails"):
-                                try:
-                                    base_endpoint = url.split("?")[0].rstrip("/")
-                                    detail_resp = client.get(f"{base_endpoint}/{raw_list[0]['Id']}?format=json", headers=headers)
-                                    if detail_resp.status_code == 200:
-                                        raw_list[0] = detail_resp.json()
-                                except Exception:
-                                    pass
 
                             for r_item in raw_list[:10]:
                                 if not isinstance(r_item, dict):
@@ -685,25 +665,46 @@ def test_supplier_connection(
                                     or r_item.get("items")
                                     or r_item.get("lines")
                                 )
-                                if isinstance(details, list) and len(details) > 0 and isinstance(details[0], dict):
-                                    merged = {**r_item, **details[0]}
+                                # Nếu chưa có details và có Id, gọi chi tiết hóa đơn/đơn hàng
+                                if (not details or len(details) == 0) and r_item.get("Id") and (is_kiotviet or "/api/" in url):
+                                    try:
+                                        base_endpoint = url.split("?")[0].rstrip("/")
+                                        det_resp = client.get(f"{base_endpoint}/{r_item['Id']}?format=json", headers=headers)
+                                        if det_resp.status_code == 200:
+                                            det_json = det_resp.json()
+                                            r_item = {**r_item, **det_json}
+                                            details = det_json.get("InvoiceDetails") or det_json.get("OrderDetails")
+                                    except Exception:
+                                        pass
+
+                                if isinstance(details, list) and len(details) > 0:
+                                    for det_line in details:
+                                        if isinstance(det_line, dict):
+                                            merged = {**r_item, **det_line}
+                                            clean_r = {k: v for k, v in merged.items() if not isinstance(v, (dict, list))}
+                                            sample_rows.append(clean_r)
+                                            if len(sample_rows) >= 10:
+                                                break
                                 else:
-                                    merged = dict(r_item)
-                                clean_r = {k: v for k, v in merged.items() if not isinstance(v, (dict, list))}
-                                sample_rows.append(clean_r)
+                                    clean_r = {k: v for k, v in r_item.items() if not isinstance(v, (dict, list))}
+                                    sample_rows.append(clean_r)
+
+                                if len(sample_rows) >= 10:
+                                    break
 
                             if sample_rows:
+                                is_live = True
                                 sample_row = sample_rows[0]
-                                message = f"Kết nối trực tiếp thành công (HTTP 200)! Đã phát hiện {len(sample_row)} trường dữ liệu và lấy {len(sample_rows)} dòng mẫu thực tế."
+                                message = f"Kết nối trực tiếp thành công (HTTP 200)! Đã tải {len(sample_rows)} dòng dữ liệu thực tế từ máy chủ."
                     elif resp.status_code in (401, 403):
-                        message = f"Đã kết nối tới máy chủ nhưng chưa được cấp quyền (HTTP {resp.status_code}). Vui lòng kiểm tra Token / Mật khẩu."
+                        message = f"Đã kết nối tới máy chủ nhưng chưa được cấp quyền (HTTP {resp.status_code}). Vui lòng kiểm tra lại Token / Mật khẩu."
                     else:
                         message = f"Máy chủ phản hồi mã HTTP {resp.status_code}."
             except Exception as exc:
                 message = f"Không thể kết nối tới URL: {exc}."
 
-    # Nếu không kết nối live được, lấy từ bộ Preset mẫu
-    if not sample_row:
+    # Chỉ dùng bộ Preset mẫu khi HOÀN TOÀN không kết nối live được
+    if not is_live and not sample_row:
         sup_code = (payload.supplier_code or "MASAN").upper()
         from app.services.supplier_connectors import generate_sample_raw_rows_for_supplier
         dummy_cfg = DistributorSupplierConfig(
@@ -722,12 +723,12 @@ def test_supplier_connection(
                 sample_rows.append(clean_s)
             sample_row = sample_rows[0]
             if not message:
-                message = f"Đã tải mẫu {len(sample_row)} trường dữ liệu chuẩn của {sup_code}."
+                message = f"Đang hiển thị mẫu cấu trúc trường tham khảo của {sup_code}."
             else:
-                message += f" Đang hiển thị mẫu cấu trúc trường chuẩn của {sup_code} để bạn tham khảo ánh xạ."
+                message += f" Đang hiển thị mẫu cấu trúc trường tham khảo của {sup_code} do chưa kết nối được máy chủ live."
 
-    # Đảm bảo bảng luôn có đủ 10 dòng mẫu thực tế để người dùng dễ quan sát
-    if sample_row and len(sample_rows) < 10:
+    # Chỉ bổ sung dòng nếu là dữ liệu giả lập (mock preset), KHÔNG chèn dòng ảo vào dữ liệu thật (is_live)
+    if not is_live and sample_row and len(sample_rows) < 10:
         base_pool = sample_rows if sample_rows else [sample_row]
         cur_idx = len(sample_rows)
         while len(sample_rows) < 10:

@@ -8,7 +8,7 @@ services:
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PLAYWRIGHT_BROWSERS_PATH
-        value: "0"
+        value: "/opt/render/project/src/pw-browsers"
       - key: SECRET_KEY
         sync: false
       - key: INITIAL_ADMIN_USERNAME

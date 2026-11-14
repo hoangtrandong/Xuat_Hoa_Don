@@ -1213,17 +1213,18 @@ export default function MultiTenantSupplierConfigsPage() {
             </div>
           </div>
 
-          <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 bg-slate-50 px-2 py-2 -mx-5 -mb-5 rounded-b-xl">
             <button
               onClick={() => setSupDrawerOpen(false)}
-              className="px-4 py-2 rounded-lg border border-gray-200 text-sm text-gray-600"
+              className="rounded bg-red-700 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-red-800 transition-colors"
             >
-              Hủy
+              Đóng
             </button>
             <button
               onClick={saveSupplierConfig}
-              className="px-5 py-2 rounded-lg bg-sky-500 hover:bg-sky-600 text-white text-sm font-semibold"
+              className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 transition-colors shadow-xs"
             >
+              <CheckCircle2 size={13} />
               Lưu cấu hình Nguồn NCC
             </button>
           </div>
@@ -1393,17 +1394,18 @@ export default function MultiTenantSupplierConfigsPage() {
             </div>
           </div>
 
-          <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 bg-slate-50 px-2 py-2 -mx-5 -mb-5 rounded-b-xl">
             <button
               onClick={() => setInvDrawerOpen(false)}
-              className="px-4 py-2 rounded-lg border border-gray-200 text-sm text-gray-600"
+              className="rounded bg-red-700 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-red-800 transition-colors"
             >
-              Hủy
+              Đóng
             </button>
             <button
               onClick={saveInvoiceConfig}
-              className="px-5 py-2 rounded-lg bg-sky-500 hover:bg-sky-600 text-white text-sm font-semibold"
+              className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 transition-colors shadow-xs"
             >
+              <CheckCircle2 size={13} />
               Lưu Mẫu Form HĐĐT
             </button>
           </div>
@@ -1472,17 +1474,18 @@ export default function MultiTenantSupplierConfigsPage() {
               />
             </div>
           </div>
-          <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 bg-slate-50 px-2 py-2 -mx-5 -mb-5 rounded-b-xl">
             <button
               onClick={() => setDistDrawerOpen(false)}
-              className="px-4 py-2 rounded-lg border border-gray-200 text-sm text-gray-600"
+              className="rounded bg-red-700 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-red-800 transition-colors"
             >
-              Hủy
+              Đóng
             </button>
             <button
               onClick={saveDistributor}
-              className="px-5 py-2 rounded-lg bg-sky-500 hover:bg-sky-600 text-white text-sm font-semibold"
+              className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 transition-colors shadow-xs"
             >
+              <CheckCircle2 size={13} />
               Lưu Nhà Phân Phối
             </button>
           </div>

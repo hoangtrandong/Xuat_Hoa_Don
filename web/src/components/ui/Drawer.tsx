@@ -21,15 +21,20 @@ export default function Drawer({ open, onClose, title, subtitle, size = "lg", ch
         className={`absolute right-0 top-0 h-full w-full ${widthClass} bg-white shadow-xl flex flex-col`}
         style={{ animation: "slideInRight 0.25s ease-out" }}
       >
-        <div className="flex items-start justify-between px-5 py-4 border-b border-gray-100 flex-shrink-0">
-          <div>
-            <h2 className="text-lg font-bold text-gray-900">{title}</h2>
-            {subtitle && <p className="text-sm text-gray-500 mt-0.5">{subtitle}</p>}
+        <header className="flex items-center justify-between bg-[#14263d] px-4 py-2.5 text-white flex-shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-xs font-bold uppercase tracking-wide text-white truncate">{title}</h2>
+            {subtitle && <span className="text-[10px] text-slate-300 truncate">· {subtitle}</span>}
           </div>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 -mr-2 transition-colors">
-            <X size={18} />
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-1 text-white hover:bg-white/10 transition-colors -mr-1"
+            aria-label="Đóng"
+          >
+            <X size={16} />
           </button>
-        </div>
+        </header>
         <div className="flex-1 overflow-y-auto">{children}</div>
       </div>
     </div>

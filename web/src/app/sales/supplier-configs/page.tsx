@@ -238,12 +238,16 @@ export default function MultiTenantSupplierConfigsPage() {
   function applySupplierPreset(code: string) {
     const preset = presets[code];
     if (!preset) return;
+    let defaultUrl = String(preset.api_endpoint_url ?? "");
+    if (code === "KIOTVIET" && (!defaultUrl || defaultUrl.includes("public.kiotapi.com"))) {
+      defaultUrl = "https://api-man1.kiotviet.vn/api/invoices?format=json&$top=15";
+    }
     setSupForm((prev) => ({
       ...prev,
       supplier_code: code,
       supplier_name: String(preset.supplier_name ?? code),
       connector_type: String(preset.connector_type ?? "REST_API"),
-      api_endpoint_url: String(preset.api_endpoint_url ?? ""),
+      api_endpoint_url: prev.api_endpoint_url && editingSupId ? prev.api_endpoint_url : defaultUrl,
       auth_type: String(preset.auth_type ?? "BEARER_TOKEN"),
       field_mapping: { ...((preset.field_mapping as Record<string, string>) || {}) },
     }));
@@ -745,11 +749,15 @@ export default function MultiTenantSupplierConfigsPage() {
                     <button
                       onClick={() => {
                         setEditingSupId(cfg.id);
+                        let url = cfg.api_endpoint_url || "";
+                        if (cfg.supplier_code === "KIOTVIET" && (!url || url.includes("public.kiotapi.com"))) {
+                          url = "https://api-man1.kiotviet.vn/api/invoices?format=json&$top=15";
+                        }
                         setSupForm({
                           supplier_code: cfg.supplier_code,
                           supplier_name: cfg.supplier_name,
                           connector_type: cfg.connector_type,
-                          api_endpoint_url: cfg.api_endpoint_url,
+                          api_endpoint_url: url,
                           auth_type: cfg.auth_type,
                           username: cfg.username,
                           encrypted_secret: "",

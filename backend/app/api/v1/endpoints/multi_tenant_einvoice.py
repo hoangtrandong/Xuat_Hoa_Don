@@ -117,67 +117,127 @@ class InvoiceIssueRequest(BaseModel):
 def _ensure_default_distributors_seeded(db: Session) -> None:
     """Khởi tạo sẵn dữ liệu mẫu chuẩn cho Nhà phân phối, Nguồn đơn NCC và Cấu hình HĐĐT nếu bảng đang trống."""
     count = db.scalar(select(func.count(Distributor.id))) or 0
-    if count > 0:
-        return
-
-    npp1 = Distributor(
-        code="NPP-DONGDO",
-        name="Công ty TNHH Phân Phối Đông Đô (NPP Mặc định)",
-        tax_code="0108899123",
-        phone="0903 111 222",
-        email="ketoan@dongdodist.vn",
-        address="Số 168 Đường Láng, Quận Đống Đa, TP. Hà Nội",
-        representative_name="Hoàng Trần Đông",
-        status="active",
-    )
-    npp2 = Distributor(
-        code="NPP-NAMVIET",
-        name="Công ty Cổ phần Thương mại & Tiếp vận Nam Việt",
-        tax_code="0315566789",
-        phone="0918 333 444",
-        email="einvoice@namvietfmcg.vn",
-        address="245 Điện Biên Phủ, Quận Bình Thạnh, TP. Hồ Chí Minh",
-        representative_name="Nguyễn Minh Quân",
-        status="active",
-    )
-    db.add_all([npp1, npp2])
-    db.flush()
-
-    # Seed cấu hình nguồn đơn hàng NCC cho NPP 1 (Vinamilk + Masan + Unilever)
-    for sup_code in ("VINAMILK", "MASAN", "UNILEVER"):
-        preset = SUPPLIER_FIELD_MAPPING_PRESETS[sup_code]
-        db.add(
-            DistributorSupplierConfig(
-                distributor_id=npp1.id,
-                supplier_code=sup_code,
-                supplier_name=preset["supplier_name"],
-                connector_type=preset["connector_type"],
-                api_endpoint_url=preset["api_endpoint_url"],
-                auth_type=preset["auth_type"],
-                username=f"dongdo_{sup_code.lower()}",
-                field_mapping=preset["field_mapping"],
-                request_config={"root_data_path": "data", "live_http": False},
-                status="active",
-            )
+    if count == 0:
+        npp1 = Distributor(
+            code="NPP-DONGDO",
+            name="Công ty TNHH Phân Phối Đông Đô (NPP Mặc định)",
+            tax_code="0108899123",
+            phone="0903 111 222",
+            email="ketoan@dongdodist.vn",
+            address="Số 168 Đường Láng, Quận Đống Đa, TP. Hà Nội",
+            representative_name="Hoàng Trần Đông",
+            status="active",
         )
-
-    # Seed cấu hình nguồn đơn hàng NCC cho NPP 2 (Masan + Nestlé)
-    for sup_code in ("MASAN", "NESTLE"):
-        preset = SUPPLIER_FIELD_MAPPING_PRESETS[sup_code]
-        db.add(
-            DistributorSupplierConfig(
-                distributor_id=npp2.id,
-                supplier_code=sup_code,
-                supplier_name=preset["supplier_name"],
-                connector_type=preset["connector_type"],
-                api_endpoint_url=preset["api_endpoint_url"],
-                auth_type=preset["auth_type"],
-                username=f"namviet_{sup_code.lower()}",
-                field_mapping=preset["field_mapping"],
-                request_config={"root_data_path": "orders", "live_http": False},
-                status="active",
-            )
+        npp2 = Distributor(
+            code="NPP-NAMVIET",
+            name="Công ty Cổ phần Thương mại & Tiếp vận Nam Việt",
+            tax_code="0315566789",
+            phone="0918 333 444",
+            email="einvoice@namvietfmcg.vn",
+            address="245 Điện Biên Phủ, Quận Bình Thạnh, TP. Hồ Chí Minh",
+            representative_name="Nguyễn Minh Quân",
+            status="active",
         )
+        db.add_all([npp1, npp2])
+        db.flush()
+
+        # Seed cấu hình nguồn đơn hàng NCC cho NPP 1 (Vinamilk + Masan + Unilever + KiotViet)
+        for sup_code in ("VINAMILK", "MASAN", "UNILEVER", "KIOTVIET"):
+            preset = SUPPLIER_FIELD_MAPPING_PRESETS[sup_code]
+            db.add(
+                DistributorSupplierConfig(
+                    distributor_id=npp1.id,
+                    supplier_code=sup_code,
+                    supplier_name=preset["supplier_name"],
+                    connector_type=preset["connector_type"],
+                    api_endpoint_url=preset["api_endpoint_url"],
+                    auth_type=preset["auth_type"],
+                    username="ctyquyanhna/0972926456" if sup_code == "KIOTVIET" else f"dongdo_{sup_code.lower()}",
+                    field_mapping=preset["field_mapping"],
+                    request_config={"root_data_path": "Data" if sup_code == "KIOTVIET" else "data", "live_http": sup_code == "KIOTVIET"},
+                    status="active",
+                )
+            )
+
+        # Seed cấu hình nguồn đơn hàng NCC cho NPP 2 (Masan + Nestlé)
+        for sup_code in ("MASAN", "NESTLE"):
+            preset = SUPPLIER_FIELD_MAPPING_PRESETS[sup_code]
+            db.add(
+                DistributorSupplierConfig(
+                    distributor_id=npp2.id,
+                    supplier_code=sup_code,
+                    supplier_name=preset["supplier_name"],
+                    connector_type=preset["connector_type"],
+                    api_endpoint_url=preset["api_endpoint_url"],
+                    auth_type=preset["auth_type"],
+                    username=f"namviet_{sup_code.lower()}",
+                    field_mapping=preset["field_mapping"],
+                    request_config={"root_data_path": "orders", "live_http": False},
+                    status="active",
+                )
+            )
+
+        # Seed cấu hình Form & Nhà cung cấp HĐĐT khác nhau cho từng NPP
+        db.add_all(
+            [
+                DistributorInvoiceConfig(
+                    distributor_id=npp1.id,
+                    config_name="MISA meInvoice (Đông Đô)",
+                    provider="MISA",
+                    invoice_template_code="1/001",
+                    invoice_series="1C26TYY",
+                    default_vat_rate=8.0,
+                    combine_orders=False,
+                    promo_handling="ZERO_PRICE",
+                    discount_display="BY_LINE",
+                    product_code_source="SUPPLIER_SKU",
+                    default_payment_method="TM/CK",
+                    form_layout_config={
+                        "header_title": "HÓA ĐƠN GIÁ TRỊ GIA TĂNG",
+                        "theme_color": "#0284c7",
+                        "show_order_ref": True,
+                        "footer_note": "Đơn vị phát hành: Công ty TNHH Phân Phối Đông Đô",
+                    },
+                    is_default=True,
+                    status="active",
+                ),
+                DistributorInvoiceConfig(
+                    distributor_id=npp2.id,
+                    config_name="Viettel Sinvoice (Nam Việt)",
+                    provider="VIETTEL",
+                    invoice_template_code="1/002",
+                    invoice_series="2C26TNN",
+                    default_vat_rate=8.0,
+                    combine_orders=True,
+                    promo_handling="DISCOUNT_ROW",
+                    discount_display="TOTAL_SUMMARY",
+                    product_code_source="INTERNAL_SKU",
+                    default_payment_method="CK",
+                    form_layout_config={
+                        "header_title": "HÓA ĐƠN BÁN HÀNG",
+                        "theme_color": "#059669",
+                        "show_order_ref": True,
+                        "footer_note": "Cảm ơn quý khách đã tin dùng sản phẩm của FMCG Nam Việt",
+                    },
+                    is_default=True,
+                    status="active",
+                ),
+            ]
+        )
+        db.commit()
+
+    # Tự động cập nhật nếu có config KiotViet đang chứa URL cũ public.kiotapi.com
+    old_kv_cfgs = db.scalars(
+        select(DistributorSupplierConfig).where(
+            DistributorSupplierConfig.supplier_code == "KIOTVIET",
+            DistributorSupplierConfig.api_endpoint_url.ilike("%public.kiotapi.com%"),
+        )
+    ).all()
+    if old_kv_cfgs:
+        for old_cfg in old_kv_cfgs:
+            old_cfg.api_endpoint_url = "https://api-man1.kiotviet.vn/api/invoices?format=json&$top=15"
+            db.add(old_cfg)
+        db.commit()
 
     # Seed cấu hình Form & Nhà cung cấp HĐĐT khác nhau cho từng NPP
     db.add_all(

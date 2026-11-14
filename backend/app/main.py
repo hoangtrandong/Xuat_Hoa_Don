@@ -41,6 +41,12 @@ def run_database_migrations() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     run_database_migrations()
+    try:
+        from app.core.database import Base, engine
+        import app.models.multi_tenant_invoice  # noqa: F401
+        Base.metadata.create_all(bind=engine)
+    except Exception as exc:
+        logger.warning("Could not auto-create tables: %s", exc)
     sync_default_roles()
     status = bootstrap_administrator_from_environment()
     logger.info("Initial administrator bootstrap: %s.", status)

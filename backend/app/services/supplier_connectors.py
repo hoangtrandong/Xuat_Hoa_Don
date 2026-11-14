@@ -521,6 +521,52 @@ class BaseSupplierConnector(ABC):
         pass
 
 
+def kiotviet_login_and_get_cookie(retailer: str, username: str, password: str) -> str:
+    """Tự động đăng nhập KiotViet Web bằng username và password (gói Chuyên nghiệp không cần Open API).
+    Trả về Cookie header (ss-id, ss-pid)."""
+    clean_retailer = retailer.strip().lower()
+    clean_user = username.strip()
+    headers = {
+        "Retailer": clean_retailer,
+        "Origin": f"https://{clean_retailer}.kiotviet.vn",
+        "Referer": f"https://{clean_retailer}.kiotviet.vn/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": {
+            "UserName": clean_user,
+            "Password": password,
+            "RememberMe": True,
+        }
+    }
+    with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+        # Khởi tạo phiên
+        client.get("https://api-man1.kiotviet.vn/api/account/checklogin?key=", headers=headers)
+
+        # Gửi thông tin đăng nhập
+        resp = client.post(
+            "https://api-man1.kiotviet.vn/api/account/login",
+            json=payload,
+            headers=headers,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Lỗi kết nối tới máy chủ KiotViet: HTTP {resp.status_code}")
+
+        data = resp.json()
+        if data.get("error"):
+            raise RuntimeError(f"KiotViet từ chối đăng nhập: {data['error']}")
+
+        cookies = [f"{k}={v}" for k, v in client.cookies.items() if v]
+        if not cookies:
+            raise RuntimeError("Đăng nhập KiotViet thành công nhưng không lấy được cookie phiên.")
+
+        return "; ".join(cookies)
+
+
 class RestApiSupplierConnector(BaseSupplierConnector):
     """Connector kết nối REST API của các Nhà cung cấp (Masan, Unilever, ERP tùy chỉnh...)."""
 
@@ -537,6 +583,18 @@ class RestApiSupplierConnector(BaseSupplierConnector):
             headers["X-API-Key"] = config.encrypted_secret
         elif config.auth_type == "COOKIE" and config.session_cookie:
             headers["Cookie"] = config.session_cookie
+
+        # Tự động đăng nhập KiotViet bằng username/password nếu chưa có cookie hoặc cookie hết hạn
+        if config.supplier_code.upper() == "KIOTVIET" and config.auth_type == "COOKIE":
+            retailer = config.username or "ctyquyanhna"
+            headers["Retailer"] = retailer
+            if not config.session_cookie and config.username and config.encrypted_secret:
+                try:
+                    cookie = kiotviet_login_and_get_cookie(retailer, config.username, config.encrypted_secret)
+                    config.session_cookie = cookie
+                    headers["Cookie"] = cookie
+                except Exception:
+                    pass
 
         req_cfg = config.request_config or {}
         # Hỗ trợ tự động gọi API thật nếu có URL HTTP/HTTPS

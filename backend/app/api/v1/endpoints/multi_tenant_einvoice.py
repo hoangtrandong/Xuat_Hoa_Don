@@ -557,9 +557,18 @@ def test_supplier_connection(
             token = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("utf-8")
             headers["Authorization"] = f"Basic {token}"
 
-        # Header Retailer đặc thù của KiotViet
-        if username:
-            headers["Retailer"] = username
+        # Hỗ trợ tự động đăng nhập KiotViet Web bằng username/password khi dùng COOKIE
+        if ("kiotviet" in (payload.supplier_code or "").lower() or "kiotviet" in url) and auth_type == "COOKIE":
+            retailer = username or "ctyquyanhna"
+            headers["Retailer"] = retailer
+            if secret:
+                try:
+                    from app.services.supplier_connectors import kiotviet_login_and_get_cookie
+                    auto_cookie = kiotviet_login_and_get_cookie(retailer, username, secret)
+                    headers["Cookie"] = auto_cookie
+                    message = "Đã tự động đăng nhập KiotViet thành công! "
+                except Exception as login_err:
+                    message = f"Đăng nhập KiotViet: {login_err}. "
 
         try:
             with httpx.Client(timeout=15.0, follow_redirects=True) as client:

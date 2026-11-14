@@ -1072,13 +1072,14 @@ export default function MultiTenantSupplierConfigsPage() {
             </div>
             <div>
               <label className="text-xs font-medium text-gray-600">
-                Mật khẩu / API Token (Để trống nếu giữ nguyên)
+                Mật khẩu / Token JWT / Cookie (Để trống nếu giữ nguyên)
               </label>
               <input
-                type="password"
+                type="text"
                 value={supForm.encrypted_secret}
                 onChange={(e) => setSupForm({ ...supForm, encrypted_secret: e.target.value })}
-                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                placeholder="VD: Bearer eyJ... hoặc Mật khẩu"
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-xs font-mono"
               />
             </div>
           </div>

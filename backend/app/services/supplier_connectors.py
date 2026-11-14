@@ -152,29 +152,29 @@ SUPPLIER_FIELD_MAPPING_PRESETS: dict[str, dict[str, Any]] = {
         },
     },
     "KIOTVIET": {
-        "supplier_name": "KiotViet (KiotAPI)",
+        "supplier_name": "KiotViet (Web API / Hóa đơn bán hàng)",
         "connector_type": "REST_API",
-        "api_endpoint_url": "https://public.kiotapi.com/orders",
+        "api_endpoint_url": "https://api-man1.kiotviet.vn/api/invoices?format=json&$top=15",
         "auth_type": "BEARER_TOKEN",
         "field_mapping": {
-            "order_number": "code",
-            "order_date": "createdDate",
-            "delivery_date": "modifiedDate",
-            "customer_code": "customerCode",
-            "customer_name": "customerName",
-            "customer_tax_code": "customerTaxCode",
-            "customer_address": "customerAddress",
-            "product_code": "productCode",
-            "product_name": "productName",
-            "unit": "unit",
-            "quantity": "quantity",
+            "order_number": "Code",
+            "order_date": "PurchaseDate",
+            "delivery_date": "CreatedDate",
+            "customer_code": "CustomerCode",
+            "customer_name": "CustomerName",
+            "customer_tax_code": "CustomerTaxCode",
+            "customer_address": "CustomerAddress",
+            "product_code": "ProductCode",
+            "product_name": "ProductName",
+            "unit": "Unit",
+            "quantity": "Quantity",
             "promo_quantity": "bonusQuantity",
-            "unit_price": "price",
-            "discount_amount": "discount",
-            "vat_rate": "vat",
-            "line_total": "subTotal",
-            "staff_code": "userCode",
-            "staff_name": "userName",
+            "unit_price": "Price",
+            "discount_amount": "Discount",
+            "vat_rate": "Tax",
+            "line_total": "SubTotal",
+            "staff_code": "SoldById",
+            "staff_name": "SoldByGivenName",
         },
     },
 }
@@ -182,23 +182,35 @@ SUPPLIER_FIELD_MAPPING_PRESETS: dict[str, dict[str, Any]] = {
 
 def _extract_value(row: dict[str, Any], configured_key: str | None, fallback_keys: tuple[str, ...] = ()) -> Any:
     if configured_key:
-        for candidate in [configured_key.strip(), configured_key.strip().lower(), configured_key.strip().upper()]:
+        ck = configured_key.strip()
+        candidates = [ck, ck.lower(), ck.upper(), ck.capitalize(), ck[:1].upper() + ck[1:]]
+        for candidate in candidates:
             if candidate in row and row[candidate] is not None and str(row[candidate]).strip() != "":
                 return row[candidate]
-        # Hỗ trợ nested key dạng "customer.code"
-        if "." in configured_key:
+        # Hỗ trợ nested key dạng "customer.code" hoặc "Branch.Name"
+        if "." in ck:
             cursor: Any = row
-            for part in configured_key.split("."):
-                if isinstance(cursor, dict) and part in cursor:
-                    cursor = cursor[part]
+            for part in ck.split("."):
+                if isinstance(cursor, dict):
+                    matched_k = next((k for k in cursor if k.lower() == part.lower()), None)
+                    cursor = cursor[matched_k] if matched_k else None
                 else:
                     cursor = None
                     break
             if cursor is not None and str(cursor).strip() != "":
                 return cursor
+        # Case-insensitive direct match
+        ck_lower = ck.lower()
+        for k, v in row.items():
+            if k.lower() == ck_lower and v is not None and str(v).strip() != "":
+                return v
     for key in fallback_keys:
         if key in row and row[key] is not None and str(row[key]).strip() != "":
             return row[key]
+        key_lower = key.lower()
+        for k, v in row.items():
+            if k.lower() == key_lower and v is not None and str(v).strip() != "":
+                return v
     return None
 
 
@@ -577,15 +589,21 @@ class RestApiSupplierConnector(BaseSupplierConnector):
         to_date: date,
     ) -> list[dict[str, Any]]:
         headers: dict[str, str] = {"Accept": "application/json"}
-        if config.auth_type == "BEARER_TOKEN" and config.encrypted_secret:
-            headers["Authorization"] = f"Bearer {config.encrypted_secret}"
-        elif config.auth_type == "API_KEY" and config.encrypted_secret:
-            headers["X-API-Key"] = config.encrypted_secret
-        elif config.auth_type == "COOKIE" and config.session_cookie:
-            headers["Cookie"] = config.session_cookie
+        secret = (config.encrypted_secret or "").strip()
+        clean_token = secret.replace("Bearer ", "").strip()
 
-        # Tự động đăng nhập KiotViet bằng username/password nếu chưa có cookie hoặc cookie hết hạn
-        if config.supplier_code.upper() == "KIOTVIET" and config.auth_type == "COOKIE":
+        if config.auth_type == "BEARER_TOKEN" and clean_token:
+            headers["Authorization"] = f"Bearer {clean_token}"
+        elif config.auth_type == "API_KEY" and secret:
+            headers["X-API-Key"] = secret
+        elif config.auth_type == "COOKIE" and (config.session_cookie or secret):
+            if clean_token.startswith("eyJ"):
+                headers["Authorization"] = f"Bearer {clean_token}"
+            headers["Cookie"] = config.session_cookie or secret
+
+        # Tự động tối ưu riêng cho KiotViet (Web API)
+        is_kiotviet = config.supplier_code.upper() == "KIOTVIET" or "kiotviet" in (config.api_endpoint_url or "").lower()
+        if is_kiotviet:
             retailer = "ctyquyanhna"
             clean_user = config.username or ""
             if "/" in clean_user:
@@ -596,9 +614,13 @@ class RestApiSupplierConnector(BaseSupplierConnector):
                 clean_user, retailer = parts[0].strip(), parts[1].strip()
 
             headers["Retailer"] = retailer
-            if not config.session_cookie and clean_user and config.encrypted_secret:
+            headers["Origin"] = f"https://{retailer}.kiotviet.vn"
+            headers["Referer"] = f"https://{retailer}.kiotviet.vn/"
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+            if config.auth_type == "COOKIE" and not config.session_cookie and clean_user and secret and not secret.startswith("eyJ"):
                 try:
-                    cookie = kiotviet_login_and_get_cookie(retailer, clean_user, config.encrypted_secret)
+                    cookie = kiotviet_login_and_get_cookie(retailer, clean_user, secret)
                     config.session_cookie = cookie
                     headers["Cookie"] = cookie
                 except Exception:
@@ -606,17 +628,18 @@ class RestApiSupplierConnector(BaseSupplierConnector):
 
         req_cfg = config.request_config or {}
         # Hỗ trợ tự động gọi API thật nếu có URL HTTP/HTTPS
-        if config.api_endpoint_url and (config.api_endpoint_url.startswith("http://") or config.api_endpoint_url.startswith("https://")):
-            # Hỗ trợ header Retailer đặc thù của KiotViet
-            if config.username:
-                headers["Retailer"] = config.username.strip()
+        endpoint_url = config.api_endpoint_url
+        if endpoint_url and "public.kiotapi.com" in endpoint_url and is_kiotviet:
+            endpoint_url = "https://api-man1.kiotviet.vn/api/invoices?format=json&$top=30"
+
+        if endpoint_url and (endpoint_url.startswith("http://") or endpoint_url.startswith("https://")):
             if req_cfg.get("retailer"):
                 headers["Retailer"] = str(req_cfg["retailer"]).strip()
 
             try:
                 with httpx.Client(timeout=30.0, follow_redirects=True) as client:
                     resp = client.get(
-                        config.api_endpoint_url,
+                        endpoint_url,
                         params={"fromDate": from_date.isoformat(), "toDate": to_date.isoformat()},
                         headers=headers,
                     )
@@ -628,20 +651,37 @@ class RestApiSupplierConnector(BaseSupplierConnector):
                         elif isinstance(data, dict):
                             root_key = req_cfg.get("root_data_path", "data")
                             raw_list = (
-                                data.get(root_key)
+                                data.get("Data")
+                                or data.get(root_key)
                                 or data.get("orders")
                                 or data.get("invoices")
                                 or data.get("rows")
                                 or []
                             )
 
-                        # Tự động làm phẳng (Flatten) nếu đơn hàng chứa mảng chi tiết (như orderDetails của KiotViet)
+                        # Bỏ qua hàng tổng kết Id == -1 của KiotViet
+                        if isinstance(raw_list, list):
+                            raw_list = [r for r in raw_list if isinstance(r, dict) and r.get("Id") != -1]
+
+                        # Tự động làm phẳng (Flatten) nếu đơn hàng chứa mảng chi tiết (như InvoiceDetails của KiotViet)
                         flat_rows: list[dict[str, Any]] = []
                         for item in raw_list:
                             if isinstance(item, dict):
+                                # Nếu là KiotViet và chưa có chi tiết, gọi API xem chi tiết hóa đơn
+                                if is_kiotviet and item.get("Id") and not item.get("InvoiceDetails") and not item.get("OrderDetails"):
+                                    try:
+                                        base_endpoint = endpoint_url.split("?")[0].rstrip("/")
+                                        r_detail = client.get(f"{base_endpoint}/{item['Id']}?format=json", headers=headers)
+                                        if r_detail.status_code == 200:
+                                            item = r_detail.json()
+                                    except Exception:
+                                        pass
+
                                 details = (
-                                    item.get("orderDetails")
+                                    item.get("InvoiceDetails")
                                     or item.get("invoiceDetails")
+                                    or item.get("OrderDetails")
+                                    or item.get("orderDetails")
                                     or item.get("items")
                                     or item.get("lines")
                                     or item.get("products")
@@ -658,6 +698,8 @@ class RestApiSupplierConnector(BaseSupplierConnector):
                         if flat_rows:
                             return flat_rows
             except Exception:
+                # Fallback dữ liệu mẫu nếu API endpoint không phản hồi hoặc đang trong môi trường demo/offline
+                pass
                 # Fallback dữ liệu mẫu nếu API endpoint không phản hồi hoặc đang trong môi trường demo/offline
                 pass
 

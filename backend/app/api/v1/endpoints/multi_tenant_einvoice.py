@@ -546,19 +546,25 @@ def test_supplier_connection(
 
     if url and (url.startswith("http://") or url.startswith("https://")):
         headers = {"Accept": "application/json"}
-        if auth_type == "BEARER_TOKEN" and secret:
-            headers["Authorization"] = f"Bearer {secret}"
+        auth_header = secret or payload.session_cookie or ""
+        clean_token = auth_header.replace("Bearer ", "").strip()
+
+        if auth_type == "BEARER_TOKEN" and clean_token:
+            headers["Authorization"] = f"Bearer {clean_token}"
         elif auth_type == "API_KEY" and secret:
             headers["X-API-Key"] = secret
         elif auth_type == "COOKIE" and (payload.session_cookie or secret):
+            if clean_token.startswith("eyJ"):
+                headers["Authorization"] = f"Bearer {clean_token}"
             headers["Cookie"] = payload.session_cookie or secret
         elif auth_type == "BASIC_AUTH" and (username or secret):
             import base64
             token = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("utf-8")
             headers["Authorization"] = f"Basic {token}"
 
-        # Hỗ trợ tự động đăng nhập KiotViet Web bằng username/password khi dùng COOKIE
-        if ("kiotviet" in (payload.supplier_code or "").lower() or "kiotviet" in url) and auth_type == "COOKIE":
+        # Hỗ trợ tự động cấu hình riêng cho KiotViet
+        is_kiotviet = ("kiotviet" in (payload.supplier_code or "").lower() or "kiotviet" in url)
+        if is_kiotviet:
             retailer = "ctyquyanhna"
             clean_user = username
             if "/" in username:
@@ -568,12 +574,16 @@ def test_supplier_connection(
                 parts = username.split("@", 1)
                 clean_user, retailer = parts[0].strip(), parts[1].strip()
 
-            # Nếu dùng cookie mà url đang để public.kiotapi.com thì tự động chuyển sang api-man1 của web
+            # Nếu dùng cookie/bearer mà url đang để public.kiotapi.com thì tự động chuyển sang api-man1
             if "public.kiotapi.com" in url:
-                url = f"https://api-man1.kiotviet.vn/api/orders?format=json&Includes=Customer&Includes=Seller&Includes=OrderPromotions&BranchIds=[908442]&TimeRange=month&$top=15"
+                url = "https://api-man1.kiotviet.vn/api/invoices?format=json&$top=15"
 
             headers["Retailer"] = retailer
-            if secret:
+            headers["Origin"] = f"https://{retailer}.kiotviet.vn"
+            headers["Referer"] = f"https://{retailer}.kiotviet.vn/"
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+            if auth_type == "COOKIE" and secret and not secret.startswith("eyJ"):
                 try:
                     from app.services.supplier_connectors import kiotviet_login_and_get_cookie
                     auto_cookie = kiotviet_login_and_get_cookie(retailer, clean_user, secret)
@@ -593,19 +603,36 @@ def test_supplier_connection(
                         raw_list = data
                     elif isinstance(data, dict):
                         raw_list = (
-                            data.get("data")
+                            data.get("Data")
+                            or data.get("data")
                             or data.get("orders")
                             or data.get("invoices")
                             or data.get("rows")
                             or [data]
                         )
 
+                    if isinstance(raw_list, list):
+                        raw_list = [r for r in raw_list if isinstance(r, dict) and r.get("Id") != -1]
+
                     if raw_list and isinstance(raw_list[0], dict):
                         first_item = raw_list[0]
-                        # Flatten nếu có mảng con (KiotViet orderDetails, etc.)
+                        
+                        # KiotViet: Nếu list view chưa có InvoiceDetails thì gọi chi tiết hóa đơn
+                        if is_kiotviet and first_item.get("Id") and not first_item.get("InvoiceDetails") and not first_item.get("OrderDetails"):
+                            try:
+                                base_endpoint = url.split("?")[0].rstrip("/")
+                                detail_resp = client.get(f"{base_endpoint}/{first_item['Id']}?format=json", headers=headers)
+                                if detail_resp.status_code == 200:
+                                    first_item = detail_resp.json()
+                            except Exception:
+                                pass
+
+                        # Flatten nếu có mảng con (KiotViet InvoiceDetails, OrderDetails, etc.)
                         details = (
-                            first_item.get("orderDetails")
+                            first_item.get("InvoiceDetails")
                             or first_item.get("invoiceDetails")
+                            or first_item.get("OrderDetails")
+                            or first_item.get("orderDetails")
                             or first_item.get("items")
                             or first_item.get("lines")
                         )
@@ -614,7 +641,7 @@ def test_supplier_connection(
                         else:
                             sample_row = first_item
 
-                        message = f"Kết nối trực tiếp thành công (HTTP 200)! Đã phát hiện {len(sample_row)} trường dữ liệu."
+                        message = f"Kết nối trực tiếp thành công (HTTP 200)! Đã phát hiện {len(sample_row)} trường dữ liệu thực tế từ máy chủ."
                 elif resp.status_code in (401, 403):
                     message = f"Đã kết nối tới máy chủ nhưng chưa được cấp quyền (HTTP {resp.status_code}). Vui lòng kiểm tra Token / Mật khẩu."
                 else:

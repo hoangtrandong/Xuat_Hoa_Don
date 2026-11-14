@@ -586,11 +586,19 @@ class RestApiSupplierConnector(BaseSupplierConnector):
 
         # Tự động đăng nhập KiotViet bằng username/password nếu chưa có cookie hoặc cookie hết hạn
         if config.supplier_code.upper() == "KIOTVIET" and config.auth_type == "COOKIE":
-            retailer = config.username or "ctyquyanhna"
+            retailer = "ctyquyanhna"
+            clean_user = config.username or ""
+            if "/" in clean_user:
+                parts = clean_user.split("/", 1)
+                retailer, clean_user = parts[0].strip(), parts[1].strip()
+            elif "@" in clean_user and not clean_user.endswith(".com"):
+                parts = clean_user.split("@", 1)
+                clean_user, retailer = parts[0].strip(), parts[1].strip()
+
             headers["Retailer"] = retailer
-            if not config.session_cookie and config.username and config.encrypted_secret:
+            if not config.session_cookie and clean_user and config.encrypted_secret:
                 try:
-                    cookie = kiotviet_login_and_get_cookie(retailer, config.username, config.encrypted_secret)
+                    cookie = kiotviet_login_and_get_cookie(retailer, clean_user, config.encrypted_secret)
                     config.session_cookie = cookie
                     headers["Cookie"] = cookie
                 except Exception:

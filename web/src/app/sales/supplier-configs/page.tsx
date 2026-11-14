@@ -1060,10 +1060,13 @@ export default function MultiTenantSupplierConfigsPage() {
               />
             </div>
             <div>
-              <label className="text-xs font-medium text-gray-600">Tài khoản / Client ID</label>
+              <label className="text-xs font-medium text-gray-600">
+                Tài khoản (KiotViet: ctyquyanhna/TênĐăngNhập)
+              </label>
               <input
                 value={supForm.username}
                 onChange={(e) => setSupForm({ ...supForm, username: e.target.value })}
+                placeholder="VD: ctyquyanhna/0364341308"
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
               />
             </div>

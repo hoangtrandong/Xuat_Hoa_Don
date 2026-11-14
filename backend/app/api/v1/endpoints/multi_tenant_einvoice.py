@@ -559,16 +559,28 @@ def test_supplier_connection(
 
         # Hỗ trợ tự động đăng nhập KiotViet Web bằng username/password khi dùng COOKIE
         if ("kiotviet" in (payload.supplier_code or "").lower() or "kiotviet" in url) and auth_type == "COOKIE":
-            retailer = username or "ctyquyanhna"
+            retailer = "ctyquyanhna"
+            clean_user = username
+            if "/" in username:
+                parts = username.split("/", 1)
+                retailer, clean_user = parts[0].strip(), parts[1].strip()
+            elif "@" in username and not username.endswith(".com"):
+                parts = username.split("@", 1)
+                clean_user, retailer = parts[0].strip(), parts[1].strip()
+
+            # Nếu dùng cookie mà url đang để public.kiotapi.com thì tự động chuyển sang api-man1 của web
+            if "public.kiotapi.com" in url:
+                url = f"https://api-man1.kiotviet.vn/api/orders?format=json&Includes=Customer&Includes=Seller&Includes=OrderPromotions&BranchIds=[908442]&TimeRange=month&$top=15"
+
             headers["Retailer"] = retailer
             if secret:
                 try:
                     from app.services.supplier_connectors import kiotviet_login_and_get_cookie
-                    auto_cookie = kiotviet_login_and_get_cookie(retailer, username, secret)
+                    auto_cookie = kiotviet_login_and_get_cookie(retailer, clean_user, secret)
                     headers["Cookie"] = auto_cookie
-                    message = "Đã tự động đăng nhập KiotViet thành công! "
+                    message = f"Đã tự động đăng nhập KiotViet ({retailer} / {clean_user}) thành công! "
                 except Exception as login_err:
-                    message = f"Đăng nhập KiotViet: {login_err}. "
+                    message = f"Đăng nhập KiotViet thất bại: {login_err}. "
 
         try:
             with httpx.Client(timeout=15.0, follow_redirects=True) as client:

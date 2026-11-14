@@ -26,6 +26,13 @@ from app.models.vinamilk import (
 )
 from app.models.vinamilk_allocation import VinamilkOrderAllocation
 from app.models.employee_borrow import EmployeeBorrowBatch, EmployeeBorrowEntry
+from app.models.multi_tenant_invoice import (
+    Distributor,
+    DistributorSupplierConfig,
+    DistributorInvoiceConfig,
+    IssuedInvoice,
+    IssuedInvoiceItem,
+)
 
 __all__ = [
     "User", "Role", "Permission", "AuditLog",
@@ -45,4 +52,5 @@ __all__ = [
     "VinamilkCredential",
     "VinamilkOrderAllocation",
     "EmployeeBorrowBatch", "EmployeeBorrowEntry",
+    "Distributor", "DistributorSupplierConfig", "DistributorInvoiceConfig", "IssuedInvoice", "IssuedInvoiceItem",
 ]

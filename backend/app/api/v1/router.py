@@ -3,7 +3,7 @@ from app.api.v1.endpoints import (
     customers, products, sales, inventory, employees, payments, delivery_requests, debt,
     stores, companies, sync, product_groups, users,
     employee_debts, store_debts, cash_receipts, debt_transfers, delivery_returns,
-    bank_receipts, promotions,
+    bank_receipts, promotions, multi_tenant_einvoice,
 )
 
 api_router = APIRouter()
@@ -28,3 +28,4 @@ api_router.include_router(sync.router, prefix="/sync", tags=["Sync"])
 api_router.include_router(product_groups.router)
 api_router.include_router(users.router)
 api_router.include_router(promotions.router)
+api_router.include_router(multi_tenant_einvoice.router)

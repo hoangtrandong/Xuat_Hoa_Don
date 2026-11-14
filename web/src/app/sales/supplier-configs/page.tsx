@@ -952,7 +952,7 @@ export default function MultiTenantSupplierConfigsPage() {
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm bg-white"
               >
                 <option value="REST_API">REST API (JSON Endpoint)</option>
-                <option value="PORTAL_PLAYWRIGHT">DMS Web Portal (Playwright / Cookie)</option>
+                <option value="PORTAL_PLAYWRIGHT">DMS Web Portal (HTTP Client / Cookie)</option>
                 <option value="EXCEL_DYNAMIC">File Excel Động (Dynamic Column Mapping)</option>
               </select>
             </div>

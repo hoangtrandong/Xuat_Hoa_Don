@@ -32,6 +32,12 @@ class Distributor(Base):
     issued_invoices: Mapped[List["IssuedInvoice"]] = relationship(
         back_populates="distributor", cascade="all, delete-orphan"
     )
+    tax_credential: Mapped["TaxAuthorityCredential | None"] = relationship(
+        back_populates="distributor", uselist=False, cascade="all, delete-orphan"
+    )
+    purchase_invoices: Mapped[List["PurchaseInvoice"]] = relationship(
+        back_populates="distributor", cascade="all, delete-orphan"
+    )
 
 
 class DistributorSupplierConfig(Base):
@@ -180,3 +186,97 @@ class IssuedInvoiceItem(Base):
     source_order_number: Mapped[str | None] = mapped_column(String(120))
 
     invoice: Mapped["IssuedInvoice"] = relationship(back_populates="items")
+
+
+class TaxAuthorityCredential(Base):
+    """Thông tin tài khoản & phiên Bearer Token kết nối Cổng Hóa đơn điện tử Tổng cục Thuế (hoadondientu.gdt.gov.vn) theo từng Nhà phân phối."""
+
+    __tablename__ = "tax_authority_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    distributor_id: Mapped[int] = mapped_column(
+        ForeignKey("distributors.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    username: Mapped[str | None] = mapped_column(String(120))  # Mã số thuế đăng nhập CQT
+    encrypted_password: Mapped[str | None] = mapped_column(Text)  # Mật khẩu CQT
+    bearer_token: Mapped[str | None] = mapped_column(Text)  # Bearer <JWT>
+    token_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    distributor: Mapped["Distributor"] = relationship(back_populates="tax_credential")
+
+
+class PurchaseInvoice(Base):
+    """Hóa đơn điện tử mua vào (đầu vào) đồng bộ từ Cổng Tổng cục Thuế (hoadondientu.gdt.gov.vn)."""
+
+    __tablename__ = "purchase_invoices"
+    __table_args__ = (
+        UniqueConstraint(
+            "distributor_id",
+            "seller_tax_code",
+            "invoice_template",
+            "invoice_symbol",
+            "invoice_number",
+            name="uq_purchase_invoice_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    distributor_id: Mapped[int] = mapped_column(ForeignKey("distributors.id", ondelete="CASCADE"), index=True)
+    external_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    invoice_template: Mapped[str] = mapped_column(String(40), default="1")  # khmshdon / KHMSHDon
+    invoice_symbol: Mapped[str] = mapped_column(String(40), index=True)  # khhdon / KHHDon
+    invoice_number: Mapped[str] = mapped_column(String(40), index=True)  # shdon / SHDon
+    invoice_date: Mapped[datetime | None] = mapped_column(DateTime, index=True)  # tdlap / NLap
+    seller_tax_code: Mapped[str] = mapped_column(String(40), index=True)  # nbmst / NBan/MST
+    seller_name: Mapped[str] = mapped_column(String(255))  # nbten / NBan/Ten
+    seller_address: Mapped[str | None] = mapped_column(String(500))  # nbdchi / NBan/DChi
+    buyer_tax_code: Mapped[str | None] = mapped_column(String(40))  # nmmst / NMua/MST
+    buyer_name: Mapped[str | None] = mapped_column(String(255))  # nmten / NMua/Ten
+    invoice_category: Mapped[str] = mapped_column(
+        String(30), default="CO_MA", index=True
+    )  # CO_MA (ttxly=5) | KHONG_MA (ttxly=6) | MAY_TINH_TIEN (ttxly=8)
+    ttxly: Mapped[str | None] = mapped_column(String(20))
+    is_mtt: Mapped[bool] = mapped_column(Boolean, default=False)
+    replaced_invoice_number: Mapped[str | None] = mapped_column(String(120))  # hdThayThe
+    replaced_invoice_date: Mapped[str | None] = mapped_column(String(80))  # ngayThayThe
+    amount_before_tax: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    tax_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    total_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    currency: Mapped[str] = mapped_column(String(15), default="VND")
+    xml_downloaded: Mapped[bool] = mapped_column(Boolean, default=False)
+    xml_content: Mapped[str | None] = mapped_column(Text)
+    html_content: Mapped[str | None] = mapped_column(Text)
+    raw_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    distributor: Mapped["Distributor"] = relationship(back_populates="purchase_invoices")
+    items: Mapped[List["PurchaseInvoiceItem"]] = relationship(
+        back_populates="invoice", cascade="all, delete-orphan"
+    )
+
+
+class PurchaseInvoiceItem(Base):
+    """Dòng hàng hóa chi tiết bóc tách từ thẻ <HHDVu> trong XML Hóa đơn mua vào."""
+
+    __tablename__ = "purchase_invoice_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    purchase_invoice_id: Mapped[int] = mapped_column(
+        ForeignKey("purchase_invoices.id", ondelete="CASCADE"), index=True
+    )
+    line_number: Mapped[int] = mapped_column(Integer, default=1)
+    product_code: Mapped[str | None] = mapped_column(String(100), index=True)  # MHHDVu
+    product_name: Mapped[str] = mapped_column(String(500))  # THHDVu
+    unit_name: Mapped[str | None] = mapped_column(String(60))  # DVTinh
+    quantity: Mapped[float] = mapped_column(Float, default=0)  # SLuong
+    unit_price: Mapped[float] = mapped_column(Numeric(16, 2), default=0)  # DGia
+    discount_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)  # STCKhau
+    amount_before_tax: Mapped[float] = mapped_column(Numeric(16, 2), default=0)  # ThTien
+    vat_rate: Mapped[str | None] = mapped_column(String(30))  # TSuat
+    vat_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+
+    invoice: Mapped["PurchaseInvoice"] = relationship(back_populates="items")

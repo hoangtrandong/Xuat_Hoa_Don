@@ -5,12 +5,17 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.auth import hash_password
 from app.models.employee import Employee
+from app.models.multi_tenant_invoice import Distributor
 from app.models.user import Role, User
 from app.schemas.user import UserCreate, UserUpdate
 
 
 def _load_options():
-    return (selectinload(User.roles), joinedload(User.employee))
+    return (
+        selectinload(User.roles),
+        joinedload(User.employee),
+        joinedload(User.distributor),
+    )
 
 
 def user_response(user: User) -> dict:
@@ -23,6 +28,10 @@ def user_response(user: User) -> dict:
         "employee_id": user.employee_id,
         "employee_code": user.employee.code if user.employee else None,
         "employee_name": user.employee.name if user.employee else None,
+        "distributor_id": user.distributor_id,
+        "distributor_code": user.distributor.code if user.distributor else None,
+        "distributor_name": user.distributor.name if user.distributor else None,
+        "distributor_tax_code": user.distributor.tax_code if user.distributor else None,
         "created_at": user.created_at,
         "roles": user.roles,
     }
@@ -67,13 +76,19 @@ def create_user(db: Session, payload: UserCreate) -> User:
     if db.scalar(select(User.id).where(User.email == payload.email)):
         raise ValueError(f"Email '{payload.email}' đã được sử dụng.")
     roles = _resolve_roles(db, payload.role_ids)
+    if not roles and payload.distributor_id is not None:
+        admin_role = db.scalar(select(Role).where(Role.name == "admin"))
+        if admin_role:
+            roles = [admin_role]
     user = User(
         username=username,
         email=payload.email,
         full_name=payload.full_name,
         hashed_password=hash_password(payload.password),
         is_active=True,
+        must_change_password=False,
         employee_id=payload.employee_id,
+        distributor_id=payload.distributor_id,
         roles=roles,
     )
     db.add(user)
@@ -92,10 +107,19 @@ def update_user(db: Session, user_id: int, payload: UserUpdate) -> Optional[User
         user.is_active = payload.is_active
     if payload.role_ids is not None:
         user.roles = _resolve_roles(db, payload.role_ids)
+    if payload.password and payload.password.strip():
+        user.hashed_password = hash_password(payload.password.strip())
+        user.must_change_password = False
+        user.failed_login_attempts = 0
+        user.locked_until = None
     if "employee_id" in payload.model_fields_set:
         if payload.employee_id is not None and not db.get(Employee, payload.employee_id):
             raise ValueError("Không tìm thấy nhân viên tương ứng.")
         user.employee_id = payload.employee_id
+    if "distributor_id" in payload.model_fields_set:
+        if payload.distributor_id is not None and not db.get(Distributor, payload.distributor_id):
+            raise ValueError("Không tìm thấy Nhà phân phối tương ứng.")
+        user.distributor_id = payload.distributor_id
     db.commit()
     db.refresh(user)
     return user

@@ -57,6 +57,17 @@ class Customer(Base):
     def company_name(self) -> str | None:
         return self.company.name if self.company else None
 
+    @property
+    def address(self) -> str | None:
+        if self.addresses:
+            default_addr = next((a for a in self.addresses if a.is_default and a.address), None)
+            if default_addr:
+                return default_addr.address
+            first_addr = next((a for a in self.addresses if a.address), None)
+            if first_addr:
+                return first_addr.address
+        return self.store.address if self.store and self.store.address else None
+
 
 class Store(Base):
     """Cửa hàng / điểm bán vật lý."""

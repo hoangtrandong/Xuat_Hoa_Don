@@ -1,10 +1,96 @@
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from app.models.customer import Customer, Store
+from app.models.customer import Customer, CustomerAddress, Store
 from app.models.employee import Employee
+from app.models.vinamilk import VinamilkOrderSnapshot
 from app.schemas.customer import CustomerCreate, CustomerUpdate
+
+
+def _extract_raw_str(raw: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for k in keys:
+        val = raw.get(k)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
+    """Tự động khởi tạo Khách hàng trong bảng customers từ các đơn hàng đã đồng bộ (vinamilk_order_snapshots)
+    nếu mã khách hàng đó chưa tồn tại trong danh mục."""
+    missing_snapshots = db.scalars(
+        select(VinamilkOrderSnapshot)
+        .where(
+            VinamilkOrderSnapshot.customer_code.is_not(None),
+            func.trim(VinamilkOrderSnapshot.customer_code) != "",
+            ~func.upper(func.trim(VinamilkOrderSnapshot.customer_code)).in_(
+                select(func.upper(func.trim(Customer.code))).where(Customer.code.is_not(None))
+            ),
+        )
+        .order_by(VinamilkOrderSnapshot.id.desc())
+    ).all()
+
+    if not missing_snapshots:
+        return 0
+
+    existing_upper = {
+        (code or "").strip().upper()
+        for code in db.scalars(select(Customer.code)).all()
+        if code
+    }
+    created_count = 0
+    for snap in missing_snapshots:
+        raw_code = (snap.customer_code or "").strip()
+        if not raw_code:
+            continue
+        clean_code = raw_code[:20]
+        upper_code = clean_code.upper()
+        if upper_code in existing_upper:
+            continue
+        if upper_code.startswith(("NVGH-", "NVBH-")) or upper_code == "NVBH":
+            continue
+
+        raw = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+        name = (
+            (snap.customer_name or "").strip()
+            or _extract_raw_str(raw, ("Tên KH", "customerName", "shopName"))
+            or clean_code
+        )[:160]
+        address = _extract_raw_str(raw, ("Địa chỉ", "customerAddress", "address", "shipTo"))[:255]
+        tax_code = _extract_raw_str(raw, ("Mã số thuế", "customerTaxCode", "taxCode", "MST"))[:30] or None
+        staff_code = _extract_raw_str(raw, ("Mã NVBH", "staffCode", "salesStaffCode"))[:50] or None
+        staff_name = _extract_raw_str(raw, ("Tên NVBH", "staffName", "salesStaffName"))[:160] or None
+
+        new_cust = Customer(
+            code=clean_code,
+            name=name,
+            type="RETAIL",
+            tier="B",
+            status="active",
+            tax_code=tax_code,
+            staff_code=staff_code,
+            staff_name=staff_name,
+        )
+        db.add(new_cust)
+        if address:
+            db.flush()
+            db.add(
+                CustomerAddress(
+                    customer_id=new_cust.id,
+                    label="Địa chỉ DMS",
+                    address=address,
+                    district="",
+                    city="",
+                    is_default=True,
+                )
+            )
+        existing_upper.add(upper_code)
+        created_count += 1
+
+    if created_count > 0 and commit:
+        db.commit()
+    return created_count
 
 
 def get(db: Session, customer_id: int) -> Optional[Customer]:
@@ -16,9 +102,17 @@ def get_by_code(db: Session, code: str) -> Optional[Customer]:
 
 
 def list_(db: Session, skip: int = 0, limit: int = 100, status: Optional[str] = None) -> List[Customer]:
+    try:
+        sync_customers_from_snapshots(db, commit=True)
+    except Exception:
+        db.rollback()
     stmt = (
         select(Customer)
-        .options(selectinload(Customer.store), selectinload(Customer.company))
+        .options(
+            selectinload(Customer.store),
+            selectinload(Customer.company),
+            selectinload(Customer.addresses),
+        )
         .order_by(Customer.code)
         .offset(skip)
         .limit(limit)
@@ -87,6 +181,8 @@ class CustomerCRUD:
     create = staticmethod(create)
     update = staticmethod(update)
     delete = staticmethod(delete)
+    sync_customers_from_snapshots = staticmethod(sync_customers_from_snapshots)
+    resolve_manager_assignment = staticmethod(resolve_manager_assignment)
 
 
 customer = CustomerCRUD()

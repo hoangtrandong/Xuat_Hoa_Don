@@ -52,7 +52,7 @@ export default function CustomersPage() {
         contactName: "", email: String(row.email ?? ""),
         citizenId: String(row.citizen_id ?? ""),
         taxCode: String(row.tax_code ?? ""),
-        address: "", district: "",
+        address: String(row.address ?? ""), district: "",
         status: row.status === "inactive" ? "inactive" : "active",
         debitBalance: Number(row.current_debt ?? 0), totalSpend: 0,
         createdAt: String(row.created_at ?? ""),
@@ -263,7 +263,7 @@ export default function CustomersPage() {
       render: (_, row) => (
         <div>
           <p className="font-medium text-gray-900">{row.name}</p>
-          <p className="text-xs text-gray-400">{row.district}</p>
+          <p className="text-xs text-gray-400">{row.address || row.district}</p>
         </div>
       ),
     },

@@ -40,6 +40,7 @@ export const menuItems: MenuItem[] = [
     children: [
       { key: "sales-orders", label: "Đơn hàng DMS", icon: "FileText", href: "/sales/orders" },
       { key: "sales-invoices", label: "Xuất Hóa Đơn ĐT", icon: "Receipt", href: "/sales/invoices" },
+      { key: "sales-purchase-invoices", label: "Hóa Đơn Mua Vào (CQT)", icon: "PackagePlus", href: "/sales/purchase-invoices" },
       { key: "sales-supplier-configs", label: "Đa NPP & Nguồn NCC", icon: "Settings", href: "/sales/supplier-configs" },
       { key: "sales-summary", label: "Tổng hợp đơn hàng", icon: "BarChart2", href: "/sales/summary" },
       { key: "sales-returns", label: "Trả hàng", icon: "RotateCcw", href: "/sales/returns" },

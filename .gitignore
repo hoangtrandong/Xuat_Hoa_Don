@@ -41,3 +41,5 @@ Thumbs.db
 *.log
 *_log.txt
 uvicorn_*.txt
+.gdt_browser_profile/
+backend/.gdt_browser_profile/

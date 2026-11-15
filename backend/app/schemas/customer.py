@@ -55,3 +55,4 @@ class Customer(CustomerBase):
     store_route: Optional[str] = None
     company_code: Optional[str] = None
     company_name: Optional[str] = None
+    address: Optional[str] = None

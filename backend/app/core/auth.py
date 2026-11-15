@@ -7,11 +7,12 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.models.employee import Employee
 from app.models.user import Role, User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -48,8 +49,8 @@ def _signing_key() -> str:
 
 
 def hash_password(password: str) -> str:
-    if len(password) < 12:
-        raise ValueError("Password must contain at least 12 characters.")
+    if len(password) < 6:
+        raise ValueError("Mật khẩu phải có tối thiểu 6 ký tự.")
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PASSWORD_ITERATIONS)
     return "pbkdf2_sha256${}${}${}".format(
@@ -98,7 +99,24 @@ def create_access_token(user: User) -> str:
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
-    user = db.scalar(select(User).where(User.username == username))
+    clean_username = (username or "").strip()
+    if not clean_username:
+        return None
+    user = db.scalar(
+        select(User)
+        .options(selectinload(User.roles), selectinload(User.distributor))
+        .where(func.lower(User.username) == clean_username.lower())
+    )
+    if not user:
+        emp = db.scalar(
+            select(Employee).where(func.lower(Employee.code) == clean_username.lower())
+        )
+        if emp:
+            user = db.scalar(
+                select(User)
+                .options(selectinload(User.roles), selectinload(User.distributor))
+                .where(User.employee_id == emp.id)
+            )
     if not user:
         return None
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -139,12 +157,29 @@ def get_current_user(
         raise credentials_error
     user = db.scalar(
         select(User)
-        .options(selectinload(User.roles).selectinload(Role.permissions))
+        .options(
+            selectinload(User.roles).selectinload(Role.permissions),
+            selectinload(User.distributor),
+        )
         .where(User.id == user_id)
     )
     if not user or not user.is_active:
         raise credentials_error
     return user
+
+
+def is_super_admin_user(user: User | None) -> bool:
+    """True nếu tài khoản là Quản trị hệ thống (không bị giới hạn vào 1 NPP cố định)."""
+    if user is None:
+        return False
+    if user.distributor_id is not None:
+        return False
+    if (user.username or "").strip().lower() == "admin":
+        return True
+    role_names = {
+        (r.name or "").strip().lower() for r in (user.roles or []) if r and r.name
+    }
+    return "admin" in role_names
 
 
 def require_endpoint_permission(

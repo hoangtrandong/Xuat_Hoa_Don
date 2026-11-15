@@ -34,7 +34,8 @@ export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDele
         <div className="flex-1 min-w-0">
           <p className="font-bold text-gray-900 text-sm truncate">{customer.name}</p>
           <p className="text-xs text-gray-400" title={customer.code}>
-            {formatCustomerCode(customer.code)} · {customer.district}
+            {formatCustomerCode(customer.code)}
+            {customer.address || customer.district ? ` · ${customer.address || customer.district}` : ""}
           </p>
         </div>
         <div className="flex flex-col items-end gap-1">

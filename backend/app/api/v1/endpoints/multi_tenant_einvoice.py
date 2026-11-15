@@ -1,12 +1,14 @@
 from collections import defaultdict
 from datetime import date, datetime
+from io import BytesIO
 from typing import Any
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+import zipfile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, hash_password, is_super_admin_user
 from app.core.database import get_db
 from app.models.multi_tenant_invoice import (
     Distributor,
@@ -14,8 +16,19 @@ from app.models.multi_tenant_invoice import (
     DistributorSupplierConfig,
     IssuedInvoice,
     IssuedInvoiceItem,
+    PurchaseInvoice,
+    PurchaseInvoiceItem,
+    TaxAuthorityCredential,
 )
-from app.models.user import User
+from app.services.gdt_purchase_invoice_service import (
+    authenticate_gdt_taxpayer,
+    compute_purchase_goods_summary,
+    fetch_gdt_captcha,
+    interactive_gdt_login_and_capture_token,
+    normalize_bearer_token,
+    sync_gdt_purchase_invoices,
+)
+from app.models.user import Role, User
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.services.einvoice_gateway import (
     InvoiceFormEngine,
@@ -41,6 +54,85 @@ class DistributorCreateRequest(BaseModel):
     address: str | None = None
     representative_name: str | None = None
     status: str = "active"
+    login_username: str | None = None
+    login_password: str | None = None
+
+
+def _ensure_distributor_account(
+    db: Session,
+    dist: Distributor,
+    login_username: str | None = None,
+    login_password: str | None = None,
+) -> User | None:
+    """Tạo hoặc cập nhật tài khoản đăng nhập quản lý riêng cho một Nhà phân phối (NPP)."""
+    existing_user = db.scalar(
+        select(User).where(User.distributor_id == dist.id).order_by(User.id)
+    )
+    default_username = (
+        (login_username or "").strip().lower()
+        or dist.code.strip().lower().replace("-", "_")
+    )
+    if existing_user is None:
+        # Nếu chưa có user gắn với NPP này, kiểm tra trùng username
+        by_name = db.scalar(select(User).where(func.lower(User.username) == default_username))
+        if by_name is not None and by_name.distributor_id is None and by_name.username.lower() != "admin":
+            existing_user = by_name
+            existing_user.distributor_id = dist.id
+        elif by_name is not None:
+            default_username = f"{default_username}_{dist.id}"
+
+    admin_role = db.scalar(select(Role).where(Role.name == "admin"))
+    roles = [admin_role] if admin_role else []
+
+    if existing_user is None:
+        raw_pass = (login_password or "").strip() or "1234567891011"
+        if len(raw_pass) < 6:
+            raise HTTPException(status_code=400, detail="Mật khẩu đăng nhập NPP phải có tối thiểu 6 ký tự.")
+        email_candidate = (dist.email or "").strip() or f"{default_username}@npp.dms.local"
+        if db.scalar(select(User.id).where(func.lower(User.email) == email_candidate.lower())):
+            email_candidate = f"{default_username}.{dist.id}@npp.dms.local"
+        new_user = User(
+            username=default_username,
+            email=email_candidate,
+            full_name=f"Quản trị {dist.name}",
+            hashed_password=hash_password(raw_pass),
+            is_active=True,
+            must_change_password=False,
+            distributor_id=dist.id,
+            roles=roles,
+        )
+        db.add(new_user)
+        db.flush()
+        return new_user
+    else:
+        if login_username and login_username.strip():
+            new_uname = login_username.strip()
+            conflict = db.scalar(
+                select(User).where(
+                    func.lower(User.username) == new_uname.lower(),
+                    User.id != existing_user.id,
+                )
+            )
+            if conflict is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tên đăng nhập '{new_uname}' đã được sử dụng.",
+                )
+            existing_user.username = new_uname
+        if login_password and login_password.strip():
+            raw_pass = login_password.strip()
+            if len(raw_pass) < 6:
+                raise HTTPException(status_code=400, detail="Mật khẩu đăng nhập NPP phải có tối thiểu 6 ký tự.")
+            existing_user.hashed_password = hash_password(raw_pass)
+            existing_user.must_change_password = False
+            existing_user.failed_login_attempts = 0
+            existing_user.locked_until = None
+        existing_user.full_name = f"Quản trị {dist.name}"
+        if not existing_user.roles and roles:
+            existing_user.roles = roles
+        db.add(existing_user)
+        db.flush()
+        return existing_user
 
 
 class SupplierConfigUpsertRequest(BaseModel):
@@ -278,6 +370,27 @@ def _ensure_default_distributors_seeded(db: Session) -> None:
             db.add(old_cfg)
         db.commit()
 
+    # Đảm bảo mỗi Nhà phân phối đều có ít nhất 1 tài khoản đăng nhập riêng
+    all_dists = db.scalars(select(Distributor).order_by(Distributor.id)).all()
+    created_any_user = False
+    for d in all_dists:
+        has_user = db.scalar(select(User.id).where(User.distributor_id == d.id).limit(1))
+        if not has_user:
+            _ensure_distributor_account(db, d)
+            created_any_user = True
+    if created_any_user:
+        db.commit()
+
+
+def _enforce_user_distributor_scope(
+    current_user: User | None,
+    requested_distributor_id: int | None,
+) -> int | None:
+    """Nếu người dùng thuộc 1 NPP cố định, khóa cứng mọi truy vấn/thao tác vào NPP đó."""
+    if current_user is not None and current_user.distributor_id is not None:
+        return current_user.distributor_id
+    return requested_distributor_id
+
 
 @router.get("/supplier-presets")
 def get_supplier_presets() -> dict[str, Any]:
@@ -285,9 +398,12 @@ def get_supplier_presets() -> dict[str, Any]:
 
 
 @router.get("/distributors")
-def list_distributors(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+def list_distributors(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
     _ensure_default_distributors_seeded(db)
-    distributors = db.scalars(
+    stmt = (
         select(Distributor)
         .options(
             selectinload(Distributor.supplier_configs),
@@ -295,7 +411,18 @@ def list_distributors(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
             selectinload(Distributor.issued_invoices),
         )
         .order_by(Distributor.id)
+    )
+    if current_user.distributor_id is not None:
+        stmt = stmt.where(Distributor.id == current_user.distributor_id)
+    distributors = db.scalars(stmt).all()
+
+    dist_users = db.scalars(
+        select(User).where(User.distributor_id.is_not(None)).order_by(User.id)
     ).all()
+    user_by_dist: dict[int, User] = {}
+    for u in dist_users:
+        if u.distributor_id and u.distributor_id not in user_by_dist:
+            user_by_dist[u.distributor_id] = u
 
     return [
         {
@@ -308,6 +435,7 @@ def list_distributors(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "address": d.address or "",
             "representative_name": d.representative_name or "",
             "status": d.status,
+            "login_username": user_by_dist[d.id].username if d.id in user_by_dist else d.code.lower().replace("-", "_"),
             "supplier_config_count": len(d.supplier_configs),
             "invoice_config_count": len(d.invoice_configs),
             "issued_invoice_count": len(d.issued_invoices),
@@ -321,7 +449,13 @@ def list_distributors(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
 def create_distributor(
     payload: DistributorCreateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    if not is_super_admin_user(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Chỉ Quản trị hệ thống mới có quyền thêm Nhà phân phối mới.",
+        )
     code = payload.code.strip().upper()
     existing = db.scalar(select(Distributor).where(func.upper(Distributor.code) == code))
     if existing is not None:
@@ -339,6 +473,13 @@ def create_distributor(
     )
     db.add(dist)
     db.flush()
+
+    dist_user = _ensure_distributor_account(
+        db,
+        dist,
+        login_username=payload.login_username,
+        login_password=payload.login_password,
+    )
 
     # Khởi tạo mặc định 1 cấu hình nguồn Vinamilk và 1 cấu hình HĐĐT cho NPP mới
     vnm_preset = SUPPLIER_FIELD_MAPPING_PRESETS["VINAMILK"]
@@ -380,7 +521,12 @@ def create_distributor(
     )
     db.commit()
     db.refresh(dist)
-    return {"id": dist.id, "code": dist.code, "name": dist.name}
+    return {
+        "id": dist.id,
+        "code": dist.code,
+        "name": dist.name,
+        "login_username": dist_user.username if dist_user else None,
+    }
 
 
 @router.patch("/distributors/{distributor_id}")
@@ -388,7 +534,10 @@ def update_distributor(
     distributor_id: int,
     payload: DistributorCreateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    if current_user.distributor_id is not None and current_user.distributor_id != distributor_id:
+        raise HTTPException(status_code=403, detail="Bạn chỉ được phép cập nhật thông tin Nhà phân phối của mình.")
     dist = db.get(Distributor, distributor_id)
     if dist is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
@@ -400,15 +549,29 @@ def update_distributor(
     dist.address = (payload.address or "").strip() or None
     dist.representative_name = (payload.representative_name or "").strip() or None
     dist.status = payload.status or "active"
+    dist_user = _ensure_distributor_account(
+        db,
+        dist,
+        login_username=payload.login_username,
+        login_password=payload.login_password,
+    )
     db.commit()
-    return {"id": dist.id, "code": dist.code, "name": dist.name}
+    return {
+        "id": dist.id,
+        "code": dist.code,
+        "name": dist.name,
+        "login_username": dist_user.username if dist_user else None,
+    }
 
 
 @router.delete("/distributors/{distributor_id}")
 def delete_distributor(
     distributor_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    if not is_super_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Chỉ Quản trị hệ thống mới được xóa Nhà phân phối.")
     dist = db.get(Distributor, distributor_id)
     if dist is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
@@ -421,15 +584,17 @@ def delete_distributor(
 def list_supplier_configs(
     distributor_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     _ensure_default_distributors_seeded(db)
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
     stmt = (
         select(DistributorSupplierConfig)
         .options(selectinload(DistributorSupplierConfig.distributor))
         .order_by(DistributorSupplierConfig.distributor_id, DistributorSupplierConfig.id)
     )
-    if distributor_id is not None:
-        stmt = stmt.where(DistributorSupplierConfig.distributor_id == distributor_id)
+    if effective_dist_id is not None:
+        stmt = stmt.where(DistributorSupplierConfig.distributor_id == effective_dist_id)
     rows = db.scalars(stmt).all()
     return [
         {
@@ -909,15 +1074,17 @@ async def upload_supplier_excel_orders(
 def list_invoice_configs(
     distributor_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     _ensure_default_distributors_seeded(db)
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
     stmt = (
         select(DistributorInvoiceConfig)
         .options(selectinload(DistributorInvoiceConfig.distributor))
         .order_by(DistributorInvoiceConfig.distributor_id, DistributorInvoiceConfig.id)
     )
-    if distributor_id is not None:
-        stmt = stmt.where(DistributorInvoiceConfig.distributor_id == distributor_id)
+    if effective_dist_id is not None:
+        stmt = stmt.where(DistributorInvoiceConfig.distributor_id == effective_dist_id)
     rows = db.scalars(stmt).all()
     return [
         {
@@ -1059,11 +1226,20 @@ def list_candidate_orders_for_invoicing(
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     supplier_code: str | None = Query(default=None),
+    distributor_id: int | None = Query(default=None),
     limit: int = Query(default=300, ge=1, le=2000),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     """Liệt kê danh sách đơn hàng từ mọi Nhà cung cấp (Vinamilk, Masan, Unilever...) để chọn xuất HĐĐT."""
     _ensure_default_distributors_seeded(db)
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    target_dist_code: str | None = None
+    if effective_dist_id is not None:
+        dist_obj = db.get(Distributor, effective_dist_id)
+        if dist_obj:
+            target_dist_code = (dist_obj.code or "").strip().upper()
+
     stmt = select(VinamilkOrderSnapshot).where(
         VinamilkOrderSnapshot.order_number.is_not(None),
         VinamilkOrderSnapshot.product_code.is_not(None),
@@ -1077,7 +1253,10 @@ def list_candidate_orders_for_invoicing(
     snaps = db.scalars(stmt).all()
 
     # Kiểm tra các đơn đã phát hành hóa đơn
-    issued_rows = db.scalars(select(IssuedInvoice).where(IssuedInvoice.status != "CANCELLED")).all()
+    issued_stmt = select(IssuedInvoice).where(IssuedInvoice.status != "CANCELLED")
+    if effective_dist_id is not None:
+        issued_stmt = issued_stmt.where(IssuedInvoice.distributor_id == effective_dist_id)
+    issued_rows = db.scalars(issued_stmt).all()
     invoiced_map: dict[str, dict[str, Any]] = {}
     for inv in issued_rows:
         for ord_num in inv.source_order_numbers or []:
@@ -1098,6 +1277,15 @@ def list_candidate_orders_for_invoicing(
     for ord_num, rows in grouped.items():
         first = rows[0]
         raw0 = first.raw_payload if isinstance(first.raw_payload, dict) else {}
+        row_dist_code = str(raw0.get("Mã NPP") or "").strip().upper()
+        if target_dist_code:
+            # Đơn hàng có ghi Mã NPP thì bắt buộc khớp với NPP đang chọn;
+            # nếu dữ liệu lịch sử chưa gắn Mã NPP thì mặc định thuộc NPP #1 (NPP-DONGDO)
+            if row_dist_code and row_dist_code != target_dist_code:
+                continue
+            if not row_dist_code and effective_dist_id != 1:
+                continue
+
         sup = str(raw0.get("Nhà cung cấp") or "VINAMILK").upper()
         if supplier_code and sup != supplier_code.upper():
             continue
@@ -1317,16 +1505,18 @@ def list_issued_invoices(
     distributor_id: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     _ensure_default_distributors_seeded(db)
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
     stmt = (
         select(IssuedInvoice)
         .options(selectinload(IssuedInvoice.distributor), selectinload(IssuedInvoice.items))
         .order_by(IssuedInvoice.id.desc())
         .limit(limit)
     )
-    if distributor_id is not None:
-        stmt = stmt.where(IssuedInvoice.distributor_id == distributor_id)
+    if effective_dist_id is not None:
+        stmt = stmt.where(IssuedInvoice.distributor_id == effective_dist_id)
     rows = db.scalars(stmt).all()
     return [
         {
@@ -1383,3 +1573,663 @@ def list_issued_invoices(
         }
         for r in rows
     ]
+
+
+# ==============================================================================
+# HÓA ĐƠN ĐIỆN TỬ MUA VÀO (TỔNG CỤC THUẾ - hoadondientu.gdt.gov.vn)
+# ==============================================================================
+
+
+class GdtAuthRequest(BaseModel):
+    distributor_id: int
+    username: str | None = None
+    password: str | None = None
+    ckey: str | None = None
+    cvalue: str | None = None
+    manual_bearer_token: str | None = None
+
+
+class GdtSyncPurchaseRequest(BaseModel):
+    distributor_id: int
+    from_date: date
+    to_date: date
+
+
+class GdtInteractiveLoginSyncRequest(BaseModel):
+    distributor_id: int
+    from_date: date
+    to_date: date
+    username: str | None = None
+    password: str | None = None
+
+
+@router.get("/purchase-invoices/credentials")
+def get_gdt_credentials_status(
+    distributor_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _ensure_default_distributors_seeded(db)
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id) or distributor_id
+    dist = db.get(Distributor, effective_dist_id)
+    if not dist:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
+
+    cred = db.scalar(
+        select(TaxAuthorityCredential).where(TaxAuthorityCredential.distributor_id == effective_dist_id)
+    )
+    default_username = (cred.username if cred and cred.username else dist.tax_code) or ""
+    has_token = bool(cred and cred.bearer_token and cred.bearer_token.strip())
+    token_preview = (
+        f"{cred.bearer_token[:28]}..."
+        if cred and cred.bearer_token and len(cred.bearer_token) > 28
+        else (cred.bearer_token if cred and cred.bearer_token else "")
+    )
+    return {
+        "distributor_id": effective_dist_id,
+        "distributor_name": dist.name,
+        "username": default_username,
+        "password": (cred.encrypted_password or "") if cred else "",
+        "has_password": bool(cred and cred.encrypted_password),
+        "has_bearer_token": has_token,
+        "token_preview": token_preview,
+        "token_updated_at": cred.token_updated_at.isoformat() if cred and cred.token_updated_at else None,
+        "last_synced_at": cred.last_synced_at.isoformat() if cred and cred.last_synced_at else None,
+    }
+
+
+@router.get("/purchase-invoices/captcha")
+def get_gdt_captcha() -> dict[str, str]:
+    try:
+        return fetch_gdt_captcha()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Không thể lấy CAPTCHA từ Cổng Tổng cục Thuế: {exc}",
+        ) from exc
+
+
+@router.post("/purchase-invoices/authenticate")
+def authenticate_gdt_account(
+    payload: GdtAuthRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    dist = db.get(Distributor, payload.distributor_id)
+    if not dist:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
+
+    cred = db.scalar(
+        select(TaxAuthorityCredential).where(
+            TaxAuthorityCredential.distributor_id == payload.distributor_id
+        )
+    )
+    if cred is None:
+        cred = TaxAuthorityCredential(distributor_id=payload.distributor_id)
+        db.add(cred)
+        db.flush()
+
+    if payload.username is not None and payload.username.strip():
+        cred.username = payload.username.strip()
+    elif not cred.username and dist.tax_code:
+        cred.username = dist.tax_code.strip()
+
+    if payload.password is not None and payload.password.strip():
+        cred.encrypted_password = payload.password.strip()
+
+    if payload.manual_bearer_token and payload.manual_bearer_token.strip():
+        cred.bearer_token = normalize_bearer_token(payload.manual_bearer_token)
+        cred.token_updated_at = datetime.utcnow()
+
+    cred.updated_by = getattr(current_user, "username", None) or "admin"
+    db.commit()
+
+    return {
+        "success": True,
+        "username": cred.username,
+        "password": cred.encrypted_password or "",
+        "has_password": bool(cred.encrypted_password),
+        "has_bearer_token": bool(cred.bearer_token),
+        "token_preview": f"{cred.bearer_token[:28]}..." if cred.bearer_token else "",
+        "token_updated_at": cred.token_updated_at.isoformat() if cred.token_updated_at else None,
+    }
+
+
+@router.post("/purchase-invoices/sync")
+def sync_purchase_invoices_endpoint(
+    payload: GdtSyncPurchaseRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if payload.to_date < payload.from_date:
+        raise HTTPException(status_code=400, detail="Từ ngày không được lớn hơn Đến ngày.")
+
+    cred = db.scalar(
+        select(TaxAuthorityCredential).where(
+            TaxAuthorityCredential.distributor_id == payload.distributor_id
+        )
+    )
+    if not cred or not cred.bearer_token or not cred.bearer_token.strip():
+        raise HTTPException(
+            status_code=428,
+            detail="CQT_TOKEN_REQUIRED: Chưa có phiên đăng nhập Cổng Thuế. Vui lòng xác thực tài khoản CQT.",
+        )
+
+    try:
+        result = sync_gdt_purchase_invoices(
+            db=db,
+            distributor_id=payload.distributor_id,
+            from_date=payload.from_date,
+            to_date=payload.to_date,
+            bearer_token=cred.bearer_token,
+        )
+        return {
+            "success": True,
+            **result,
+        }
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=428,
+            detail="CQT_TOKEN_EXPIRED: Phiên Bearer Token Cổng Thuế đã hết hạn. Vui lòng đăng nhập lại Cổng Thuế để làm mới phiên.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Lỗi khi đồng bộ hóa đơn mua vào từ Tổng cục Thuế: {exc}",
+        ) from exc
+
+
+@router.post("/purchase-invoices/interactive-login-sync")
+def interactive_login_and_sync_purchase_invoices(
+    payload: GdtInteractiveLoginSyncRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Mở cửa sổ trình duyệt tới hoadondientu.gdt.gov.vn để người dùng đăng nhập thủ công.
+    Ngay khi người dùng đăng nhập xong, tự động bắt Bearer Token, lưu vào DB và chạy đồng bộ Hóa đơn mua vào."""
+    if payload.to_date < payload.from_date:
+        raise HTTPException(status_code=400, detail="Từ ngày không được lớn hơn Đến ngày.")
+
+    dist = db.get(Distributor, payload.distributor_id)
+    if not dist:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
+
+    cred = db.scalar(
+        select(TaxAuthorityCredential).where(
+            TaxAuthorityCredential.distributor_id == payload.distributor_id
+        )
+    )
+    if cred is None:
+        cred = TaxAuthorityCredential(distributor_id=payload.distributor_id)
+        db.add(cred)
+        db.flush()
+
+    if payload.username and payload.username.strip():
+        cred.username = payload.username.strip()
+    elif not cred.username and dist.tax_code:
+        cred.username = dist.tax_code.strip()
+
+    if payload.password and payload.password.strip():
+        cred.encrypted_password = payload.password.strip()
+    db.commit()
+
+    try:
+        token = interactive_gdt_login_and_capture_token(
+            username=cred.username,
+            password=cred.encrypted_password,
+            timeout_seconds=180,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Không lấy được phiên đăng nhập từ cửa sổ trình duyệt: {exc}",
+        ) from exc
+
+    cred.bearer_token = token
+    cred.token_updated_at = datetime.utcnow()
+    cred.updated_by = getattr(current_user, "username", None) or "admin"
+    db.commit()
+
+    try:
+        result = sync_gdt_purchase_invoices(
+            db=db,
+            distributor_id=payload.distributor_id,
+            from_date=payload.from_date,
+            to_date=payload.to_date,
+            bearer_token=cred.bearer_token,
+        )
+        return {
+            "success": True,
+            "token_captured": True,
+            **result,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Đã bắt được Bearer Token nhưng gặp lỗi khi tải hóa đơn: {exc}",
+        ) from exc
+
+
+class PurchaseInvoiceZipDownloadRequest(BaseModel):
+    distributor_id: int
+    invoice_ids: list[int] | None = None
+    file_type: str = "all"  # "all" | "xml" | "html"
+
+
+def _extract_invoice_discount_and_fee(r: PurchaseInvoice) -> tuple[float, float]:
+    raw = r.raw_metadata if isinstance(r.raw_metadata, dict) else {}
+    disc = raw.get("ttcktmai") or raw.get("tgtcktm") or raw.get("chietKhau")
+    if disc is not None:
+        try:
+            disc_val = float(disc)
+        except (TypeError, ValueError):
+            disc_val = 0.0
+    else:
+        disc_val = sum(float(it.discount_amount or 0) for it in r.items)
+
+    fee = raw.get("tgtphi") or raw.get("tphi") or raw.get("tongPhi") or 0
+    try:
+        fee_val = float(fee)
+    except (TypeError, ValueError):
+        fee_val = 0.0
+    return round(disc_val, 2), round(fee_val, 2)
+
+
+def _resolve_tthai_code(r: PurchaseInvoice, is_replaced: bool) -> str:
+    raw = r.raw_metadata if isinstance(r.raw_metadata, dict) else {}
+    tthai = str(raw.get("tthai") or "").strip()
+    if tthai in ("1", "2", "3", "4", "5", "6"):
+        return tthai
+    if is_replaced:
+        return "4"
+    if (r.replaced_invoice_number or "").strip():
+        return "2"
+    return "1"
+
+
+TTHAI_LABELS: dict[str, str] = {
+    "1": "Hóa đơn mới",
+    "2": "Hóa đơn thay thế",
+    "3": "Hóa đơn điều chỉnh",
+    "4": "Hóa đơn đã bị thay thế",
+    "5": "Hóa đơn đã bị điều chỉnh",
+    "6": "Hóa đơn đã bị hủy",
+}
+
+KQKT_LABELS: dict[str, str] = {
+    "5": "Đã cấp mã hóa đơn",
+    "6": "Cục Thuế đã nhận không mã",
+    "8": "Đã cấp mã HĐ khởi tạo từ máy tính tiền",
+}
+
+
+@router.get("/purchase-invoices")
+def list_purchase_invoices(
+    distributor_id: int = Query(...),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    category: str = Query(default="ALL"),
+    seller_tax_code: str = Query(default=""),
+    buyer_identity: str = Query(default=""),
+    status_filter: str = Query(default="ALL"),
+    check_result: str = Query(default="ALL"),
+    invoice_number: str = Query(default=""),
+    invoice_template: str = Query(default=""),
+    invoice_symbol: str = Query(default=""),
+    search: str = Query(default=""),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _ensure_default_distributors_seeded(db)
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id) or distributor_id
+    stmt = (
+        select(PurchaseInvoice)
+        .options(selectinload(PurchaseInvoice.items))
+        .where(PurchaseInvoice.distributor_id == effective_dist_id)
+        .order_by(PurchaseInvoice.invoice_date.desc(), PurchaseInvoice.id.desc())
+    )
+    if from_date is not None:
+        stmt = stmt.where(
+            PurchaseInvoice.invoice_date >= datetime.combine(from_date, datetime.min.time())
+        )
+    if to_date is not None:
+        stmt = stmt.where(
+            PurchaseInvoice.invoice_date <= datetime.combine(to_date, datetime.max.time())
+        )
+    if category and category.upper() != "ALL":
+        stmt = stmt.where(PurchaseInvoice.invoice_category == category.upper())
+
+    base_rows = list(db.scalars(stmt).all())
+
+    # Danh sách Nhà cung cấp (Người bán) duy nhất trong khoảng ngày để hiển thị gợi ý trên bộ lọc
+    sellers_map: dict[str, str] = {}
+    for r in base_rows:
+        mst = (r.seller_tax_code or "").strip()
+        if mst and mst not in sellers_map:
+            sellers_map[mst] = (r.seller_name or mst).strip()
+    sellers_list = [
+        {"tax_code": k, "name": v}
+        for k, v in sorted(sellers_map.items(), key=lambda x: x[1].lower())
+    ]
+
+    # Xác định tập hợp các số hóa đơn đã bị thay thế trong danh sách
+    replaced_shds: set[str] = set()
+    replaced_by_map: dict[str, str] = {}
+    for r in base_rows:
+        if r.replaced_invoice_number:
+            for part in r.replaced_invoice_number.split("/"):
+                clean_shd = part.strip()
+                if clean_shd:
+                    replaced_shds.add(clean_shd)
+                    replaced_by_map[clean_shd] = r.invoice_number
+
+    all_rows = base_rows
+
+    # 1. Lọc theo MST người bán (hoặc tên người bán)
+    if seller_tax_code and seller_tax_code.strip() and seller_tax_code.upper() != "ALL":
+        sq = seller_tax_code.strip().lower()
+        all_rows = [
+            r
+            for r in all_rows
+            if sq in (r.seller_tax_code or "").lower() or sq in (r.seller_name or "").lower()
+        ]
+
+    # 2. Lọc theo CCCD / MST người mua
+    if buyer_identity and buyer_identity.strip():
+        bq = buyer_identity.strip().lower()
+        all_rows = [
+            r
+            for r in all_rows
+            if bq in (r.buyer_tax_code or "").lower() or bq in (r.buyer_name or "").lower()
+        ]
+
+    # 3. Lọc theo Kết quả kiểm tra (ttxly: 5, 6, 8)
+    if check_result and check_result.strip() and check_result.upper() != "ALL":
+        cr = check_result.strip()
+        all_rows = [
+            r
+            for r in all_rows
+            if (r.ttxly or "").strip() == cr
+            or (cr == "5" and r.invoice_category == "CO_MA")
+            or (cr == "6" and r.invoice_category == "KHONG_MA")
+            or (cr == "8" and (r.invoice_category == "MAY_TINH_TIEN" or r.is_mtt))
+        ]
+
+    # 4. Lọc theo Trạng thái hóa đơn (tthai: 1..6 hoặc VALID/REPLACEMENT/REPLACED)
+    if status_filter and status_filter.strip() and status_filter.upper() != "ALL":
+        sf = status_filter.strip().upper()
+        if sf == "VALID":
+            all_rows = [
+                r for r in all_rows if (r.invoice_number or "").strip() not in replaced_shds
+            ]
+        elif sf == "REPLACEMENT":
+            all_rows = [r for r in all_rows if bool((r.replaced_invoice_number or "").strip())]
+        elif sf == "REPLACED":
+            all_rows = [
+                r for r in all_rows if (r.invoice_number or "").strip() in replaced_shds
+            ]
+        elif sf in ("1", "2", "3", "4", "5", "6"):
+            all_rows = [
+                r
+                for r in all_rows
+                if _resolve_tthai_code(r, (r.invoice_number or "").strip() in replaced_shds) == sf
+            ]
+
+    # 5. Lọc theo Số hóa đơn
+    if invoice_number and invoice_number.strip():
+        inq = invoice_number.strip().lower()
+        all_rows = [r for r in all_rows if inq in (r.invoice_number or "").lower()]
+
+    # 6. Lọc theo Ký hiệu mẫu số hóa đơn (1..6)
+    if invoice_template and invoice_template.strip() and invoice_template.upper() != "ALL":
+        itq = invoice_template.strip().lower()
+        all_rows = [r for r in all_rows if (r.invoice_template or "").strip().lower() == itq]
+
+    # 7. Lọc theo Ký hiệu hóa đơn (VD: C26THP)
+    if invoice_symbol and invoice_symbol.strip():
+        isq = invoice_symbol.strip().lower()
+        all_rows = [r for r in all_rows if isq in (r.invoice_symbol or "").lower()]
+
+    # 8. Tìm kiếm tổng hợp
+    if search and search.strip():
+        q = search.strip().lower()
+        all_rows = [
+            r
+            for r in all_rows
+            if q in (r.invoice_number or "").lower()
+            or q in (r.invoice_symbol or "").lower()
+            or q in (r.seller_tax_code or "").lower()
+            or q in (r.seller_name or "").lower()
+            or any(
+                q in (it.product_code or "").lower() or q in (it.product_name or "").lower()
+                for it in r.items
+            )
+        ]
+
+    goods_summary = compute_purchase_goods_summary(all_rows)
+
+    co_ma_count = sum(1 for r in all_rows if r.invoice_category == "CO_MA")
+    khong_ma_count = sum(1 for r in all_rows if r.invoice_category == "KHONG_MA")
+    mtt_count = sum(1 for r in all_rows if r.invoice_category == "MAY_TINH_TIEN" or r.is_mtt)
+    hddt_count = sum(1 for r in all_rows if not (r.invoice_category == "MAY_TINH_TIEN" or r.is_mtt))
+    replaced_count = sum(1 for r in all_rows if (r.invoice_number or "").strip() in replaced_shds)
+
+    net_before_tax = 0.0
+    net_tax = 0.0
+    net_discount = 0.0
+    net_fee = 0.0
+    net_total = 0.0
+    serialized_invoices: list[dict[str, Any]] = []
+
+    for r in all_rows:
+        is_rep = (r.invoice_number or "").strip() in replaced_shds
+        mult = -1.0 if is_rep else 1.0
+        disc_val, fee_val = _extract_invoice_discount_and_fee(r)
+        tthai_code = _resolve_tthai_code(r, is_rep)
+        ttxly_code = (r.ttxly or ("8" if r.is_mtt else "5")).strip()
+
+        net_before_tax += float(r.amount_before_tax or 0) * mult
+        net_tax += float(r.tax_amount or 0) * mult
+        net_discount += disc_val * mult
+        net_fee += fee_val * mult
+        net_total += float(r.total_amount or 0) * mult
+
+        serialized_invoices.append(
+            {
+                "id": r.id,
+                "distributor_id": r.distributor_id,
+                "invoice_template": r.invoice_template,
+                "invoice_symbol": r.invoice_symbol,
+                "invoice_number": r.invoice_number,
+                "invoice_date": r.invoice_date.strftime("%d/%m/%Y") if r.invoice_date else "",
+                "invoice_date_iso": r.invoice_date.isoformat() if r.invoice_date else None,
+                "seller_tax_code": r.seller_tax_code,
+                "seller_name": r.seller_name,
+                "seller_address": r.seller_address or "",
+                "buyer_tax_code": r.buyer_tax_code or "",
+                "buyer_name": r.buyer_name or "",
+                "invoice_category": r.invoice_category,
+                "ttxly": ttxly_code,
+                "kqkt_label": KQKT_LABELS.get(ttxly_code, "Đã cấp mã hóa đơn"),
+                "tthai": tthai_code,
+                "tthai_label": TTHAI_LABELS.get(tthai_code, "Hóa đơn mới"),
+                "is_mtt": r.is_mtt,
+                "replaced_invoice_number": r.replaced_invoice_number or "",
+                "replaced_invoice_date": r.replaced_invoice_date or "",
+                "is_replaced": is_rep,
+                "replaced_by_invoice_number": replaced_by_map.get((r.invoice_number or "").strip(), ""),
+                "amount_before_tax": float(r.amount_before_tax or 0),
+                "tax_amount": float(r.tax_amount or 0),
+                "discount_amount": disc_val,
+                "fee_amount": fee_val,
+                "total_amount": float(r.total_amount or 0),
+                "currency": r.currency or "VND",
+                "xml_downloaded": r.xml_downloaded,
+                "has_html": bool(r.html_content),
+                "item_count": len(r.items),
+                "synced_at": r.synced_at.isoformat() if r.synced_at else None,
+                "items": [
+                    {
+                        "id": it.id,
+                        "line_number": it.line_number,
+                        "product_code": it.product_code or "",
+                        "product_name": it.product_name,
+                        "unit_name": it.unit_name or "",
+                        "quantity": it.quantity,
+                        "unit_price": float(it.unit_price or 0),
+                        "discount_amount": float(it.discount_amount or 0),
+                        "amount_before_tax": float(it.amount_before_tax or 0),
+                        "vat_rate": it.vat_rate or "",
+                    }
+                    for it in r.items
+                ],
+            }
+        )
+
+    return {
+        "stats": {
+            "total_invoices": len(all_rows),
+            "hddt_count": hddt_count,
+            "co_ma_count": co_ma_count,
+            "khong_ma_count": khong_ma_count,
+            "mtt_count": mtt_count,
+            "replaced_count": replaced_count,
+            "total_before_tax": round(net_before_tax, 2),
+            "total_tax": round(net_tax, 2),
+            "total_discount": round(net_discount, 2),
+            "total_fee": round(net_fee, 2),
+            "total_payment": round(net_total, 2),
+        },
+        "sellers": sellers_list,
+        "invoices": serialized_invoices,
+        "goods_summary": goods_summary,
+    }
+
+
+@router.get("/purchase-invoices/{invoice_id}/detail")
+def get_purchase_invoice_detail(
+    invoice_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    inv = db.scalar(
+        select(PurchaseInvoice)
+        .options(selectinload(PurchaseInvoice.items))
+        .where(PurchaseInvoice.id == invoice_id)
+    )
+    if not inv:
+        raise HTTPException(status_code=404, detail="Không tìm thấy hóa đơn mua vào.")
+    disc_val, fee_val = _extract_invoice_discount_and_fee(inv)
+    tthai_code = _resolve_tthai_code(inv, False)
+    ttxly_code = (inv.ttxly or ("8" if inv.is_mtt else "5")).strip()
+    return {
+        "id": inv.id,
+        "invoice_template": inv.invoice_template,
+        "invoice_symbol": inv.invoice_symbol,
+        "invoice_number": inv.invoice_number,
+        "invoice_date": inv.invoice_date.strftime("%d/%m/%Y") if inv.invoice_date else "",
+        "seller_tax_code": inv.seller_tax_code,
+        "seller_name": inv.seller_name,
+        "seller_address": inv.seller_address or "",
+        "buyer_tax_code": inv.buyer_tax_code or "",
+        "buyer_name": inv.buyer_name or "",
+        "ttxly": ttxly_code,
+        "kqkt_label": KQKT_LABELS.get(ttxly_code, "Đã cấp mã hóa đơn"),
+        "tthai": tthai_code,
+        "tthai_label": TTHAI_LABELS.get(tthai_code, "Hóa đơn mới"),
+        "replaced_invoice_number": inv.replaced_invoice_number or "",
+        "replaced_invoice_date": inv.replaced_invoice_date or "",
+        "amount_before_tax": float(inv.amount_before_tax or 0),
+        "tax_amount": float(inv.tax_amount or 0),
+        "discount_amount": disc_val,
+        "fee_amount": fee_val,
+        "total_amount": float(inv.total_amount or 0),
+        "xml_content": inv.xml_content or "",
+        "html_content": inv.html_content or "",
+        "items": [
+            {
+                "id": it.id,
+                "line_number": it.line_number,
+                "product_code": it.product_code or "",
+                "product_name": it.product_name,
+                "unit_name": it.unit_name or "",
+                "quantity": it.quantity,
+                "unit_price": float(it.unit_price or 0),
+                "discount_amount": float(it.discount_amount or 0),
+                "amount_before_tax": float(it.amount_before_tax or 0),
+                "vat_rate": it.vat_rate or "",
+            }
+            for it in inv.items
+        ],
+    }
+
+
+@router.post("/purchase-invoices/download-zip")
+def download_purchase_invoices_zip(
+    payload: PurchaseInvoiceZipDownloadRequest,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Tải riêng file .XML, file .HTML bản thể hiện, hoặc gói .ZIP (XML + HTML) của các hóa đơn mua vào."""
+    stmt = select(PurchaseInvoice).where(PurchaseInvoice.distributor_id == payload.distributor_id)
+    if payload.invoice_ids:
+        stmt = stmt.where(PurchaseInvoice.id.in_(payload.invoice_ids))
+    stmt = stmt.order_by(PurchaseInvoice.invoice_date.desc(), PurchaseInvoice.id.desc())
+    rows = list(db.scalars(stmt).all())
+    if not rows:
+        raise HTTPException(status_code=404, detail="Không có hóa đơn nào để tải về.")
+
+    ft = (payload.file_type or "all").strip().lower()
+
+    # Nếu chỉ tải 1 hóa đơn với định dạng riêng lẻ (xml hoặc html) -> trả trực tiếp file .xml hoặc .html
+    if len(rows) == 1 and ft in ("xml", "html"):
+        inv = rows[0]
+        base_name = f"{inv.seller_tax_code}_{inv.invoice_template}_{inv.invoice_symbol}_{inv.invoice_number}"
+        if ft == "xml":
+            if not inv.xml_content:
+                raise HTTPException(status_code=404, detail="Hóa đơn này chưa có nội dung XML.")
+            return Response(
+                content=("\ufeff" + inv.xml_content).encode("utf-8"),
+                media_type="application/xml; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="{base_name}.xml"'},
+            )
+        if ft == "html":
+            if not inv.html_content:
+                raise HTTPException(status_code=404, detail="Hóa đơn này chưa có bản thể hiện HTML.")
+            return Response(
+                content=inv.html_content.encode("utf-8"),
+                media_type="text/html; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="{base_name}.html"'},
+            )
+
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for inv in rows:
+            base_name = f"{inv.seller_tax_code}_{inv.invoice_template}_{inv.invoice_symbol}_{inv.invoice_number}"
+            if ft in ("all", "xml") and inv.xml_content:
+                path_xml = f"{base_name}.xml" if ft == "xml" else f"{base_name}/invoice_{base_name}.xml"
+                zf.writestr(path_xml, inv.xml_content.encode("utf-8"))
+            if ft in ("all", "html") and inv.html_content:
+                path_html = f"{base_name}.html" if ft == "html" else f"{base_name}/invoice_{base_name}.html"
+                zf.writestr(path_html, inv.html_content.encode("utf-8"))
+
+    zip_bytes = zip_buf.getvalue()
+    suffix = "XML" if ft == "xml" else ("HTML" if ft == "html" else "XML_HTML")
+    filename = f"Hoa_don_mua_vao_{suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@router.delete("/purchase-invoices/{invoice_id}")
+def delete_purchase_invoice(
+    invoice_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    inv = db.get(PurchaseInvoice, invoice_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Không tìm thấy hóa đơn mua vào.")
+    db.delete(inv)
+    db.commit()
+    return {"deleted": True, "id": invoice_id}

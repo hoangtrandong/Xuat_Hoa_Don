@@ -34,10 +34,14 @@ class User(Base):
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
+    distributor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     roles: Mapped[List["Role"]] = relationship(secondary=user_roles, back_populates="users")
     employee: Mapped["Employee | None"] = relationship(back_populates="user")
+    distributor: Mapped["Distributor | None"] = relationship("Distributor")
 
 
 class Role(Base):

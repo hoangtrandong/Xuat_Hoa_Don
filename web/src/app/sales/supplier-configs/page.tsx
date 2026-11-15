@@ -26,6 +26,7 @@ import StatCard from "@/components/ui/StatCard";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { API_URL, apiFetch } from "@/lib/api";
+import { useAuthSession } from "@/lib/auth-session";
 
 interface DistributorItem {
   id: number;
@@ -37,6 +38,7 @@ interface DistributorItem {
   address: string;
   representative_name: string;
   status: string;
+  login_username?: string;
   supplier_config_count: number;
   invoice_config_count: number;
   issued_invoice_count: number;
@@ -310,6 +312,8 @@ function FieldMappingCombobox({
 }
 
 export default function MultiTenantSupplierConfigsPage() {
+  const authSession = useAuthSession();
+  const isNppScoped = Boolean(authSession.distributorId);
   const [activeTab, setActiveTab] = useState<"suppliers" | "invoices" | "distributors">("suppliers");
   const [distributors, setDistributors] = useState<DistributorItem[]>([]);
   const [selectedDistributorId, setSelectedDistributorId] = useState<number | null>(null);
@@ -332,6 +336,8 @@ export default function MultiTenantSupplierConfigsPage() {
     address: "",
     representative_name: "",
     status: "active",
+    login_username: "",
+    login_password: "",
   });
 
   const [supDrawerOpen, setSupDrawerOpen] = useState(false);
@@ -506,7 +512,8 @@ export default function MultiTenantSupplierConfigsPage() {
       setDistributors(distList);
       setPresets(presetMap);
 
-      const effectiveDistId = distId ?? selectedDistributorId ?? (distList[0]?.id ?? null);
+      const effectiveDistId =
+        authSession.distributorId ?? distId ?? selectedDistributorId ?? (distList[0]?.id ?? null);
       if (effectiveDistId && effectiveDistId !== selectedDistributorId) {
         setSelectedDistributorId(effectiveDistId);
       }
@@ -816,29 +823,37 @@ export default function MultiTenantSupplierConfigsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Quản lý Đa Nhà Phân Phối, Nguồn Đơn NCC & Mẫu Hóa Đơn"
+        title={
+          isNppScoped
+            ? `Cấu hình Nguồn Đơn NCC & Mẫu Hóa Đơn — ${currentDistributor?.name || authSession.distributorName}`
+            : "Quản lý Đa Nhà Phân Phối, Nguồn Đơn NCC & Mẫu Hóa Đơn"
+        }
         subtitle="Mỗi Nhà phân phối tự cấu hình URL & Bảng ánh xạ trường dữ liệu cho từng Nhà cung cấp (Vinamilk, Masan, Unilever...) và Form Hóa đơn điện tử riêng (MISA, Viettel, VNPT)"
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => {
-                setEditingDistId(null);
-                setDistForm({
-                  code: "",
-                  name: "",
-                  tax_code: "",
-                  phone: "",
-                  email: "",
-                  address: "",
-                  representative_name: "",
-                  status: "active",
-                });
-                setDistDrawerOpen(true);
-              }}
-              className="flex items-center gap-2 px-3.5 py-2 rounded-lg border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 text-sm font-medium"
-            >
-              <Building2 size={16} /> Thêm Nhà Phân Phối
-            </button>
+            {!isNppScoped && (
+              <button
+                onClick={() => {
+                  setEditingDistId(null);
+                  setDistForm({
+                    code: "",
+                    name: "",
+                    tax_code: "",
+                    phone: "",
+                    email: "",
+                    address: "",
+                    representative_name: "",
+                    status: "active",
+                    login_username: "",
+                    login_password: "",
+                  });
+                  setDistDrawerOpen(true);
+                }}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-lg border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 text-sm font-medium"
+              >
+                <Building2 size={16} /> Thêm Nhà Phân Phối
+              </button>
+            )}
             <button
               onClick={() => loadAll(selectedDistributorId)}
               className="flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 text-sm font-medium"
@@ -1277,6 +1292,7 @@ export default function MultiTenantSupplierConfigsPage() {
                 <th className="px-4 py-3">Mã NPP</th>
                 <th className="px-4 py-3">Tên Nhà Phân Phối</th>
                 <th className="px-4 py-3">Mã Số Thuế</th>
+                <th className="px-4 py-3">Tài khoản đăng nhập</th>
                 <th className="px-4 py-3">Địa chỉ</th>
                 <th className="px-4 py-3 text-center">Nguồn NCC</th>
                 <th className="px-4 py-3 text-center">Mẫu HĐĐT</th>
@@ -1289,6 +1305,15 @@ export default function MultiTenantSupplierConfigsPage() {
                   <td className="px-4 py-3 font-bold text-sky-700">{d.code}</td>
                   <td className="px-4 py-3 font-medium text-gray-900">{d.name}</td>
                   <td className="px-4 py-3 font-mono text-gray-700">{d.tax_code || "—"}</td>
+                  <td className="px-4 py-3">
+                    {d.login_username ? (
+                      <span className="inline-flex items-center gap-1 rounded bg-sky-50 border border-sky-200 px-2 py-0.5 font-mono text-xs font-semibold text-sky-800">
+                        @{d.login_username}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-400">Chưa cấp</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-gray-600">{d.address || "—"}</td>
                   <td className="px-4 py-3 text-center">{d.supplier_config_count}</td>
                   <td className="px-4 py-3 text-center">{d.invoice_config_count}</td>
@@ -1305,12 +1330,14 @@ export default function MultiTenantSupplierConfigsPage() {
                           address: d.address,
                           representative_name: d.representative_name,
                           status: d.status,
+                          login_username: d.login_username || "",
+                          login_password: "",
                         });
                         setDistDrawerOpen(true);
                       }}
                       className="text-sky-600 hover:underline text-xs font-semibold mr-3"
                     >
-                      Sửa
+                      Sửa / Tài khoản
                     </button>
                   </td>
                 </tr>
@@ -1966,6 +1993,47 @@ export default function MultiTenantSupplierConfigsPage() {
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
               />
             </div>
+          </div>
+
+          <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3.5 space-y-3">
+            <div className="text-xs font-bold uppercase text-sky-800">
+              Tài khoản Đăng nhập Quản lý riêng của Nhà Phân Phối
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs font-medium text-gray-700">
+                  Tên đăng nhập (Username)
+                </label>
+                <input
+                  value={distForm.login_username}
+                  onChange={(e) =>
+                    setDistForm({
+                      ...distForm,
+                      login_username: e.target.value.toLowerCase().replace(/\s+/g, "_"),
+                    })
+                  }
+                  placeholder="VD: npp_mienbac"
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-700">
+                  {editingDistId ? "Mật khẩu mới (Để trống nếu giữ nguyên)" : "Mật khẩu khởi tạo"}
+                </label>
+                <input
+                  type="password"
+                  value={distForm.login_password}
+                  onChange={(e) =>
+                    setDistForm({ ...distForm, login_password: e.target.value })
+                  }
+                  placeholder={editingDistId ? "••••••••••••" : "Mặc định: 1234567891011"}
+                  className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-600">
+              Khi đăng nhập bằng tài khoản này, hệ thống sẽ tự động hiển thị không gian quản lý riêng của NPP (Đơn hàng, Hóa đơn mua vào, Phát hành HĐĐT, Cấu hình NCC).
+            </p>
           </div>
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 bg-slate-50 px-2 py-2 -mx-5 -mb-5 rounded-b-xl">
             <button

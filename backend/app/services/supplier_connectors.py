@@ -527,6 +527,12 @@ def persist_canonical_orders_to_snapshots(
                 existing.raw_payload = normalized_payload
             saved_rows += 1
 
+    db.flush()
+    try:
+        from app.crud.customer import sync_customers_from_snapshots
+        sync_customers_from_snapshots(db, commit=False)
+    except Exception:
+        pass
     db.commit()
     return saved_rows
 

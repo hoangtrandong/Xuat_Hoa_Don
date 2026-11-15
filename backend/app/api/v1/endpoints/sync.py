@@ -1569,6 +1569,9 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
                     c.staff_code = sc
                 if sn and not c.staff_name:
                     c.staff_name = sn
+        from app.crud.customer import sync_customers_from_snapshots
+        db.flush()
+        sync_customers_from_snapshots(db, commit=False)
     except Exception:
         pass
     return saved
@@ -1937,6 +1940,7 @@ def list_local_vinamilk_orders(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=2000, ge=1, le=2000),
     db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_current_user),
     order_number: str | None = None,
 ):
     filters = [
@@ -1964,6 +1968,26 @@ def list_local_vinamilk_orders(
         .offset(skip)
         .limit(limit)
     ).all()
+
+    # Phân tách dữ liệu đơn hàng theo Nhà phân phối (NPP) của tài khoản đang đăng nhập
+    user_dist_id = getattr(current_user, "distributor_id", None) if current_user else None
+    user_dist_code = (
+        (current_user.distributor.code or "").strip().upper()
+        if current_user and getattr(current_user, "distributor", None)
+        else None
+    )
+    if user_dist_id is not None and user_dist_code:
+        filtered_rows = []
+        for r in rows:
+            raw_p = r.raw_payload if isinstance(r.raw_payload, dict) else {}
+            r_dist_code = str(raw_p.get("Mã NPP") or "").strip().upper()
+            if r_dist_code:
+                if r_dist_code == user_dist_code:
+                    filtered_rows.append(r)
+            elif user_dist_id == 1:
+                filtered_rows.append(r)
+        rows = filtered_rows
+        snapshot_total = len(rows)
     latest = db.scalar(select(VinamilkSyncRun).where(
         VinamilkSyncRun.from_date <= to_date,
         VinamilkSyncRun.to_date >= from_date,
@@ -2282,6 +2306,7 @@ def list_grouped_vinamilk_orders(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=500),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     if to_date < from_date:
         raise HTTPException(status_code=422, detail="Ngày kết thúc phải lớn hơn hoặc bằng ngày bắt đầu.")
@@ -2292,7 +2317,7 @@ def list_grouped_vinamilk_orders(
     while True:
         page = list_local_vinamilk_orders(
             from_date=from_date, to_date=to_date, source="sync", search=None,
-            status=None, skip=offset, limit=2000, db=db,
+            status=None, skip=offset, limit=2000, db=db, current_user=current_user,
         )
         last_synced_at = page["last_synced_at"]
         for row in page["rows"]:
@@ -2785,6 +2810,7 @@ def _create_manual_order(
     payload: ManualOrderRequest,
     performed_by: str | None = None,
     current_employee: Employee | None = None,
+    distributor_code: str | None = None,
 ) -> dict[str, Any]:
     """Tạo đơn hàng tự tạo (không từ DMS), lưu cùng bảng snapshot để hiển thị chung danh sách Đơn hàng.
 
@@ -3046,6 +3072,7 @@ def _create_manual_order(
             "Người thực hiện": actor,
             "performedBy": actor,
             "_manual_order": True,
+            **({"Mã NPP": distributor_code} if distributor_code else {}),
         }
         db.add(VinamilkOrderSnapshot(
             remote_key=hashlib.sha256(f"MANUAL|{order_number}|{product.sku}|{line_idx}".encode()).hexdigest(),
@@ -3105,11 +3132,17 @@ def create_manual_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    dist_code = (
+        (current_user.distributor.code or "").strip().upper()
+        if current_user and getattr(current_user, "distributor", None)
+        else None
+    )
     return _create_manual_order(
         db,
         payload,
         performed_by=getattr(current_user, "username", None),
         current_employee=resolve_user_employee(db, current_user),
+        distributor_code=dist_code,
     )
 
 

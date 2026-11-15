@@ -20,6 +20,7 @@ import StatCard from "@/components/ui/StatCard";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { API_URL, apiFetch } from "@/lib/api";
+import { useAuthSession } from "@/lib/auth-session";
 import { formatVND } from "@/lib/format";
 
 interface DistributorOption {
@@ -155,9 +156,12 @@ interface IssuedInvoiceRecord {
 }
 
 export default function EInvoiceGatewayPage() {
+  const authSession = useAuthSession();
   const [activeTab, setActiveTab] = useState<"issue" | "history">("issue");
   const [distributors, setDistributors] = useState<DistributorOption[]>([]);
-  const [selectedDistId, setSelectedDistId] = useState<number | null>(null);
+  const [selectedDistId, setSelectedDistId] = useState<number | null>(
+    authSession.distributorId ?? null
+  );
   const [invoiceConfigs, setInvoiceConfigs] = useState<InvoiceConfigOption[]>([]);
   const [selectedConfigId, setSelectedConfigId] = useState<number | null>(null);
   const [supplierFilter, setSupplierFilter] = useState<string>("");
@@ -189,18 +193,22 @@ export default function EInvoiceGatewayPage() {
       const distList: DistributorOption[] = distRes.ok ? await distRes.json() : [];
       setDistributors(distList);
 
-      const effDistId = distId ?? selectedDistId ?? (distList[0]?.id ?? null);
+      const effDistId =
+        authSession.distributorId ?? distId ?? selectedDistId ?? (distList[0]?.id ?? null);
       if (effDistId && effDistId !== selectedDistId) {
         setSelectedDistId(effDistId);
       }
 
+      const candParams = new URLSearchParams();
+      if (effDistId) candParams.set("distributor_id", String(effDistId));
+      if (supCode ?? supplierFilter) {
+        candParams.set("supplier_code", supCode ?? supplierFilter);
+      }
+      const candQs = candParams.toString();
+
       const [cfgRes, ordRes, issRes] = await Promise.all([
         apiFetch(`${API_URL}/einvoice/invoice-configs${effDistId ? `?distributor_id=${effDistId}` : ""}`),
-        apiFetch(
-          `${API_URL}/einvoice/candidate-orders${
-            (supCode ?? supplierFilter) ? `?supplier_code=${encodeURIComponent(supCode ?? supplierFilter)}` : ""
-          }`
-        ),
+        apiFetch(`${API_URL}/einvoice/candidate-orders${candQs ? `?${candQs}` : ""}`),
         apiFetch(`${API_URL}/einvoice/issued${effDistId ? `?distributor_id=${effDistId}` : ""}`),
       ]);
 

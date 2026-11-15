@@ -19,12 +19,13 @@ class UserCreate(BaseModel):
     password: str
     role_ids: List[int] = Field(default_factory=list)
     employee_id: Optional[int] = None
+    distributor_id: Optional[int] = None
 
     @field_validator("password")
     @classmethod
     def _password_strength(cls, value: str) -> str:
-        if len(value) < 12:
-            raise ValueError("Password must contain at least 12 characters.")
+        if len(value) < 6:
+            raise ValueError("Mật khẩu phải có tối thiểu 6 ký tự.")
         return value
 
 
@@ -33,6 +34,8 @@ class UserUpdate(BaseModel):
     role_ids: Optional[List[int]] = None
     full_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     employee_id: Optional[int] = None
+    distributor_id: Optional[int] = None
+    password: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -44,6 +47,10 @@ class UserResponse(BaseModel):
     employee_id: Optional[int]
     employee_code: Optional[str] = None
     employee_name: Optional[str] = None
+    distributor_id: Optional[int] = None
+    distributor_code: Optional[str] = None
+    distributor_name: Optional[str] = None
+    distributor_tax_code: Optional[str] = None
     created_at: datetime
     roles: List[RoleResponse]
 

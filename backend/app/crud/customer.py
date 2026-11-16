@@ -59,6 +59,7 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
         )[:160]
         address = _extract_raw_str(raw, ("Địa chỉ", "customerAddress", "address", "shipTo"))[:255]
         tax_code = _extract_raw_str(raw, ("Mã số thuế", "customerTaxCode", "taxCode", "MST"))[:30] or None
+        phone = _extract_raw_str(raw, ("Điện thoại", "phone", "CustomerPhone", "Phone", "SDT"))[:30] or None
         staff_code = _extract_raw_str(raw, ("Mã NVBH", "staffCode", "salesStaffCode"))[:50] or None
         staff_name = _extract_raw_str(raw, ("Tên NVBH", "staffName", "salesStaffName"))[:160] or None
 
@@ -67,6 +68,7 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
             name=name,
             type="RETAIL",
             tier="B",
+            phone=phone,
             status="active",
             tax_code=tax_code,
             staff_code=staff_code,

@@ -423,6 +423,49 @@ def _safe_str(payload: dict[str, Any], keys: tuple[str, ...], default: str = "")
     return default
 
 
+def _allocate_order_discounts(rows: list[VinamilkOrderSnapshot]) -> dict[int, float]:
+    discounts_by_order: dict[str, float] = {}
+    gross_by_order: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    for row in rows:
+        raw = row.raw_payload if isinstance(row.raw_payload, dict) else {}
+        order_key = row.order_number or f"SNAPSHOT:{row.id}"
+        discount = _safe_float(raw, ("Chiết khấu đơn hàng", "OrderDiscount"), 0.0)
+        discounts_by_order[order_key] = max(discounts_by_order.get(order_key, 0.0), discount)
+
+        quantity = _safe_float(raw, ("Số lượng", "quantity", "qty"), 0.0)
+        if quantity <= 0:
+            continue
+        price = _safe_float(raw, ("Giá bán", "unitPrice", "price"), 0.0)
+        value = _safe_float(raw, ("Giá trị", "totalValue", "subtotal"), quantity * price)
+        gross = round(quantity * price) if price > 0 else round(value)
+        if gross > 0:
+            gross_by_order[order_key].append((row.id, gross))
+
+    allocations: dict[int, float] = {}
+    for order_key, discount in discounts_by_order.items():
+        lines = gross_by_order.get(order_key, [])
+        total_gross = sum(gross for _, gross in lines)
+        if discount <= 0 or total_gross <= 0:
+            continue
+        existing_line_discount = sum(
+            _safe_float(
+                row.raw_payload if isinstance(row.raw_payload, dict) else {},
+                ("Số tiền CK", "discountAmount", "totalDiscount"),
+                0.0,
+            )
+            for row in rows
+            if (row.order_number or f"SNAPSHOT:{row.id}") == order_key
+        )
+        remaining = max(0, round(discount - existing_line_discount))
+        if remaining == 0:
+            continue
+        for index, (snapshot_id, gross) in enumerate(lines):
+            share = remaining if index == len(lines) - 1 else round(remaining * gross / total_gross)
+            allocations[snapshot_id] = share
+            remaining -= share
+    return allocations
+
+
 class InvoiceFormEngine:
     """Động cơ xây dựng Form Hóa Đơn Điện Tử Động theo cấu hình riêng của từng Nhà phân phối."""
 
@@ -542,6 +585,7 @@ class InvoiceFormEngine:
             total_discount = 0.0
             total_vat = 0.0
             promo_notes: list[str] = []
+            order_discount_allocations = _allocate_order_discounts(group_rows)
 
             for row in group_rows:
                 raw = row.raw_payload if isinstance(row.raw_payload, dict) else {}
@@ -571,11 +615,13 @@ class InvoiceFormEngine:
                 if price == 0 and qty > 0 and gross_val > 0:
                     price = round(gross_val / qty, 2)
                 disc_amt = _safe_float(raw, ("Số tiền CK", "discountAmount", "totalDiscount"), 0.0)
+                order_disc_amt = order_discount_allocations.get(row.id, 0.0)
                 vat_rate = _safe_float(raw, ("Thuế suất", "vatRate"), config.default_vat_rate)
 
                 if qty > 0:
                     line_gross = round(qty * price) if price > 0 else round(gross_val)
-                    effective_disc = round(disc_amt) if config.discount_display == "BY_LINE" else 0.0
+                    line_discount = disc_amt + order_disc_amt
+                    effective_disc = round(line_discount) if config.discount_display == "BY_LINE" else 0.0
                     amt_before_tax = max(0.0, line_gross - effective_disc)
                     disc_rate = round((effective_disc / line_gross) * 100, 2) if line_gross > 0 else 0.0
                     vat_amt = round(amt_before_tax * (vat_rate / 100.0))
@@ -601,7 +647,7 @@ class InvoiceFormEngine:
                     )
                     line_no += 1
                     total_sub_before_tax += amt_before_tax
-                    total_discount += disc_amt
+                    total_discount += line_discount
                     total_vat += vat_amt
 
                 # Xử lý hàng khuyến mãi theo quy tắc riêng của NPP

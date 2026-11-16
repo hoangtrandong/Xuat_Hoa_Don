@@ -14,6 +14,7 @@ class Customer(Base):
     name: Mapped[str] = mapped_column(String(160), index=True)
     type: Mapped[str] = mapped_column(String(20))  # DISTRIBUTOR | WHOLESALE | RETAIL | HORECA
     tier: Mapped[str] = mapped_column(String(5), default="B")  # A | B | C
+    phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     email: Mapped[str | None] = mapped_column(String(120))
     citizen_id: Mapped[str | None] = mapped_column(String(20))
     tax_code: Mapped[str | None] = mapped_column(String(30))

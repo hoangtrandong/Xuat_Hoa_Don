@@ -22,7 +22,7 @@ from app.core.auth import get_current_user, resolve_user_employee
 from app.core.config import settings
 from app.core.database import get_db
 from app.services.vinamilk_sales_summary import build_sales_summary
-from app.models.customer import Company, Customer
+from app.models.customer import Company, Customer, Store
 from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder
 from app.models.product import Product
@@ -1570,8 +1570,10 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
                 if sn and not c.staff_name:
                     c.staff_name = sn
         from app.crud.customer import sync_customers_from_snapshots
+        from app.crud.product import sync_products_from_system_data
         db.flush()
         sync_customers_from_snapshots(db, commit=False)
+        sync_products_from_system_data(db, commit=False)
     except Exception:
         pass
     return saved
@@ -2025,25 +2027,25 @@ def list_local_vinamilk_orders(
         for row in rows
     }
     customer_code_suffixes = {code[-3:] for code in customer_codes if len(code) >= 3}
-    customers_by_code: dict[str, Customer] = {}
-    customers_by_suffix: dict[str, list[Customer]] = defaultdict(list)
+    customers_by_code: dict[str, str | None] = {}
+    customers_by_suffix: dict[str, list[str | None]] = defaultdict(list)
     if customer_codes:
-        customer_rows = db.scalars(
-            select(Customer)
-            .options(joinedload(Customer.store))
+        customer_rows = db.execute(
+            select(Customer.code, Store.name)
+            .outerjoin(Store, Customer.store_id == Store.id)
             .where(
                 or_(
                     func.upper(Customer.code).in_(customer_codes),
                     func.upper(Customer.code).in_(customer_code_suffixes),
                 )
             )
-        ).unique().all()
-        for customer_row in customer_rows:
-            normalized_code = (customer_row.code or "").strip().upper()
+        ).all()
+        for customer_code, store_name in customer_rows:
+            normalized_code = (customer_code or "").strip().upper()
             if normalized_code:
-                customers_by_code[normalized_code] = customer_row
+                customers_by_code[normalized_code] = store_name
                 if len(normalized_code) >= 3:
-                    customers_by_suffix[normalized_code[-3:]].append(customer_row)
+                    customers_by_suffix[normalized_code[-3:]].append(store_name)
     output_rows: list[dict[str, Any]] = []
     replaced_by: dict[str, list[str]] = defaultdict(list)
     replaced_order_for: dict[str, str] = {}
@@ -2193,11 +2195,11 @@ def list_local_vinamilk_orders(
             or _field(row.raw_payload, ("customerCode", "shopCode", "Mã KH"))
             or ""
         ).strip().upper()
-        store_customer = customers_by_code.get(customer_code)
-        if store_customer is None and len(customer_code) >= 3:
+        store_name = customers_by_code.get(customer_code)
+        if store_name is None and len(customer_code) >= 3:
             suffix_customers = customers_by_suffix.get(customer_code[-3:], [])
             if len(suffix_customers) == 1:
-                store_customer = suffix_customers[0]
+                store_name = suffix_customers[0]
         manager_assignment = customer_manager_by_code.get(customer_code)
         if manager_assignment is None and len(customer_code) >= 3:
             suffix_matches = customer_managers_by_suffix.get(customer_code[-3:], [])
@@ -2236,7 +2238,7 @@ def list_local_vinamilk_orders(
             "_boxes_per_carton": product.boxes_per_carton if product and product.boxes_per_carton and product.boxes_per_carton > 0 else None,
             "Tình trạng xử lý đơn hàng": order_status_label,
             "Trạng thái xử lý": order_status_label,
-            "Cửa Hàng": store_customer.store.name if store_customer and store_customer.store else "",
+            "Cửa Hàng": store_name or "",
             "NVGH": ", ".join(delivery_labels),
             "Mã NVGH": delivery_code,
             "Tên NVGH": delivery_name,
@@ -2377,6 +2379,7 @@ def list_grouped_vinamilk_orders(
             continue
         value = sum(_float_from_payload(line, ("totalValue", "total", "amount", "Giá trị")) for line in lines)
         discount = sum(_float_from_payload(line, ("totalDiscount", "discountAmount", "Số tiền CK")) for line in lines)
+        order_discount = _float_from_payload(row, ("orderDiscount", "Chiết khấu đơn hàng"))
         summary_fields = {
             "orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng",
             "createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày",
@@ -2395,12 +2398,17 @@ def list_grouped_vinamilk_orders(
         summary = {k: v for k, v in row.items() if k in summary_fields}
         if row.get("_snapshot_order_number"):
             summary["orderNumber"] = row["_snapshot_order_number"]
-        summary.update({"totalValue": value, "totalDiscount": discount, "_product_count": len(lines), "_summary_key": key})
+        summary.update({
+            "totalValue": value,
+            "totalDiscount": max(discount, order_discount),
+            "_product_count": len(lines),
+            "_summary_key": key,
+        })
         summaries.append(summary)
         replaced = row.get("_replacement_type") in ("SPLIT", "MERGE") and bool(row.get("_replaced_by_order_numbers"))
         if not replaced:
             total_value += value
-            total_discount += discount
+            total_discount += max(discount, order_discount)
             confirmed += bool(field(row, ("deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate")))
     return {
         "rows": summaries[skip:skip + limit], "total": len(summaries), "all_total": len(groups),

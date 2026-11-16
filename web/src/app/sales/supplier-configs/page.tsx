@@ -20,6 +20,8 @@ import {
   Check,
   ChevronDown,
   X,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
@@ -342,6 +344,7 @@ export default function MultiTenantSupplierConfigsPage() {
 
   const [supDrawerOpen, setSupDrawerOpen] = useState(false);
   const [editingSupId, setEditingSupId] = useState<number | null>(null);
+  const [showSecret, setShowSecret] = useState(false);
   const [supForm, setSupForm] = useState<{
     supplier_code: string;
     supplier_name: string;
@@ -349,17 +352,21 @@ export default function MultiTenantSupplierConfigsPage() {
     api_endpoint_url: string;
     auth_type: string;
     username: string;
+    distributor_code: string;
     encrypted_secret: string;
+    has_secret: boolean;
     session_cookie: string;
     field_mapping: Record<string, string>;
   }>({
     supplier_code: "MASAN",
     supplier_name: "Masan Consumer (Masan DMS)",
-    connector_type: "REST_API",
+    connector_type: "PORTAL_PLAYWRIGHT",
     api_endpoint_url: "https://dms-api.masangroup.com/v2/distributor/orders",
     auth_type: "BEARER_TOKEN",
     username: "",
+    distributor_code: "",
     encrypted_secret: "",
+    has_secret: false,
     session_cookie: "",
     field_mapping: {},
   });
@@ -498,6 +505,7 @@ export default function MultiTenantSupplierConfigsPage() {
 
   const excelInputRef = useRef<HTMLInputElement>(null);
   const [uploadingSupId, setUploadingSupId] = useState<number | null>(null);
+  const [deletingSupId, setDeletingSupId] = useState<number | null>(null);
 
   const loadAll = useCallback(async (distId?: number | null) => {
     setLoading(true);
@@ -544,14 +552,20 @@ export default function MultiTenantSupplierConfigsPage() {
     let defaultUrl = String(preset.api_endpoint_url ?? "");
     if (code === "KIOTVIET" && (!defaultUrl || defaultUrl.includes("public.kiotapi.com"))) {
       defaultUrl = "https://api-man1.kiotviet.vn/api/invoices?format=json&$top=15";
+    } else if (code === "NAZZY" && !defaultUrl) {
+      defaultUrl = "http://dms21.nazzy.vn/handler/BillsHandler.ashx";
     }
     setSupForm((prev) => ({
       ...prev,
       supplier_code: code,
       supplier_name: String(preset.supplier_name ?? code),
-      connector_type: String(preset.connector_type ?? "REST_API"),
+      connector_type: String(preset.connector_type ?? "PORTAL_PLAYWRIGHT"),
       api_endpoint_url: prev.api_endpoint_url && editingSupId ? prev.api_endpoint_url : defaultUrl,
-      auth_type: String(preset.auth_type ?? "BEARER_TOKEN"),
+      auth_type: String(preset.auth_type ?? (code === "NAZZY" ? "COOKIE" : "BEARER_TOKEN")),
+      distributor_code:
+        code === "NAZZY"
+          ? (prev.distributor_code || "MAITRUNG")
+          : prev.distributor_code,
       field_mapping: { ...((preset.field_mapping as Record<string, string>) || {}) },
     }));
   }
@@ -594,6 +608,9 @@ export default function MultiTenantSupplierConfigsPage() {
           encrypted_secret: supForm.encrypted_secret,
           session_cookie: supForm.session_cookie,
           supplier_code: supForm.supplier_code,
+          request_config: {
+            distributor_code: supForm.distributor_code,
+          },
         }),
       });
       const data = await res.json();
@@ -702,14 +719,33 @@ export default function MultiTenantSupplierConfigsPage() {
       const url = editingSupId
         ? `${API_URL}/einvoice/supplier-configs/${editingSupId}`
         : `${API_URL}/einvoice/supplier-configs`;
-      const res = await apiFetch(url, {
+      let res = await apiFetch(url, {
         method: editingSupId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           distributor_id: selectedDistributorId,
           ...supForm,
+          request_config: {
+            distributor_code: supForm.distributor_code,
+          },
         }),
       });
+
+      // Nếu PATCH bị 404 (do ID cũ không còn tồn tại trong DB), tự động POST tạo mới
+      if (!res.ok && res.status === 404 && editingSupId) {
+        res = await apiFetch(`${API_URL}/einvoice/supplier-configs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            distributor_id: selectedDistributorId,
+            ...supForm,
+            request_config: {
+              distributor_code: supForm.distributor_code,
+            },
+          }),
+        });
+      }
+
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Không thể lưu cấu hình Nhà cung cấp.");
       setMessage(`Đã lưu cấu hình nguồn dữ liệu & ánh xạ trường cho ${supForm.supplier_code}.`);
@@ -718,6 +754,33 @@ export default function MultiTenantSupplierConfigsPage() {
       await loadAll(selectedDistributorId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Lỗi khi lưu cấu hình Nhà cung cấp.");
+    }
+  }
+
+  async function deleteSupplierConfig(cfg: SupplierConfigItem) {
+    if (
+      !window.confirm(
+        `Xóa cấu hình Nhà cung cấp ${cfg.supplier_name} (${cfg.supplier_code})? Thao tác này không thể hoàn tác.`
+      )
+    ) {
+      return;
+    }
+
+    setError("");
+    setMessage("");
+    setDeletingSupId(cfg.id);
+    try {
+      const res = await apiFetch(`${API_URL}/einvoice/supplier-configs/${cfg.id}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Không thể xóa cấu hình Nhà cung cấp.");
+      setMessage(`Đã xóa cấu hình Nhà cung cấp ${cfg.supplier_name} (${cfg.supplier_code}).`);
+      await loadAll(selectedDistributorId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Lỗi khi xóa cấu hình Nhà cung cấp.");
+    } finally {
+      setDeletingSupId(null);
     }
   }
 
@@ -1000,7 +1063,7 @@ export default function MultiTenantSupplierConfigsPage() {
       {/* TAB 1: SUPPLIER CONFIGS & DYNAMIC FIELD MAPPING */}
       {activeTab === "suppliers" && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-bold text-gray-900">
                 Các nguồn dữ liệu Nhà Cung Cấp của {currentDistributor?.name}
@@ -1009,29 +1072,34 @@ export default function MultiTenantSupplierConfigsPage() {
                 Mỗi Nhà cung cấp có URL kết nối và tên các trường dữ liệu khác nhau, được chuẩn hóa tự động về Canonical Order.
               </p>
             </div>
-            <button
-              onClick={() => {
-                setEditingSupId(null);
-                const defaultPreset = presets["MASAN"] || {};
-                setSupForm({
-                  supplier_code: "MASAN",
-                  supplier_name: String(defaultPreset.supplier_name || "Masan Consumer (Masan DMS)"),
-                  connector_type: String(defaultPreset.connector_type || "REST_API"),
-                  api_endpoint_url: String(
-                    defaultPreset.api_endpoint_url || "https://dms-api.masangroup.com/v2/distributor/orders"
-                  ),
-                  auth_type: String(defaultPreset.auth_type || "BEARER_TOKEN"),
-                  username: "",
-                  encrypted_secret: "",
-                  session_cookie: "",
-                  field_mapping: { ...((defaultPreset.field_mapping as Record<string, string>) || {}) },
-                });
-                setSupDrawerOpen(true);
-              }}
-              className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-sm"
-            >
-              <Plus size={16} /> Thêm Nguồn Nhà Cung Cấp
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingSupId(null);
+                  const defaultPreset = presets["MASAN"] || {};
+                  setSupForm({
+                    supplier_code: "MASAN",
+                    supplier_name: String(defaultPreset.supplier_name || "Masan Consumer (Masan DMS)"),
+                    connector_type: "PORTAL_PLAYWRIGHT",
+                    api_endpoint_url: String(
+                      defaultPreset.api_endpoint_url || "https://dms-api.masangroup.com/v2/distributor/orders"
+                    ),
+                    auth_type: String(defaultPreset.auth_type || "BEARER_TOKEN"),
+                    username: "",
+                    distributor_code: "",
+                    encrypted_secret: "",
+                    has_secret: false,
+                    session_cookie: "",
+                    field_mapping: { ...((defaultPreset.field_mapping as Record<string, string>) || {}) },
+                  });
+                  setSupDrawerOpen(true);
+                }}
+                className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-sm"
+              >
+                <Plus size={16} /> Thêm Nguồn Nhà Cung Cấp
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1052,6 +1120,26 @@ export default function MultiTenantSupplierConfigsPage() {
                       <p className="text-xs text-gray-500 mt-1 break-all">
                         <strong>URL lấy đơn:</strong> {cfg.api_endpoint_url || "Chưa khai báo"}
                       </p>
+                      <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px]">
+                        <span className="text-slate-600">
+                          Tài khoản: <strong className="font-mono text-slate-800">{cfg.username || "Chưa nhập"}</strong>
+                        </span>
+                        <span className="text-slate-300">•</span>
+                        {cfg.has_secret ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            <CheckCircle2 size={11} className="text-emerald-600" /> Đã lưu mật khẩu
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                            <AlertCircle size={11} className="text-amber-600" /> Chưa có mật khẩu
+                          </span>
+                        )}
+                        {cfg.has_cookie && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-50 text-sky-700 border border-sky-200">
+                            ✓ Session Cookie
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <Badge variant="info">{cfg.connector_type}</Badge>
                   </div>
@@ -1083,7 +1171,7 @@ export default function MultiTenantSupplierConfigsPage() {
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-gray-100">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => syncOrdersFromSupplier(cfg)}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm"
@@ -1109,6 +1197,8 @@ export default function MultiTenantSupplierConfigsPage() {
                         if (cfg.supplier_code === "KIOTVIET" && (!url || url.includes("public.kiotapi.com"))) {
                           url = "https://api-man1.kiotviet.vn/api/invoices?format=json&$top=15";
                         }
+                        const reqCfg = cfg.request_config || {};
+                        const distCode = String(reqCfg.distributor_code || reqCfg.distributorCode || "");
                         setSupForm({
                           supplier_code: cfg.supplier_code,
                           supplier_name: cfg.supplier_name,
@@ -1116,16 +1206,28 @@ export default function MultiTenantSupplierConfigsPage() {
                           api_endpoint_url: url,
                           auth_type: cfg.auth_type,
                           username: cfg.username,
+                          distributor_code: distCode,
                           encrypted_secret: "",
+                          has_secret: Boolean(cfg.has_secret),
                           session_cookie: "",
                           field_mapping: { ...(cfg.field_mapping || {}) },
                         });
+                        setShowSecret(false);
                         setSupDrawerOpen(true);
                       }}
                       className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-sky-600"
                       title="Cấu hình URL & Ánh xạ trường"
                     >
                       <Edit3 size={15} />
+                    </button>
+                    <button
+                      onClick={() => deleteSupplierConfig(cfg)}
+                      disabled={deletingSupId === cfg.id}
+                      className="p-1.5 rounded-lg text-gray-500 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+                      title="Xóa cấu hình Nhà cung cấp"
+                      aria-label={`Xóa cấu hình Nhà cung cấp ${cfg.supplier_name}`}
+                    >
+                      <Trash2 size={15} />
                     </button>
                   </div>
                 </div>
@@ -1350,7 +1452,10 @@ export default function MultiTenantSupplierConfigsPage() {
       {/* DRAWER 1: SUPPLIER CONFIG & DYNAMIC FIELD MAPPING */}
       <Drawer
         open={supDrawerOpen}
-        onClose={() => setSupDrawerOpen(false)}
+        onClose={() => {
+          setSupDrawerOpen(false);
+          setEditingSupId(null);
+        }}
         title={
           editingSupId
             ? `Cấu hình Nguồn & Ánh xạ Trường: ${supForm.supplier_code}`
@@ -1407,7 +1512,7 @@ export default function MultiTenantSupplierConfigsPage() {
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm bg-white"
               >
                 <option value="REST_API">REST API (JSON Endpoint)</option>
-                <option value="PORTAL_PLAYWRIGHT">DMS Web Portal (HTTP Client / Cookie)</option>
+                <option value="PORTAL_PLAYWRIGHT">HTTP Client (Cookie)</option>
                 <option value="EXCEL_DYNAMIC">File Excel Động (Dynamic Column Mapping)</option>
               </select>
             </div>
@@ -1435,28 +1540,94 @@ export default function MultiTenantSupplierConfigsPage() {
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
               />
             </div>
+            {supForm.supplier_code === "NAZZY" && (
+              <div className="sm:col-span-2 rounded-lg border border-sky-300 bg-sky-50/70 p-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold uppercase tracking-wide text-sky-800">
+                    Mã Doanh Nghiệp Nazzy (txtDistributor) *
+                  </label>
+                  <span className="rounded bg-sky-200/80 px-2 py-0.5 text-[10px] font-semibold text-sky-900">
+                    Bắt buộc cho Nazzy DMS
+                  </span>
+                </div>
+                <input
+                  value={supForm.distributor_code}
+                  onChange={(e) =>
+                    setSupForm({ ...supForm, distributor_code: e.target.value.toUpperCase() })
+                  }
+                  placeholder="VD: MAITRUNG (Tên DN trên màn hình đăng nhập web Nazzy)"
+                  className="mt-1.5 w-full rounded-lg border border-sky-300 bg-white px-3 py-2 text-sm font-mono font-bold uppercase text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Hệ thống tự động sử dụng Mã DN này cùng Mã NV và Mật khẩu để đăng nhập HTTP thuần lấy Session Cookie xác thực, sau đó kéo đơn hàng từ Nazzy DMS.
+                </p>
+              </div>
+            )}
             <div>
               <label className="text-xs font-medium text-gray-600">
-                Tài khoản (KiotViet: ctyquyanhna/TênĐăngNhập)
+                {supForm.supplier_code === "NAZZY"
+                  ? "Mã Nhân viên / Tài khoản Nazzy (txtCode) *"
+                  : supForm.supplier_code === "KIOTVIET"
+                  ? "Tài khoản (KiotViet: ctyquyanhna/TênĐăngNhập)"
+                  : "Tài khoản đăng nhập"}
               </label>
               <input
                 value={supForm.username}
                 onChange={(e) => setSupForm({ ...supForm, username: e.target.value })}
-                placeholder="VD: ctyquyanhna/0364341308"
+                placeholder={
+                  supForm.supplier_code === "NAZZY"
+                    ? "VD: AVL4HrI... hoặc Tên NV"
+                    : "VD: ctyquyanhna/0364341308"
+                }
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
               />
             </div>
             <div>
-              <label className="text-xs font-medium text-gray-600">
-                Mật khẩu / Token JWT / Cookie (Để trống nếu giữ nguyên)
-              </label>
-              <input
-                type="text"
-                value={supForm.encrypted_secret}
-                onChange={(e) => setSupForm({ ...supForm, encrypted_secret: e.target.value })}
-                placeholder="VD: Bearer eyJ... hoặc Mật khẩu"
-                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-xs font-mono"
-              />
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-gray-600">
+                  {supForm.supplier_code === "NAZZY"
+                    ? "Mật khẩu Nazzy (txtPassword)"
+                    : "Mật khẩu / Token JWT / Cookie"}
+                </label>
+                {supForm.has_secret && (
+                  <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 border border-emerald-300">
+                    <CheckCircle2 size={11} className="text-emerald-600" /> Đã lưu mật khẩu
+                  </span>
+                )}
+              </div>
+              <div className="relative mt-1">
+                <input
+                  type={showSecret ? "text" : "password"}
+                  value={supForm.encrypted_secret}
+                  onChange={(e) => setSupForm({ ...supForm, encrypted_secret: e.target.value })}
+                  placeholder={
+                    supForm.has_secret
+                      ? "•••••••• (Đã lưu trong hệ thống — để trống nếu không đổi)"
+                      : supForm.supplier_code === "NAZZY"
+                      ? "Nhập mật khẩu Nazzy (txtPassword)"
+                      : "VD: Bearer eyJ... hoặc Mật khẩu"
+                  }
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-9 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSecret(!showSecret)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  title={showSecret ? "Ẩn mật khẩu" : "Hiện mật khẩu"}
+                >
+                  {showSecret ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+              {supForm.has_secret ? (
+                <p className="mt-1 text-[11px] text-emerald-700 flex items-center gap-1">
+                  <CheckCircle2 size={12} className="text-emerald-600 shrink-0" />
+                  Hệ thống đã lưu mật khẩu an toàn. Chỉ cần nhập vào đây khi bạn muốn đổi mật khẩu mới.
+                </p>
+              ) : (
+                <p className="mt-1 text-[11px] text-gray-400">
+                  Nhập mật khẩu dùng để xác thực và đồng bộ đơn hàng.
+                </p>
+              )}
             </div>
           </div>
 
@@ -1735,7 +1906,10 @@ export default function MultiTenantSupplierConfigsPage() {
 
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 bg-slate-50 px-2 py-2 -mx-5 -mb-5 rounded-b-xl">
             <button
-              onClick={() => setSupDrawerOpen(false)}
+              onClick={() => {
+                setSupDrawerOpen(false);
+                setEditingSupId(null);
+              }}
               className="rounded bg-red-700 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-red-800 transition-colors"
             >
               Đóng
@@ -2026,7 +2200,7 @@ export default function MultiTenantSupplierConfigsPage() {
                   onChange={(e) =>
                     setDistForm({ ...distForm, login_password: e.target.value })
                   }
-                  placeholder={editingDistId ? "••••••••••••" : "Mặc định: 1234567891011"}
+                  placeholder={editingDistId ? "•••••••••••• (Để trống nếu giữ nguyên)" : "Nhập mật khẩu (tối thiểu 6 ký tự)"}
                   className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
                 />
               </div>

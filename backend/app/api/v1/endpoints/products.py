@@ -180,12 +180,35 @@ def _apply_representative_upload(db: Session, product: ProductModel, representat
 
 @router.get("/categories/", response_model=List[ProductCategoryOption])
 def list_categories(db: Session = Depends(get_db)):
-    return db.query(ProductCategory).order_by(ProductCategory.name).all()
+    try:
+        product_crud.ensure_default_categories_and_units(db, commit=True)
+    except Exception:
+        db.rollback()
+    return db.query(ProductCategory).order_by(ProductCategory.code, ProductCategory.name).all()
 
 
 @router.get("/units/", response_model=List[ProductUnitOption])
 def list_units(db: Session = Depends(get_db)):
+    try:
+        product_crud.ensure_default_categories_and_units(db, commit=True)
+    except Exception:
+        db.rollback()
     return db.query(ProductUnit).order_by(ProductUnit.name).all()
+
+
+@router.post("/sync-from-system")
+def sync_products_from_system(db: Session = Depends(get_db)):
+    """Đồng bộ toàn bộ Mã sản phẩm (SKU), Tên sản phẩm, ĐVT, Đơn giá và Nhà cung cấp
+    từ các đơn hàng DMS và hóa đơn mua vào CQT đã đồng bộ về bảng products."""
+    try:
+        result = product_crud.sync_products_from_system_data(db, commit=True)
+        return {"success": True, **result}
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Không thể đồng bộ danh mục SKU từ hệ thống: {exc}",
+        ) from exc
 
 
 @router.get("/", response_model=List[Product])

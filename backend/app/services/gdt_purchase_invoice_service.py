@@ -109,111 +109,125 @@ def interactive_gdt_login_and_capture_token(
     password: str | None = None,
     timeout_seconds: int = 180,
 ) -> str:
-    """Mở trình duyệt hiển thị trực tiếp trang hoadondientu.gdt.gov.vn (với profile lưu phiên),
+    """Mở trình duyệt hiển thị trực tiếp trang hoadondientu.gdt.gov.vn,
     tự động bật khung Đăng nhập và điền sẵn MST + Mật khẩu (nếu có).
     Người dùng chỉ cần gõ CAPTCHA và bấm Đăng nhập; hệ thống tự động bắt Bearer Token và đóng trình duyệt."""
-    from pathlib import Path
     from playwright.sync_api import sync_playwright
     from scripts.vinamilk_login import configure_playwright_browser_path
 
     configure_playwright_browser_path()
     captured_token: list[str] = []
-    profile_dir = Path(__file__).resolve().parents[2] / ".gdt_browser_profile"
-    profile_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
+        browser = p.chromium.launch(
             headless=False,
-            no_viewport=True,
-            args=["--start-maximized", "--disable-blink-features=AutomationControlled"],
+            args=[
+                "--new-window",
+                "--start-maximized",
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
-        page = context.pages[0] if context.pages else context.new_page()
+        context = browser.new_context(no_viewport=True)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
 
-        def _on_request(req):
-            if captured_token:
-                return
-            auth = req.headers.get("authorization") or req.headers.get("Authorization")
-            if auth and ("bearer " in auth.lower() or len(auth.split(".")) == 3):
-                captured_token.append(normalize_bearer_token(auth))
-
-        def _on_response(resp):
-            if captured_token:
-                return
-            if "security-taxpayer/authenticate" in resp.url and resp.status == 200:
+            def _on_request(req):
+                if captured_token:
+                    return
                 try:
-                    body = resp.json()
-                    if isinstance(body, dict) and body.get("token"):
-                        captured_token.append(normalize_bearer_token(str(body["token"])))
+                    auth = req.headers.get("authorization") or req.headers.get("Authorization")
+                    if auth and ("bearer " in auth.lower() or len(auth.split(".")) == 3):
+                        captured_token.append(normalize_bearer_token(auth))
                 except Exception:
                     pass
 
-        page.on("request", _on_request)
-        page.on("response", _on_response)
+            def _on_response(resp):
+                if captured_token:
+                    return
+                try:
+                    if "security-taxpayer/authenticate" in resp.url and resp.status == 200:
+                        body = resp.json()
+                        if isinstance(body, dict) and body.get("token"):
+                            captured_token.append(normalize_bearer_token(str(body["token"])))
+                except Exception:
+                    pass
 
-        page.goto(GDT_BASE_URL, wait_until="domcontentloaded", timeout=60000)
+            context.on("request", _on_request)
+            context.on("response", _on_response)
 
-        # Tự động đóng popup thông báo của Tổng cục Thuế (nếu có) và bấm mở khung "Đăng nhập"
-        try:
-            page.wait_for_timeout(1200)
-            close_btns = page.locator("button.ant-modal-close")
-            if close_btns.count() > 0:
-                for i in range(close_btns.count()):
-                    try:
-                        if close_btns.nth(i).is_visible():
-                            close_btns.nth(i).click(timeout=1500)
-                            page.wait_for_timeout(400)
-                    except Exception:
-                        pass
-
-            login_trigger = page.locator("text=Đăng nhập").first
-            if login_trigger.is_visible() and not page.locator("input#username").is_visible():
-                login_trigger.click(timeout=3000)
-                page.wait_for_timeout(600)
-        except Exception:
-            pass
-
-        # Tự động điền sẵn MST (username) và Mật khẩu (password) nếu đã lưu
-        if username:
+            page.goto(GDT_BASE_URL, wait_until="domcontentloaded", timeout=60000)
             try:
-                page.wait_for_selector("input#username", timeout=5000)
-                page.fill("input#username", username.strip())
-                if password:
-                    page.fill("input#password", password)
-                page.focus("input#cvalue")
+                page.bring_to_front()
             except Exception:
                 pass
 
-        deadline = time.time() + timeout_seconds
-        while time.time() < deadline and not captured_token:
-            page.wait_for_timeout(500)
+            # Tự động đóng popup thông báo của Tổng cục Thuế (nếu có) và bấm mở khung "Đăng nhập"
             try:
-                for ck in context.cookies():
-                    if ck.get("name") in ("jwt", "token", "access_token") and ck.get("value"):
-                        val = str(ck["value"]).strip()
-                        if len(val.split(".")) == 3:
-                            captured_token.append(normalize_bearer_token(val))
-                            break
-                if not captured_token:
-                    ls_token = page.evaluate(
-                        """() => {
-                            for (const k of ['jwt', 'token', 'access_token', 'accessToken']) {
-                                const v = localStorage.getItem(k) || sessionStorage.getItem(k);
-                                if (v && v.split('.').length === 3) return v;
-                            }
-                            return null;
-                        }"""
-                    )
-                    if ls_token:
-                        captured_token.append(normalize_bearer_token(str(ls_token).strip('"')))
+                page.wait_for_timeout(1200)
+                close_btns = page.locator("button.ant-modal-close")
+                if close_btns.count() > 0:
+                    for i in range(close_btns.count()):
+                        try:
+                            if close_btns.nth(i).is_visible():
+                                close_btns.nth(i).click(timeout=1500)
+                                page.wait_for_timeout(400)
+                        except Exception:
+                            pass
+
+                login_trigger = page.locator("text=Đăng nhập").first
+                if login_trigger.is_visible() and not page.locator("input#username").is_visible():
+                    login_trigger.click(timeout=3000)
+                    page.wait_for_timeout(600)
             except Exception:
+                pass
+
+            # Tự động điền sẵn MST (username) và Mật khẩu (password) nếu đã lưu
+            if username:
+                try:
+                    page.wait_for_selector("input#username", timeout=5000)
+                    page.fill("input#username", username.strip())
+                    if password:
+                        page.fill("input#password", password)
+                    page.focus("input#cvalue")
+                except Exception:
+                    pass
+
+            deadline = time.time() + timeout_seconds
+            while time.time() < deadline and not captured_token:
                 if page.is_closed():
                     break
-
-        try:
-            context.close()
-        except Exception:
-            pass
+                try:
+                    page.wait_for_timeout(500)
+                    for ck in context.cookies():
+                        if ck.get("name") in ("jwt", "token", "access_token") and ck.get("value"):
+                            val = str(ck["value"]).strip()
+                            if len(val.split(".")) == 3:
+                                captured_token.append(normalize_bearer_token(val))
+                                break
+                    if not captured_token and not page.is_closed():
+                        ls_token = page.evaluate(
+                            """() => {
+                                for (const k of ['jwt', 'token', 'access_token', 'accessToken']) {
+                                    const v = localStorage.getItem(k) || sessionStorage.getItem(k);
+                                    if (v && v.split('.').length === 3) return v;
+                                }
+                                return null;
+                            }"""
+                        )
+                        if ls_token:
+                            captured_token.append(normalize_bearer_token(str(ls_token).strip('"')))
+                except Exception:
+                    if page.is_closed():
+                        break
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
 
     if not captured_token:
         raise RuntimeError(
@@ -707,6 +721,13 @@ def sync_gdt_purchase_invoices(
     )
     if cred:
         cred.last_synced_at = datetime.utcnow()
+
+    try:
+        from app.crud.product import sync_products_from_system_data
+        db.flush()
+        sync_products_from_system_data(db, commit=False)
+    except Exception:
+        pass
 
     db.commit()
     return {

@@ -209,6 +209,30 @@ def test_grouped_order_pagination_filter_and_detail(db):
     assert {row["productCode"] for row in detail["rows"]} == {"01VD41", "OTHER"}
 
 
+def test_order_list_works_when_legacy_customers_table_lacks_phone_column(db):
+    day = date(2026, 11, 16)
+    customer = db.scalar(select(Customer).where(Customer.code == "0MD"))
+    customer.store = Store(code="STORE-0MD", name="Cửa hàng Nam Thúy")
+    db.add(VinamilkOrderSnapshot(
+        remote_key="legacy-customer-schema",
+        order_number="LEGACY-1",
+        product_code="01VD41",
+        customer_code="0MD",
+        customer_name="Nam thúy 1",
+        order_created_date=day,
+        synced_from=day,
+        synced_to=day,
+        raw_payload={"orderNumber": "LEGACY-1", "productCode": "01VD41", "customerCode": "0MD"},
+    ))
+    db.commit()
+    db.connection().exec_driver_sql("ALTER TABLE customers DROP COLUMN phone")
+
+    result = list_grouped_vinamilk_orders(day, day, skip=0, limit=20, db=db)
+
+    assert result["total"] == 1
+    assert result["rows"][0]["Cửa Hàng"] == "Cửa hàng Nam Thúy"
+
+
 def test_grouped_order_keeps_all_lines_across_snapshot_pages(db):
     day = date(2026, 11, 4)
     db.add_all([
@@ -226,6 +250,41 @@ def test_grouped_order_keeps_all_lines_across_snapshot_pages(db):
     assert result["rows"][0]["_product_count"] == 2001
     assert result["rows"][0]["totalValue"] == 20010
     assert result["rows"][0]["totalDiscount"] == 2001
+
+
+def test_grouped_order_keeps_order_level_discount_separate_from_line_discounts(db):
+    day = date(2026, 11, 16)
+    lines = (
+        ("NCNAK180-001", 12, 396000, 4752000),
+        ("NCNSHDD180-001", 240, 360000, 86400000),
+    )
+    for index, (product_code, quantity, unit_price, total_value) in enumerate(lines):
+        db.add(VinamilkOrderSnapshot(
+            remote_key=f"nazzy-discount-{index}",
+            order_number="26113454",
+            product_code=product_code,
+            order_created_date=day,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={
+                "Số đơn hàng": "26113454",
+                "Mã sản phẩm": product_code,
+                "Số lượng": quantity,
+                "Giá bán": unit_price,
+                "Giá trị": total_value,
+                "Số tiền CK": 1251 if index == 0 else 22749,
+                "Chiết khấu đơn hàng": 24000,
+            },
+        ))
+    db.flush()
+
+    result = list_grouped_vinamilk_orders(day, day, skip=0, limit=20, db=db)
+
+    assert result["total"] == 1
+    assert result["rows"][0]["totalValue"] == 91152000
+    assert result["rows"][0]["totalDiscount"] == 24000
+    assert result["total_value"] == 91152000
+    assert result["total_discount"] == 24000
 
 
 def test_order_list_shows_store_from_customer_code(db):

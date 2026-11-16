@@ -44,6 +44,7 @@ class Product(Base):
     boxes_per_carton: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    _npp_code: Mapped[str | None] = mapped_column("npp_code", String(50), nullable=True)
 
     category: Mapped["ProductCategory"] = relationship(back_populates="products")
     unit: Mapped["ProductUnit"] = relationship(back_populates="products")
@@ -53,7 +54,9 @@ class Product(Base):
 
     @property
     def npp_code(self) -> str:
-        if hasattr(self, "_npp_code_cache"):
+        if self._npp_code:
+            return self._npp_code
+        if hasattr(self, "_npp_code_cache") and self._npp_code_cache:
             return self._npp_code_cache
         group = self.group_items[0].group if self.group_items else None
         if group:
@@ -62,6 +65,10 @@ class Product(Base):
                     return link.distributor_sku
             return group.representative_product.sku
         return self.sku
+
+    @npp_code.setter
+    def npp_code(self, value: str | None) -> None:
+        self._npp_code = value.strip().upper() if value and str(value).strip() else None
 
     @property
     def npp_name(self) -> str:

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 import hashlib
 from io import BytesIO
@@ -43,6 +44,7 @@ class CanonicalOrder(BaseModel):
     staff_code: str | None = None
     staff_name: str | None = None
     status: str = "Đã duyệt"
+    order_discount: float = 0.0
     items: list[CanonicalOrderItem] = Field(default_factory=list)
 
 
@@ -179,7 +181,91 @@ SUPPLIER_FIELD_MAPPING_PRESETS: dict[str, dict[str, Any]] = {
             "staff_name": "SoldByGivenName",
         },
     },
+    "NAZZY": {
+        "supplier_name": "DMS Nazzy (NPP Mai Gold)",
+        "connector_type": "REST_API",
+        "api_endpoint_url": "http://dms21.nazzy.vn/handler/BillsHandler.ashx",
+        "auth_type": "COOKIE",
+        "field_mapping": {
+            "order_number": "Code",
+            "order_date": "BillsDate",
+            "delivery_date": "CreateDate",
+            "supplier_name": "GroupName",
+            "customer_code": "CustomerCode",
+            "customer_name": "CustomerName",
+            "customer_tax_code": "CustomerTaxCode",
+            "customer_address": "Address",
+            "product_code": "ProductCode",
+            "product_name": "ProductName",
+            "unit": "UnitName",
+            "quantity": "Amount",
+            "promo_quantity": "promo_quantity",
+            "unit_price": "PriceNow",
+            "discount_amount": "Discount",
+            "order_discount": "OrderDiscount",
+            "vat_rate": "TaxPercent",
+            "line_total": "TotalPrice",
+            "staff_code": "SaleEmployeeCode",
+            "staff_name": "SaleEmployeeName",
+        },
+    },
 }
+
+
+def parse_curl_command(curl_str: str) -> dict[str, Any]:
+    """Tự động phân tích lệnh bash cURL của Nazzy DMS hoặc NCC bất kỳ để lấy URL, Headers, Cookies và Query Params."""
+    import re
+    import urllib.parse
+
+    result: dict[str, Any] = {
+        "url": "",
+        "headers": {},
+        "cookies": "",
+        "cookies_dict": {},
+        "params": {},
+    }
+    cleaned = curl_str.replace("\\\r\n", " ").replace("\\\n", " ").strip()
+
+    # 1. Trích xuất URL
+    url_match = re.search(r"--url\s+['\"]([^'\"]+)['\"]", cleaned)
+    if not url_match:
+        url_match = re.search(r"curl\s+['\"]([^'\"]+)['\"]", cleaned)
+    if not url_match:
+        url_match = re.search(r"curl\s+([^\s]+)", cleaned)
+    if url_match:
+        full_url = url_match.group(1).strip()
+        if "?" in full_url:
+            base_url, query_str = full_url.split("?", 1)
+            result["url"] = base_url
+            parsed_params = urllib.parse.parse_qs(query_str)
+            for k, v in parsed_params.items():
+                result["params"][k] = v[0] if len(v) == 1 else v
+        else:
+            result["url"] = full_url
+
+    # 2. Trích xuất Headers: -H 'Key: Value'
+    headers_matches = re.findall(r"-H\s+['\"]([^'\"]+)['\"]", cleaned)
+    for h in headers_matches:
+        if ":" in h:
+            k, v = h.split(":", 1)
+            clean_k = k.strip()
+            clean_v = v.strip()
+            result["headers"][clean_k] = clean_v
+            if clean_k.lower() == "cookie":
+                result["cookies"] = clean_v
+
+    # 3. Trích xuất Cookies từ -b '...'
+    cookie_match = re.search(r"-b\s+['\"]([^'\"]+)['\"]", cleaned)
+    if cookie_match:
+        result["cookies"] = cookie_match.group(1).strip()
+
+    if result["cookies"]:
+        for part in result["cookies"].split(";"):
+            if "=" in part:
+                ck, cv = part.strip().split("=", 1)
+                result["cookies_dict"][ck.strip()] = cv.strip()
+
+    return result
 
 
 def _extract_value(row: dict[str, Any], configured_key: str | None, fallback_keys: tuple[str, ...] = ()) -> Any:
@@ -368,7 +454,7 @@ class DynamicFieldMapper:
                 _extract_value(
                     row,
                     field_mapping.get("quantity"),
-                    ("quantity", "so_luong_ban", "billedQty", "OrderQty", "Số lượng"),
+                    ("quantity", "Amount", "so_luong_ban", "billedQty", "OrderQty", "Số lượng"),
                 ),
                 0.0,
             )
@@ -384,7 +470,7 @@ class DynamicFieldMapper:
                 _extract_value(
                     row,
                     field_mapping.get("unit_price"),
-                    ("unitPrice", "don_gia_chua_vat", "basePrice", "UnitPrice", "Giá bán", "Đơn giá"),
+                    ("unitPrice", "PriceNow", "don_gia_chua_vat", "basePrice", "UnitPrice", "Giá bán", "Đơn giá"),
                 ),
                 0.0,
             )
@@ -413,6 +499,14 @@ class DynamicFieldMapper:
                 0.0,
             )
             line_total = raw_line_total if raw_line_total > 0 else max(0.0, quantity * unit_price - discount_amount)
+            order_discount = _to_float(
+                _extract_value(
+                    row,
+                    field_mapping.get("order_discount"),
+                    ("orderDiscount", "DiscountPromotion", "Chiết khấu đơn hàng"),
+                ),
+                0.0,
+            )
 
             if order_number not in orders_by_number:
                 orders_by_number[order_number] = CanonicalOrder(
@@ -428,6 +522,7 @@ class DynamicFieldMapper:
                     customer_address=customer_address,
                     staff_code=staff_code,
                     staff_name=staff_name,
+                    order_discount=order_discount,
                     items=[],
                 )
 
@@ -468,6 +563,7 @@ def persist_canonical_orders_to_snapshots(
                 "Số đơn hàng": order.order_number,
                 "Ngày đơn hàng": order.order_date.strftime("%d/%m/%Y"),
                 "Ngày giao hàng": (order.delivery_date or order.order_date).strftime("%d/%m/%Y"),
+                "Mã NPP": distributor_code or "",
                 "Mã KH": order.customer_code,
                 "Tên KH": order.customer_name,
                 "Mã số thuế": order.customer_tax_code or "",
@@ -480,6 +576,7 @@ def persist_canonical_orders_to_snapshots(
                 "Giá bán": item.unit_price,
                 "Giá trị": subtotal_val,
                 "Số tiền CK": item.discount_amount,
+                "Chiết khấu đơn hàng": order.order_discount,
                 "Thành tiền": net_val,
                 "Thuế suất": item.vat_rate,
                 "Mã NVBH": order.staff_code or "",
@@ -528,12 +625,16 @@ def persist_canonical_orders_to_snapshots(
             saved_rows += 1
 
     db.flush()
+    db.commit()
+
     try:
         from app.crud.customer import sync_customers_from_snapshots
-        sync_customers_from_snapshots(db, commit=False)
+        from app.crud.product import sync_products_from_system_data
+        sync_customers_from_snapshots(db, commit=True)
+        sync_products_from_system_data(db, commit=True)
     except Exception:
-        pass
-    db.commit()
+        db.rollback()
+
     return saved_rows
 
 
@@ -596,15 +697,330 @@ def kiotviet_login_and_get_cookie(retailer: str, username: str, password: str) -
         return "; ".join(cookies)
 
 
+def nazzy_login_and_get_cookie(
+    distributor_code: str,
+    username: str,
+    password: str,
+    base_url: str = "http://dms21.nazzy.vn",
+) -> str:
+    """Tự động đăng nhập vào web Nazzy DMS (http://dms21.nazzy.vn) bằng HTTP thuần.
+    Sử dụng Mã Doanh Nghiệp (txtDistributor), Mã Nhân Viên (txtCode) và Mật Khẩu (txtPassword).
+    Trả về chuỗi Cookie phiên chứa ASP.NET_SessionId, ses_adminId, ses_disId..."""
+    import re
+    clean_base = base_url.rstrip("/").split("/handler")[0].split("/Pages")[0]
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    with httpx.Client(verify=False, timeout=20.0, follow_redirects=False) as client:
+        # 1. GET trang chủ để lấy ASP.NET ViewState & Session Cookie ban đầu
+        r_get = client.get(f"{clean_base}/", headers=headers)
+        if r_get.status_code not in (200, 302):
+            raise RuntimeError(f"Không thể kết nối tới máy chủ Nazzy DMS ({clean_base}): HTTP {r_get.status_code}")
+
+        html = r_get.text
+        vs_m = re.search(r'id="__VIEWSTATE"\s+value="([^"]+)"', html)
+        vsg_m = re.search(r'id="__VIEWSTATEGENERATOR"\s+value="([^"]+)"', html)
+        ev_m = re.search(r'id="__EVENTVALIDATION"\s+value="([^"]+)"', html)
+
+        viewstate = vs_m.group(1) if vs_m else ""
+        viewstategen = vsg_m.group(1) if vsg_m else "C2EE9ABB"
+        eventval = ev_m.group(1) if ev_m else ""
+
+        # 2. POST form đăng nhập
+        payload = {
+            "__VIEWSTATE": viewstate,
+            "__VIEWSTATEGENERATOR": viewstategen,
+            "__EVENTVALIDATION": eventval,
+            "txtDistributor": distributor_code.strip(),
+            "txtCode": username.strip(),
+            "txtPassword": password.strip(),
+            "btnLogin": "Đăng nhập",
+        }
+        post_headers = {
+            **headers,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": f"{clean_base}/",
+            "Origin": clean_base,
+        }
+        r_post = client.post(f"{clean_base}/", data=payload, headers=post_headers)
+
+        cookies = [f"{k}={v}" for k, v in client.cookies.items() if v]
+
+        has_auth_cookie = any("ses_adminId" in c or "ses_disId" in c or "ses_adminName" in c for c in cookies)
+        if r_post.status_code in (302, 301) or has_auth_cookie:
+            return "; ".join(cookies)
+
+        err_msg = ""
+        msg_m = re.search(r'<span[^>]+id="[^"]*lbMessage[^"]*"[^>]*>(?:<font[^>]*>)?([^<]+)', r_post.text, re.IGNORECASE)
+        if msg_m:
+            err_msg = msg_m.group(1).strip()
+        raise RuntimeError(err_msg or "Nazzy DMS từ chối đăng nhập. Vui lòng kiểm tra lại Mã DN, Mã NV và Mật khẩu.")
+
+
+def fetch_nazzy_orders(
+    config: DistributorSupplierConfig,
+    from_date: date,
+    to_date: date,
+    *,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
+    """Tự động đồng bộ đơn hàng từ DMS Nazzy (http://dms21.nazzy.vn) của NPP Mai Gold.
+    Hỗ trợ tự động đăng nhập HTTP bằng Mã DN + Mã NV + Mật khẩu, phân trang, đa luồng và phân bổ chiết khấu / quà tặng KM."""
+    raw_url = config.api_endpoint_url or "http://dms21.nazzy.vn/handler/BillsHandler.ashx"
+    base_url = raw_url.split("?")[0].strip()
+
+    req_cfg = config.request_config or {}
+    dist_code = str(req_cfg.get("distributor_code") or req_cfg.get("distributorCode") or "").strip()
+    clean_user = (config.username or "").strip()
+    if "/" in clean_user:
+        parts = clean_user.split("/", 1)
+        if not dist_code:
+            dist_code = parts[0].strip()
+        clean_user = parts[1].strip()
+
+    secret = (config.encrypted_secret or "").strip()
+    cookie_str = (config.session_cookie or "").strip()
+
+    # Tự động đăng nhập qua HTTP nếu chưa có Cookie hoặc người dùng cập nhật mật khẩu mới
+    if dist_code and clean_user and secret:
+        try:
+            new_cookie = nazzy_login_and_get_cookie(dist_code, clean_user, secret, base_url)
+            cookie_str = new_cookie
+            config.session_cookie = new_cookie
+        except Exception:
+            # Nếu login bằng user/pass không thành công nhưng đã có cookie_str cũ, tiếp tục thử với cookie_str cũ
+            pass
+
+    headers: dict[str, str] = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Content-Type": "application/json;charset=utf-8",
+        "Pragma": "no-cache",
+        "Referer": "http://dms21.nazzy.vn/Pages/Bills/OrderV2.aspx",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+        ),
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    cookies: dict[str, str] = {}
+    if cookie_str:
+        for part in cookie_str.split(";"):
+            if "=" in part:
+                ck, cv = part.strip().split("=", 1)
+                cookies[ck.strip()] = cv.strip()
+
+    req_cfg = config.request_config or {}
+    group_id = str(
+        req_cfg.get("groupId")
+        or req_cfg.get("group_id")
+        or "1124|1064|1058|1059|1061|1062|1063|1060|-1"
+    )
+    type_val = req_cfg.get("type", 4)
+    status_val = req_cfg.get("status", 2)
+    page_size = int(req_cfg.get("pageSize", 50))
+
+    from_str = from_date.strftime("%Y/%m/%d")
+    to_str = to_date.strftime("%Y/%m/%d")
+
+    all_order_summaries: list[dict[str, Any]] = []
+
+    with httpx.Client(verify=False, timeout=30.0, follow_redirects=True) as client:
+        current_page = 1
+        while True:
+            params = {
+                "t": "GetBillsOrderGetListV5",
+                "type": str(type_val),
+                "code": "",
+                "note": "",
+                "typePayment": "-1",
+                "groupId": group_id,
+                "customer": "",
+                "productId": "-1",
+                "depotId": str(req_cfg.get("depotId", -1)),
+                "dicDepot": str(req_cfg.get("dicDepot", -1)),
+                "saleId": str(req_cfg.get("saleId", -1)),
+                "status": str(status_val),
+                "fromDate": from_str,
+                "toDate": to_str,
+                "currentPage": str(current_page),
+                "pageSize": str(page_size),
+                "orderBy": "1",
+                "_": str(int(datetime.utcnow().timestamp() * 1000)),
+            }
+            try:
+                resp = client.get(base_url, params=params, headers=headers, cookies=cookies)
+                if resp.status_code != 200:
+                    if strict:
+                        raise RuntimeError(f"HTTP {resp.status_code} khi lấy danh sách đơn Nazzy.")
+                    break
+                data = resp.json()
+            except Exception as exc:
+                if strict:
+                    raise RuntimeError(f"Không thể lấy danh sách đơn Nazzy: {exc}") from exc
+                break
+
+            if not isinstance(data, dict):
+                if strict:
+                    raise RuntimeError("Dữ liệu trả về từ Nazzy không đúng định dạng.")
+                break
+            items_block = data.get("Items") or {}
+            if not isinstance(items_block, dict):
+                if strict:
+                    raise RuntimeError("Dữ liệu trả về từ Nazzy không có danh sách đơn hàng hợp lệ.")
+                break
+            total_records = items_block.get("TotalRecord", 0)
+            page_items = items_block.get("Items") or []
+            if not page_items:
+                break
+
+            all_order_summaries.extend(page_items)
+            if current_page * page_size >= total_records or len(page_items) < page_size:
+                break
+            current_page += 1
+            if current_page > 30:
+                break
+
+    if not all_order_summaries:
+        return []
+
+    # Fetch chi tiết từng đơn hàng qua ThreadPoolExecutor để tăng tốc gấp 10 lần
+    def _fetch_order_detail(ord_sum: dict[str, Any]) -> list[dict[str, Any]]:
+        depot_id = ord_sum.get("BillsDepotId")
+        if not depot_id:
+            return []
+        try:
+            with httpx.Client(verify=False, timeout=20.0, follow_redirects=True) as local_client:
+                r_det = local_client.get(
+                    base_url,
+                    params={"t": "BillsOrderGetInfo", "id": str(depot_id), "option": "0"},
+                    headers=headers,
+                    cookies=cookies,
+                )
+                if r_det.status_code != 200:
+                    return []
+                det_data = r_det.json()
+        except Exception:
+            return []
+
+        info = det_data.get("Info") or {}
+        details = det_data.get("Details") or []
+        promotions = det_data.get("Promotion") or []
+
+        cash_discount_total = sum(
+            float(p.get("Price") or 0.0)
+            for p in promotions
+            if p.get("ProductId", -1) <= 0
+        )
+        order_discount = float(info.get("DiscountPromotion") or cash_discount_total or 0.0)
+        total_detail_price = sum(float(line.get("TotalPrice") or 0.0) for line in details)
+        header_data = {
+            "Code": info.get("Code") or ord_sum.get("Code"),
+            "BillsDate": info.get("BillsDate") or ord_sum.get("BillsDate"),
+            "CreateDate": info.get("CreateDate") or ord_sum.get("CreateDate"),
+            "CustomerCode": str(info.get("CustomerCode") or ord_sum.get("CustomerCode") or "KH-NAZZY").strip(),
+            "CustomerName": info.get("CustomerName") or ord_sum.get("CustomerName"),
+            "CustomerTaxCode": info.get("CustomerTaxCode") or "",
+            "Address": info.get("Address") or ord_sum.get("Address") or "",
+            "Phone": info.get("Phone") or "",
+            "GroupName": info.get("GroupName") or ord_sum.get("GroupName") or "NAZZY",
+            "SaleEmployeeCode": info.get("SaleEmployeeCode") or "",
+            "SaleEmployeeName": info.get("SaleEmployeeName") or "",
+            "DictDepotName": info.get("DictDepotName") or ord_sum.get("DictDepotName") or "Kho Mai Gold",
+            "DepotName": info.get("DepotName") or ord_sum.get("DepotName") or "",
+            "OrderTotalPrice": float(info.get("TotalPrice") or ord_sum.get("TotalPrice") or 0.0),
+            "OrderDiscount": order_discount,
+        }
+
+        order_rows: list[dict[str, Any]] = []
+
+        # Các dòng sản phẩm mua bán
+        remaining_order_discount = round(order_discount)
+        priced_lines = [line for line in details if float(line.get("TotalPrice") or 0.0) > 0]
+        for line in details:
+            line_price = float(line.get("TotalPrice") or 0.0)
+            allocated_discount = 0.0
+            if line in priced_lines and total_detail_price > 0 and order_discount > 0:
+                if line is priced_lines[-1]:
+                    allocated_discount = remaining_order_discount
+                else:
+                    allocated_discount = round(order_discount * line_price / total_detail_price)
+                remaining_order_discount -= allocated_discount
+            line_discount = float(line.get("Discount") or 0.0) + allocated_discount
+
+            order_rows.append({
+                **header_data,
+                "ProductCode": str(line.get("ProductCode") or f"SP-{line.get('ProductId')}").strip(),
+                "ProductName": line.get("ProductName") or "Sản phẩm Nazzy",
+                "UnitName": line.get("UnitName") or "Thùng",
+                "Amount": float(line.get("Amount") or 0.0),
+                "promo_quantity": 0.0,
+                "PriceNow": float(line.get("PriceNow") or line.get("Price") or 0.0),
+                "Discount": line_discount,
+                "TaxPercent": float(line.get("TaxPercent") or 8.0),
+                "TotalPrice": max(0.0, line_price - line_discount),
+            })
+
+        # Các dòng hàng tặng khuyến mại (hiện vật)
+        for p in promotions:
+            if p.get("ProductId", -1) > 0 and float(p.get("Amount") or p.get("PromotionAmount") or 0) > 0:
+                p_qty = float(p.get("Amount") or p.get("PromotionAmount") or 0)
+                order_rows.append({
+                    **header_data,
+                    "ProductCode": str(p.get("ProductCode") or f"KM-{p.get('ProductId')}").strip(),
+                    "ProductName": f"{p.get('ProductName', 'Hàng khuyến mại')} (Hàng KM không thu tiền)",
+                    "UnitName": p.get("UnitName") or "Gói",
+                    "Amount": 0.0,
+                    "promo_quantity": p_qty,
+                    "PriceNow": 0.0,
+                    "Discount": 0.0,
+                    "TaxPercent": float(p.get("PromotionVATPercent") or 0.0),
+                    "TotalPrice": 0.0,
+                })
+
+        return order_rows
+
+    flat_results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(_fetch_order_detail, item) for item in all_order_summaries]
+        for f in as_completed(futures):
+            res = f.result()
+            if res:
+                flat_results.extend(res)
+
+    return flat_results
+
+
 class RestApiSupplierConnector(BaseSupplierConnector):
-    """Connector kết nối REST API của các Nhà cung cấp (Masan, Unilever, ERP tùy chỉnh...)."""
+    """Connector kết nối REST API của các Nhà cung cấp (Nazzy, Masan, Unilever, KiotViet...)."""
 
     def fetch_raw_orders(
         self,
         config: DistributorSupplierConfig,
         from_date: date,
         to_date: date,
+        *,
+        allow_sample_fallback: bool = True,
     ) -> list[dict[str, Any]]:
+        # Tự động ưu tiên xử lý chuyên biệt cho Nazzy DMS (NPP Mai Gold)
+        is_nazzy = (
+            config.supplier_code.upper() == "NAZZY"
+            or "nazzy" in (config.api_endpoint_url or "").lower()
+            or "BillsHandler" in (config.api_endpoint_url or "")
+        )
+        if is_nazzy:
+            return fetch_nazzy_orders(
+                config,
+                from_date,
+                to_date,
+                strict=not allow_sample_fallback,
+            )
         headers: dict[str, str] = {"Accept": "application/json"}
         secret = (config.encrypted_secret or "").strip()
         clean_token = secret.replace("Bearer ", "").strip()
@@ -660,65 +1076,75 @@ class RestApiSupplierConnector(BaseSupplierConnector):
                         params={"fromDate": from_date.isoformat(), "toDate": to_date.isoformat()},
                         headers=headers,
                     )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        raw_list: list[Any] = []
-                        if isinstance(data, list):
-                            raw_list = data
-                        elif isinstance(data, dict):
-                            root_key = req_cfg.get("root_data_path", "data")
-                            raw_list = (
-                                data.get("Data")
-                                or data.get(root_key)
-                                or data.get("orders")
-                                or data.get("invoices")
-                                or data.get("rows")
-                                or []
+                    if resp.status_code != 200:
+                        raise RuntimeError(f"HTTP {resp.status_code} khi kết nối nguồn Nhà cung cấp.")
+                    data = resp.json()
+                    raw_list: list[Any] = []
+                    if isinstance(data, list):
+                        raw_list = data
+                    elif isinstance(data, dict):
+                        root_key = req_cfg.get("root_data_path", "data")
+                        raw_list = (
+                            data.get("Data")
+                            or data.get(root_key)
+                            or data.get("orders")
+                            or data.get("invoices")
+                            or data.get("rows")
+                            or []
+                        )
+                    elif not allow_sample_fallback:
+                        raise RuntimeError("Nguồn Nhà cung cấp trả về dữ liệu không đúng định dạng danh sách.")
+
+                    # Bỏ qua hàng tổng kết Id == -1 của KiotViet
+                    if isinstance(raw_list, list):
+                        raw_list = [r for r in raw_list if isinstance(r, dict) and r.get("Id") != -1]
+
+                    if not isinstance(raw_list, list):
+                        raise RuntimeError("Nguồn Nhà cung cấp không trả về danh sách đơn hàng.")
+
+                    # Tự động làm phẳng (Flatten) nếu đơn hàng chứa mảng chi tiết (như InvoiceDetails của KiotViet)
+                    flat_rows: list[dict[str, Any]] = []
+                    for item in raw_list:
+                        if isinstance(item, dict):
+                            # Nếu là KiotViet và chưa có chi tiết, gọi API xem chi tiết hóa đơn
+                            if is_kiotviet and item.get("Id") and not item.get("InvoiceDetails") and not item.get("OrderDetails"):
+                                try:
+                                    base_endpoint = endpoint_url.split("?")[0].rstrip("/")
+                                    r_detail = client.get(f"{base_endpoint}/{item['Id']}?format=json", headers=headers)
+                                    if r_detail.status_code == 200:
+                                        item = r_detail.json()
+                                except Exception:
+                                    pass
+
+                            details = (
+                                item.get("InvoiceDetails")
+                                or item.get("invoiceDetails")
+                                or item.get("OrderDetails")
+                                or item.get("orderDetails")
+                                or item.get("items")
+                                or item.get("lines")
+                                or item.get("products")
                             )
-
-                        # Bỏ qua hàng tổng kết Id == -1 của KiotViet
-                        if isinstance(raw_list, list):
-                            raw_list = [r for r in raw_list if isinstance(r, dict) and r.get("Id") != -1]
-
-                        # Tự động làm phẳng (Flatten) nếu đơn hàng chứa mảng chi tiết (như InvoiceDetails của KiotViet)
-                        flat_rows: list[dict[str, Any]] = []
-                        for item in raw_list:
-                            if isinstance(item, dict):
-                                # Nếu là KiotViet và chưa có chi tiết, gọi API xem chi tiết hóa đơn
-                                if is_kiotviet and item.get("Id") and not item.get("InvoiceDetails") and not item.get("OrderDetails"):
-                                    try:
-                                        base_endpoint = endpoint_url.split("?")[0].rstrip("/")
-                                        r_detail = client.get(f"{base_endpoint}/{item['Id']}?format=json", headers=headers)
-                                        if r_detail.status_code == 200:
-                                            item = r_detail.json()
-                                    except Exception:
-                                        pass
-
-                                details = (
-                                    item.get("InvoiceDetails")
-                                    or item.get("invoiceDetails")
-                                    or item.get("OrderDetails")
-                                    or item.get("orderDetails")
-                                    or item.get("items")
-                                    or item.get("lines")
-                                    or item.get("products")
-                                )
-                                if isinstance(details, list) and len(details) > 0:
-                                    for line in details:
-                                        if isinstance(line, dict):
-                                            merged = {**item, **line}
-                                            if "id" in line:
-                                                merged["detail_id"] = line["id"]
-                                            flat_rows.append(merged)
-                                else:
-                                    flat_rows.append(item)
-                        if flat_rows:
-                            return flat_rows
-            except Exception:
+                            if isinstance(details, list) and len(details) > 0:
+                                for line in details:
+                                    if isinstance(line, dict):
+                                        merged = {**item, **line}
+                                        if "id" in line:
+                                            merged["detail_id"] = line["id"]
+                                        flat_rows.append(merged)
+                            else:
+                                flat_rows.append(item)
+                    if flat_rows or not allow_sample_fallback:
+                        return flat_rows
+            except Exception as exc:
+                if not allow_sample_fallback:
+                    raise RuntimeError(f"Không thể đồng bộ nguồn Nhà cung cấp: {exc}") from exc
                 # Fallback dữ liệu mẫu nếu API endpoint không phản hồi hoặc đang trong môi trường demo/offline
                 pass
                 # Fallback dữ liệu mẫu nếu API endpoint không phản hồi hoặc đang trong môi trường demo/offline
                 pass
+        elif not allow_sample_fallback:
+            raise RuntimeError("Cấu hình nguồn Nhà cung cấp chưa có URL HTTP hợp lệ.")
 
         # Dữ liệu mẫu mô phỏng chuẩn xác theo đúng cấu trúc field_mapping của NCC để test/demo ngay lập tức
         return generate_sample_raw_rows_for_supplier(config, from_date)
@@ -902,6 +1328,70 @@ def generate_sample_raw_rows_for_supplier(
                 f_total: 5850000,
                 f_scode: "NV-KV02",
                 f_sname: "Hoàng Thị Mai",
+            },
+        ]
+
+    if sup == "NAZZY":
+        return [
+            {
+                f_order: "26113337",
+                f_date: date_str,
+                f_deliv: date_str,
+                f_ccode: "10129223",
+                f_cname: "Võ Hạ",
+                f_ctax: "040076033328",
+                f_caddr: "Số nhà 224, khối Hòa Bắc, Xã Tương Dương, Nghệ An",
+                f_pcode: "323105",
+                f_pname: "Bánh Marshmallow Phủ Sô Cô La Nextar 392g",
+                f_unit: "Thùng",
+                f_qty: 1,
+                f_promo: 0,
+                f_price: 328000,
+                f_disc: 24000,
+                f_vat: 8,
+                f_total: 304000,
+                f_scode: "BH001",
+                f_sname: "Giao hàng",
+            },
+            {
+                f_order: "26113337",
+                f_date: date_str,
+                f_deliv: date_str,
+                f_ccode: "10129223",
+                f_cname: "Võ Hạ",
+                f_ctax: "040076033328",
+                f_caddr: "Số nhà 224, khối Hòa Bắc, Xã Tương Dương, Nghệ An",
+                f_pcode: "320029",
+                f_pname: "Bánh kem xốp phô mai-Richeese Nabati Cheese Cream Wafer 330g",
+                f_unit: "Thùng",
+                f_qty: 1,
+                f_promo: 0,
+                f_price: 240000,
+                f_disc: 24000,
+                f_vat: 8,
+                f_total: 216000,
+                f_scode: "BH001",
+                f_sname: "Giao hàng",
+            },
+            {
+                f_order: "26113338",
+                f_date: date_str,
+                f_deliv: date_str,
+                f_ccode: "10129224",
+                f_cname: "Lam Giang",
+                f_ctax: "040191033257",
+                f_caddr: "Số 212 Khối Hòa Nam, Xã Tương Dương, Nghệ An",
+                f_pcode: "320935",
+                f_pname: "Bánh Xốp Nhân Kem Goguma - Nabati Goguma Cream Wafer 110g",
+                f_unit: "Thùng",
+                f_qty: 3,
+                f_promo: 0,
+                f_price: 209712,
+                f_disc: 77136,
+                f_vat: 8,
+                f_total: 552000,
+                f_scode: "BH001",
+                f_sname: "Giao hàng",
             },
         ]
 

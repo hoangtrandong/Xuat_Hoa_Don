@@ -38,6 +38,7 @@ from app.services.supplier_connectors import (
     DynamicFieldMapper,
     RestApiSupplierConnector,
     SUPPLIER_FIELD_MAPPING_PRESETS,
+    parse_curl_command,
     parse_excel_with_dynamic_mapping,
     persist_canonical_orders_to_snapshots,
 )
@@ -85,7 +86,7 @@ def _ensure_distributor_account(
     roles = [admin_role] if admin_role else []
 
     if existing_user is None:
-        raw_pass = (login_password or "").strip() or "1234567891011"
+        raw_pass = (login_password or "").strip() or "123456"
         if len(raw_pass) < 6:
             raise HTTPException(status_code=400, detail="Mật khẩu đăng nhập NPP phải có tối thiểu 6 ký tự.")
         email_candidate = (dist.email or "").strip() or f"{default_username}@npp.dms.local"
@@ -189,6 +190,17 @@ class SyncSupplierOrdersRequest(BaseModel):
     from_date: date | None = None
     to_date: date | None = None
     custom_raw_rows: list[dict[str, Any]] | None = None
+
+
+class SupplierCurlSyncRequest(BaseModel):
+    curl_command: str = Field(min_length=10)
+    save_config: bool = True
+    from_date: date | None = None
+    to_date: date | None = None
+
+
+class CurlParseRequest(BaseModel):
+    curl_command: str = Field(min_length=10)
 
 
 class InvoicePreviewRequest(BaseModel):
@@ -370,6 +382,104 @@ def _ensure_default_distributors_seeded(db: Session) -> None:
             db.add(old_cfg)
         db.commit()
 
+    # Đảm bảo Nhà phân phối Mai Gold (NPP-MAIGOLD) luôn sẵn sàng cho kết nối Nazzy DMS
+    mg_code = "NPP-MAIGOLD"
+    maigold = db.scalar(select(Distributor).where(func.upper(Distributor.code) == mg_code))
+    if maigold is None:
+        maigold = Distributor(
+            code=mg_code,
+            name="Nhà Phân Phối Mai Gold",
+            tax_code="040076033328",
+            phone="0843 940 555",
+            email="maigold@dms.nazzy.vn",
+            address="Số 224 Khối Hòa Bắc, Tương Dương, Nghệ An",
+            representative_name="Mai Trung",
+            status="active",
+        )
+        db.add(maigold)
+        db.flush()
+
+    # Kiểm tra cấu hình kết nối DMS Nazzy cho Mai Gold
+    nazzy_cfg = db.scalar(
+        select(DistributorSupplierConfig).where(
+            DistributorSupplierConfig.distributor_id == maigold.id,
+            DistributorSupplierConfig.supplier_code == "NAZZY",
+        )
+    )
+    preset_nazzy = SUPPLIER_FIELD_MAPPING_PRESETS.get("NAZZY", {})
+    default_nazzy_cookie = (
+        "ASP.NET_SessionId=0vvy5x0vajrgt2eqegk1jylv; "
+        "ses_adminName=5YvN8dzRH2qNSyBM3Z541w==; "
+        "ses_adminCode=AVL4HrI+4owVtPgffyzsJA==; "
+        "ses_adminId=zqYY5Ufpw0Dh4gOAckxx8g==; "
+        "ses_disId=rpkyw8TV/3/1fam27mR5zQ==; "
+        "ses_FacId=XFopTPqmWW6vPT6ckYisKw==; "
+        "ses_EmType=PCPi3XdBCEgWsHYazVHa6Q==; "
+        "ses_Config=RTDwg3UT5AUcXEqdWp+GWg==; "
+        "ses_adminFullName=33jbvoXUNe/qLFm2AdoLnpRVktIG/zG6GPsX9lrskb4=; "
+        "ses_adminIsAdmin=BhmlvxJVhfl5nXE8Gv3VDA==; "
+        "ses_IsMobile=zzghSkrMV9IlKMcK2UsXPg==; "
+        "ses_adminPermission=UypW6KbG68GZpgAPYnSEJA=="
+    )
+    if nazzy_cfg is None:
+        nazzy_cfg = DistributorSupplierConfig(
+            distributor_id=maigold.id,
+            supplier_code="NAZZY",
+            supplier_name="DMS Nazzy (NPP Mai Gold)",
+            connector_type="REST_API",
+            api_endpoint_url="http://dms21.nazzy.vn/handler/BillsHandler.ashx",
+            auth_type="COOKIE",
+            session_cookie=default_nazzy_cookie,
+            field_mapping=preset_nazzy.get("field_mapping", {}),
+            request_config={
+                "groupId": "1124|1064|1058|1059|1061|1062|1063|1060|-1",
+                "type": 4,
+                "status": 2,
+                "pageSize": 50,
+                "depotId": -1,
+                "dicDepot": -1,
+                "saleId": -1,
+                "productId": -1,
+                "typePayment": -1,
+                "orderBy": 1,
+                "live_http": True,
+            },
+            status="active",
+        )
+        db.add(nazzy_cfg)
+        db.flush()
+
+    # Kiểm tra cấu hình mẫu HĐĐT cho Mai Gold
+    mg_inv_cfg = db.scalar(
+        select(DistributorInvoiceConfig).where(DistributorInvoiceConfig.distributor_id == maigold.id)
+    )
+    if mg_inv_cfg is None:
+        db.add(
+            DistributorInvoiceConfig(
+                distributor_id=maigold.id,
+                config_name="MISA meInvoice - NPP Mai Gold",
+                provider="MISA",
+                invoice_template_code="1/001",
+                invoice_series="1C26TMG",
+                default_vat_rate=8.0,
+                combine_orders=False,
+                promo_handling="ZERO_PRICE",
+                discount_display="BY_LINE",
+                product_code_source="SUPPLIER_SKU",
+                default_payment_method="TM/CK",
+                form_layout_config={
+                    "header_title": "HÓA ĐƠN GIÁ TRỊ GIA TĂNG (MẪU MISA MEINVOICE)",
+                    "theme_color": "#0284c7",
+                    "show_order_ref": True,
+                    "footer_note": "Đơn vị phát hành: Nhà Phân Phối Mai Gold",
+                },
+                auto_sign=True,
+                is_default=True,
+                status="active",
+            )
+        )
+        db.flush()
+
     # Đảm bảo mỗi Nhà phân phối đều có ít nhất 1 tài khoản đăng nhập riêng
     all_dists = db.scalars(select(Distributor).order_by(Distributor.id)).all()
     created_any_user = False
@@ -390,6 +500,19 @@ def _enforce_user_distributor_scope(
     if current_user is not None and current_user.distributor_id is not None:
         return current_user.distributor_id
     return requested_distributor_id
+
+
+def _ensure_user_can_access_supplier_config(
+    current_user: User,
+    distributor_id: int,
+) -> None:
+    if is_super_admin_user(current_user):
+        return
+    if current_user.distributor_id is None or current_user.distributor_id != distributor_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Bạn chỉ được phép truy cập cấu hình nhà cung cấp của Nhà phân phối mình.",
+        )
 
 
 @router.get("/supplier-presets")
@@ -587,7 +710,16 @@ def list_supplier_configs(
     current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     _ensure_default_distributors_seeded(db)
-    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    if is_super_admin_user(current_user):
+        effective_dist_id = distributor_id
+    else:
+        if current_user.distributor_id is None:
+            raise HTTPException(status_code=403, detail="Tài khoản chưa được gán Nhà phân phối.")
+        requested_dist_id = (
+            distributor_id if distributor_id is not None else current_user.distributor_id
+        )
+        _ensure_user_can_access_supplier_config(current_user, requested_dist_id)
+        effective_dist_id = current_user.distributor_id
     stmt = (
         select(DistributorSupplierConfig)
         .options(selectinload(DistributorSupplierConfig.distributor))
@@ -623,7 +755,9 @@ def list_supplier_configs(
 def create_supplier_config(
     payload: SupplierConfigUpsertRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    _ensure_user_can_access_supplier_config(current_user, payload.distributor_id)
     dist = db.get(Distributor, payload.distributor_id)
     if dist is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
@@ -668,10 +802,43 @@ def update_supplier_config(
     config_id: int,
     payload: SupplierConfigUpsertRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     cfg = db.get(DistributorSupplierConfig, config_id)
+    if cfg is not None:
+        _ensure_user_can_access_supplier_config(current_user, cfg.distributor_id)
+        if cfg.distributor_id != payload.distributor_id:
+            raise HTTPException(status_code=403, detail="Không thể chuyển cấu hình sang Nhà phân phối khác.")
+    else:
+        _ensure_user_can_access_supplier_config(current_user, payload.distributor_id)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình nguồn Nhà cung cấp.")
+        sup_code = payload.supplier_code.strip().upper()
+        cfg = db.scalar(
+            select(DistributorSupplierConfig).where(
+                DistributorSupplierConfig.distributor_id == payload.distributor_id,
+                func.upper(DistributorSupplierConfig.supplier_code) == sup_code,
+            )
+        )
+    if cfg is None:
+        cfg = DistributorSupplierConfig(
+            distributor_id=payload.distributor_id,
+            supplier_code=payload.supplier_code.strip().upper(),
+            supplier_name=payload.supplier_name.strip(),
+            connector_type=payload.connector_type,
+            api_endpoint_url=(payload.api_endpoint_url or "").strip() or None,
+            auth_type=payload.auth_type,
+            username=(payload.username or "").strip() or None,
+            encrypted_secret=(payload.encrypted_secret or "").strip() or None,
+            session_cookie=(payload.session_cookie or "").strip() or None,
+            field_mapping=payload.field_mapping or {},
+            request_config=payload.request_config or {},
+            status=payload.status or "active",
+        )
+        db.add(cfg)
+        db.commit()
+        db.refresh(cfg)
+        return {"id": cfg.id, "supplier_code": cfg.supplier_code}
+
     cfg.supplier_code = payload.supplier_code.strip().upper()
     cfg.supplier_name = payload.supplier_name.strip()
     cfg.connector_type = payload.connector_type
@@ -693,10 +860,12 @@ def update_supplier_config(
 def delete_supplier_config(
     config_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     cfg = db.get(DistributorSupplierConfig, config_id)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình nguồn Nhà cung cấp.")
+    _ensure_user_can_access_supplier_config(current_user, cfg.distributor_id)
     db.delete(cfg)
     db.commit()
     return {"deleted": True, "id": config_id}
@@ -705,6 +874,7 @@ def delete_supplier_config(
 @router.post("/supplier-configs/test-connection")
 def test_supplier_connection(
     payload: SupplierTestConnectionRequest,
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Kiểm tra kết nối tới URL của Nhà cung cấp và lấy mẫu các trường dữ liệu thực tế
     để hỗ trợ người dùng ánh xạ (mapping) trường dữ liệu dễ dàng trên giao diện."""
@@ -818,6 +988,91 @@ def test_supplier_connection(
                     message = f"Đã tự động đăng nhập KiotViet ({retailer} / {clean_user}) thành công! "
                 except Exception as login_err:
                     message = f"Đăng nhập KiotViet thất bại: {login_err}. "
+
+        # Hỗ trợ tự động cấu hình và kiểm tra kết nối riêng cho Nazzy DMS (NPP Mai Gold)
+        is_nazzy = ("nazzy" in (payload.supplier_code or "").lower() or "nazzy" in url or "billshandler" in url.lower())
+        if is_nazzy:
+            headers["Referer"] = "http://dms21.nazzy.vn/Pages/Bills/OrderV2.aspx"
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0"
+            headers["X-Requested-With"] = "XMLHttpRequest"
+            headers["Content-Type"] = "application/json;charset=utf-8"
+
+            clean_base_url = url.split("?")[0].strip() or "http://dms21.nazzy.vn/handler/BillsHandler.ashx"
+
+            req_cfg = payload.request_config or {}
+            nazzy_dn = str(req_cfg.get("distributor_code") or req_cfg.get("distributorCode") or "").strip()
+            clean_nv = (username or "").strip()
+            if "/" in clean_nv:
+                parts = clean_nv.split("/", 1)
+                if not nazzy_dn:
+                    nazzy_dn = parts[0].strip()
+                clean_nv = parts[1].strip()
+
+            test_cookie = (payload.session_cookie or secret or "").strip()
+            # Tự động đăng nhập lấy cookie phiên nếu người dùng nhập Mã DN + Mã NV + Mật khẩu
+            if nazzy_dn and clean_nv and secret:
+                try:
+                    from app.services.supplier_connectors import nazzy_login_and_get_cookie
+                    logged_cookie = nazzy_login_and_get_cookie(nazzy_dn, clean_nv, secret, clean_base_url)
+                    headers["Cookie"] = logged_cookie
+                    test_cookie = logged_cookie
+                    message = f"Xác thực đăng nhập Nazzy DMS thành công (Mã DN: {nazzy_dn}, Mã NV: {clean_nv})! "
+                except Exception as login_err:
+                    message = f"Đăng nhập Nazzy DMS thất bại: {login_err}. "
+
+            cookies_dict: dict[str, str] = {}
+            if test_cookie:
+                for part in test_cookie.split(";"):
+                    if "=" in part:
+                        ck, cv = part.strip().split("=", 1)
+                        cookies_dict[ck.strip()] = cv.strip()
+
+            test_params = {
+                "t": "GetBillsOrderGetListV5",
+                "type": "4",
+                "code": "",
+                "note": "",
+                "typePayment": "-1",
+                "groupId": "1124|1064|1058|1059|1061|1062|1063|1060|-1",
+                "customer": "",
+                "productId": "-1",
+                "depotId": "-1",
+                "dicDepot": "-1",
+                "saleId": "-1",
+                "status": "2",
+                "fromDate": datetime.utcnow().strftime("%Y/%m/%d"),
+                "toDate": datetime.utcnow().strftime("%Y/%m/%d"),
+                "currentPage": "1",
+                "pageSize": "10",
+                "orderBy": "1",
+                "_": str(int(datetime.utcnow().timestamp() * 1000)),
+            }
+            try:
+                with httpx.Client(verify=False, timeout=15.0, follow_redirects=True) as client:
+                    resp = client.get(clean_base_url, params=test_params, headers=headers, cookies=cookies_dict)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        items_b = data.get("Items", {}) if isinstance(data, dict) else {}
+                        orders_b = items_b.get("Items", []) if isinstance(items_b, dict) else []
+                        if orders_b:
+                            first_depot_id = orders_b[0].get("BillsDepotId")
+                            r_det = client.get(
+                                clean_base_url,
+                                params={"t": "BillsOrderGetInfo", "id": str(first_depot_id), "option": "0"},
+                                headers=headers,
+                                cookies=cookies_dict,
+                            )
+                            if r_det.status_code == 200:
+                                det_data = r_det.json()
+                                info = det_data.get("Info", {})
+                                details = det_data.get("Details", [])
+                                if details:
+                                    sample_row = {**info, **details[0]}
+                                    sample_rows = [{**info, **d} for d in details[:5]]
+                                    is_live = True
+                                    message = f"Kết nối máy chủ DMS Nazzy thành công! Tìm thấy {items_b.get('TotalRecord', len(orders_b))} đơn hàng đã duyệt trong ngày."
+            except Exception as nazzy_err:
+                message = f"Kết nối Nazzy DMS: {nazzy_err}. "
 
         if not sample_row:
             try:
@@ -982,6 +1237,7 @@ def sync_orders_from_supplier_config(
     config_id: int,
     payload: SyncSupplierOrdersRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Kéo dữ liệu đơn hàng từ URL của Nhà cung cấp, chạy qua DynamicFieldMapper để chuẩn hóa
     sang Canonical Order và lưu vào hệ thống."""
@@ -992,6 +1248,7 @@ def sync_orders_from_supplier_config(
     )
     if cfg is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình Nhà cung cấp.")
+    _ensure_user_can_access_supplier_config(current_user, cfg.distributor_id)
 
     target_from = payload.from_date or datetime.utcnow().date()
     target_to = payload.to_date or target_from
@@ -1000,7 +1257,15 @@ def sync_orders_from_supplier_config(
         raw_rows = payload.custom_raw_rows
     else:
         connector = RestApiSupplierConnector()
-        raw_rows = connector.fetch_raw_orders(cfg, target_from, target_to)
+        try:
+            raw_rows = connector.fetch_raw_orders(
+                cfg,
+                target_from,
+                target_to,
+                allow_sample_fallback=False,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     dist_code = cfg.distributor.code if cfg.distributor else None
     canonical_orders = DynamicFieldMapper.transform_rows_to_canonical(
@@ -1028,11 +1293,127 @@ def sync_orders_from_supplier_config(
     }
 
 
+@router.post("/parse-curl")
+def parse_curl_endpoint(payload: CurlParseRequest) -> dict[str, Any]:
+    """Phân tích lệnh bash cURL và trích xuất URL, headers, cookies, query parameters."""
+    parsed = parse_curl_command(payload.curl_command)
+    return {
+        "success": bool(parsed.get("url")),
+        "parsed": parsed,
+    }
+
+
+@router.post("/supplier-configs/{config_id}/sync-curl")
+def sync_orders_from_curl_command(
+    config_id: int,
+    payload: SupplierCurlSyncRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Đồng bộ đơn hàng trực tiếp bằng chuỗi lệnh bash cURL từ web Nazzy DMS hoặc NCC bất kỳ.
+    Tự động trích xuất cookie phiên và cập nhật cấu hình cho NPP."""
+    cfg = db.scalar(
+        select(DistributorSupplierConfig)
+        .options(selectinload(DistributorSupplierConfig.distributor))
+        .where(DistributorSupplierConfig.id == config_id)
+    )
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình Nhà cung cấp.")
+    _ensure_user_can_access_supplier_config(current_user, cfg.distributor_id)
+
+    parsed = parse_curl_command(payload.curl_command)
+    if not parsed.get("url"):
+        raise HTTPException(status_code=400, detail="Lệnh cURL không hợp lệ: Không tìm thấy URL yêu cầu.")
+
+    # Tự động cập nhật cookie và request config nếu người dùng bật lưu cấu hình
+    if payload.save_config:
+        if parsed.get("cookies"):
+            cfg.session_cookie = parsed["cookies"]
+        if parsed.get("url"):
+            cfg.api_endpoint_url = parsed["url"]
+        cur_req_cfg = dict(cfg.request_config or {})
+        for p_key in [
+            "groupId",
+            "group_id",
+            "type",
+            "status",
+            "pageSize",
+            "depotId",
+            "dicDepot",
+            "saleId",
+            "productId",
+            "typePayment",
+        ]:
+            if p_key in parsed.get("params", {}):
+                cur_req_cfg[p_key] = parsed["params"][p_key]
+        cfg.request_config = cur_req_cfg
+        db.add(cfg)
+        db.flush()
+
+    # Xác định khoảng ngày đồng bộ
+    target_from = payload.from_date
+    target_to = payload.to_date
+    if not target_from and parsed.get("params", {}).get("fromDate"):
+        try:
+            target_from = datetime.strptime(str(parsed["params"]["fromDate"]), "%Y/%m/%d").date()
+        except Exception:
+            pass
+    if not target_to and parsed.get("params", {}).get("toDate"):
+        try:
+            target_to = datetime.strptime(str(parsed["params"]["toDate"]), "%Y/%m/%d").date()
+        except Exception:
+            pass
+
+    today = datetime.utcnow().date()
+    target_from = target_from or today
+    target_to = target_to or target_from
+
+    # Đồng bộ đơn hàng qua connector
+    connector = RestApiSupplierConnector()
+    raw_rows = connector.fetch_raw_orders(cfg, target_from, target_to)
+
+    dist_code = cfg.distributor.code if cfg.distributor else None
+    canonical_orders = DynamicFieldMapper.transform_rows_to_canonical(
+        raw_rows=raw_rows,
+        supplier_code=cfg.supplier_code,
+        field_mapping=cfg.field_mapping or {},
+        distributor_code=dist_code,
+    )
+    saved_lines = persist_canonical_orders_to_snapshots(
+        db=db,
+        canonical_orders=canonical_orders,
+        distributor_code=dist_code,
+    )
+    cfg.last_synced_at = datetime.utcnow()
+    db.commit()
+
+    total_value = sum(
+        sum(item.line_total for item in ord_item.items)
+        for ord_item in canonical_orders
+    )
+
+    return {
+        "success": True,
+        "supplier_code": cfg.supplier_code,
+        "supplier_name": cfg.supplier_name,
+        "distributor_code": dist_code,
+        "from_date": target_from.isoformat(),
+        "to_date": target_to.isoformat(),
+        "synced_orders": len(canonical_orders),
+        "synced_lines": saved_lines,
+        "total_value": total_value,
+        "order_numbers": [o.order_number for o in canonical_orders],
+        "canonical_preview": [o.model_dump(mode="json") for o in canonical_orders[:5]],
+        "message": f"Đồng bộ thành công {len(canonical_orders)} đơn hàng ({saved_lines} dòng sản phẩm) từ DMS Nazzy cho {dist_code}!",
+    }
+
+
 @router.post("/supplier-configs/{config_id}/upload-excel")
 async def upload_supplier_excel_orders(
     config_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Nhập file Excel có tên cột đặc thù của từng NCC -> Ánh xạ qua DynamicFieldMapper -> Lưu đơn chuẩn."""
     cfg = db.scalar(
@@ -1042,6 +1423,7 @@ async def upload_supplier_excel_orders(
     )
     if cfg is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình Nhà cung cấp.")
+    _ensure_user_can_access_supplier_config(current_user, cfg.distributor_id)
 
     content = await file.read()
     dist_code = cfg.distributor.code if cfg.distributor else None
@@ -1305,6 +1687,12 @@ def list_candidate_orders_for_invoicing(
             total_promo += p
             subtotal += val if val > 0 else (q * price)
             discount += ck
+        order_discount = float(
+            str(raw0.get("Chiết khấu đơn hàng") or raw0.get("OrderDiscount") or 0)
+            .replace(",", "")
+            or 0
+        )
+        discount = max(discount, order_discount)
 
         inv_info = invoiced_map.get(ord_num)
         results.append(

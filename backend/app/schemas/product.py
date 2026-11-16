@@ -5,6 +5,7 @@ from typing import Optional, List
 
 class ProductBase(BaseModel):
     sku: str
+    npp_code: Optional[str] = None
     name: str
     category_id: int
     unit_id: int
@@ -22,6 +23,7 @@ class ProductCreate(ProductBase):
 
 class ProductUpdate(BaseModel):
     sku: Optional[str] = None
+    npp_code: Optional[str] = None
     name: Optional[str] = None
     category_id: Optional[int] = None
     unit_id: Optional[int] = None
@@ -36,12 +38,14 @@ class ProductUpdate(BaseModel):
 class ProductCategoryOption(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    code: Optional[str] = None
     name: str
 
 
 class ProductUnitOption(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    code: Optional[str] = None
     name: str
 
 
@@ -49,9 +53,19 @@ class Product(ProductBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
     created_at: datetime
+    barcode: Optional[str] = None
     npp_code: Optional[str] = None
     representative_sku: Optional[str] = None
     representative_name: Optional[str] = None
+    category_code: Optional[str] = None
+    category_name: Optional[str] = None
+    unit_code: Optional[str] = None
+    unit_name: Optional[str] = None
+    order_count: int = 0
+    total_ordered_qty: float = 0
+    purchase_invoice_count: int = 0
+    total_purchased_qty: float = 0
+    sync_source: str = "MANUAL"
 
 
 class PriceListItem(BaseModel):

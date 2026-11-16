@@ -1960,6 +1960,28 @@ def list_local_vinamilk_orders(
         ))
     if status:
         filters.append(VinamilkOrderSnapshot.status == status)
+    user_dist_id = getattr(current_user, "distributor_id", None) if current_user else None
+    user_dist_code = (
+        (current_user.distributor.code or "").strip().upper()
+        if current_user and getattr(current_user, "distributor", None)
+        else None
+    )
+    if user_dist_id is not None and user_dist_code:
+        payload_dist_code = VinamilkOrderSnapshot.raw_payload["Mã NPP"].as_string()
+        filters.append(
+            or_(
+                func.upper(VinamilkOrderSnapshot.performed_by) == user_dist_code,
+                func.upper(payload_dist_code) == user_dist_code,
+                and_(
+                    user_dist_id == 1,
+                    or_(
+                        VinamilkOrderSnapshot.performed_by.is_(None),
+                        VinamilkOrderSnapshot.performed_by == "",
+                    ),
+                    or_(payload_dist_code.is_(None), payload_dist_code == ""),
+                ),
+            )
+        )
     snapshot_total = db.scalar(select(func.count()).select_from(VinamilkOrderSnapshot).where(*filters)) or 0
     rows = db.scalars(
         select(VinamilkOrderSnapshot)
@@ -1969,25 +1991,6 @@ def list_local_vinamilk_orders(
         .limit(limit)
     ).all()
 
-    # Phân tách dữ liệu đơn hàng theo Nhà phân phối (NPP) của tài khoản đang đăng nhập
-    user_dist_id = getattr(current_user, "distributor_id", None) if current_user else None
-    user_dist_code = (
-        (current_user.distributor.code or "").strip().upper()
-        if current_user and getattr(current_user, "distributor", None)
-        else None
-    )
-    if user_dist_id is not None and user_dist_code:
-        filtered_rows = []
-        for r in rows:
-            raw_p = r.raw_payload if isinstance(r.raw_payload, dict) else {}
-            r_dist_code = str(raw_p.get("Mã NPP") or "").strip().upper()
-            if r_dist_code:
-                if r_dist_code == user_dist_code:
-                    filtered_rows.append(r)
-            elif user_dist_id == 1:
-                filtered_rows.append(r)
-        rows = filtered_rows
-        snapshot_total = len(rows)
     latest = db.scalar(select(VinamilkSyncRun).where(
         VinamilkSyncRun.from_date <= to_date,
         VinamilkSyncRun.to_date >= from_date,

@@ -99,6 +99,62 @@ def test_manual_order_shows_in_order_list_with_supplier(db):
     assert rows[0]["Tên NVQL"] == "Nguyễn An"
 
 
+def test_supplier_synced_orders_are_visible_to_their_distributor(db):
+    order_date = date(2026, 11, 4)
+    db.add(VinamilkOrderSnapshot(
+        remote_key="supplier-sync-maigold",
+        order_number="NAZZY-001",
+        customer_code="0MD",
+        customer_name="Nam thúy 1",
+        product_code="01VD41",
+        product_name="SĐCĐ Ông Thọ",
+        order_created_date=order_date,
+        synced_from=order_date,
+        synced_to=order_date,
+        performed_by="NPP-MAIGOLD",
+        raw_payload={
+            "Số đơn hàng": "NAZZY-001",
+            "Mã KH": "0MD",
+            "Tên KH": "Nam thúy 1",
+            "Mã sản phẩm": "01VD41",
+            "Tên sản phẩm": "SĐCĐ Ông Thọ",
+            "Nhà cung cấp": "Nazzy",
+        },
+    ))
+    db.add(VinamilkOrderSnapshot(
+        remote_key="supplier-sync-other-distributor",
+        order_number="OTHER-001",
+        customer_code="0MD",
+        customer_name="Nam thúy 1",
+        product_code="01VD41",
+        product_name="SĐCĐ Ông Thọ",
+        order_created_date=order_date,
+        synced_from=order_date,
+        synced_to=order_date,
+        performed_by="NPP-OTHER",
+        raw_payload={"Số đơn hàng": "OTHER-001"},
+    ))
+    db.flush()
+
+    response = list_local_vinamilk_orders(
+        from_date=order_date,
+        to_date=order_date,
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=1,
+        db=db,
+        current_user=SimpleNamespace(
+            distributor_id=2,
+            distributor=SimpleNamespace(code="NPP-MAIGOLD"),
+        ),
+    )
+
+    assert [row["Số đơn hàng"] for row in response["rows"]] == ["NAZZY-001"]
+    assert response["snapshot_total"] == 1
+
+
 def test_order_list_supplies_product_carton_conversion_and_unknown_sku(db):
     product = db.scalar(select(Product).where(Product.sku == "01VD41"))
     product.boxes_per_carton = 24

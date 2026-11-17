@@ -3,8 +3,6 @@
 // src/app/sales/orders/page.tsx
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ShoppingCart,
-  CircleCheck,
   Clock3,
   Ban,
   Plus,
@@ -18,10 +16,14 @@ import {
   ClipboardCheck,
   XCircle,
   Download,
+  Loader2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import PageHeader from "@/components/ui/PageHeader";
-import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
 import OrderActionModal from "@/components/ui/OrderActionModal";
@@ -54,6 +56,7 @@ function getDefaultDateRange() {
 
 const LONG_SYNC_DAYS = 31;
 const LOCAL_PAGE_SIZE = 2000;
+const compactInputCls = "w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100";
 
 function eachInclusiveInputDate(from: string, to: string) {
   const [fromYear, fromMonth, fromDay] = from.split("-").map(Number);
@@ -283,10 +286,9 @@ const remoteColumnDefinitions: {
   { title: "Số đơn hàng", keys: ["orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"], width: "9rem" },
   { title: "Mã CTKM", keys: ["promotionCode", "campaignCode", "ctkmCode", "promotionId", "Mã CTKM"], width: "11rem", truncate: true },
   { title: "Tên CTKM", keys: ["promotionName", "campaignName", "Tên CTKM"], width: "16rem", truncate: true },
-  { title: "Ngày tạo", keys: ["createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày"], width: "10.5rem" },
-  { title: "Ngày giao", keys: ["deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao"], width: "7.5rem" },
-  { title: "Mã NVBH", keys: ["staffCode", "salesStaffCode", "Mã NVBH"], width: "7.5rem" },
-  { title: "Tên NVBH", keys: ["staffName", "salesStaffName", "Tên NVBH"], width: "10rem", truncate: true },
+  { title: "Ngày tạo", keys: ["createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày", "Ngày đơn hàng", "_order_created_date"], width: "10.5rem" },
+  { title: "Ngày giao", keys: ["deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao", "Ngày giao hàng"], width: "7.5rem" },
+  { title: "Nhà phân phối", keys: ["NPP", "_distributor_name", "distributor_name", "Mã NPP", "_distributor_code"], width: "15rem", truncate: true },
   { title: "NVGH", keys: ["NVGH"], width: "12rem", truncate: true },
   { title: "Mã NVGH", keys: ["Mã NVGH"], width: "7.5rem" },
   { title: "Tên NVGH", keys: ["Tên NVGH"], width: "10rem", truncate: true },
@@ -297,8 +299,9 @@ const remoteColumnDefinitions: {
   { title: "Tên NVQL", keys: ["Tên NVQL", "_manager_name"], width: "10rem", truncate: true },
   { title: "Địa chỉ", keys: ["address", "customerAddress", "shipTo", "Địa chỉ"], width: "14rem", truncate: true },
   { title: "Mã sản phẩm", keys: ["productCode", "itemCode", "sku", "Mã sản phẩm"], width: "7.5rem" },
-  { title: "Sản phẩm", keys: ["productName", "itemName", "product", "Sản phẩm"], width: "16rem", truncate: true },
+  { title: "Sản phẩm", keys: ["productName", "product_name", "itemName", "product", "Sản phẩm", "Tên sản phẩm"], width: "16rem", truncate: true },
   { title: "Nhà cung cấp", keys: ["Nhà cung cấp", "supplier", "_supplier"], width: "9.5rem", truncate: true },
+  { title: "Nguồn đồng bộ", keys: ["Nguồn đồng bộ", "_sync_source"], width: "10rem", truncate: true },
   { title: "ĐVT", keys: ["unit", "unitName", "ĐVT"], width: "4.5rem" },
   { title: "Số lượng", keys: ["quantity", "qty", "Số lượng"], width: "6.5rem", align: "right" },
   { title: "Số lượng KM", keys: ["promotionQuantity", "freeQuantity", "giftQuantity", "Số lượng KM"], width: "7.5rem", align: "right" },
@@ -357,6 +360,8 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
   normalized["Người thực hiện"] = performedBy;
   normalized["_performed_by"] = performedBy;
   normalized["_local_id"] = order["_local_id"] ?? null;
+  normalized["_distributor_code"] = order["_distributor_code"] ?? order["Mã NPP"] ?? null;
+  normalized["_distributor_name"] = order["_distributor_name"] ?? null;
   normalized["_boxes_per_carton"] = order["_boxes_per_carton"] ?? null;
   normalized["Thành tiền"] = numericValue(normalized["Giá trị"]) - numericValue(normalized["Số tiền CK"]);
   normalized["_order_created_date"] = order["_order_created_date"] ?? null;
@@ -417,6 +422,14 @@ function formatRemoteColumnValue(title: string, value: unknown): string {
   if (title === "Ngày tạo") return formatVinamilkDate(value, true);
   if (title === "Ngày giao") return formatVinamilkDate(value, false);
   if (title === "Thành tiền" && typeof value === "number") return formatNumber(value);
+  if (title === "Nguồn đồng bộ") {
+    const source = displayRemoteValue(value).trim();
+    const normalized = source.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (normalized === "VINAMILK") return "Vinamilk";
+    if (normalized === "NAZZY") return "Nazzy";
+    if (normalized === "FRIESLANDCAMPINA" || normalized === "FC") return "FrieslandCampina";
+    return source.replaceAll("_", " ");
+  }
   if (title === "Mã KH") {
     const code = displayRemoteValue(value).trim();
     return /^(NVBH|NVGH)-/i.test(code) || code.toUpperCase() === "NVBH" ? code : formatCustomerCode(code);
@@ -632,12 +645,21 @@ export default function SalesOrdersPage() {
     }
   }, [splitApprovalFilter]);
 
-  const loadOrderLines = useCallback(async (orderNumber?: string) => {
+  const loadOrderLines = useCallback(async (orderNumber?: string, distributorCode?: string) => {
     const allRows: RemoteOrder[] = [];
     let skip = 0;
     while (true) {
+      const params = new URLSearchParams({
+        from_date: fromDate,
+        to_date: toDate,
+        source: "sync",
+        skip: String(skip),
+        limit: String(LOCAL_PAGE_SIZE),
+      });
+      if (orderNumber) params.set("order_number", orderNumber);
+      if (distributorCode) params.set("distributor_code", distributorCode);
       const response = await apiFetch(
-        `${API_URL}/sync/vinamilk-orders?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&source=sync&skip=${skip}&limit=${LOCAL_PAGE_SIZE}${orderNumber ? `&order_number=${encodeURIComponent(orderNumber)}` : ""}`
+        `${API_URL}/sync/vinamilk-orders?${params}`
       );
       const payload = await response.json() as {
         rows?: unknown;
@@ -714,7 +736,8 @@ export default function SalesOrdersPage() {
     setDetailError("");
     setDetailLoading(true);
     try {
-      const lines = await loadOrderLines(number);
+      const distributorCode = displayRemoteValue(order["_distributor_code"]).trim();
+      const lines = await loadOrderLines(number, distributorCode || undefined);
       if (version === detailRequestVersion.current) setDetailOrderLines(lines);
     } catch (error) {
       if (version === detailRequestVersion.current) setDetailError(error instanceof Error ? error.message : "Không thể tải chi tiết đơn hàng.");
@@ -2116,6 +2139,15 @@ return Array.from(map.values());
       align,
       render: (value, order) => {
         const text = formatRemoteColumnValue(title, value);
+        if (title === "Nguồn đồng bộ") {
+          return text ? (
+            <span className="inline-flex max-w-full items-center rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-800" title={text}>
+              <span className="truncate">{text}</span>
+            </span>
+          ) : (
+            <span className="text-slate-400">—</span>
+          );
+        }
         if (title === "Nhà cung cấp") {
           return text ? (
             <span className="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 border border-amber-200">
@@ -2308,6 +2340,13 @@ return Array.from(map.values());
         return <span className="block truncate" title={text || undefined}>{text}</span>;
       },
     }));
+  const orderDetailColumns = remoteColumns.filter((column) => ![
+    "Tình trạng xử lý đơn hàng",
+    "Tình trạng xuất kho",
+    "Thay thế cho đơn",
+    "Tên NVBH",
+    "NVGH",
+  ].includes(column.title));
 
   const remoteStatuses = serverStatuses;
   const deliveryStatuses = Array.from(new Set([
@@ -2353,13 +2392,10 @@ return Array.from(map.values());
       ),
     },
     ...remoteColumns.filter((column) => [
-      "Ngày tạo", "Nhà cung cấp", "Mã KH", "Tên KH", "Mã NVBH", "Tên NVBH", "NVGH",
+      "Ngày tạo", "Nhà phân phối", "Nguồn đồng bộ", "Nhà cung cấp", "Mã KH", "Tên KH",
     ].includes(column.title)),
     { key: "Số sản phẩm", title: "Số sản phẩm", sortable: true, align: "right", width: "8rem" },
-    ...remoteColumns.filter((column) => [
-      "Giá trị", "Số tiền CK", "Thành tiền", "Tình trạng xử lý đơn hàng",
-      "Tình trạng xuất kho", "Thay thế cho đơn",
-    ].includes(column.title)),
+    ...remoteColumns.filter((column) => ["Giá trị", "Số tiền CK", "Thành tiền"].includes(column.title)),
   ];
   const deliveryRequestOrderOptions = Array.from(
     workflowOrders.filter(matchesFilters).reduce((orders, row) => {
@@ -2847,6 +2883,16 @@ return Array.from(map.values());
 
   const { value: totalValue, discount: totalDiscount, confirmed: confirmedDeliveries } = listTotals;
   const totalAmount = totalValue - totalDiscount;
+  const totalListPages = Math.max(1, Math.ceil(listTotal / pageSize));
+  const paginationPages = totalListPages <= 5
+    ? Array.from({ length: totalListPages }, (_, index) => index + 1)
+    : listPage <= 3
+      ? [1, 2, 3, 4, totalListPages]
+      : listPage >= totalListPages - 2
+        ? [1, totalListPages - 3, totalListPages - 2, totalListPages - 1, totalListPages]
+        : [1, listPage - 1, listPage, listPage + 1, totalListPages];
+  const firstVisibleOrder = listTotal === 0 ? 0 : (listPage - 1) * pageSize + 1;
+  const lastVisibleOrder = Math.min(listPage * pageSize, listTotal);
 
   const filteredSplitOrderOptions = eligibleOrderGroups.filter((group) => {
     if (!splitOrderSearch.trim()) return true;
@@ -2914,9 +2960,9 @@ return Array.from(map.values());
                 type="button"
                 onClick={() => void openDeliveryRequestDrawer()}
                 disabled={listTotal === 0}
-                className="flex items-center gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3.5 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-xs font-semibold text-sky-700 transition-colors hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <Download size={16} />
+                <Download size={14} />
                 Tạo phiếu yêu cầu xuất hàng
               </button>
             )}
@@ -2927,13 +2973,13 @@ return Array.from(map.values());
                 setIsSplitApprovalDrawerOpen(true);
                 void loadSplitApprovalRequests(splitApprovalFilter);
               }}
-              className={`flex items-center gap-2 rounded-lg border px-3.5 py-2 text-sm font-medium transition-colors ${
+              className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
                 pendingSplitRequestCount > 0
                   ? "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
                   : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
               }`}
             >
-              <ClipboardCheck size={16} />
+              <ClipboardCheck size={14} />
               Kế toán duyệt tách đơn
               {pendingSplitRequestCount > 0 && (
                 <span className="inline-flex items-center justify-center rounded-full bg-amber-600 px-2 py-0.5 text-xs font-bold text-white">
@@ -2944,67 +2990,123 @@ return Array.from(map.values());
             <button
               type="button"
               onClick={() => void openSplitDrawer()}
-              className="flex items-center gap-2 rounded-lg border border-purple-200 bg-purple-50 px-3.5 py-2 text-sm font-medium text-purple-700 hover:bg-purple-100 transition-colors"
+              className="inline-flex items-center gap-1.5 rounded border border-purple-200 bg-purple-50 px-2.5 py-1.5 text-xs font-semibold text-purple-700 transition-colors hover:bg-purple-100"
             >
-              <Split size={16} />
+              <Split size={14} />
               Tách đơn
             </button>
             <button
               type="button"
               onClick={() => void openMergeDrawer()}
-              className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3.5 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 transition-colors"
+              className="inline-flex items-center gap-1.5 rounded border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-100"
             >
-              <Merge size={16} />
+              <Merge size={14} />
               Gộp đơn
             </button>
-            <button type="button" onClick={() => setIsCreateOrderOpen(true)} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-              <Plus size={16} />
+            <button type="button" onClick={() => setIsCreateOrderOpen(true)} className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-2.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700">
+              <Plus size={14} />
               Tạo đơn hàng
             </button>
           </div>
         }
       />
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
-        <StatCard label="Tổng đơn hàng" value={allOrderCount} icon={<ShoppingCart size={20} />} color="bg-sky-50 text-sky-600" />
-        <StatCard label="Tổng giá trị" value={formatVND(totalValue)} icon={<CircleCheck size={20} />} color="bg-emerald-50 text-emerald-600" />
-        <StatCard label="Tổng chiết khấu" value={formatVND(totalDiscount)} icon={<Ban size={20} />} color="bg-rose-50 text-rose-600" />
-        <StatCard label="Tổng thành tiền" value={formatVND(totalAmount)} icon={<CheckCircle2 size={20} />} color="bg-indigo-50 text-indigo-600" />
-        <StatCard label="Đã xác nhận giao" value={confirmedDeliveries} icon={<Clock3 size={20} />} color="bg-amber-50 text-amber-600" />
+      <div className="grid grid-cols-2 overflow-hidden border border-slate-300 bg-white shadow-sm sm:grid-cols-3 xl:grid-cols-5">
+        {[
+          { label: "Tổng đơn hàng", value: formatNumber(allOrderCount), tone: "text-slate-800" },
+          { label: "Tổng giá trị", value: formatVND(totalValue), tone: "text-slate-800" },
+          { label: "Tổng chiết khấu", value: formatVND(totalDiscount), tone: "text-rose-700" },
+          { label: "Tổng thành tiền", value: formatVND(totalAmount), tone: "text-sky-800" },
+          { label: "Đã xác nhận giao", value: formatNumber(confirmedDeliveries), tone: "text-emerald-700" },
+        ].map((stat) => (
+          <div key={stat.label} className="border-b border-r border-slate-200 px-3 py-2.5 last:border-r-0">
+            <p className="text-[10px] font-semibold text-slate-500">{stat.label}</p>
+            <p className={`mt-0.5 truncate text-sm font-bold tabular-nums ${stat.tone}`} title={stat.value}>{stat.value}</p>
+          </div>
+        ))}
       </div>
 
       <section className="space-y-4">
-        <div className="flex flex-wrap items-end gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm">
-          <label className="text-sm text-gray-600">Từ ngày<input type="date" value={fromDate} onChange={(event) => { setListPage(1); setFromDate(event.target.value); }} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm" aria-label="Từ ngày" /></label>
-          <label className="text-sm text-gray-600">Đến ngày<input type="date" value={toDate} onChange={(event) => { setListPage(1); setToDate(event.target.value); }} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm" aria-label="Đến ngày" /></label>
-          <button onClick={handleSyncConfiguredSources} disabled={isSyncing} className="flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-50">
-            <RefreshCw size={16} className={isSyncing ? "animate-spin" : ""} />{isSyncing ? "Đang đồng bộ..." : "Đồng bộ dữ liệu"}
-          </button>
-          <label className="text-sm text-gray-600">Số đơn
-            <select value={pageSize} onChange={(event) => { setListPage(1); setPageSize(Number(event.target.value)); }} className="mt-1 block rounded-lg border border-gray-200 px-3 py-2 text-sm">
-              {[20, 50, 100, 500].map((size) => <option key={size} value={size}>{size} đơn/trang</option>)}
-            </select>
-          </label>
-          <button onClick={() => void downloadExcel()} disabled={listTotal === 0} className="flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">
-            Tải Excel toàn bộ
-          </button>
+        <div className="overflow-hidden border border-slate-400 bg-white shadow-lg">
+          <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 text-[11px] font-bold uppercase text-sky-800">
+            Khoảng ngày và thao tác
+          </div>
+          <div className="border-b border-slate-200 px-3 py-2.5">
+            <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-4">
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Từ ngày
+                <input type="date" value={fromDate} onChange={(event) => { setListPage(1); setFromDate(event.target.value); }} className={`${compactInputCls} mt-0.5`} aria-label="Từ ngày" />
+              </label>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Đến ngày
+                <input type="date" value={toDate} onChange={(event) => { setListPage(1); setToDate(event.target.value); }} className={`${compactInputCls} mt-0.5`} aria-label="Đến ngày" />
+              </label>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Số đơn mỗi trang
+                <select value={pageSize} onChange={(event) => { setListPage(1); setPageSize(Number(event.target.value)); }} className={`${compactInputCls} mt-0.5`}>
+                  {[20, 50, 100, 500].map((size) => <option key={size} value={size}>{size} đơn/trang</option>)}
+                </select>
+              </label>
+              <div className="flex flex-wrap items-end gap-2">
+                <button type="button" onClick={handleSyncConfiguredSources} disabled={isSyncing} className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+                  {isSyncing ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                  {isSyncing ? "Đang đồng bộ..." : "Đồng bộ"}
+                </button>
+                <button type="button" onClick={() => void downloadExcel()} disabled={listTotal === 0} className="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">
+                  <Download size={13} /> Tải Excel toàn bộ
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 text-[11px] font-bold uppercase text-sky-800">
+            Lọc đơn hàng
+          </div>
+          <div className="border-b border-slate-200 px-3 py-2.5">
+            <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 2xl:grid-cols-7">
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Số đơn hàng
+                <input value={orderFilter} onChange={(event) => { setListPage(1); setOrderFilter(event.target.value); }} placeholder="Lọc số đơn hàng" className={`${compactInputCls} mt-0.5`} />
+              </label>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Khách hàng
+                <input value={customerFilter} onChange={(event) => { setListPage(1); setCustomerFilter(event.target.value); }} placeholder="Lọc mã/tên khách hàng" className={`${compactInputCls} mt-0.5`} />
+              </label>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Nhân viên bán hàng
+                <input value={staffFilter} onChange={(event) => { setListPage(1); setStaffFilter(event.target.value); }} placeholder="Lọc mã/tên NVBH" className={`${compactInputCls} mt-0.5`} />
+              </label>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Sản phẩm / nhà cung cấp
+                <input value={productFilter} onChange={(event) => { setListPage(1); setProductFilter(event.target.value); }} placeholder="Lọc mã/tên SP, nhà cung cấp" className={`${compactInputCls} mt-0.5`} />
+              </label>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Tình trạng xử lý
+                <select value={statusFilter} onChange={(event) => { setListPage(1); setStatusFilter(event.target.value); }} className={`${compactInputCls} mt-0.5`}>
+                  <option value="Tất cả">Tất cả</option>
+                  {remoteStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+                </select>
+              </label>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Tình trạng xuất kho
+                <select value={deliveryStatusFilter} onChange={(event) => { setListPage(1); setDeliveryStatusFilter(event.target.value); }} className={`${compactInputCls} mt-0.5`}>
+                  <option value="Tất cả">Tất cả</option>
+                  {deliveryStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+                </select>
+              </label>
+              <div className="flex items-end">
+                <button type="button" onClick={clearFilters} className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800">
+                  Xóa lọc
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 px-3 py-2">
+            <p className="text-[10px] text-slate-500">
+              {listLoading ? "Đang tải đơn hàng..." : `Có ${listTotal}/${allOrderCount} đơn hàng sau lọc.`}
+            </p>
+            {lastSyncedAt && <p className="text-[10px] text-slate-500">Cập nhật gần nhất: {formatVinamilkDate(lastSyncedAt, true)}</p>}
+          </div>
         </div>
-        <div className="grid grid-cols-1 gap-3 rounded-xl border border-gray-100 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-7">
-          <input value={orderFilter} onChange={(event) => { setListPage(1); setOrderFilter(event.target.value); }} placeholder="Lọc số đơn hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={customerFilter} onChange={(event) => { setListPage(1); setCustomerFilter(event.target.value); }} placeholder="Lọc mã/tên khách hàng" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={staffFilter} onChange={(event) => { setListPage(1); setStaffFilter(event.target.value); }} placeholder="Lọc mã/tên NVBH" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <input value={productFilter} onChange={(event) => { setListPage(1); setProductFilter(event.target.value); }} placeholder="Lọc mã/tên SP, Nhà cung cấp" className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm" />
-          <select value={statusFilter} onChange={(event) => { setListPage(1); setStatusFilter(event.target.value); }} className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm">
-            <option value="Tất cả">Tất cả tình trạng xử lý</option>
-            {remoteStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
-          </select>
-          <select value={deliveryStatusFilter} onChange={(event) => { setListPage(1); setDeliveryStatusFilter(event.target.value); }} className="min-w-0 rounded-lg border border-gray-200 px-3 py-2 text-sm">
-            <option value="Tất cả">Tất cả tình trạng xuất kho</option>
-            {deliveryStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
-          </select>
-          <button onClick={clearFilters} className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">Xóa lọc</button>
-        </div>
-        <p className="text-sm text-gray-500">{listLoading ? "Đang tải đơn hàng..." : `Có ${listTotal}/${allOrderCount} đơn hàng sau lọc.`} {lastSyncedAt && ` Cập nhật gần nhất: ${formatVinamilkDate(lastSyncedAt, true)}`}</p>
         {remoteError && <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700"><AlertTriangle size={16} />{remoteError}</div>}
       </section>
 
@@ -3019,40 +3121,109 @@ return Array.from(map.values());
           emptyMessage="Không có đơn hàng trong khoảng ngày đã chọn"
           getRowKey={(order) => displayRemoteValue(order["_summary_key"])}
           fitColumns
+          compact
         />
       ) : (
         <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-12 text-center text-sm text-gray-400">
           Chưa có dữ liệu trong database. Chọn khoảng ngày rồi bấm “Đồng bộ dữ liệu” để cập nhật từ các nguồn đã cấu hình.
         </div>
       )}
-      <div className="flex items-center justify-end gap-3 text-sm text-gray-700">
-        <button type="button" disabled={listLoading || listPage <= 1} onClick={() => setListPage((page) => page - 1)} className="rounded border px-3 py-2 disabled:opacity-40">Trang trước</button>
-        <span>Trang {listPage} / {Math.max(1, Math.ceil(listTotal / pageSize))}</span>
-        <button type="button" disabled={listLoading || listPage * pageSize >= listTotal} onClick={() => setListPage((page) => page + 1)} className="rounded border px-3 py-2 disabled:opacity-40">Trang sau</button>
-      </div>
+      <nav
+        aria-label="Phân trang danh sách đơn hàng"
+        className="flex flex-col gap-2 border-t border-slate-200 bg-white px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
+      >
+        <p className="text-center text-[11px] text-slate-600 sm:text-left">
+          Hiển thị{" "}
+          <span className="font-semibold tabular-nums text-slate-800">
+            {firstVisibleOrder.toLocaleString("vi-VN")}–{lastVisibleOrder.toLocaleString("vi-VN")}
+          </span>
+          {" "}trong{" "}
+          <span className="font-semibold tabular-nums text-slate-800">{listTotal.toLocaleString("vi-VN")}</span>
+          {" "}đơn hàng
+        </p>
+        <div className="flex items-center justify-center gap-1">
+          {[
+            { label: "Về trang đầu", icon: <ChevronsLeft size={15} />, target: 1, disabled: listPage <= 1 },
+            { label: "Trang trước", icon: <ChevronLeft size={15} />, target: listPage - 1, disabled: listPage <= 1 },
+          ].map(({ label, icon, target, disabled }) => (
+            <button
+              key={label}
+              type="button"
+              aria-label={label}
+              title={label}
+              disabled={listLoading || disabled}
+              onClick={() => setListPage(target)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-slate-600 transition-colors hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-300"
+            >
+              {icon}
+            </button>
+          ))}
+          {paginationPages.map((page, index) => (
+            <Fragment key={page}>
+              {index > 0 && page - paginationPages[index - 1] > 1 && (
+                <span aria-hidden="true" className="px-1 text-xs text-slate-400">…</span>
+              )}
+              <button
+                type="button"
+                aria-label={`Trang ${page}`}
+                aria-current={page === listPage ? "page" : undefined}
+                disabled={listLoading}
+                onClick={() => setListPage(page)}
+                className={`inline-flex h-8 min-w-8 items-center justify-center rounded px-2 text-xs font-semibold tabular-nums transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-1 disabled:cursor-wait ${
+                  page === listPage
+                    ? "bg-sky-700 text-white shadow-sm"
+                    : "border border-slate-300 bg-white text-slate-700 hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700"
+                }`}
+              >
+                {page}
+              </button>
+            </Fragment>
+          ))}
+          {[
+            { label: "Trang sau", icon: <ChevronRight size={15} />, target: listPage + 1, disabled: listPage >= totalListPages },
+            { label: "Về trang cuối", icon: <ChevronsRight size={15} />, target: totalListPages, disabled: listPage >= totalListPages },
+          ].map(({ label, icon, target, disabled }) => (
+            <button
+              key={label}
+              type="button"
+              aria-label={label}
+              title={label}
+              disabled={listLoading || disabled}
+              onClick={() => setListPage(target)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded border border-slate-300 bg-white text-slate-600 transition-colors hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-300"
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      </nav>
 
       <OrderActionModal
         open={detailOrderNumber !== null}
         onClose={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }}
         title={`Chi tiết đơn hàng ${detailOrderNumber ?? ""}`}
         subtitle={detailLoading ? "Đang tải chi tiết..." : `${detailOrderLines.length} dòng sản phẩm`}
-        footer={<div className="flex justify-end"><button type="button" onClick={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }} className="min-h-11 rounded-lg border border-gray-200 px-5 text-sm font-medium text-gray-700 hover:bg-gray-50">Đóng</button></div>}
+        footer={<div className="flex justify-end"><button type="button" onClick={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }} className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800">Đóng</button></div>}
       >
         <div className="space-y-4 p-3 sm:p-5">
           {detailError && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-700">{detailError}</p>}
           {detailLoading && <p className="text-sm text-gray-500">Đang tải sản phẩm...</p>}
           {detailOrderLines.length > 0 && (
-            <div className="grid gap-2 rounded-lg bg-gray-50 p-3 text-sm text-gray-700 sm:grid-cols-2">
-              <div><strong>Khách hàng:</strong> {displayRemoteValue(detailOrderLines[0]["Tên KH"]) || "—"}</div>
-              <div><strong>NVGH:</strong> {displayRemoteValue(detailOrderLines[0]["NVGH"]) || "—"}</div>
-              <div><strong>Giá trị:</strong> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Giá trị"]), 0))}</div>
-              <div><strong>Chiết khấu:</strong> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Số tiền CK"]), 0))}</div>
-              <div><strong>Thành tiền:</strong> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Thành tiền"]), 0))}</div>
+            <div className="border border-slate-300 bg-white">
+              <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 text-[11px] font-bold uppercase text-sky-800">
+                Tổng quan đơn hàng
+              </div>
+              <div className="grid gap-x-3 gap-y-2 px-3 py-2.5 text-xs sm:grid-cols-2 xl:grid-cols-4">
+                <p><span className="font-semibold text-slate-600">Khách hàng:</span> {displayRemoteValue(detailOrderLines[0]["Tên KH"]) || "—"}</p>
+                <p><span className="font-semibold text-slate-600">Giá trị:</span> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Giá trị"]), 0))}</p>
+                <p><span className="font-semibold text-slate-600">Chiết khấu:</span> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Số tiền CK"]), 0))}</p>
+                <p><span className="font-semibold text-slate-600">Thành tiền:</span> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Thành tiền"]), 0))}</p>
+              </div>
             </div>
           )}
           {!detailLoading && !detailError && <DataTable
             data={detailOrderLines}
-            columns={remoteColumns.filter((column) => [
+            columns={orderDetailColumns.filter((column) => [
               "Mã sản phẩm", "Sản phẩm", "Nhà cung cấp", "ĐVT", "Số lượng",
               "Số lượng KM", "Giá trị", "Số tiền CK", "Thành tiền", "Đơn giá", "Mã CTKM",
             ].includes(column.title))}
@@ -3060,13 +3231,14 @@ return Array.from(map.values());
             pageSize={20}
             getRowKey={orderRowKey}
             fitColumns
+            compact
             emptyMessage="Không tìm thấy chi tiết đơn hàng."
           />}
           {!detailLoading && !detailError && <details className="rounded-lg border border-gray-200 p-3">
             <summary className="cursor-pointer text-sm font-medium text-gray-700">Thông tin đầy đủ</summary>
             <div className="mt-3">
-              <DataTable data={detailOrderLines} columns={remoteColumns} searchable={false}
-                pageSize={20} getRowKey={orderRowKey} fitColumns />
+              <DataTable data={detailOrderLines} columns={orderDetailColumns} searchable={false}
+                pageSize={20} getRowKey={orderRowKey} fitColumns compact />
             </div>
           </details>}
         </div>
@@ -3473,13 +3645,14 @@ return Array.from(map.values());
         subtitle="Phân bổ sản phẩm từ đơn gốc"
         footer={
           <div className="space-y-2">
-            {splitError && <div role="alert" className="max-h-20 overflow-y-auto text-sm text-red-700">{splitError}</div>}
+            {splitError && <div role="alert" className="max-h-20 overflow-y-auto text-[10px] text-red-700">{splitError}</div>}
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-xs text-amber-800">Đơn tách chờ Kế toán duyệt.</p>
+              <p className="text-[10px] text-amber-800">Đơn tách chờ Kế toán duyệt.</p>
               <div className="flex gap-2">
-                <button type="button" onClick={() => setIsSplitDrawerOpen(false)} disabled={isSubmittingSplit} className="min-h-11 flex-1 rounded-lg border border-gray-200 px-4 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50 sm:flex-none">Hủy</button>
-                <button type="button" onClick={() => void submitSplitOrder()} disabled={isSubmittingSplit || !selectedSplitOrderGroup} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-purple-600 px-4 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50 sm:flex-none">
-                  <Split size={16} />{isSubmittingSplit ? "Đang gửi..." : "Gửi Kế toán duyệt"}
+                <button type="button" onClick={() => setIsSplitDrawerOpen(false)} disabled={isSubmittingSplit} className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50">Hủy</button>
+                <button type="button" onClick={() => void submitSplitOrder()} disabled={isSubmittingSplit || !selectedSplitOrderGroup} className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+                  {isSubmittingSplit ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                  {isSubmittingSplit ? "Đang gửi..." : "Gửi Kế toán duyệt"}
                 </button>
               </div>
             </div>
@@ -4435,11 +4608,12 @@ return Array.from(map.values());
         subtitle="Chọn ít nhất 2 đơn"
         footer={
           <div className="space-y-2">
-            {mergeError && <div role="alert" className="max-h-20 overflow-y-auto text-sm text-red-700">{mergeError}</div>}
+            {mergeError && <div role="alert" className="max-h-20 overflow-y-auto text-[10px] text-red-700">{mergeError}</div>}
             <div className="flex gap-2 sm:justify-end">
-              <button type="button" onClick={() => setIsMergeDrawerOpen(false)} disabled={isSubmittingMerge} className="min-h-11 flex-1 rounded-lg border border-gray-200 px-4 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50 sm:flex-none">Hủy</button>
-              <button type="button" onClick={() => void submitMergeOrders()} disabled={isSubmittingMerge || selectedMergeOrderNumbers.length < 2} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 sm:flex-none">
-                <Merge size={16} />{isSubmittingMerge ? "Đang gộp đơn..." : `Xác nhận gộp (${selectedMergeOrderNumbers.length} đơn)`}
+              <button type="button" onClick={() => setIsMergeDrawerOpen(false)} disabled={isSubmittingMerge} className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50">Hủy</button>
+              <button type="button" onClick={() => void submitMergeOrders()} disabled={isSubmittingMerge || selectedMergeOrderNumbers.length < 2} className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+                {isSubmittingMerge ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                {isSubmittingMerge ? "Đang gộp đơn..." : `Xác nhận gộp (${selectedMergeOrderNumbers.length} đơn)`}
               </button>
             </div>
           </div>

@@ -1,9 +1,10 @@
+import unicodedata
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from zipfile import BadZipFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from typing import List
 
@@ -11,9 +12,105 @@ from app.core.database import get_db
 from app.schemas.product import Product, ProductCreate, ProductUpdate, PriceList, PriceListCreate, ProductCategoryOption, ProductUnitOption
 from app.models.product import ProductCategory, ProductUnit, ProductGroup, ProductGroupItem
 from app.models.product import Product as ProductModel
+from app.models.multi_tenant_invoice import (
+    Distributor,
+    DistributorSupplierConfig,
+    IssuedInvoice,
+    IssuedInvoiceItem,
+    PurchaseInvoice,
+    PurchaseInvoiceItem,
+)
+from app.models.vinamilk import VinamilkOrderSnapshot
 from app.crud import product as product_crud, price_list as pl_crud
 
 router = APIRouter(prefix="/products", tags=["products"])
+
+
+def _product_distributors(db: Session, product_codes: set[str]) -> dict[str, list[dict[str, str]]]:
+    if not product_codes:
+        return {}
+
+    distributors = db.scalars(select(Distributor)).all()
+    distributors_by_id = {item.id: item for item in distributors}
+    distributors_by_code = {(item.code or "").strip().upper(): item for item in distributors if item.code}
+    supplier_distributors: dict[str, set[str]] = {}
+    for config in db.scalars(select(DistributorSupplierConfig)).all():
+        distributor = distributors_by_id.get(config.distributor_id)
+        if distributor and config.supplier_code:
+            supplier_distributors.setdefault(config.supplier_code.strip().upper(), set()).add(distributor.code.upper())
+
+    codes_by_product: dict[str, set[str]] = {}
+    snapshots = db.execute(
+        select(
+            VinamilkOrderSnapshot.product_code,
+            VinamilkOrderSnapshot.performed_by,
+            VinamilkOrderSnapshot.processing_status,
+            VinamilkOrderSnapshot.raw_payload,
+        ).where(func.upper(VinamilkOrderSnapshot.product_code).in_(product_codes))
+    ).all()
+    for product_code, performed_by, processing_status, raw_payload in snapshots:
+        raw = raw_payload if isinstance(raw_payload, dict) else {}
+        payload_code = next(
+            (str(value).strip().upper() for key, value in raw.items()
+             if key.strip().casefold() in {"mã npp", "_distributor_code", "distributorcode", "distributor_code"}
+             and value is not None and str(value).strip()),
+            "",
+        )
+        distributor_code = payload_code or (performed_by or "").strip().upper()
+        if distributor_code not in distributors_by_code:
+            distributor_code = ""
+        if not distributor_code:
+            source = next(
+                (str(value).strip().upper() for key, value in raw.items()
+                 if key.strip().casefold() in {"nguồn đồng bộ", "_sync_source"}
+                 and value is not None and str(value).strip()),
+                "",
+            )
+            status_source = (processing_status or "").strip()
+            if not source and status_source.upper().startswith("NCC:"):
+                source = status_source.split(":", 1)[1].strip().upper()
+            actor_key = (
+                unicodedata.normalize("NFKD", (performed_by or "").strip())
+                .encode("ascii", "ignore")
+                .decode("ascii")
+                .casefold()
+            )
+            if not source and actor_key == "he thong":
+                source = "VINAMILK"
+            candidates = supplier_distributors.get(source, set())
+            if len(candidates) == 1:
+                distributor_code = next(iter(candidates))
+        if product_code and distributor_code:
+            codes_by_product.setdefault(product_code.strip().upper(), set()).add(distributor_code)
+
+    purchase_rows = db.execute(
+        select(PurchaseInvoiceItem.product_code, PurchaseInvoice.distributor_id)
+        .join(PurchaseInvoice, PurchaseInvoice.id == PurchaseInvoiceItem.purchase_invoice_id)
+        .where(func.upper(PurchaseInvoiceItem.product_code).in_(product_codes))
+    ).all()
+    for product_code, distributor_id in purchase_rows:
+        distributor = distributors_by_id.get(distributor_id)
+        if product_code and distributor:
+            codes_by_product.setdefault(product_code.strip().upper(), set()).add(distributor.code.upper())
+
+    issued_rows = db.execute(
+        select(IssuedInvoiceItem.product_code, IssuedInvoice.distributor_id)
+        .join(IssuedInvoice, IssuedInvoice.id == IssuedInvoiceItem.invoice_id)
+        .where(func.upper(IssuedInvoiceItem.product_code).in_(product_codes))
+    ).all()
+    for product_code, distributor_id in issued_rows:
+        distributor = distributors_by_id.get(distributor_id)
+        if product_code and distributor:
+            codes_by_product.setdefault(product_code.strip().upper(), set()).add(distributor.code.upper())
+
+    return {
+        product_code: [
+            {"code": code, "name": distributors_by_code[code].name}
+            for code in sorted(codes)
+            if code in distributors_by_code
+        ]
+        for product_code, codes in codes_by_product.items()
+    }
 
 
 @router.get("/template")
@@ -213,7 +310,15 @@ def sync_products_from_system(db: Session = Depends(get_db)):
 
 @router.get("/", response_model=List[Product])
 def list_products(skip: int = 0, limit: int = 100, category_id: int | None = None, db: Session = Depends(get_db)):
-    return product_crud.list_(db, skip=skip, limit=limit, category_id=category_id)
+    products = product_crud.list_(db, skip=skip, limit=limit, category_id=category_id)
+    distributor_map = _product_distributors(db, {product.sku.strip().upper() for product in products if product.sku})
+    return [
+        {
+            **Product.model_validate(product).model_dump(),
+            "distributors": distributor_map.get(product.sku.strip().upper(), []),
+        }
+        for product in products
+    ]
 
 
 @router.post("/", response_model=Product, status_code=201)

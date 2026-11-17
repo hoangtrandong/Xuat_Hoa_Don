@@ -29,7 +29,7 @@ import {
   FileText,
 } from "lucide-react";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
-import { formatVNDFull, formatNumber } from "@/lib/format";
+import { formatNumber, formatUnitPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL, apiFetch } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
@@ -73,6 +73,12 @@ type ApiProductItem = {
   purchase_invoice_count?: number;
   total_purchased_qty?: number;
   sync_source?: string;
+  distributors?: ProductDistributor[];
+};
+
+type ProductDistributor = {
+  code: string;
+  name: string;
 };
 
 type ProductRow = {
@@ -99,6 +105,7 @@ type ProductRow = {
   purchase_invoice_count: number;
   total_purchased_qty: number;
   sync_source: "ORDER_SYNC" | "PURCHASE_INVOICE" | "DMS_AND_CQT" | "MANUAL";
+  distributors: ProductDistributor[];
 };
 
 type SortField =
@@ -133,6 +140,7 @@ export default function ProductsPage() {
   // Bộ lọc tra cứu
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<string>("ALL");
+  const [distributorFilter, setDistributorFilter] = useState<string>("ALL");
   const [categoryFilter, setCategoryFilter] = useState<string>("ALL");
   const [supplierFilter, setSupplierFilter] = useState<string>("ALL");
   const [unitFilter, setUnitFilter] = useState<string>("ALL");
@@ -247,6 +255,7 @@ export default function ProductsPage() {
           purchase_invoice_count: Number(product.purchase_invoice_count ?? 0),
           total_purchased_qty: Number(product.total_purchased_qty ?? 0),
           sync_source: syncSource,
+          distributors: product.distributors ?? [],
         };
       });
 
@@ -574,6 +583,21 @@ export default function ProductsPage() {
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "vi"));
   }, [products]);
 
+  const distributorOptions = useMemo(() => {
+    const options = new Map<string, { name: string; count: number }>();
+    for (const product of products) {
+      for (const distributor of product.distributors) {
+        const existing = options.get(distributor.code);
+        options.set(distributor.code, {
+          name: distributor.name,
+          count: (existing?.count ?? 0) + 1,
+        });
+      }
+    }
+    return Array.from(options, ([code, value]) => ({ code, ...value }))
+      .sort((a, b) => a.name.localeCompare(b.name, "vi"));
+  }, [products]);
+
   // Số lượng SKU theo danh mục
   const categoryCounts = useMemo(() => {
     const counts = new Map<number, number>();
@@ -623,6 +647,9 @@ export default function ProductsPage() {
       }
       if (sourceFilter === "MANUAL" && p.sync_source !== "MANUAL") return false;
 
+      if (distributorFilter !== "ALL" && !p.distributors.some((distributor) => distributor.code === distributorFilter)) {
+        return false;
+      }
       if (categoryFilter !== "ALL" && String(p.category_id) !== categoryFilter) return false;
       if (supplierFilter !== "ALL" && p.supplier !== supplierFilter) return false;
       if (unitFilter !== "ALL" && p.unit !== unitFilter) return false;
@@ -634,7 +661,7 @@ export default function ProductsPage() {
 
       if (q) {
         const haystack = normalizeSearchText(
-          `${p.code} ${p.nppCode} ${p.name} ${p.supplier} ${p.category} ${p.unit} ${p.representative_sku}`
+          `${p.code} ${p.nppCode} ${p.name} ${p.supplier} ${p.category} ${p.unit} ${p.representative_sku} ${p.distributors.map((distributor) => `${distributor.code} ${distributor.name}`).join(" ")}`
         );
         if (!haystack.includes(q)) return false;
       }
@@ -666,6 +693,7 @@ export default function ProductsPage() {
     products,
     searchQuery,
     sourceFilter,
+    distributorFilter,
     categoryFilter,
     supplierFilter,
     unitFilter,
@@ -677,7 +705,7 @@ export default function ProductsPage() {
   // Reset trang khi đổi bộ lọc
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, sourceFilter, categoryFilter, supplierFilter, unitFilter, statusFilter, pageSize]);
+  }, [searchQuery, sourceFilter, distributorFilter, categoryFilter, supplierFilter, unitFilter, statusFilter, pageSize]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
@@ -746,6 +774,7 @@ export default function ProductsPage() {
   function resetFilters() {
     setSearchQuery("");
     setSourceFilter("ALL");
+    setDistributorFilter("ALL");
     setCategoryFilter("ALL");
     setSupplierFilter("ALL");
     setUnitFilter("ALL");
@@ -759,6 +788,7 @@ export default function ProductsPage() {
         STT: index + 1,
         "Mã SKU": product.code,
         "Mã NPP nội bộ": product.nppCode || product.code,
+        "Nhà phân phối": product.distributors.map((distributor) => `${distributor.code} - ${distributor.name}`).join(" / "),
         "Tên sản phẩm": product.name,
         "Mã danh mục": product.categoryCode,
         "Danh mục ngành hàng": product.category,
@@ -1038,7 +1068,7 @@ export default function ProductsPage() {
 
         {/* 3. BỘ LỌC TRA CỨU ĐA CHIỀU */}
         <section className="border-b border-slate-200 px-3 py-2.5">
-          <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-6">
+          <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-7">
             <div className="sm:col-span-2 xl:col-span-2">
               <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                 Tìm kiếm Mã sản phẩm (SKU) / Tên hàng hóa / Mã NPP
@@ -1088,6 +1118,24 @@ export default function ProductsPage() {
                   Đồng bộ từ Hóa đơn mua vào CQT ({stats.fromPurchaseCount})
                 </option>
                 <option value="MANUAL">Tạo thủ công / Upload Excel</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                Nhà phân phối (NPP)
+              </label>
+              <select
+                value={distributorFilter}
+                onChange={(e) => setDistributorFilter(e.target.value)}
+                className={inputCls}
+              >
+                <option value="ALL">Tất cả NPP ({distributorOptions.length})</option>
+                {distributorOptions.map((distributor) => (
+                  <option key={distributor.code} value={distributor.code}>
+                    {distributor.name} ({distributor.count} SKU)
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -1214,6 +1262,7 @@ export default function ProductsPage() {
 
               {(searchQuery ||
                 sourceFilter !== "ALL" ||
+                distributorFilter !== "ALL" ||
                 categoryFilter !== "ALL" ||
                 supplierFilter !== "ALL" ||
                 unitFilter !== "ALL" ||
@@ -1273,6 +1322,7 @@ export default function ProductsPage() {
                     Mã NPP {renderSortIcon("nppCode")}
                   </button>
                 </th>
+                <th className="px-2.5 py-2">Nhà phân phối</th>
                 <th className="px-2.5 py-2">
                   <button
                     type="button"
@@ -1335,15 +1385,6 @@ export default function ProductsPage() {
                     className="inline-flex items-center justify-end gap-1 font-semibold uppercase text-slate-700 hover:text-sky-700"
                   >
                     Giá bán {renderSortIcon("price")}
-                  </button>
-                </th>
-                <th className="px-2.5 py-2 text-right">
-                  <button
-                    type="button"
-                    onClick={() => handleSort("cost_price")}
-                    className="inline-flex items-center justify-end gap-1 font-semibold uppercase text-slate-700 hover:text-sky-700"
-                  >
-                    Giá vốn / CQT {renderSortIcon("cost_price")}
                   </button>
                 </th>
                 <th className="px-2 py-2 text-center">Trạng thái</th>
@@ -1477,6 +1518,24 @@ export default function ProductsPage() {
                       </td>
 
                       <td className="px-2.5 py-1.5">
+                        {row.distributors.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {row.distributors.map((distributor) => (
+                              <span
+                                key={distributor.code}
+                                title={`${distributor.code} · ${distributor.name}`}
+                                className="max-w-56 truncate rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-800"
+                              >
+                                {distributor.name}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-[10px] italic text-slate-400">Chưa xác định</span>
+                        )}
+                      </td>
+
+                      <td className="px-2.5 py-1.5">
                         <div className="font-semibold text-slate-800">{row.name}</div>
                         {row.representative_sku && row.representative_sku !== row.code && (
                           <div className="text-[10px] text-slate-500">
@@ -1554,22 +1613,12 @@ export default function ProductsPage() {
                       <td className="px-2.5 py-1.5 text-right font-medium text-slate-700 whitespace-nowrap">
                         {row.price > 0 ? (
                           <span className="font-semibold text-slate-900">
-                            {formatVNDFull(row.price)}
+                            {formatUnitPrice(row.price, 4)}
                           </span>
                         ) : (
                           <span className="text-[10px] italic text-amber-700">
-                            0 đ (Hàng KM)
+                            {formatUnitPrice(0, 4)} (Hàng KM)
                           </span>
-                        )}
-                      </td>
-
-                      <td className="px-2.5 py-1.5 text-right font-medium text-slate-700 whitespace-nowrap">
-                        {row.cost_price > 0 ? (
-                          <span className="font-semibold text-emerald-700">
-                            {formatVNDFull(row.cost_price)}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400">—</span>
                         )}
                       </td>
 

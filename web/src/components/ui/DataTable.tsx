@@ -31,6 +31,7 @@ interface DataTableProps<T> {
   isRowSelectable?: (row: T) => boolean;
   /** Size columns to content, keep cells on one line, and scroll horizontally. */
   fitColumns?: boolean;
+  compact?: boolean;
   defaultSortKey?: string;
   defaultSortDir?: "asc" | "desc";
   hidePagination?: boolean;
@@ -56,6 +57,7 @@ export default function DataTable<T>({
   getRowKey,
   isRowSelectable,
   fitColumns = false,
+  compact = false,
   defaultSortKey,
   defaultSortDir = "asc",
   hidePagination = false,
@@ -147,9 +149,12 @@ export default function DataTable<T>({
         </div>
       )}
       <div className="overflow-x-auto">
-        <table className={cn("text-sm", fitColumns ? "w-max table-fixed" : "w-full")}>
+        <table className={cn(
+          compact ? "w-full min-w-max border-collapse text-left" : "text-sm",
+          !compact && (fitColumns ? "w-max table-fixed" : "w-full")
+        )}>
           <thead>
-            <tr className="border-b border-gray-100 bg-gray-50">
+            <tr className={compact ? "border-b border-slate-200 bg-slate-100 text-[10px] font-semibold text-slate-600" : "border-b border-gray-100 bg-gray-50"}>
               {selectable && (
                 <th className="w-10 min-w-10 px-4 py-3" scope="col">
                   <input
@@ -168,7 +173,7 @@ export default function DataTable<T>({
                   key={`${col.key}-${colIndex}`}
                   style={col.width ? { width: col.width, minWidth: col.width, maxWidth: col.width } : undefined}
                   className={cn(
-                    "px-4 py-3 text-xs font-semibold text-gray-500 uppercase align-middle",
+                    compact ? "px-3 py-2 text-[10px] font-semibold text-slate-600 uppercase align-middle" : "px-4 py-3 text-xs font-semibold text-gray-500 uppercase align-middle",
                     fitColumns ? "whitespace-nowrap overflow-hidden text-ellipsis tracking-normal" : "tracking-wide",
                     col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left",
                     col.sortable && "cursor-pointer hover:text-gray-700 select-none"
@@ -185,10 +190,10 @@ export default function DataTable<T>({
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-50">
+          <tbody className={compact ? "text-[11px]" : "divide-y divide-gray-50"}>
             {paginated.length === 0 ? (
               <tr>
-                <td colSpan={columns.length + (selectable ? 1 : 0)} className="px-4 py-12 text-center text-gray-400 text-sm">
+                <td colSpan={columns.length + (selectable ? 1 : 0)} className={compact ? "px-3 py-8 text-center text-[11px] text-slate-500" : "px-4 py-12 text-center text-gray-400 text-sm"}>
                   {emptyMessage}
                 </td>
               </tr>
@@ -201,7 +206,9 @@ export default function DataTable<T>({
                     key={rowKey}
                     onClick={() => onRowClick?.(row)}
                     className={cn(
-                      "hover:bg-gray-50 transition-colors",
+                      compact
+                        ? "border-b border-slate-100 even:bg-amber-50/40 text-[11px] hover:bg-sky-50/50 transition-colors"
+                        : "hover:bg-gray-50 transition-colors",
                       onRowClick && "cursor-pointer",
                       selectable && selection.has(rowKey) && "bg-sky-50/60"
                     )}
@@ -223,7 +230,7 @@ export default function DataTable<T>({
                         key={`${col.key}-${colIndex}`}
                         style={col.width ? { width: col.width, minWidth: col.width, maxWidth: col.width } : undefined}
                         className={cn(
-                          "px-4 py-3 text-gray-700 align-middle",
+                          compact ? "px-3 py-1.5 text-slate-700 align-middle" : "px-4 py-3 text-gray-700 align-middle",
                           fitColumns && "whitespace-nowrap overflow-hidden text-ellipsis",
                           col.align === "right" && "tabular-nums",
                           col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : "text-left"

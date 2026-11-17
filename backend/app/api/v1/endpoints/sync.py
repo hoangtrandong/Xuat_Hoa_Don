@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from app.services.vinamilk_sales_summary import build_sales_summary
 from app.models.customer import Company, Customer, Store
 from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder
+from app.models.multi_tenant_invoice import Distributor, DistributorSupplierConfig
 from app.models.product import Product
 from app.models.promotion import Promotion, PromotionRule
 from app.models.user import User
@@ -1519,7 +1521,7 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
         snapshot.synced_from = from_date
         snapshot.synced_to = to_date
         snapshot.synced_at = datetime.utcnow()
-        snapshot.raw_payload = row
+        snapshot.raw_payload = {**row, "Nguồn đồng bộ": "VINAMILK"}
         saved += 1
     # Dòng tiêu đề đơn (không có sản phẩm) từ các lần đồng bộ cũ là dữ liệu thừa khi đã có dòng chi tiết.
     detailed_orders = sorted({number for _, _, number, product in row_data_list if number and product})
@@ -1944,6 +1946,7 @@ def list_local_vinamilk_orders(
     db: Session = Depends(get_db),
     current_user: User | None = Depends(get_current_user),
     order_number: str | None = None,
+    distributor_code: str | None = None,
 ):
     filters = [
         VinamilkOrderSnapshot.order_created_date >= from_date,
@@ -1992,6 +1995,17 @@ def list_local_vinamilk_orders(
         .offset(skip)
         .limit(limit)
     ).all()
+    distributors_by_code = {
+        (distributor.code or "").strip().upper(): distributor
+        for distributor in db.scalars(select(Distributor)).all()
+        if (distributor.code or "").strip()
+    }
+    distributors_by_id = {distributor.id: distributor for distributor in distributors_by_code.values()}
+    supplier_distributor_codes: dict[str, set[str]] = defaultdict(set)
+    for config in db.scalars(select(DistributorSupplierConfig)).all():
+        distributor = distributors_by_id.get(config.distributor_id)
+        if distributor and config.supplier_code:
+            supplier_distributor_codes[config.supplier_code.strip().upper()].add(distributor.code.upper())
 
     latest = db.scalar(select(VinamilkSyncRun).where(
         VinamilkSyncRun.from_date <= to_date,
@@ -2226,12 +2240,59 @@ def list_local_vinamilk_orders(
             row_actor = (
                 _field(row.raw_payload, ("performedBy", "Người thực hiện", "_performed_by")) or ""
             ).strip()
+        resolved_distributor_code = _field(
+            row.raw_payload,
+            ("Mã NPP", "_distributor_code", "distributorCode", "distributor_code"),
+        )
+        resolved_distributor_code = (resolved_distributor_code or "").strip().upper()
+        if not resolved_distributor_code and row_actor.upper() in distributors_by_code:
+            resolved_distributor_code = row_actor.upper()
+        if not resolved_distributor_code:
+            source_for_distributor = _field(row.raw_payload, ("Nguồn đồng bộ", "_sync_source"))
+            processing_source = (getattr(row, "processing_status", None) or "").strip()
+            if not source_for_distributor and processing_source.upper().startswith("NCC:"):
+                source_for_distributor = processing_source.split(":", 1)[1].strip()
+            if not source_for_distributor:
+                normalized_actor = unicodedata.normalize("NFKD", row_actor).encode("ascii", "ignore").decode("ascii").casefold()
+                if normalized_actor == "he thong" and not getattr(row, "is_synthetic", False):
+                    source_for_distributor = "VINAMILK"
+            configured_distributors = supplier_distributor_codes.get((source_for_distributor or "").strip().upper(), set())
+            if len(configured_distributors) == 1:
+                resolved_distributor_code = next(iter(configured_distributors))
+        distributor = distributors_by_code.get(resolved_distributor_code)
+        distributor_name = distributor.name if distributor else ""
+        distributor_label = distributor_name or resolved_distributor_code
         if pending_req and pending_req.requested_by:
             performed_by = f"{pending_req.requested_by} (Chờ KT)"
         else:
             performed_by = replacement_actor_for.get(order_num) or row_actor or "Hệ thống"
+        sync_source = _field(row.raw_payload, ("Nguồn đồng bộ", "_sync_source"))
+        if not sync_source:
+            processing_source = (getattr(row, "processing_status", None) or "").strip()
+            if processing_source.upper().startswith("NCC:"):
+                sync_source = processing_source.split(":", 1)[1].strip()
+            elif (
+                unicodedata.normalize("NFKD", row_actor).encode("ascii", "ignore").decode("ascii").casefold()
+                == "he thong"
+                and not getattr(row, "is_synthetic", False)
+            ):
+                sync_source = "VINAMILK"
+
+        resolved_created_date = (
+            _field(row.raw_payload, ("createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày", "Ngày đơn hàng"))
+            or (row.order_created_date.strftime("%d/%m/%Y") if row.order_created_date else None)
+        )
+        resolved_delivery_date = (
+            _field(row.raw_payload, ("deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao", "Ngày giao hàng"))
+            or (row.delivery_date.strftime("%d/%m/%Y") if row.delivery_date else resolved_created_date)
+        )
+
         base = {
             **row.raw_payload,
+            "NPP": distributor_label or "Chưa xác định",
+            **({"Ngày tạo": resolved_created_date} if resolved_created_date and not _field(row.raw_payload, ("Ngày tạo", "createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày")) else {}),
+            **({"Ngày giao": resolved_delivery_date} if resolved_delivery_date and not _field(row.raw_payload, ("Ngày giao", "deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate")) else {}),
+            **({"Nguồn đồng bộ": sync_source} if sync_source else {}),
             "Nhà cung cấp": supplier,
             "supplier": supplier,
             "_supplier": supplier,
@@ -2252,6 +2313,8 @@ def list_local_vinamilk_orders(
             "_performed_by": performed_by,
             "_local_id": row.id,
             "_snapshot_order_number": row.order_number,
+            "_distributor_code": resolved_distributor_code or None,
+            "_distributor_name": distributor_name or None,
             "_order_created_date": row.order_created_date.isoformat() if row.order_created_date else None,
             "_synced_at": _iso_utc(row.synced_at),
             "_allocation_id": None,
@@ -2285,11 +2348,19 @@ def list_local_vinamilk_orders(
                 "_uploaded_by": allocation.uploaded_by,
                 "_note": allocation.note,
             })
+    if distributor_code:
+        normalized_distributor_code = distributor_code.strip().upper()
+        output_rows = [
+            row for row in output_rows
+            if (row.get("_distributor_code") or "").strip().upper() == normalized_distributor_code
+        ]
+        snapshot_total = len(output_rows)
+
     return {
         "rows": output_rows,
         "total": snapshot_total,
         "snapshot_total": snapshot_total,
-        "snapshot_count": len(rows),
+        "snapshot_count": len(output_rows) if distributor_code else len(rows),
         "row_count": len(output_rows),
         "skip": skip,
         "limit": limit,
@@ -2327,7 +2398,8 @@ def list_grouped_vinamilk_orders(
         last_synced_at = page["last_synced_at"]
         for row in page["rows"]:
             number = row.get("_snapshot_order_number") or _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
-            key = number or f"__snapshot_{row['_local_id']}"
+            distributor_code = row.get("_distributor_code") or ""
+            key = f"{distributor_code}|{number}" if number else f"{distributor_code}|__snapshot_{row['_local_id']}"
             groups.setdefault(key, []).append(row)
         offset += page["snapshot_count"]
         if not page["snapshot_count"] or offset >= page["snapshot_total"]:
@@ -2382,10 +2454,12 @@ def list_grouped_vinamilk_orders(
         order_discount = _float_from_payload(row, ("orderDiscount", "Chiết khấu đơn hàng"))
         summary_fields = {
             "orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng",
-            "createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày",
-            "deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao",
+            "createdAt", "createDate", "createdDate", "orderCreatedAt", "orderDate", "Ngày tạo", "Ngày", "Ngày đơn hàng",
+            "deliveryDate", "deliveryAt", "deliveryConfirmedAt", "deliveryConfirmTime", "b2bDeliveryDate", "Ngày giao", "Ngày giao hàng",
             "staffCode", "salesStaffCode", "Mã NVBH", "staffName", "salesStaffName", "Tên NVBH",
             "customerCode", "shopCode", "Mã KH", "customerName", "shopName", "Tên KH",
+            "NPP", "_distributor_code", "_distributor_name",
+            "Nguồn đồng bộ",
             "Cửa Hàng", "store_name", "storeName", "NVGH", "Mã NVGH", "Tên NVGH",
             "Mã NVQL", "Tên NVQL", "_manager_code", "_manager_name",
             "address", "customerAddress", "shipTo", "Địa chỉ", "orderStatus", "status",
@@ -2404,6 +2478,24 @@ def list_grouped_vinamilk_orders(
             "_product_count": len(lines),
             "_summary_key": key,
         })
+        suppliers = sorted({
+            field(line, ("Nhà cung cấp", "supplier", "_supplier"))
+            for line in lines
+            if field(line, ("Nhà cung cấp", "supplier", "_supplier"))
+        })
+        if suppliers:
+            summary["Nhà cung cấp"] = " / ".join(suppliers)
+        sync_sources = set()
+        for line in lines:
+            source = field(line, ("Nguồn đồng bộ", "_sync_source"))
+            if not source:
+                processing_source = field(line, ("_processing_status",))
+                if processing_source.upper().startswith("NCC:"):
+                    source = processing_source.split(":", 1)[1].strip()
+            if source:
+                sync_sources.add(source)
+        if sync_sources:
+            summary["Nguồn đồng bộ"] = " / ".join(sorted(sync_sources))
         summaries.append(summary)
         replaced = row.get("_replacement_type") in ("SPLIT", "MERGE") and bool(row.get("_replaced_by_order_numbers"))
         if not replaced:

@@ -49,6 +49,11 @@ class ProductUnitOption(BaseModel):
     name: str
 
 
+class ProductDistributor(BaseModel):
+    code: str
+    name: str
+
+
 class Product(ProductBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -66,6 +71,7 @@ class Product(ProductBase):
     purchase_invoice_count: int = 0
     total_purchased_qty: float = 0
     sync_source: str = "MANUAL"
+    distributors: List[ProductDistributor] = Field(default_factory=list)
 
 
 class PriceListItem(BaseModel):

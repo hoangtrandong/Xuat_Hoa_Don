@@ -32,6 +32,9 @@ from app.models.multi_tenant_invoice import (
     DistributorInvoiceConfig,
     IssuedInvoice,
     IssuedInvoiceItem,
+    PurchaseInvoice,
+    PurchaseInvoiceItem,
+    TaxAuthorityCredential,
 )
 
 __all__ = [
@@ -53,4 +56,5 @@ __all__ = [
     "VinamilkOrderAllocation",
     "EmployeeBorrowBatch", "EmployeeBorrowEntry",
     "Distributor", "DistributorSupplierConfig", "DistributorInvoiceConfig", "IssuedInvoice", "IssuedInvoiceItem",
+    "PurchaseInvoice", "PurchaseInvoiceItem", "TaxAuthorityCredential",
 ]

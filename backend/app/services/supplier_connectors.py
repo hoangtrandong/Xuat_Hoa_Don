@@ -331,6 +331,130 @@ def _to_date(val: Any, fallback: date | None = None) -> date:
     return fallback or datetime.utcnow().date()
 
 
+def fetch_vinamilk_orders(
+    config: DistributorSupplierConfig,
+    from_date: date,
+    to_date: date,
+) -> list[dict[str, Any]]:
+    """Fetch Vinamilk DMS orders using its authenticated Excel-export flow."""
+    from scripts.vinamilk_login import login_and_get_cookie
+
+    endpoint = "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel"
+    cookie = (config.session_cookie or "").strip()
+    if not cookie:
+        username = (config.username or "").strip()
+        password = (config.encrypted_secret or "").strip()
+        if not username or not password:
+            raise RuntimeError(
+                "Thiếu tài khoản hoặc mật khẩu Vinamilk DMS trong cấu hình nguồn. "
+                "Vui lòng cập nhật thông tin đăng nhập rồi thử lại."
+            )
+        cookie = login_and_get_cookie(username, password)
+
+    from_date_text = from_date.strftime("%d/%m/%Y")
+    to_date_text = to_date.strftime("%d/%m/%Y")
+    export_form = {
+        "orderNumber": "",
+        "refOrderNumber": "",
+        "fromDate": from_date_text,
+        "toDate": to_date_text,
+        "deliveryDate": "",
+        "customerCode": "",
+        "customerName": "",
+        "orderSource": "0",
+        "priorityCode": "-1",
+        "csvStatus": "",
+        "xmlStatus": "",
+        "saleStaff": "",
+        "deliveryStaff": "",
+        "orderType": "IN",
+        "saleOrderType": "-1",
+        "reportCode": "1790085269000",
+        "reportFormId": "",
+    }
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://vinamilk.dmsone.vn/sale-product/search-sale/info",
+        "Origin": "https://vinamilk.dmsone.vn",
+    }
+
+    with httpx.Client(timeout=60.0, headers=headers, follow_redirects=True) as client:
+        for attempt in range(2):
+            client.cookies.update(
+                {
+                    part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip()
+                    for part in cookie.split(";")
+                    if "=" in part and part.split("=", 1)[0].strip()
+                }
+            )
+            response = client.post(endpoint, data=export_form)
+            if response.status_code in (401, 403) and attempt == 0:
+                username = (config.username or "").strip()
+                password = (config.encrypted_secret or "").strip()
+                if not username or not password:
+                    raise RuntimeError(
+                        f"Vinamilk từ chối phiên đăng nhập (HTTP {response.status_code}); "
+                        "cấu hình chưa có đủ tài khoản/mật khẩu để đăng nhập lại."
+                    )
+                cookie = login_and_get_cookie(username, password)
+                config.session_cookie = cookie
+                continue
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Vinamilk DMS trả về HTTP {response.status_code} khi xuất đơn hàng."
+                )
+            try:
+                export_result = response.json()
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Vinamilk DMS không trả về phản hồi JSON hợp lệ khi xuất đơn hàng."
+                ) from exc
+            if not isinstance(export_result, dict):
+                raise RuntimeError("Vinamilk DMS trả về cấu trúc phản hồi không hợp lệ.")
+            if export_result.get("hasData") is False and not export_result.get("path"):
+                config.session_cookie = cookie
+                return []
+            file_path = export_result.get("path")
+            if not file_path:
+                raise RuntimeError("Vinamilk DMS không cung cấp đường dẫn tải file đơn hàng.")
+
+            file_url = (
+                file_path
+                if str(file_path).startswith("http")
+                else f"https://vinamilk.dmsone.vn{file_path}"
+            )
+            download_response = client.get(file_url)
+            if download_response.status_code != 200:
+                raise RuntimeError(
+                    "Không thể tải file đơn hàng từ Vinamilk DMS "
+                    f"(HTTP {download_response.status_code})."
+                )
+            workbook = load_workbook(BytesIO(download_response.content), data_only=True)
+            worksheet = workbook.active
+            column_names = [cell.value for cell in worksheet[1]]
+            rows: list[dict[str, Any]] = []
+            for values in worksheet.iter_rows(min_row=2, values_only=True):
+                row = dict(zip(column_names, values))
+                if not row.get("Số đơn hàng"):
+                    continue
+                rows.append(
+                    {
+                        key: value.isoformat() if hasattr(value, "isoformat") else value
+                        for key, value in row.items()
+                    }
+                )
+            config.session_cookie = cookie
+            return rows
+
+    raise RuntimeError("Không thể tạo phiên đăng nhập hợp lệ với Vinamilk DMS.")
+
+
 class DynamicFieldMapper:
     """Động cơ ánh xạ dữ liệu động từ cấu trúc bất kỳ của NCC sang Canonical Order Model."""
 
@@ -559,10 +683,17 @@ def persist_canonical_orders_to_snapshots(
             subtotal_val = round(item.quantity * item.unit_price)
             net_val = round(item.line_total if item.line_total > 0 else max(0.0, subtotal_val - item.discount_amount))
 
+            order_date_str = order.order_date.strftime("%d/%m/%Y")
+            delivery_date_str = (order.delivery_date or order.order_date).strftime("%d/%m/%Y")
+
             normalized_payload: dict[str, Any] = {
                 "Số đơn hàng": order.order_number,
-                "Ngày đơn hàng": order.order_date.strftime("%d/%m/%Y"),
-                "Ngày giao hàng": (order.delivery_date or order.order_date).strftime("%d/%m/%Y"),
+                "Ngày tạo": order_date_str,
+                "Ngày đơn hàng": order_date_str,
+                "orderDate": order_date_str,
+                "Ngày giao": delivery_date_str,
+                "Ngày giao hàng": delivery_date_str,
+                "deliveryDate": delivery_date_str,
                 "Mã NPP": distributor_code or "",
                 "Mã KH": order.customer_code,
                 "Tên KH": order.customer_name,
@@ -583,6 +714,7 @@ def persist_canonical_orders_to_snapshots(
                 "Tên NVBH": order.staff_name or "",
                 "Trạng thái": order.status,
                 "Nhà cung cấp": order.supplier_name or order.supplier_code,
+                "Nguồn đồng bộ": order.supplier_code,
             }
 
             existing = db.scalar(
@@ -1008,6 +1140,13 @@ class RestApiSupplierConnector(BaseSupplierConnector):
         *,
         allow_sample_fallback: bool = True,
     ) -> list[dict[str, Any]]:
+        is_vinamilk = (
+            config.supplier_code.upper() == "VINAMILK"
+            or "vinamilk.dmsone.vn" in (config.api_endpoint_url or "").lower()
+        )
+        if is_vinamilk:
+            return fetch_vinamilk_orders(config, from_date, to_date)
+
         # Tự động ưu tiên xử lý chuyên biệt cho Nazzy DMS (NPP Mai Gold)
         is_nazzy = (
             config.supplier_code.upper() == "NAZZY"

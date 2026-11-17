@@ -44,6 +44,16 @@ export function formatVNDFull(value: number): string {
   return value.toLocaleString("vi-VN") + " ₫";
 }
 
+export function formatUnitPrice(value: number | string | null | undefined, decimals = 4): string {
+  if (value === null || value === undefined || value === "") return (0).toFixed(decimals);
+  const num = Number(value);
+  if (Number.isNaN(num)) return String(value);
+  return num.toLocaleString("en-US", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+
 export function formatNumber(value: number): string {
   return value.toLocaleString("vi-VN");
 }

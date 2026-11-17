@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from types import SimpleNamespace
+import unicodedata
 
 import pytest
 from fastapi import HTTPException
@@ -29,9 +30,11 @@ from app.crud import customer as customer_crud
 from app.models.customer import Customer, Store
 from app.models.employee import Employee
 from app.models.inventory import DeliveryRequest, DeliveryRequestOrder, Warehouse
+from app.models.multi_tenant_invoice import Distributor, DistributorSupplierConfig
 from app.models.product import Product, ProductCategory, ProductUnit
 from app.models.promotion import Promotion, PromotionItem, PromotionRule, PromotionRuleRewardProduct, PromotionStore
 from app.models.vinamilk import VinamilkOrderSnapshot
+from app.api.v1.endpoints.products import _product_distributors
 from app.schemas.customer import CustomerCreate
 
 
@@ -185,9 +188,12 @@ def test_grouped_order_pagination_filter_and_detail(db):
         db.add(VinamilkOrderSnapshot(
             remote_key=f"grouped-{index}", order_number=order, product_code=product,
             customer_code="0MD", customer_name="Nam thúy 1", order_created_date=day,
+            performed_by=unicodedata.normalize("NFD", "H\u1ec7 th\u1ed1ng") if order == "ORD-2" else None,
+            processing_status="NCC:NAZZY" if order == "ORD-1" and product == "OTHER" else None,
             synced_from=day, synced_to=day,
             raw_payload={"orderNumber": order, "productCode": product, "totalValue": value,
-                         "totalDiscount": discount, "customerCode": "0MD"},
+                         "totalDiscount": discount, "customerCode": "0MD",
+                         **({"Nguồn đồng bộ": "NAZZY"} if order == "ORD-1" and product == "01VD41" else {})},
         ))
     db.flush()
     first = list_grouped_vinamilk_orders(day, day, skip=0, limit=1, db=db)
@@ -199,6 +205,10 @@ def test_grouped_order_pagination_filter_and_detail(db):
     assert matching["rows"][0]["_product_count"] == 2
     assert matching["rows"][0]["totalValue"] == 300
     assert matching["rows"][0]["totalDiscount"] == 40
+    assert matching["rows"][0]["Nhà cung cấp"] == "Vinamilk"
+    assert matching["rows"][0]["Nguồn đồng bộ"] == "NAZZY"
+    vinamilk_order = next(row for row in first["rows"] + second["rows"] if row["orderNumber"] == "ORD-2")
+    assert vinamilk_order["Nguồn đồng bộ"] == "VINAMILK"
     assert "productCode" not in matching["rows"][0]
     assert "quantity" not in matching["rows"][0]
     assert list_grouped_vinamilk_orders(day, day, product="Vinamilk", skip=0, limit=20, db=db)["total"] == 2
@@ -207,6 +217,102 @@ def test_grouped_order_pagination_filter_and_detail(db):
         skip=0, limit=100, db=db, order_number="ORD-1",
     )
     assert {row["productCode"] for row in detail["rows"]} == {"01VD41", "OTHER"}
+
+
+def test_grouped_orders_keep_same_order_number_separate_by_distributor(db):
+    day = date(2026, 11, 4)
+    distributors = [
+        Distributor(code="NPP-TRUNGDONG", name="Trung Dong"),
+        Distributor(code="NPP-MAIGOLD", name="Mai Gold"),
+    ]
+    db.add_all(distributors)
+    db.flush()
+    for index, distributor in enumerate(distributors):
+        db.add(VinamilkOrderSnapshot(
+            remote_key=f"same-order-{index}",
+            order_number="DUPLICATE-001",
+            product_code=f"SKU-{index}",
+            product_name=f"Product {index}",
+            order_created_date=day,
+            performed_by=distributor.code,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"Số đơn hàng": "DUPLICATE-001", "Mã NPP": distributor.code},
+        ))
+    db.flush()
+
+    result = list_grouped_vinamilk_orders(day, day, skip=0, limit=20, db=db)
+
+    assert result["total"] == 2
+    assert {row["_distributor_code"] for row in result["rows"]} == {
+        "NPP-TRUNGDONG",
+        "NPP-MAIGOLD",
+    }
+    assert {row["NPP"] for row in result["rows"]} == {
+        "Trung Dong",
+        "Mai Gold",
+    }
+    mai_gold_detail = list_local_vinamilk_orders(
+        from_date=day,
+        to_date=day,
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=20,
+        db=db,
+        order_number="DUPLICATE-001",
+        distributor_code="NPP-MAIGOLD",
+    )
+    assert len(mai_gold_detail["rows"]) == 1
+    assert mai_gold_detail["rows"][0]["_distributor_code"] == "NPP-MAIGOLD"
+    assert mai_gold_detail["snapshot_count"] == 1
+
+
+def test_synced_products_are_associated_with_their_distributor(db):
+    trung_dong = Distributor(code="NPP-TRUNGDONG", name="Trung Dong")
+    mai_gold = Distributor(code="NPP-MAIGOLD", name="Mai Gold")
+    db.add_all([trung_dong, mai_gold])
+    db.flush()
+    db.add_all([
+        DistributorSupplierConfig(
+            distributor_id=trung_dong.id, supplier_code="VINAMILK", supplier_name="Vinamilk",
+        ),
+        DistributorSupplierConfig(
+            distributor_id=mai_gold.id, supplier_code="NAZZY", supplier_name="Nazzy",
+        ),
+    ])
+    day = date(2026, 11, 4)
+    db.add_all([
+        VinamilkOrderSnapshot(
+            remote_key="product-source-vinamilk",
+            order_number="VNM-001",
+            product_code="SKU-VNM",
+            product_name="Vinamilk product",
+            order_created_date=day,
+            performed_by="Hệ thống",
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"Nguồn đồng bộ": "VINAMILK"},
+        ),
+        VinamilkOrderSnapshot(
+            remote_key="product-source-nazzy",
+            order_number="NAZ-001",
+            product_code="SKU-NAZ",
+            product_name="Nazzy product",
+            order_created_date=day,
+            performed_by=mai_gold.code,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"Nguồn đồng bộ": "NAZZY", "Mã NPP": mai_gold.code},
+        ),
+    ])
+    db.flush()
+
+    result = _product_distributors(db, {"SKU-VNM", "SKU-NAZ"})
+
+    assert result["SKU-VNM"] == [{"code": "NPP-TRUNGDONG", "name": "Trung Dong"}]
+    assert result["SKU-NAZ"] == [{"code": "NPP-MAIGOLD", "name": "Mai Gold"}]
 
 
 def test_order_list_works_when_legacy_customers_table_lacks_phone_column(db):

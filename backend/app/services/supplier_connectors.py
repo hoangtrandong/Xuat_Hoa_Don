@@ -384,6 +384,38 @@ def fetch_vinamilk_orders(
         "Origin": "https://vinamilk.dmsone.vn",
     }
 
+    def relogin() -> str:
+        username = (config.username or "").strip()
+        password = (config.encrypted_secret or "").strip()
+        if not username or not password:
+            raise RuntimeError(
+                "Phiên đăng nhập Vinamilk đã hết hạn; cấu hình chưa có đủ "
+                "tài khoản/mật khẩu để đăng nhập lại."
+            )
+        refreshed_cookie = login_and_get_cookie(username, password)
+        config.session_cookie = refreshed_cookie
+        return refreshed_cookie
+
+    def parse_workbook(content: bytes) -> list[dict[str, Any]]:
+        try:
+            workbook = load_workbook(BytesIO(content), data_only=True)
+        except Exception as exc:
+            raise RuntimeError("Vinamilk trả về file Excel không hợp lệ.") from exc
+        worksheet = workbook.active
+        column_names = [cell.value for cell in worksheet[1]]
+        rows: list[dict[str, Any]] = []
+        for values in worksheet.iter_rows(min_row=2, values_only=True):
+            row = dict(zip(column_names, values))
+            if not row.get("Số đơn hàng"):
+                continue
+            rows.append(
+                {
+                    key: value.isoformat() if hasattr(value, "isoformat") else value
+                    for key, value in row.items()
+                }
+            )
+        return rows
+
     with httpx.Client(timeout=60.0, headers=headers, follow_redirects=True) as client:
         for attempt in range(2):
             client.cookies.update(
@@ -394,26 +426,35 @@ def fetch_vinamilk_orders(
                 }
             )
             response = client.post(endpoint, data=export_form)
-            if response.status_code in (401, 403) and attempt == 0:
-                username = (config.username or "").strip()
-                password = (config.encrypted_secret or "").strip()
-                if not username or not password:
-                    raise RuntimeError(
-                        f"Vinamilk từ chối phiên đăng nhập (HTTP {response.status_code}); "
-                        "cấu hình chưa có đủ tài khoản/mật khẩu để đăng nhập lại."
-                    )
-                cookie = login_and_get_cookie(username, password)
-                config.session_cookie = cookie
+            content_type = response.headers.get("content-type", "").lower()
+            needs_login = (
+                response.status_code in (401, 403)
+                or response.headers.get("requires_auth") == "1"
+                or "text/html" in content_type
+                or "/login" in str(response.url).lower()
+            )
+            if needs_login and attempt == 0:
+                cookie = relogin()
                 continue
             if response.status_code != 200:
                 raise RuntimeError(
                     f"Vinamilk DMS trả về HTTP {response.status_code} khi xuất đơn hàng."
                 )
+            if response.content.startswith(b"PK\x03\x04"):
+                config.session_cookie = cookie
+                return parse_workbook(response.content)
+
             try:
                 export_result = response.json()
             except ValueError as exc:
+                if attempt == 0:
+                    cookie = relogin()
+                    continue
+                preview = " ".join(response.text[:160].split())
                 raise RuntimeError(
-                    "Vinamilk DMS không trả về phản hồi JSON hợp lệ khi xuất đơn hàng."
+                    "Vinamilk DMS không trả về JSON hoặc file Excel hợp lệ "
+                    f"(Content-Type: {content_type or 'không xác định'}, "
+                    f"preview: {preview or 'rỗng'})."
                 ) from exc
             if not isinstance(export_result, dict):
                 raise RuntimeError("Vinamilk DMS trả về cấu trúc phản hồi không hợp lệ.")
@@ -435,22 +476,8 @@ def fetch_vinamilk_orders(
                     "Không thể tải file đơn hàng từ Vinamilk DMS "
                     f"(HTTP {download_response.status_code})."
                 )
-            workbook = load_workbook(BytesIO(download_response.content), data_only=True)
-            worksheet = workbook.active
-            column_names = [cell.value for cell in worksheet[1]]
-            rows: list[dict[str, Any]] = []
-            for values in worksheet.iter_rows(min_row=2, values_only=True):
-                row = dict(zip(column_names, values))
-                if not row.get("Số đơn hàng"):
-                    continue
-                rows.append(
-                    {
-                        key: value.isoformat() if hasattr(value, "isoformat") else value
-                        for key, value in row.items()
-                    }
-                )
             config.session_cookie = cookie
-            return rows
+            return parse_workbook(download_response.content)
 
     raise RuntimeError("Không thể tạo phiên đăng nhập hợp lệ với Vinamilk DMS.")
 

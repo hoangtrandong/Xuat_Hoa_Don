@@ -1783,25 +1783,29 @@ def _fetch_vinamilk_sync(session_cookie: str, form: dict[str, str]) -> dict[str,
         if resp.status_code in (401, 403) or resp.headers.get("requires_auth") == "1":
             return {"status": 401, "body": ""}
 
-        try:
-            data = resp.json()
-        except Exception:
-            return {"status": 401, "body": ""}
+        if resp.content.startswith(b"PK\x03\x04"):
+            excel_bytes = resp.content
+        else:
+            try:
+                data = resp.json()
+            except Exception:
+                return {"status": 401, "body": ""}
 
-        if data and data.get("hasData") is False and not data.get("path"):
-            return {"status": 200, "body": "[]"}
-        if not data or not data.get("path"):
-            raise RuntimeError(f"Failed to export excel: {data}")
+            if data and data.get("hasData") is False and not data.get("path"):
+                return {"status": 200, "body": "[]"}
+            if not data or not data.get("path"):
+                raise RuntimeError(f"Failed to export excel: {data}")
 
-        file_url = data["path"]
-        if not file_url.startswith("http"):
-            file_url = "https://vinamilk.dmsone.vn" + file_url
+            file_url = data["path"]
+            if not file_url.startswith("http"):
+                file_url = "https://vinamilk.dmsone.vn" + file_url
 
-        dl_resp = client.get(file_url)
-        if dl_resp.status_code != 200:
-            raise RuntimeError(f"Không thể tải file excel từ DMS (HTTP {dl_resp.status_code})")
-
-        excel_bytes = dl_resp.content
+            dl_resp = client.get(file_url)
+            if dl_resp.status_code != 200:
+                raise RuntimeError(
+                    f"Không thể tải file excel từ DMS (HTTP {dl_resp.status_code})"
+                )
+            excel_bytes = dl_resp.content
         workbook = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
         sheet = workbook.active
         headers = [cell.value for cell in sheet[1]]

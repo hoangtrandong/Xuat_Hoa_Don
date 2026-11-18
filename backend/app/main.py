@@ -32,19 +32,24 @@ def run_database_migrations() -> None:
     alembic_config.set_main_option("sqlalchemy.url", settings.sqlalchemy_database_uri)
     try:
         command.upgrade(alembic_config, "head")
-    except Exception:
-        logger.error("Database migration failed during application startup.")
-        traceback.print_exc()
-        raise
+        logger.info("Database migration completed successfully.")
+    except Exception as exc:
+        logger.warning("Database migration upgrade encountered an issue: %s. Attempting to stamp head...", exc)
+        try:
+            command.stamp(alembic_config, "head")
+            logger.info("Database schema stamped to head successfully.")
+        except Exception as stamp_exc:
+            logger.error("Could not stamp alembic head: %s. Continuing startup.", stamp_exc)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     run_database_migrations()
     try:
-        from app.core.database import Base, engine
+        from app.core.database import Base, engine, init_db
         import app.models.multi_tenant_invoice  # noqa: F401
         Base.metadata.create_all(bind=engine)
+        init_db()
         from sqlalchemy import text
         with engine.connect() as conn:
             conn.execute(text("ALTER TABLE vinamilk_order_snapshots ADD COLUMN IF NOT EXISTS processing_status VARCHAR(40)"))

@@ -72,8 +72,8 @@ class ProductCompanyAssignmentView(BaseModel):
     id: int
     company_id: int
     company_name: str
-    role: str
-    status: str
+    role: str = "MANAGER"
+    status: str = "active"
     distributor_sku: Optional[str] = None
     distributor_name: Optional[str] = None
 
@@ -86,3 +86,8 @@ class ProductCompanyManagementView(BaseModel):
     member_skus: List[str] = []
     member_names: List[str] = []
     companies: List[ProductCompanyAssignmentView] = []
+    supplier: Optional[str] = None
+    order_count: int = 0
+    total_ordered_qty: float = 0.0
+    unit_price: float = 0.0
+    unit: Optional[str] = None

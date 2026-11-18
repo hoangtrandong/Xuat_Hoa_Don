@@ -32,8 +32,8 @@ class Distributor(Base):
     issued_invoices: Mapped[List["IssuedInvoice"]] = relationship(
         back_populates="distributor", cascade="all, delete-orphan"
     )
-    tax_credential: Mapped["TaxAuthorityCredential | None"] = relationship(
-        back_populates="distributor", uselist=False, cascade="all, delete-orphan"
+    tax_credentials: Mapped[List["TaxAuthorityCredential"]] = relationship(
+        back_populates="distributor", cascade="all, delete-orphan"
     )
     purchase_invoices: Mapped[List["PurchaseInvoice"]] = relationship(
         back_populates="distributor", cascade="all, delete-orphan"
@@ -193,9 +193,13 @@ class TaxAuthorityCredential(Base):
 
     __tablename__ = "tax_authority_credentials"
 
+    __table_args__ = (
+        UniqueConstraint("distributor_id", "username", name="uq_tax_credential_distributor_username"),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
     distributor_id: Mapped[int] = mapped_column(
-        ForeignKey("distributors.id", ondelete="CASCADE"), unique=True, index=True
+        ForeignKey("distributors.id", ondelete="CASCADE"), index=True
     )
     username: Mapped[str | None] = mapped_column(String(120))  # Mã số thuế đăng nhập CQT
     encrypted_password: Mapped[str | None] = mapped_column(Text)  # Mật khẩu CQT
@@ -206,7 +210,10 @@ class TaxAuthorityCredential(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    distributor: Mapped["Distributor"] = relationship(back_populates="tax_credential")
+    distributor: Mapped["Distributor"] = relationship(back_populates="tax_credentials")
+    purchase_invoices: Mapped[List["PurchaseInvoice"]] = relationship(
+        back_populates="tax_credential", cascade="all, delete-orphan"
+    )
 
 
 class PurchaseInvoice(Base):
@@ -216,6 +223,7 @@ class PurchaseInvoice(Base):
     __table_args__ = (
         UniqueConstraint(
             "distributor_id",
+            "tax_credential_id",
             "seller_tax_code",
             "invoice_template",
             "invoice_symbol",
@@ -226,6 +234,9 @@ class PurchaseInvoice(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     distributor_id: Mapped[int] = mapped_column(ForeignKey("distributors.id", ondelete="CASCADE"), index=True)
+    tax_credential_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tax_authority_credentials.id", ondelete="CASCADE"), index=True
+    )
     external_id: Mapped[str | None] = mapped_column(String(120), index=True)
     invoice_template: Mapped[str] = mapped_column(String(40), default="1")  # khmshdon / KHMSHDon
     invoice_symbol: Mapped[str] = mapped_column(String(40), index=True)  # khhdon / KHHDon
@@ -254,6 +265,9 @@ class PurchaseInvoice(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     distributor: Mapped["Distributor"] = relationship(back_populates="purchase_invoices")
+    tax_credential: Mapped["TaxAuthorityCredential | None"] = relationship(
+        back_populates="purchase_invoices"
+    )
     items: Mapped[List["PurchaseInvoiceItem"]] = relationship(
         back_populates="invoice", cascade="all, delete-orphan"
     )

@@ -1970,7 +1970,8 @@ def list_issued_invoices(
 
 class GdtAuthRequest(BaseModel):
     distributor_id: int
-    username: str | None = None
+    credential_id: int | None = None
+    username: str
     password: str | None = None
     ckey: str | None = None
     cvalue: str | None = None
@@ -1979,12 +1980,14 @@ class GdtAuthRequest(BaseModel):
 
 class GdtSyncPurchaseRequest(BaseModel):
     distributor_id: int
+    tax_credential_id: int | None = None
     from_date: date
     to_date: date
 
 
 class GdtInteractiveLoginSyncRequest(BaseModel):
     distributor_id: int
+    tax_credential_id: int | None = None
     from_date: date
     to_date: date
     username: str | None = None
@@ -2003,26 +2006,47 @@ def get_gdt_credentials_status(
     if not dist:
         raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
 
-    cred = db.scalar(
-        select(TaxAuthorityCredential).where(TaxAuthorityCredential.distributor_id == effective_dist_id)
+    credentials = list(
+        db.scalars(
+            select(TaxAuthorityCredential)
+            .where(TaxAuthorityCredential.distributor_id == effective_dist_id)
+            .order_by(TaxAuthorityCredential.id)
+        )
     )
-    default_username = (cred.username if cred and cred.username else dist.tax_code) or ""
-    has_token = bool(cred and cred.bearer_token and cred.bearer_token.strip())
-    token_preview = (
-        f"{cred.bearer_token[:28]}..."
-        if cred and cred.bearer_token and len(cred.bearer_token) > 28
-        else (cred.bearer_token if cred and cred.bearer_token else "")
-    )
+    accounts = [
+        {
+            "id": cred.id,
+            "username": cred.username or "",
+            "has_password": bool(cred.encrypted_password),
+            "has_bearer_token": bool(cred.bearer_token and cred.bearer_token.strip()),
+            "token_preview": (
+                f"{cred.bearer_token[:28]}..."
+                if cred.bearer_token and len(cred.bearer_token) > 28
+                else (cred.bearer_token or "")
+            ),
+            "token_updated_at": (
+                cred.token_updated_at.isoformat() if cred.token_updated_at else None
+            ),
+            "last_synced_at": cred.last_synced_at.isoformat() if cred.last_synced_at else None,
+            "invoice_count": db.scalar(
+                select(func.count(PurchaseInvoice.id)).where(
+                    PurchaseInvoice.tax_credential_id == cred.id
+                )
+            )
+            or 0,
+        }
+        for cred in credentials
+    ]
     return {
         "distributor_id": effective_dist_id,
         "distributor_name": dist.name,
-        "username": default_username,
-        "password": (cred.encrypted_password or "") if cred else "",
-        "has_password": bool(cred and cred.encrypted_password),
-        "has_bearer_token": has_token,
-        "token_preview": token_preview,
-        "token_updated_at": cred.token_updated_at.isoformat() if cred and cred.token_updated_at else None,
-        "last_synced_at": cred.last_synced_at.isoformat() if cred and cred.last_synced_at else None,
+        "username": accounts[0]["username"] if accounts else (dist.tax_code or ""),
+        "accounts": accounts,
+        "has_bearer_token": any(account["has_bearer_token"] for account in accounts),
+        "last_synced_at": max(
+            (account["last_synced_at"] for account in accounts if account["last_synced_at"]),
+            default=None,
+        ),
     }
 
 
@@ -2047,33 +2071,70 @@ def authenticate_gdt_account(
     if not dist:
         raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
 
-    cred = db.scalar(
-        select(TaxAuthorityCredential).where(
-            TaxAuthorityCredential.distributor_id == payload.distributor_id
+    username = payload.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Vui lòng nhập mã số thuế đăng nhập CQT.")
+
+    cred = None
+    if payload.credential_id is not None:
+        cred = db.get(TaxAuthorityCredential, payload.credential_id)
+        if not cred or cred.distributor_id != payload.distributor_id:
+            raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản CQT.")
+    else:
+        cred = db.scalar(
+            select(TaxAuthorityCredential).where(
+                TaxAuthorityCredential.distributor_id == payload.distributor_id,
+                TaxAuthorityCredential.username == username,
+            )
         )
-    )
     if cred is None:
-        cred = TaxAuthorityCredential(distributor_id=payload.distributor_id)
+        cred = TaxAuthorityCredential(distributor_id=payload.distributor_id, username=username)
         db.add(cred)
         db.flush()
 
-    if payload.username is not None and payload.username.strip():
-        cred.username = payload.username.strip()
-    elif not cred.username and dist.tax_code:
-        cred.username = dist.tax_code.strip()
+    duplicate = db.scalar(
+        select(TaxAuthorityCredential).where(
+            TaxAuthorityCredential.distributor_id == payload.distributor_id,
+            TaxAuthorityCredential.username == username,
+            TaxAuthorityCredential.id != cred.id,
+        )
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="Mã số thuế này đã được đăng ký cho NPP.")
+    cred.username = username
 
-    if payload.password is not None and payload.password.strip():
-        cred.encrypted_password = payload.password.strip()
-
+    effective_password = (payload.password or "").strip() or (cred.encrypted_password or "")
     if payload.manual_bearer_token and payload.manual_bearer_token.strip():
         cred.bearer_token = normalize_bearer_token(payload.manual_bearer_token)
         cred.token_updated_at = datetime.utcnow()
+    elif payload.ckey and payload.cvalue:
+        if not effective_password:
+            raise HTTPException(status_code=400, detail="Vui lòng nhập mật khẩu Cổng Thuế.")
+        try:
+            cred.bearer_token = authenticate_gdt_taxpayer(
+                username=username,
+                password=effective_password,
+                ckey=payload.ckey,
+                cvalue=payload.cvalue,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        cred.token_updated_at = datetime.utcnow()
+    elif not (cred.bearer_token and cred.bearer_token.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="Vui lòng nhập CAPTCHA hoặc dán token Cổng Thuế.",
+        )
+
+    if payload.password is not None and payload.password.strip():
+        cred.encrypted_password = payload.password.strip()
 
     cred.updated_by = getattr(current_user, "username", None) or "admin"
     db.commit()
 
     return {
         "success": True,
+        "credential_id": cred.id,
         "username": cred.username,
         "password": cred.encrypted_password or "",
         "has_password": bool(cred.encrypted_password),
@@ -2091,29 +2152,80 @@ def sync_purchase_invoices_endpoint(
     if payload.to_date < payload.from_date:
         raise HTTPException(status_code=400, detail="Từ ngày không được lớn hơn Đến ngày.")
 
-    cred = db.scalar(
-        select(TaxAuthorityCredential).where(
-            TaxAuthorityCredential.distributor_id == payload.distributor_id
-        )
+    credentials_stmt = select(TaxAuthorityCredential).where(
+        TaxAuthorityCredential.distributor_id == payload.distributor_id
     )
-    if not cred or not cred.bearer_token or not cred.bearer_token.strip():
+    if payload.tax_credential_id is not None:
+        credentials_stmt = credentials_stmt.where(
+            TaxAuthorityCredential.id == payload.tax_credential_id
+        )
+    credentials = list(db.scalars(credentials_stmt.order_by(TaxAuthorityCredential.id)))
+    if not credentials:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản CQT để đồng bộ.")
+    ready_credentials = [
+        cred for cred in credentials if cred.bearer_token and cred.bearer_token.strip()
+    ]
+    if not ready_credentials:
         raise HTTPException(
             status_code=428,
             detail="CQT_TOKEN_REQUIRED: Chưa có phiên đăng nhập Cổng Thuế. Vui lòng xác thực tài khoản CQT.",
         )
 
     try:
-        result = sync_gdt_purchase_invoices(
-            db=db,
-            distributor_id=payload.distributor_id,
-            from_date=payload.from_date,
-            to_date=payload.to_date,
-            bearer_token=cred.bearer_token,
-        )
-        return {
-            "success": True,
-            **result,
+        combined = {
+            "total_found": 0,
+            "saved_invoices": 0,
+            "xml_extracted_count": 0,
+            "synced_accounts": 0,
+            "skipped_accounts": len(credentials) - len(ready_credentials),
+            "errors": [],
+            "warnings": [],
         }
+        saved_invoice_ids: set[int] = set()
+        for cred in ready_credentials:
+            try:
+                result = sync_gdt_purchase_invoices(
+                    db=db,
+                    distributor_id=payload.distributor_id,
+                    tax_credential_id=cred.id,
+                    from_date=payload.from_date,
+                    to_date=payload.to_date,
+                    bearer_token=cred.bearer_token,
+                    sync_products=False,
+                )
+                for key in ("total_found", "saved_invoices", "xml_extracted_count"):
+                    combined[key] += result[key]
+                saved_invoice_ids.update(result.get("saved_invoice_ids", []))
+                combined["warnings"].extend(result.get("warnings", []))
+                combined["synced_accounts"] += 1
+            except Exception as exc:
+                db.rollback()
+                combined["errors"].append(
+                    {
+                        "credential_id": cred.id,
+                        "username": cred.username,
+                        "detail": str(exc),
+                    }
+                )
+        if combined["synced_accounts"] == 0 and combined["errors"]:
+            raise RuntimeError(
+                f"Không tài khoản CQT nào đồng bộ thành công: {combined['errors'][0]['detail']}"
+            )
+        if saved_invoice_ids:
+            from app.crud.product import sync_products_from_system_data
+
+            try:
+                db.flush()
+                sync_products_from_system_data(
+                    db, invoice_ids=sorted(saved_invoice_ids), commit=False
+                )
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                combined["warnings"].append(
+                    f"Đã lưu hóa đơn nhưng chưa đồng bộ được danh mục sản phẩm: {exc}"
+                )
+        return {"success": True, **combined}
     except PermissionError as exc:
         raise HTTPException(
             status_code=428,
@@ -2141,18 +2253,28 @@ def interactive_login_and_sync_purchase_invoices(
     if not dist:
         raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
 
-    cred = db.scalar(
-        select(TaxAuthorityCredential).where(
-            TaxAuthorityCredential.distributor_id == payload.distributor_id
+    username = (payload.username or "").strip()
+    cred = None
+    if payload.tax_credential_id is not None:
+        cred = db.get(TaxAuthorityCredential, payload.tax_credential_id)
+        if not cred or cred.distributor_id != payload.distributor_id:
+            raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản CQT.")
+    elif username:
+        cred = db.scalar(
+            select(TaxAuthorityCredential).where(
+                TaxAuthorityCredential.distributor_id == payload.distributor_id,
+                TaxAuthorityCredential.username == username,
+            )
         )
-    )
+    if not cred and not username:
+        raise HTTPException(status_code=400, detail="Vui lòng nhập mã số thuế đăng nhập CQT.")
     if cred is None:
-        cred = TaxAuthorityCredential(distributor_id=payload.distributor_id)
+        cred = TaxAuthorityCredential(distributor_id=payload.distributor_id, username=username)
         db.add(cred)
         db.flush()
 
-    if payload.username and payload.username.strip():
-        cred.username = payload.username.strip()
+    if username:
+        cred.username = username
     elif not cred.username and dist.tax_code:
         cred.username = dist.tax_code.strip()
 
@@ -2166,7 +2288,24 @@ def interactive_login_and_sync_purchase_invoices(
             password=cred.encrypted_password,
             timeout_seconds=180,
         )
+    except (ModuleNotFoundError, ImportError):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Môi trường máy chủ/cloud không hỗ trợ mở trình duyệt Playwright trực tiếp. "
+                "Vui lòng dán Bearer Token CQT (hoặc lệnh cURL từ F12 DevTools của hoadondientu.gdt.gov.vn) vào ô nhập Token để đồng bộ."
+            ),
+        )
     except Exception as exc:
+        err_str = str(exc)
+        if "playwright" in err_str.lower() or "no module" in err_str.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Môi trường máy chủ/cloud không hỗ trợ mở trình duyệt Playwright trực tiếp. "
+                    "Vui lòng dán Bearer Token CQT (hoặc lệnh cURL từ F12 DevTools của hoadondientu.gdt.gov.vn) vào ô nhập Token để đồng bộ."
+                ),
+            )
         raise HTTPException(
             status_code=400,
             detail=f"Không lấy được phiên đăng nhập từ cửa sổ trình duyệt: {exc}",
@@ -2181,6 +2320,7 @@ def interactive_login_and_sync_purchase_invoices(
         result = sync_gdt_purchase_invoices(
             db=db,
             distributor_id=payload.distributor_id,
+            tax_credential_id=cred.id,
             from_date=payload.from_date,
             to_date=payload.to_date,
             bearer_token=cred.bearer_token,
@@ -2195,6 +2335,33 @@ def interactive_login_and_sync_purchase_invoices(
             status_code=502,
             detail=f"Đã bắt được Bearer Token nhưng gặp lỗi khi tải hóa đơn: {exc}",
         ) from exc
+
+
+@router.delete("/purchase-invoices/credentials/{credential_id}")
+def delete_gdt_credential(
+    credential_id: int,
+    distributor_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id) or distributor_id
+    cred = db.get(TaxAuthorityCredential, credential_id)
+    if not cred or cred.distributor_id != effective_dist_id:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản CQT.")
+    invoice_count = db.scalar(
+        select(func.count(PurchaseInvoice.id)).where(
+            PurchaseInvoice.tax_credential_id == credential_id
+        )
+    ) or 0
+    username = cred.username
+    db.delete(cred)
+    db.commit()
+    return {
+        "success": True,
+        "credential_id": credential_id,
+        "username": username,
+        "deleted_invoices": invoice_count,
+    }
 
 
 class PurchaseInvoiceZipDownloadRequest(BaseModel):
@@ -2271,7 +2438,10 @@ def list_purchase_invoices(
     effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id) or distributor_id
     stmt = (
         select(PurchaseInvoice)
-        .options(selectinload(PurchaseInvoice.items))
+        .options(
+            selectinload(PurchaseInvoice.items),
+            selectinload(PurchaseInvoice.tax_credential),
+        )
         .where(PurchaseInvoice.distributor_id == effective_dist_id)
         .order_by(PurchaseInvoice.invoice_date.desc(), PurchaseInvoice.id.desc())
     )
@@ -2425,6 +2595,10 @@ def list_purchase_invoices(
             {
                 "id": r.id,
                 "distributor_id": r.distributor_id,
+                "tax_credential_id": r.tax_credential_id,
+                "tax_account_username": (
+                    r.tax_credential.username if r.tax_credential else ""
+                ),
                 "invoice_template": r.invoice_template,
                 "invoice_symbol": r.invoice_symbol,
                 "invoice_number": r.invoice_number,
@@ -2500,7 +2674,10 @@ def get_purchase_invoice_detail(
 ) -> dict[str, Any]:
     inv = db.scalar(
         select(PurchaseInvoice)
-        .options(selectinload(PurchaseInvoice.items))
+        .options(
+            selectinload(PurchaseInvoice.items),
+            selectinload(PurchaseInvoice.tax_credential),
+        )
         .where(PurchaseInvoice.id == invoice_id)
     )
     if not inv:
@@ -2510,6 +2687,10 @@ def get_purchase_invoice_detail(
     ttxly_code = (inv.ttxly or ("8" if inv.is_mtt else "5")).strip()
     return {
         "id": inv.id,
+        "tax_credential_id": inv.tax_credential_id,
+        "tax_account_username": (
+            inv.tax_credential.username if inv.tax_credential else ""
+        ),
         "invoice_template": inv.invoice_template,
         "invoice_symbol": inv.invoice_symbol,
         "invoice_number": inv.invoice_number,

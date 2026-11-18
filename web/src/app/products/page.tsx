@@ -24,15 +24,19 @@ import {
   FileSpreadsheet,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Layers,
   Building2,
   FileText,
+  Tag,
+  Link2,
 } from "lucide-react";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import { formatNumber, formatUnitPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL, apiFetch } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
+import { useAuthSession } from "@/lib/auth-session";
 
 const inputCls =
   "w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100";
@@ -108,6 +112,17 @@ type ProductRow = {
   distributors: ProductDistributor[];
 };
 
+type NppProductOption = {
+  code: string;
+  name: string;
+  supplier: string;
+  unit: string;
+  unitPrice: number;
+  orderCount: number;
+  mappedSku: string;
+  companyName: string;
+};
+
 type SortField =
   | "code"
   | "nppCode"
@@ -130,6 +145,9 @@ function normalizeSearchText(value: string): string {
 }
 
 export default function ProductsPage() {
+  const authSession = useAuthSession();
+  const isSuperAdmin = authSession.isSuperAdmin || !authSession.distributorCode;
+
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [units, setUnits] = useState<UnitOption[]>([]);
@@ -139,12 +157,18 @@ export default function ProductsPage() {
 
   // Bộ lọc tra cứu
   const [searchQuery, setSearchQuery] = useState("");
-  const [sourceFilter, setSourceFilter] = useState<string>("ALL");
   const [distributorFilter, setDistributorFilter] = useState<string>("ALL");
   const [categoryFilter, setCategoryFilter] = useState<string>("ALL");
   const [supplierFilter, setSupplierFilter] = useState<string>("ALL");
   const [unitFilter, setUnitFilter] = useState<string>("ALL");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
+
+  // Tự động gán và khóa NPP đối với tài khoản Nhà phân phối
+  useEffect(() => {
+    if (!isSuperAdmin && authSession.distributorCode) {
+      setDistributorFilter(authSession.distributorCode);
+    }
+  }, [isSuperAdmin, authSession.distributorCode]);
 
   // Sắp xếp & Phân trang
   const [sortField, setSortField] = useState<SortField>("code");
@@ -164,6 +188,18 @@ export default function ProductsPage() {
   const [editingNppId, setEditingNppId] = useState<number | null>(null);
   const [inlineNppCode, setInlineNppCode] = useState<string>("");
   const [savingNppId, setSavingNppId] = useState<number | null>(null);
+
+  // Danh sách mã sản phẩm NPP nội bộ (từ đơn hàng DMS / web NCC)
+  const [nppProductOptions, setNppProductOptions] = useState<NppProductOption[]>([]);
+  const [editNppSearchQuery, setEditNppSearchQuery] = useState("");
+  const [showEditNppDropdown, setShowEditNppDropdown] = useState(false);
+  const [editNppFilterTab, setEditNppFilterTab] = useState<"ALL" | "UNMAPPED" | "MAPPED">("ALL");
+  const editNppContainerRef = useRef<HTMLDivElement>(null);
+
+  const [createNppSearchQuery, setCreateNppSearchQuery] = useState("");
+  const [showCreateNppDropdown, setShowCreateNppDropdown] = useState(false);
+  const [createNppFilterTab, setCreateNppFilterTab] = useState<"ALL" | "UNMAPPED" | "MAPPED">("ALL");
+  const createNppContainerRef = useRef<HTMLDivElement>(null);
 
   const [form, setForm] = useState({
     sku: "",
@@ -204,10 +240,11 @@ export default function ProductsPage() {
   const loadCatalog = useCallback(async (showSpinner = false) => {
     if (showSpinner) setLoading(true);
     try {
-      const [categoryResponse, unitResponse, productResponse] = await Promise.all([
+      const [categoryResponse, unitResponse, productResponse, companyLinksResponse] = await Promise.all([
         apiFetch(`${API_URL}/products/categories/`),
         apiFetch(`${API_URL}/products/units/`),
         apiFetch(`${API_URL}/products/?limit=10000`),
+        apiFetch(`${API_URL}/product-groups/products/company-links`).catch(() => null),
       ]);
       if (!categoryResponse.ok || !unitResponse.ok || !productResponse.ok) {
         throw new Error("Không thể tải danh mục ngành hàng, đơn vị tính và danh sách SKU.");
@@ -215,6 +252,44 @@ export default function ProductsPage() {
       const loadedCategories = (await categoryResponse.json()) as CategoryOption[];
       const loadedUnits = (await unitResponse.json()) as UnitOption[];
       const loadedProducts = (await productResponse.json()) as ApiProductItem[];
+
+      // Tải danh sách mã sản phẩm NPP nội bộ để phục vụ tìm kiếm & gắn mã
+      if (companyLinksResponse && companyLinksResponse.ok) {
+        const rawLinks = (await companyLinksResponse.json().catch(() => [])) as Array<Record<string, unknown>>;
+        if (Array.isArray(rawLinks)) {
+          const nppList: NppProductOption[] = rawLinks
+            .map((item) => {
+              const memberSkus = Array.isArray(item.member_skus) ? (item.member_skus as string[]) : [];
+              const memberNames = Array.isArray(item.member_names) ? (item.member_names as string[]) : [];
+              const companies = Array.isArray(item.companies) ? (item.companies as Array<Record<string, unknown>>) : [];
+              const code = (
+                memberSkus[0] ||
+                (companies[0]?.distributor_sku as string) ||
+                ""
+              )
+                .trim()
+                .toUpperCase();
+              const name =
+                (item.group_name as string) ||
+                memberNames[0] ||
+                (companies[0]?.distributor_name as string) ||
+                "";
+              const repSku = (item.representative_sku as string) || "";
+              return {
+                code,
+                name,
+                supplier: ((item.supplier as string) || "Vinamilk").trim(),
+                unit: ((item.unit as string) || "").trim(),
+                unitPrice: Number(item.unit_price) || 0,
+                orderCount: Number(item.order_count) || 0,
+                mappedSku: repSku && repSku !== "Chưa gán SKU CQT" ? repSku : "",
+                companyName: (companies[0]?.company_name as string) || "",
+              };
+            })
+            .filter((x: NppProductOption) => Boolean(x.code));
+          setNppProductOptions(nppList);
+        }
+      }
 
       setCategories(loadedCategories);
       setUnits(loadedUnits);
@@ -283,7 +358,7 @@ export default function ProductsPage() {
     setSyncing(true);
     setBannerMsg({
       type: "info",
-      text: "Đang quét và đồng bộ mã sản phẩm (SKU), tên sản phẩm, ĐVT, đơn giá từ Đơn hàng DMS & Hóa đơn mua vào CQT...",
+      text: "Đang đồng bộ danh mục SKU từ Hóa đơn mua vào CQT và cập nhật Mã NPP nội bộ từ Đơn hàng DMS...",
     });
     try {
       const response = await apiFetch(`${API_URL}/products/sync-from-system`, {
@@ -292,6 +367,7 @@ export default function ProductsPage() {
       const result = (await response.json()) as {
         added?: number;
         updated?: number;
+        dms_mapped?: number;
         total_products?: number;
         from_orders?: number;
         from_purchase_invoices?: number;
@@ -303,7 +379,7 @@ export default function ProductsPage() {
       await loadCatalog(false);
       setBannerMsg({
         type: "success",
-        text: `Đồng bộ hoàn tất: Tổng ${result.total_products ?? 0} SKU trong hệ thống (Quét ${result.from_orders ?? 0} mã từ Đơn hàng DMS, ${result.from_purchase_invoices ?? 0} mã từ Hóa đơn CQT · Thêm mới ${result.added ?? 0} SKU, cập nhật ${result.updated ?? 0} SKU).`,
+        text: `Đồng bộ hoàn tất: ${result.added ?? 0} SKU mới từ Hóa đơn CQT, ${result.dms_mapped ?? 0} Mã NPP cập nhật từ DMS. Tổng: ${result.total_products ?? 0} SKU.`,
       });
     } catch (err) {
       setBannerMsg({
@@ -536,6 +612,8 @@ export default function ProductsPage() {
 
   function openCreateModal() {
     setModalError("");
+    setCreateNppSearchQuery("");
+    setShowCreateNppDropdown(false);
     setForm({
       sku: "",
       npp_code: "",
@@ -555,6 +633,8 @@ export default function ProductsPage() {
   function openEditModal(product: ProductRow) {
     setModalError("");
     setEditingProduct(product);
+    setEditNppSearchQuery("");
+    setShowEditNppDropdown(false);
     setEditForm({
       sku: product.code,
       npp_code: product.nppCode || "",
@@ -582,6 +662,100 @@ export default function ProductsPage() {
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "vi"));
   }, [products]);
+
+  // Đếm số lượng mã NPP đã ghép / chưa ghép
+  const nppUnmappedCount = useMemo(
+    () => nppProductOptions.filter((x) => !x.mappedSku).length,
+    [nppProductOptions]
+  );
+  const nppMappedCount = useMemo(
+    () => nppProductOptions.filter((x) => Boolean(x.mappedSku)).length,
+    [nppProductOptions]
+  );
+
+  // Tự động đóng dropdown khi click ra ngoài hoặc bấm Escape
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (editNppContainerRef.current && !editNppContainerRef.current.contains(e.target as Node)) {
+        setShowEditNppDropdown(false);
+      }
+      if (createNppContainerRef.current && !createNppContainerRef.current.contains(e.target as Node)) {
+        setShowCreateNppDropdown(false);
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setShowEditNppDropdown(false);
+        setShowCreateNppDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  // Lọc danh sách mã NPP nội bộ khi tìm kiếm trong Modal Chỉnh sửa SKU
+  const filteredEditNppOptions = useMemo(() => {
+    let list = nppProductOptions;
+    if (editNppFilterTab === "UNMAPPED") {
+      list = list.filter(
+        (item) =>
+          !item.mappedSku ||
+          (editingProduct && item.mappedSku.toUpperCase() === editingProduct.code.toUpperCase())
+      );
+    } else if (editNppFilterTab === "MAPPED") {
+      list = list.filter((item) => Boolean(item.mappedSku));
+    }
+    const q = editNppSearchQuery.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (item) =>
+        item.code.toLowerCase().includes(q) ||
+        item.name.toLowerCase().includes(q) ||
+        item.supplier.toLowerCase().includes(q)
+    );
+  }, [nppProductOptions, editNppFilterTab, editNppSearchQuery, editingProduct]);
+
+  // Thông tin chi tiết mã NPP đã chọn trong editForm
+  const selectedEditNppItem = useMemo(() => {
+    if (!editForm.npp_code) return null;
+    return (
+      nppProductOptions.find(
+        (item) => item.code.toUpperCase() === editForm.npp_code.toUpperCase()
+      ) || null
+    );
+  }, [nppProductOptions, editForm.npp_code]);
+
+  // Lọc danh sách mã NPP nội bộ khi tìm kiếm trong Modal Thêm mới SKU
+  const filteredCreateNppOptions = useMemo(() => {
+    let list = nppProductOptions;
+    if (createNppFilterTab === "UNMAPPED") {
+      list = list.filter((item) => !item.mappedSku);
+    } else if (createNppFilterTab === "MAPPED") {
+      list = list.filter((item) => Boolean(item.mappedSku));
+    }
+    const q = createNppSearchQuery.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (item) =>
+        item.code.toLowerCase().includes(q) ||
+        item.name.toLowerCase().includes(q) ||
+        item.supplier.toLowerCase().includes(q)
+    );
+  }, [nppProductOptions, createNppFilterTab, createNppSearchQuery]);
+
+  // Thông tin chi tiết mã NPP đã chọn trong form thêm mới
+  const selectedCreateNppItem = useMemo(() => {
+    if (!form.npp_code) return null;
+    return (
+      nppProductOptions.find(
+        (item) => item.code.toUpperCase() === form.npp_code.toUpperCase()
+      ) || null
+    );
+  }, [nppProductOptions, form.npp_code]);
 
   const distributorOptions = useMemo(() => {
     const options = new Map<string, { name: string; count: number }>();
@@ -634,22 +808,18 @@ export default function ProductsPage() {
   const filteredProducts = useMemo(() => {
     const q = normalizeSearchText(searchQuery.trim());
     const filtered = products.filter((p) => {
-      if (sourceFilter === "SYNCED_ALL" && p.sync_source === "MANUAL") return false;
-      if (sourceFilter === "ORDER_SYNC" && p.sync_source !== "ORDER_SYNC" && p.sync_source !== "DMS_AND_CQT") {
-        return false;
+      // Phân quyền NPP: Từng NPP chỉ nhìn thấy danh sách SKU của NPP mình
+      if (!isSuperAdmin && authSession.distributorCode) {
+        if (!p.distributors.some((dist) => dist.code.toUpperCase() === authSession.distributorCode.toUpperCase())) {
+          return false;
+        }
+      } else if (distributorFilter !== "ALL") {
+        // Admin lọc theo từng NPP cụ thể
+        if (!p.distributors.some((dist) => dist.code.toUpperCase() === distributorFilter.toUpperCase())) {
+          return false;
+        }
       }
-      if (
-        sourceFilter === "PURCHASE_INVOICE" &&
-        p.sync_source !== "PURCHASE_INVOICE" &&
-        p.sync_source !== "DMS_AND_CQT"
-      ) {
-        return false;
-      }
-      if (sourceFilter === "MANUAL" && p.sync_source !== "MANUAL") return false;
 
-      if (distributorFilter !== "ALL" && !p.distributors.some((distributor) => distributor.code === distributorFilter)) {
-        return false;
-      }
       if (categoryFilter !== "ALL" && String(p.category_id) !== categoryFilter) return false;
       if (supplierFilter !== "ALL" && p.supplier !== supplierFilter) return false;
       if (unitFilter !== "ALL" && p.unit !== unitFilter) return false;
@@ -679,12 +849,6 @@ export default function ProductsPage() {
       else if (sortField === "supplier") cmp = a.supplier.localeCompare(b.supplier, "vi");
       else if (sortField === "price") cmp = a.price - b.price;
       else if (sortField === "cost_price") cmp = a.cost_price - b.cost_price;
-      else if (sortField === "activity") {
-        cmp =
-          a.order_count +
-          a.purchase_invoice_count -
-          (b.order_count + b.purchase_invoice_count);
-      }
       return sortOrder === "asc" ? cmp : -cmp;
     });
 
@@ -692,7 +856,8 @@ export default function ProductsPage() {
   }, [
     products,
     searchQuery,
-    sourceFilter,
+    isSuperAdmin,
+    authSession.distributorCode,
     distributorFilter,
     categoryFilter,
     supplierFilter,
@@ -705,7 +870,7 @@ export default function ProductsPage() {
   // Reset trang khi đổi bộ lọc
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, sourceFilter, distributorFilter, categoryFilter, supplierFilter, unitFilter, statusFilter, pageSize]);
+  }, [searchQuery, distributorFilter, categoryFilter, supplierFilter, unitFilter, statusFilter, pageSize]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
@@ -773,8 +938,7 @@ export default function ProductsPage() {
 
   function resetFilters() {
     setSearchQuery("");
-    setSourceFilter("ALL");
-    setDistributorFilter("ALL");
+    setDistributorFilter(isSuperAdmin ? "ALL" : (authSession.distributorCode || "ALL"));
     setCategoryFilter("ALL");
     setSupplierFilter("ALL");
     setUnitFilter("ALL");
@@ -784,32 +948,30 @@ export default function ProductsPage() {
   function exportProducts() {
     if (filteredProducts.length === 0) return;
     downloadExcel(
-      filteredProducts.map((product, index) => ({
-        STT: index + 1,
-        "Mã SKU": product.code,
-        "Mã NPP nội bộ": product.nppCode || product.code,
-        "Nhà phân phối": product.distributors.map((distributor) => `${distributor.code} - ${distributor.name}`).join(" / "),
-        "Tên sản phẩm": product.name,
-        "Mã danh mục": product.categoryCode,
-        "Danh mục ngành hàng": product.category,
-        ĐVT: product.unit,
-        "Quy cách (Hộp/Thùng)": product.boxes_per_carton,
-        "Nhà cung cấp": product.supplier,
-        "Nguồn đồng bộ":
-          product.sync_source === "DMS_AND_CQT"
-            ? "Đơn hàng DMS & HĐ CQT"
-            : product.sync_source === "ORDER_SYNC"
-            ? "Đơn hàng DMS"
-            : product.sync_source === "PURCHASE_INVOICE"
-            ? "Hóa đơn mua vào CQT"
-            : "Tạo thủ công",
-        "Số đơn DMS": product.order_count,
-        "Tổng SL bán DMS": product.total_ordered_qty,
-        "Số HĐ mua vào CQT": product.purchase_invoice_count,
-        "Giá bán (VNĐ)": product.price,
-        "Giá vốn / Giá nhập (VNĐ)": product.cost_price,
-        "Trạng thái": product.status === "active" ? "Đang kinh doanh" : "Ngừng kinh doanh",
-      })),
+      filteredProducts.map((product, index) => {
+        const activeCode = !isSuperAdmin
+          ? authSession.distributorCode
+          : (distributorFilter !== "ALL" ? distributorFilter : "");
+        const matchedDist = activeCode
+          ? product.distributors.find((d) => d.code.toUpperCase() === activeCode.toUpperCase())
+          : product.distributors[0];
+        const distName = matchedDist?.name || product.distributors[0]?.name || "Chưa xác định";
+
+        return {
+          STT: index + 1,
+          "Nhà phân phối": distName,
+          "Mã SKU": product.code,
+          "Mã NPP nội bộ": product.nppCode || product.code,
+          "Tên sản phẩm": product.name,
+          "Mã danh mục": product.categoryCode,
+          "Danh mục ngành hàng": product.category,
+          ĐVT: product.unit,
+          "Quy cách (Hộp/Thùng)": product.boxes_per_carton,
+          "Nhà cung cấp": product.supplier || "—",
+          "Giá bán / ĐVT (VNĐ)": product.price,
+          "Trạng thái": product.status === "active" ? "Đang kinh doanh" : "Ngừng kinh doanh",
+        };
+      }),
       `Danh_sach_SKU_${new Date().toISOString().slice(0, 10)}`,
       "Danh sách SKU"
     );
@@ -936,77 +1098,27 @@ export default function ProductsPage() {
         {/* 2. THANH CHỈ SỐ NGHIỆP VỤ (COMPACT KPI STRIP) */}
         <section className="border-b border-slate-200 bg-slate-50/90 px-3 py-2">
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
-            <button
-              type="button"
-              onClick={() => setSourceFilter("ALL")}
-              className={cn(
-                "flex items-center justify-between rounded border px-2.5 py-1.5 text-left transition-colors",
-                sourceFilter === "ALL"
-                  ? "border-sky-600 bg-sky-50/80"
-                  : "border-slate-300 bg-white hover:border-sky-400"
-              )}
-            >
+            <div className="flex items-center justify-between rounded border border-slate-300 bg-white px-2.5 py-1.5">
               <div>
                 <p className="text-[10px] font-semibold uppercase text-slate-500">Tổng danh mục SKU</p>
                 <p className="text-sm font-bold text-slate-900">
                   {formatNumber(stats.total)}{" "}
-                  <span className="text-[10px] font-normal text-emerald-700">
-                    ({stats.activeCount} đang bán)
-                  </span>
+                  <span className="text-[10px] font-normal text-slate-500">sản phẩm</span>
                 </p>
               </div>
               <Package size={16} className="text-sky-700" />
-            </button>
+            </div>
 
-            <button
-              type="button"
-              onClick={() =>
-                setSourceFilter((prev) => (prev === "ORDER_SYNC" ? "ALL" : "ORDER_SYNC"))
-              }
-              className={cn(
-                "flex items-center justify-between rounded border px-2.5 py-1.5 text-left transition-colors",
-                sourceFilter === "ORDER_SYNC"
-                  ? "border-sky-600 bg-sky-50/80"
-                  : "border-slate-300 bg-white hover:border-sky-400"
-              )}
-            >
+            <div className="flex items-center justify-between rounded border border-slate-300 bg-white px-2.5 py-1.5">
               <div>
-                <p className="text-[10px] font-semibold uppercase text-slate-500">
-                  Từ Đơn hàng DMS
-                </p>
-                <p className="text-sm font-bold text-sky-800">
-                  {formatNumber(stats.fromOrdersCount)}{" "}
-                  <span className="text-[10px] font-normal text-slate-500">mã SP</span>
-                </p>
-              </div>
-              <Layers size={16} className="text-sky-600" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                setSourceFilter((prev) =>
-                  prev === "PURCHASE_INVOICE" ? "ALL" : "PURCHASE_INVOICE"
-                )
-              }
-              className={cn(
-                "flex items-center justify-between rounded border px-2.5 py-1.5 text-left transition-colors",
-                sourceFilter === "PURCHASE_INVOICE"
-                  ? "border-sky-600 bg-sky-50/80"
-                  : "border-slate-300 bg-white hover:border-sky-400"
-              )}
-            >
-              <div>
-                <p className="text-[10px] font-semibold uppercase text-slate-500">
-                  Từ Hóa đơn mua CQT
-                </p>
+                <p className="text-[10px] font-semibold uppercase text-slate-500">Đang kinh doanh</p>
                 <p className="text-sm font-bold text-emerald-700">
-                  {formatNumber(stats.fromPurchaseCount)}{" "}
-                  <span className="text-[10px] font-normal text-slate-500">mã SP</span>
+                  {formatNumber(stats.activeCount)}{" "}
+                  <span className="text-[10px] font-normal text-slate-500">SKU</span>
                 </p>
               </div>
-              <FileText size={16} className="text-emerald-600" />
-            </button>
+              <CheckCircle2 size={16} className="text-emerald-600" />
+            </div>
 
             <button
               type="button"
@@ -1022,16 +1134,38 @@ export default function ProductsPage() {
             >
               <div>
                 <p className="text-[10px] font-semibold uppercase text-slate-500">
-                  SKU đã có đơn giá
+                  Có giá bán / ĐVT
                 </p>
                 <p className="text-sm font-bold text-slate-800">
                   {formatNumber(stats.pricedCount)}{" "}
-                  <span className="text-[10px] font-normal text-amber-700">
-                    ({stats.zeroPriceCount} KM/0đ)
-                  </span>
+                  <span className="text-[10px] font-normal text-slate-500">SKU</span>
                 </p>
               </div>
-              <CheckCircle2 size={16} className="text-emerald-600" />
+              <Check size={16} className="text-sky-600" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                setStatusFilter((prev) => (prev === "ZERO_PRICE" ? "ALL" : "ZERO_PRICE"))
+              }
+              className={cn(
+                "flex items-center justify-between rounded border px-2.5 py-1.5 text-left transition-colors",
+                statusFilter === "ZERO_PRICE"
+                  ? "border-sky-600 bg-sky-50/80"
+                  : "border-slate-300 bg-white hover:border-sky-400"
+              )}
+            >
+              <div>
+                <p className="text-[10px] font-semibold uppercase text-slate-500">
+                  Hàng khuyến mại (KM)
+                </p>
+                <p className="text-sm font-bold text-amber-700">
+                  {formatNumber(stats.zeroPriceCount)}{" "}
+                  <span className="text-[10px] font-normal text-slate-500">SKU</span>
+                </p>
+              </div>
+              <AlertTriangle size={16} className="text-amber-600" />
             </button>
 
             <div className="flex items-center justify-between rounded border border-slate-300 bg-white px-2.5 py-1.5">
@@ -1068,7 +1202,7 @@ export default function ProductsPage() {
 
         {/* 3. BỘ LỌC TRA CỨU ĐA CHIỀU */}
         <section className="border-b border-slate-200 px-3 py-2.5">
-          <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-7">
+          <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-6">
             <div className="sm:col-span-2 xl:col-span-2">
               <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                 Tìm kiếm Mã sản phẩm (SKU) / Tên hàng hóa / Mã NPP
@@ -1100,43 +1234,29 @@ export default function ProductsPage() {
 
             <div>
               <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                Nguồn đồng bộ hệ thống
-              </label>
-              <select
-                value={sourceFilter}
-                onChange={(e) => setSourceFilter(e.target.value)}
-                className={inputCls}
-              >
-                <option value="ALL">Tất cả nguồn ({stats.total})</option>
-                <option value="SYNCED_ALL">
-                  Đã đồng bộ từ hệ thống ({stats.fromOrdersCount + stats.fromPurchaseCount})
-                </option>
-                <option value="ORDER_SYNC">
-                  Đồng bộ từ Đơn hàng DMS ({stats.fromOrdersCount})
-                </option>
-                <option value="PURCHASE_INVOICE">
-                  Đồng bộ từ Hóa đơn mua vào CQT ({stats.fromPurchaseCount})
-                </option>
-                <option value="MANUAL">Tạo thủ công / Upload Excel</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                 Nhà phân phối (NPP)
               </label>
-              <select
-                value={distributorFilter}
-                onChange={(e) => setDistributorFilter(e.target.value)}
-                className={inputCls}
-              >
-                <option value="ALL">Tất cả NPP ({distributorOptions.length})</option>
-                {distributorOptions.map((distributor) => (
-                  <option key={distributor.code} value={distributor.code}>
-                    {distributor.name} ({distributor.count} SKU)
-                  </option>
-                ))}
-              </select>
+              {isSuperAdmin ? (
+                <select
+                  value={distributorFilter}
+                  onChange={(e) => setDistributorFilter(e.target.value)}
+                  className={inputCls}
+                >
+                  <option value="ALL">Tất cả NPP ({distributorOptions.length})</option>
+                  {distributorOptions.map((distributor) => (
+                    <option key={distributor.code} value={distributor.code}>
+                      {distributor.name} ({distributor.count} SKU)
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div
+                  className="w-full min-w-0 rounded border border-slate-300 bg-slate-100 px-2 py-1 text-xs font-semibold text-sky-800 truncate"
+                  title={authSession.distributorName || authSession.distributorCode}
+                >
+                  {authSession.distributorName || authSession.distributorCode} (Cố định)
+                </div>
+              )}
             </div>
 
             <div>
@@ -1261,8 +1381,7 @@ export default function ProductsPage() {
               )}
 
               {(searchQuery ||
-                sourceFilter !== "ALL" ||
-                distributorFilter !== "ALL" ||
+                (isSuperAdmin ? distributorFilter !== "ALL" : false) ||
                 categoryFilter !== "ALL" ||
                 supplierFilter !== "ALL" ||
                 unitFilter !== "ALL" ||
@@ -1303,6 +1422,7 @@ export default function ProductsPage() {
                   />
                 </th>
                 <th className="w-10 px-2 py-2 text-center">STT</th>
+                <th className="px-2.5 py-2">Nhà phân phối</th>
                 <th className="px-2.5 py-2">
                   <button
                     type="button"
@@ -1322,7 +1442,6 @@ export default function ProductsPage() {
                     Mã NPP {renderSortIcon("nppCode")}
                   </button>
                 </th>
-                <th className="px-2.5 py-2">Nhà phân phối</th>
                 <th className="px-2.5 py-2">
                   <button
                     type="button"
@@ -1357,7 +1476,7 @@ export default function ProductsPage() {
                     className="inline-flex items-center gap-1 font-semibold uppercase text-slate-700 hover:text-sky-700"
                     title="Số đơn vị (Hộp/Lon/Chai/Gói) trong 1 Thùng"
                   >
-                    Quy cách {renderSortIcon("boxes_per_carton")}
+                    Quy cách (ĐVT/Thùng) {renderSortIcon("boxes_per_carton")}
                   </button>
                 </th>
                 <th className="px-2.5 py-2">
@@ -1369,22 +1488,13 @@ export default function ProductsPage() {
                     Nhà cung cấp {renderSortIcon("supplier")}
                   </button>
                 </th>
-                <th className="px-2.5 py-2">
-                  <button
-                    type="button"
-                    onClick={() => handleSort("activity")}
-                    className="inline-flex items-center gap-1 font-semibold uppercase text-slate-700 hover:text-sky-700"
-                  >
-                    Nguồn đồng bộ & Phát sinh {renderSortIcon("activity")}
-                  </button>
-                </th>
                 <th className="px-2.5 py-2 text-right">
                   <button
                     type="button"
                     onClick={() => handleSort("price")}
                     className="inline-flex items-center justify-end gap-1 font-semibold uppercase text-slate-700 hover:text-sky-700"
                   >
-                    Giá bán {renderSortIcon("price")}
+                    Giá bán / ĐVT {renderSortIcon("price")}
                   </button>
                 </th>
                 <th className="px-2 py-2 text-center">Trạng thái</th>
@@ -1395,7 +1505,7 @@ export default function ProductsPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={14} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={13} className="px-4 py-10 text-center text-xs text-slate-500">
                     <span className="inline-flex items-center gap-2">
                       <Loader2 size={15} className="animate-spin text-sky-600" />
                       Đang đồng bộ và tải danh sách mã sản phẩm (SKU) từ hệ thống...
@@ -1404,7 +1514,7 @@ export default function ProductsPage() {
                 </tr>
               ) : pagedProducts.length === 0 ? (
                 <tr>
-                  <td colSpan={14} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={13} className="px-4 py-10 text-center text-xs text-slate-500">
                     Không tìm thấy mã sản phẩm (SKU) nào khớp với điều kiện lọc hiện tại.
                   </td>
                 </tr>
@@ -1437,6 +1547,29 @@ export default function ProductsPage() {
                         {stt}
                       </td>
 
+                      {/* CỘT NHÀ PHÂN PHỐI HIỂN THỊ ĐẦU TIÊN (MỖI DÒNG CHỈ 1 NPP) */}
+                      <td className="px-2.5 py-1.5 whitespace-nowrap">
+                        {(() => {
+                          const activeCode = !isSuperAdmin
+                            ? authSession.distributorCode
+                            : (distributorFilter !== "ALL" ? distributorFilter : "");
+                          const matchedDist = activeCode
+                            ? row.distributors.find((d) => d.code.toUpperCase() === activeCode.toUpperCase())
+                            : row.distributors[0];
+                          const distName = matchedDist?.name || row.distributors[0]?.name;
+                          return distName ? (
+                            <span
+                              title={distName}
+                              className="max-w-44 truncate inline-block rounded border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-800"
+                            >
+                              {distName}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] italic text-slate-400">Chưa xác định</span>
+                          );
+                        })()}
+                      </td>
+
                       <td className="px-2.5 py-1.5 whitespace-nowrap">
                         <span className="font-mono font-bold text-sky-800">
                           {row.code}
@@ -1453,6 +1586,7 @@ export default function ProductsPage() {
                             <input
                               type="text"
                               autoFocus
+                              list="sku-npp-options-datalist"
                               value={inlineNppCode}
                               onChange={(e) => setInlineNppCode(e.target.value.toUpperCase())}
                               onKeyDown={(e) => {
@@ -1518,24 +1652,6 @@ export default function ProductsPage() {
                       </td>
 
                       <td className="px-2.5 py-1.5">
-                        {row.distributors.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {row.distributors.map((distributor) => (
-                              <span
-                                key={distributor.code}
-                                title={`${distributor.code} · ${distributor.name}`}
-                                className="max-w-56 truncate rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-800"
-                              >
-                                {distributor.name}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-[10px] italic text-slate-400">Chưa xác định</span>
-                        )}
-                      </td>
-
-                      <td className="px-2.5 py-1.5">
                         <div className="font-semibold text-slate-800">{row.name}</div>
                         {row.representative_sku && row.representative_sku !== row.code && (
                           <div className="text-[10px] text-slate-500">
@@ -1563,7 +1679,7 @@ export default function ProductsPage() {
                       <td className="px-2 py-1.5 text-center font-semibold text-slate-700">
                         {row.boxes_per_carton > 1 ? (
                           <span className="rounded bg-amber-100/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
-                            {row.boxes_per_carton} {row.unit}/Thùng
+                            {row.boxes_per_carton}
                           </span>
                         ) : (
                           <span className="text-slate-400">1</span>
@@ -1585,40 +1701,26 @@ export default function ProductsPage() {
                         </span>
                       </td>
 
-                      <td className="px-2.5 py-1.5 whitespace-nowrap">
-                        {row.sync_source === "DMS_AND_CQT" ? (
-                          <div className="flex flex-col gap-0.5">
-                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-sky-800">
-                              • DMS: {row.order_count} đơn ({formatNumber(row.total_ordered_qty)} {row.unit})
-                            </span>
-                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-800">
-                              • CQT: {row.purchase_invoice_count} HĐ ({formatNumber(row.total_purchased_qty)} {row.unit})
-                            </span>
-                          </div>
-                        ) : row.sync_source === "ORDER_SYNC" ? (
-                          <span className="inline-flex items-center gap-1 rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 text-[10px] font-medium text-sky-800">
-                            Đơn DMS: <strong>{row.order_count}</strong> đơn · SL:{" "}
-                            <strong>{formatNumber(row.total_ordered_qty)}</strong>
-                          </span>
-                        ) : row.sync_source === "PURCHASE_INVOICE" ? (
-                          <span className="inline-flex items-center gap-1 rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">
-                            HĐ mua CQT: <strong>{row.purchase_invoice_count}</strong> HĐ · SL:{" "}
-                            <strong>{formatNumber(row.total_purchased_qty)}</strong>
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-slate-400">Thủ công / Excel</span>
-                        )}
-                      </td>
-
+                      {/* GIÁ BÁN THEO ĐVT */}
                       <td className="px-2.5 py-1.5 text-right font-medium text-slate-700 whitespace-nowrap">
                         {row.price > 0 ? (
-                          <span className="font-semibold text-slate-900">
-                            {formatUnitPrice(row.price, 4)}
-                          </span>
+                          <div className="flex items-center justify-end gap-1">
+                            <span className="font-semibold text-slate-900">
+                              {formatUnitPrice(row.price, 4)}
+                            </span>
+                            <span className="text-[10px] font-medium text-slate-500">
+                              / {row.unit}
+                            </span>
+                          </div>
                         ) : (
-                          <span className="text-[10px] italic text-amber-700">
-                            {formatUnitPrice(0, 4)} (Hàng KM)
-                          </span>
+                          <div className="flex items-center justify-end gap-1">
+                            <span className="text-[10px] italic text-amber-700">
+                              {formatUnitPrice(0, 4)}
+                            </span>
+                            <span className="text-[10px] font-medium text-slate-500">
+                              / {row.unit} (KM)
+                            </span>
+                          </div>
                         )}
                       </td>
 
@@ -1765,10 +1867,10 @@ export default function ProductsPage() {
           onClick={() => setCreateOpen(false)}
         >
           <div
-            className="w-full max-w-2xl border border-slate-400 bg-white shadow-lg"
+            className="w-full max-w-6xl border border-slate-400 bg-white shadow-2xl max-h-[92vh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
-            <header className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
+            <header className="bg-[#14263d] px-4 py-2.5 text-white flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <Plus size={17} className="text-red-500" />
                 <h2 className="text-xs font-bold uppercase tracking-wide text-white">
@@ -1784,7 +1886,7 @@ export default function ProductsPage() {
               </button>
             </header>
 
-            <form onSubmit={createProduct}>
+            <form onSubmit={createProduct} className="flex flex-col flex-1 overflow-y-auto">
               {modalError && (
                 <div className="mx-3 mt-2 flex items-center gap-2 border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
                   <AlertTriangle size={14} />
@@ -1792,46 +1894,324 @@ export default function ProductsPage() {
                 </div>
               )}
 
-              <section className="border-b border-slate-200 px-3 py-2.5">
-                <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-4">
-                  <label className="text-[10px] font-semibold text-slate-600 block">
-                    Mã sản phẩm (SKU) <span className="text-red-600">*</span>
+              {/* KHỐI 1: ĐỊNH DANH SẢN PHẨM & LIÊN KẾT MÃ NPP NỘI BỘ */}
+              <section className="border-b border-slate-200 bg-slate-50/40 p-4">
+                <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5 mb-3">
+                  <Layers size={13} className="text-sky-600" />
+                  <span>1. Định danh sản phẩm & Ghép nối Mã SP NPP</span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5">
+                  {/* Mã SKU */}
+                  <div className="md:col-span-4">
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-1">
+                      Mã sản phẩm (SKU) <span className="text-red-600">*</span>
+                    </label>
                     <input
                       required
                       value={form.sku}
                       onChange={(e) => setForm({ ...form, sku: e.target.value.toUpperCase() })}
                       placeholder="VD: 01TD03"
-                      className={cn(inputCls, "mt-0.5 font-mono font-bold uppercase")}
+                      className={cn(inputCls, "font-mono font-bold uppercase text-sky-900 bg-white")}
                     />
-                  </label>
+                    <span className="text-[10px] text-slate-400 mt-0.5 block">
+                      Mã SKU chính dùng quản lý kho & hóa đơn CQT
+                    </span>
+                  </div>
 
-                  <label className="text-[10px] font-semibold text-slate-600 block">
-                    Mã NPP (Nội bộ)
-                    <input
-                      value={form.npp_code}
-                      onChange={(e) => setForm({ ...form, npp_code: e.target.value.toUpperCase() })}
-                      placeholder="VD: NPP-01TD03"
-                      className={cn(inputCls, "mt-0.5 font-mono font-bold uppercase")}
-                    />
-                  </label>
+                  {/* Combobox Mã SP NPP chuyên nghiệp */}
+                  <div className="md:col-span-8" ref={createNppContainerRef}>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] font-semibold text-slate-600 flex items-center gap-1.5">
+                        <Link2 size={12} className="text-sky-600" />
+                        <span>Mã SP NPP (Nội bộ / Web NCC)</span>
+                      </label>
+                      <span className="text-[10px] text-slate-500">
+                        {nppProductOptions.length} mã NPP trong hệ thống
+                      </span>
+                    </div>
 
-                  <label className="text-[10px] font-semibold text-slate-600 block sm:col-span-2">
-                    Tên sản phẩm đầy đủ <span className="text-red-600">*</span>
+                    {/* TRƯỜNG HỢP 1: ĐÃ CHỌN MÃ NPP */}
+                    {form.npp_code ? (
+                      <div className="flex items-center justify-between gap-3 rounded border border-sky-300 bg-sky-50/80 p-2 shadow-sm">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="inline-flex items-center gap-1 rounded bg-sky-700 px-2 py-0.5 font-mono text-xs font-bold text-white shadow-sm">
+                              <Link2 size={11} />
+                              {form.npp_code}
+                            </span>
+                            <span className="font-semibold text-xs text-slate-800 truncate">
+                              {selectedCreateNppItem?.name || "Sản phẩm NPP nội bộ"}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-slate-600">
+                            <span>
+                              Nhà cung cấp: <strong className="text-slate-800">{selectedCreateNppItem?.supplier || "—"}</strong>
+                            </span>
+                            <span>
+                              ĐVT: <strong className="text-slate-800">{selectedCreateNppItem?.unit || "—"}</strong>
+                            </span>
+                            {selectedCreateNppItem?.unitPrice ? (
+                              <span>
+                                Đơn giá NCC:{" "}
+                                <strong className="text-emerald-700">
+                                  {formatNumber(selectedCreateNppItem.unitPrice)} đ
+                                </strong>
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCreateNppSearchQuery("");
+                              setShowCreateNppDropdown(true);
+                            }}
+                            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white hover:bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700 shadow-sm transition-colors"
+                          >
+                            <Pencil size={11} /> Đổi mã
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setForm({ ...form, npp_code: "" })}
+                            className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors"
+                            title="Bỏ liên kết mã NPP"
+                          >
+                            <X size={11} /> Bỏ gắn
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* TRƯỜNG HỢP 2: CHƯA CHỌN MÃ NPP */
+                      <div className="relative">
+                        <Search
+                          size={13}
+                          className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                        />
+                        <input
+                          type="text"
+                          value={createNppSearchQuery}
+                          onChange={(e) => {
+                            setCreateNppSearchQuery(e.target.value);
+                            setShowCreateNppDropdown(true);
+                          }}
+                          onFocus={() => setShowCreateNppDropdown(true)}
+                          placeholder="Tìm kiếm theo mã NPP nội bộ hoặc tên sản phẩm để gắn vào SKU..."
+                          className={cn(inputCls, "pl-8 pr-24 text-xs font-medium")}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowCreateNppDropdown(!showCreateNppDropdown)}
+                          className="absolute right-1 top-1/2 -translate-y-1/2 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-sky-700 hover:text-sky-900 rounded bg-sky-50 hover:bg-sky-100 border border-sky-200"
+                        >
+                          <Search size={11} /> Tìm chọn
+                          <ChevronDown size={11} />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* POPUP DROPDOWN TÌM KIẾM MÃ NPP */}
+                    {showCreateNppDropdown && (
+                      <div className="relative">
+                        <div className="absolute left-0 right-0 top-1.5 z-[70] rounded-md border border-slate-300 bg-white shadow-2xl overflow-hidden flex flex-col">
+                          <div className="p-2 border-b border-slate-200 bg-slate-50 space-y-1.5">
+                            <div className="relative">
+                              <Search
+                                size={13}
+                                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                              />
+                              <input
+                                type="text"
+                                autoFocus
+                                value={createNppSearchQuery}
+                                onChange={(e) => setCreateNppSearchQuery(e.target.value)}
+                                placeholder="Gõ mã hoặc tên sản phẩm NPP để lọc nhanh..."
+                                className="w-full rounded border border-slate-300 bg-white pl-8 pr-7 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+                              />
+                              {createNppSearchQuery && (
+                                <button
+                                  type="button"
+                                  onClick={() => setCreateNppSearchQuery("")}
+                                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                >
+                                  <X size={12} />
+                                </button>
+                              )}
+                            </div>
+                            <div className="flex items-center justify-between text-[11px]">
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setCreateNppFilterTab("ALL")}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded text-[10px] font-semibold transition-colors",
+                                    createNppFilterTab === "ALL"
+                                      ? "bg-sky-600 text-white"
+                                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                                  )}
+                                >
+                                  Tất cả ({nppProductOptions.length})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setCreateNppFilterTab("UNMAPPED")}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded text-[10px] font-semibold transition-colors",
+                                    createNppFilterTab === "UNMAPPED"
+                                      ? "bg-sky-600 text-white"
+                                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                                  )}
+                                >
+                                  Chưa ghép SKU ({nppUnmappedCount})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setCreateNppFilterTab("MAPPED")}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded text-[10px] font-semibold transition-colors",
+                                    createNppFilterTab === "MAPPED"
+                                      ? "bg-sky-600 text-white"
+                                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                                  )}
+                                >
+                                  Đã ghép ({nppMappedCount})
+                                </button>
+                              </div>
+                              <span className="text-slate-500 text-[10px]">
+                                Kết quả: <strong>{filteredCreateNppOptions.length}</strong> mã
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="overflow-y-auto max-h-64 divide-y divide-slate-100">
+                            {filteredCreateNppOptions.length === 0 ? (
+                              <div className="p-4 text-center text-xs text-slate-400">
+                                Không tìm thấy mã sản phẩm NPP nào phù hợp.
+                              </div>
+                            ) : (
+                              filteredCreateNppOptions.map((npp) => {
+                                const isSelected =
+                                  form.npp_code.toUpperCase() === npp.code.toUpperCase();
+
+                                return (
+                                  <div
+                                    key={npp.code}
+                                    onClick={() => {
+                                      setForm((prev) => ({
+                                        ...prev,
+                                        npp_code: npp.code,
+                                        name: prev.name ? prev.name : npp.name,
+                                        supplier: prev.supplier || npp.supplier,
+                                      }));
+                                      setShowCreateNppDropdown(false);
+                                      setCreateNppSearchQuery("");
+                                    }}
+                                    className={cn(
+                                      "p-2.5 hover:bg-sky-50/80 cursor-pointer transition-colors flex items-center justify-between gap-3 text-left",
+                                      isSelected && "bg-sky-100/70 border-l-4 border-sky-600"
+                                    )}
+                                  >
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-mono text-xs font-bold text-sky-800 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">
+                                          {npp.code}
+                                        </span>
+                                        <span className="text-xs font-semibold text-slate-800 truncate">
+                                          {npp.name}
+                                        </span>
+                                        {npp.mappedSku ? (
+                                          <span className="rounded bg-amber-100 px-1.5 py-0.2 text-[9px] font-medium text-amber-800">
+                                            Đã ghép: {npp.mappedSku}
+                                          </span>
+                                        ) : (
+                                          <span className="rounded bg-slate-100 px-1.5 py-0.2 text-[9px] text-slate-500">
+                                            Chưa ghép
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="mt-1 flex items-center gap-3 text-[10px] text-slate-500">
+                                        <span>
+                                          NCC: <strong className="text-slate-700">{npp.supplier}</strong>
+                                        </span>
+                                        {npp.unit && (
+                                          <span>
+                                            ĐVT: <strong className="text-slate-700">{npp.unit}</strong>
+                                          </span>
+                                        )}
+                                        {npp.orderCount > 0 && (
+                                          <span>
+                                            Đơn đặt: <strong>{npp.orderCount}</strong>
+                                          </span>
+                                        )}
+                                        {npp.companyName && (
+                                          <span>NPP: {npp.companyName}</span>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    <div className="text-right shrink-0">
+                                      {npp.unitPrice > 0 && (
+                                        <div className="text-xs font-bold text-slate-800 font-mono">
+                                          {formatNumber(npp.unitPrice)} đ
+                                        </div>
+                                      )}
+                                      <span className="inline-block mt-0.5 rounded bg-sky-600 hover:bg-sky-700 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors">
+                                        Chọn ↵
+                                      </span>
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+
+                          <div className="p-1.5 border-t border-slate-200 bg-slate-50 text-[10px] text-slate-500 flex items-center justify-between px-3">
+                            <span>Nhấn vào dòng bất kỳ để chọn mã NPP</span>
+                            <button
+                              type="button"
+                              onClick={() => setShowCreateNppDropdown(false)}
+                              className="font-semibold text-sky-600 hover:underline"
+                            >
+                              Đóng [Esc]
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Tên sản phẩm */}
+                  <div className="col-span-12">
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-1">
+                      Tên sản phẩm đầy đủ (Tên hiển thị) <span className="text-red-600">*</span>
+                    </label>
                     <input
                       required
                       value={form.name}
                       onChange={(e) => setForm({ ...form, name: e.target.value })}
                       placeholder="VD: Sữa đặc có đường Ông Thọ đỏ 380g"
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "text-xs font-medium")}
                     />
-                  </label>
+                  </div>
+                </div>
+              </section>
 
-                  <label className="text-[10px] font-semibold text-slate-600 block sm:col-span-2">
+              {/* KHỐI 2: THÔNG TIN PHÂN LOẠI & NHÀ CUNG CẤP */}
+              <section className="border-b border-slate-200 p-4">
+                <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5 mb-3">
+                  <Building2 size={13} className="text-sky-600" />
+                  <span>2. Phân loại, Đơn vị tính & Nhà cung cấp</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                  <label className="text-[10px] font-semibold text-slate-600 block">
                     Danh mục ngành hàng
                     <select
                       value={form.category_id}
                       onChange={(e) => setForm({ ...form, category_id: e.target.value })}
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "mt-1")}
                     >
                       {categories.map((cat) => (
                         <option key={cat.id} value={cat.id}>
@@ -1846,7 +2226,7 @@ export default function ProductsPage() {
                     <select
                       value={form.unit_id}
                       onChange={(e) => setForm({ ...form, unit_id: e.target.value })}
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "mt-1")}
                     >
                       {units.map((u) => (
                         <option key={u.id} value={u.id}>
@@ -1863,7 +2243,7 @@ export default function ProductsPage() {
                       value={form.supplier}
                       onChange={(e) => setForm({ ...form, supplier: e.target.value })}
                       placeholder="VD: Vinamilk"
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "mt-1")}
                     />
                     <datalist id="sku-suppliers-datalist">
                       {supplierOptions.map((s) => (
@@ -1873,6 +2253,27 @@ export default function ProductsPage() {
                   </label>
 
                   <label className="text-[10px] font-semibold text-slate-600 block">
+                    Quy cách (Số hộp/thùng)
+                    <input
+                      type="number"
+                      min={1}
+                      value={form.boxes_per_carton}
+                      onChange={(e) => setForm({ ...form, boxes_per_carton: e.target.value })}
+                      className={cn(inputCls, "mt-1 text-center font-semibold")}
+                    />
+                  </label>
+                </div>
+              </section>
+
+              {/* KHỐI 3: GIÁ BÁN & CHÍNH SÁCH TỒN KHO */}
+              <section className="border-b border-slate-200 p-4">
+                <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5 mb-3">
+                  <Tag size={13} className="text-sky-600" />
+                  <span>3. Giá bán niêm yết & Chính sách tồn kho</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                  <label className="text-[10px] font-semibold text-slate-600 block">
                     Giá bán niêm yết (VNĐ)
                     <input
                       type="number"
@@ -1880,7 +2281,7 @@ export default function ProductsPage() {
                       step="any"
                       value={form.base_price}
                       onChange={(e) => setForm({ ...form, base_price: e.target.value })}
-                      className={cn(inputCls, "mt-0.5 text-right font-semibold")}
+                      className={cn(inputCls, "mt-1 text-right font-semibold")}
                     />
                   </label>
 
@@ -1892,18 +2293,18 @@ export default function ProductsPage() {
                       step="any"
                       value={form.cost_price}
                       onChange={(e) => setForm({ ...form, cost_price: e.target.value })}
-                      className={cn(inputCls, "mt-0.5 text-right font-semibold")}
+                      className={cn(inputCls, "mt-1 text-right font-semibold")}
                     />
                   </label>
 
                   <label className="text-[10px] font-semibold text-slate-600 block">
-                    Quy cách (Số hộp/thùng)
+                    Tồn kho tối thiểu (Tái đặt)
                     <input
                       type="number"
-                      min={1}
-                      value={form.boxes_per_carton}
-                      onChange={(e) => setForm({ ...form, boxes_per_carton: e.target.value })}
-                      className={cn(inputCls, "mt-0.5 text-center font-semibold")}
+                      min={0}
+                      value={form.reorder_level}
+                      onChange={(e) => setForm({ ...form, reorder_level: e.target.value })}
+                      className={cn(inputCls, "mt-1 text-center font-semibold")}
                     />
                   </label>
 
@@ -1912,7 +2313,7 @@ export default function ProductsPage() {
                     <select
                       value={form.status}
                       onChange={(e) => setForm({ ...form, status: e.target.value })}
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "mt-1")}
                     >
                       <option value="active">Đang kinh doanh</option>
                       <option value="inactive">Ngừng kinh doanh</option>
@@ -1921,7 +2322,7 @@ export default function ProductsPage() {
                 </div>
               </section>
 
-              <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
+              <footer className="border-t border-slate-300 bg-slate-100 px-4 py-2.5 flex items-center justify-between gap-3 shrink-0">
                 <span className="text-[10px] text-slate-500">
                   Mã SKU sẽ tự động chuẩn hóa in hoa và dùng chung cho Đơn hàng & Xuất hóa đơn.
                 </span>
@@ -1936,7 +2337,7 @@ export default function ProductsPage() {
                   <button
                     type="submit"
                     disabled={submitting}
-                    className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
+                    className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-4 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
                   >
                     {submitting ? (
                       <Loader2 size={13} className="animate-spin" />
@@ -1962,15 +2363,20 @@ export default function ProductsPage() {
           }}
         >
           <div
-            className="w-full max-w-2xl border border-slate-400 bg-white shadow-lg"
+            className="w-full max-w-6xl border border-slate-400 bg-white shadow-2xl max-h-[92vh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
-            <header className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
+            <header className="bg-[#14263d] px-4 py-2.5 text-white flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <Pencil size={17} className="text-red-500" />
                 <h2 className="text-xs font-bold uppercase tracking-wide text-white">
-                  Cập Nhật Thông Tin Sản Phẩm · {editingProduct.code}
+                  Cập Nhật Thông Tin Sản Phẩm · SKU: {editingProduct.code}
                 </h2>
+                {editingProduct.sync_source && (
+                  <span className="rounded bg-sky-500/20 text-sky-200 border border-sky-400/30 px-2 py-0.5 text-[10px] font-mono">
+                    Nguồn: {editingProduct.sync_source}
+                  </span>
+                )}
               </div>
               <button
                 type="button"
@@ -1984,58 +2390,353 @@ export default function ProductsPage() {
               </button>
             </header>
 
-            <form onSubmit={updateProduct}>
+            <form onSubmit={updateProduct} className="flex flex-col flex-1 overflow-y-auto">
               {modalError && (
-                <div className="mx-3 mt-2 flex items-center gap-2 border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                <div className="mx-4 mt-3 flex items-center gap-2 border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
                   <AlertTriangle size={14} />
                   <span>{modalError}</span>
                 </div>
               )}
 
-              <section className="border-b border-slate-200 px-3 py-2.5">
-                <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-4">
-                  <label className="text-[10px] font-semibold text-slate-600 block">
-                    Mã sản phẩm (SKU) <span className="text-red-600">*</span>
+              {/* KHỐI 1: ĐỊNH DANH SẢN PHẨM & LIÊN KẾT MÃ NPP NỘI BỘ */}
+              <section className="border-b border-slate-200 bg-slate-50/40 p-4">
+                <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5 mb-3">
+                  <Layers size={13} className="text-sky-600" />
+                  <span>1. Định danh sản phẩm & Ghép nối Mã SP NPP</span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5">
+                  {/* Mã SKU CQT */}
+                  <div className="md:col-span-4">
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-1">
+                      Mã sản phẩm (SKU) <span className="text-red-600">*</span>
+                    </label>
                     <input
                       required
                       value={editForm.sku}
                       onChange={(e) =>
                         setEditForm({ ...editForm, sku: e.target.value.toUpperCase() })
                       }
-                      className={cn(inputCls, "mt-0.5 font-mono font-bold uppercase")}
+                      className={cn(inputCls, "font-mono font-bold uppercase text-sky-900 bg-white")}
                     />
-                  </label>
+                    <span className="text-[10px] text-slate-400 mt-0.5 block">
+                      Mã SKU đồng bộ từ Cơ quan Thuế (CQT) hoặc hệ thống
+                    </span>
+                  </div>
 
-                  <label className="text-[10px] font-semibold text-slate-600 block">
-                    Mã NPP (Nội bộ)
-                    <input
-                      value={editForm.npp_code}
-                      onChange={(e) =>
-                        setEditForm({ ...editForm, npp_code: e.target.value.toUpperCase() })
-                      }
-                      placeholder="VD: NPP-01TD03"
-                      className={cn(inputCls, "mt-0.5 font-mono font-bold uppercase")}
-                    />
-                  </label>
+                  {/* Combobox Mã SP NPP chuyên nghiệp */}
+                  <div className="md:col-span-8" ref={editNppContainerRef}>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] font-semibold text-slate-600 flex items-center gap-1.5">
+                        <Link2 size={12} className="text-sky-600" />
+                        <span>Mã SP NPP (Nội bộ / Web NCC)</span>
+                      </label>
+                      <span className="text-[10px] text-slate-500">
+                        {nppProductOptions.length} mã NPP trong hệ thống
+                      </span>
+                    </div>
 
-                  <label className="text-[10px] font-semibold text-slate-600 block sm:col-span-2">
-                    Tên sản phẩm đầy đủ <span className="text-red-600">*</span>
+                    {/* TRƯỜNG HỢP 1: ĐÃ CHỌN MÃ NPP -> HIỂN THỊ THẺ CHỌN CHUYÊN NGHIỆP */}
+                    {editForm.npp_code ? (
+                      <div className="flex items-center justify-between gap-3 rounded border border-sky-300 bg-sky-50/80 p-2 shadow-sm">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="inline-flex items-center gap-1 rounded bg-sky-700 px-2 py-0.5 font-mono text-xs font-bold text-white shadow-sm">
+                              <Link2 size={11} />
+                              {editForm.npp_code}
+                            </span>
+                            <span className="font-semibold text-xs text-slate-800 truncate">
+                              {selectedEditNppItem?.name || "Sản phẩm NPP nội bộ"}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-slate-600">
+                            <span>
+                              Nhà cung cấp: <strong className="text-slate-800">{selectedEditNppItem?.supplier || "—"}</strong>
+                            </span>
+                            <span>
+                              ĐVT: <strong className="text-slate-800">{selectedEditNppItem?.unit || "—"}</strong>
+                            </span>
+                            {selectedEditNppItem?.unitPrice ? (
+                              <span>
+                                Đơn giá NCC:{" "}
+                                <strong className="text-emerald-700">
+                                  {formatNumber(selectedEditNppItem.unitPrice)} đ
+                                </strong>
+                              </span>
+                            ) : null}
+                            {selectedEditNppItem?.orderCount ? (
+                              <span>
+                                Đơn đặt DMS:{" "}
+                                <strong className="text-sky-800">
+                                  {selectedEditNppItem.orderCount} đơn
+                                </strong>
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditNppSearchQuery("");
+                              setShowEditNppDropdown(true);
+                            }}
+                            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white hover:bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700 shadow-sm transition-colors"
+                          >
+                            <Pencil size={11} /> Đổi mã khác
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditForm({ ...editForm, npp_code: "" })}
+                            className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors"
+                            title="Bỏ liên kết mã NPP"
+                          >
+                            <X size={11} /> Bỏ gắn
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* TRƯỜNG HỢP 2: CHƯA CHỌN MÃ NPP -> KHUNG TÌM KIẾM TÍCH HỢP */
+                      <div className="relative">
+                        <Search
+                          size={13}
+                          className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                        />
+                        <input
+                          type="text"
+                          value={editNppSearchQuery}
+                          onChange={(e) => {
+                            setEditNppSearchQuery(e.target.value);
+                            setShowEditNppDropdown(true);
+                          }}
+                          onFocus={() => setShowEditNppDropdown(true)}
+                          placeholder="Tìm kiếm theo mã NPP nội bộ hoặc tên sản phẩm để gắn vào SKU..."
+                          className={cn(inputCls, "pl-8 pr-24 text-xs font-medium")}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowEditNppDropdown(!showEditNppDropdown)}
+                          className="absolute right-1 top-1/2 -translate-y-1/2 inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-sky-700 hover:text-sky-900 rounded bg-sky-50 hover:bg-sky-100 border border-sky-200"
+                        >
+                          <Search size={11} /> Tìm chọn
+                          <ChevronDown size={11} />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* POPUP DROPDOWN TÌM KIẾM MÃ NPP CHUYÊN NGHIỆP */}
+                    {showEditNppDropdown && (
+                      <div className="relative">
+                        <div className="absolute left-0 right-0 top-1.5 z-[70] rounded-md border border-slate-300 bg-white shadow-2xl overflow-hidden flex flex-col">
+                          {/* Header: Input tìm kiếm & Tabs lọc */}
+                          <div className="p-2 border-b border-slate-200 bg-slate-50 space-y-1.5">
+                            <div className="relative">
+                              <Search
+                                size={13}
+                                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                              />
+                              <input
+                                type="text"
+                                autoFocus
+                                value={editNppSearchQuery}
+                                onChange={(e) => setEditNppSearchQuery(e.target.value)}
+                                placeholder="Gõ mã hoặc tên sản phẩm NPP để lọc nhanh..."
+                                className="w-full rounded border border-slate-300 bg-white pl-8 pr-7 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+                              />
+                              {editNppSearchQuery && (
+                                <button
+                                  type="button"
+                                  onClick={() => setEditNppSearchQuery("")}
+                                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                >
+                                  <X size={12} />
+                                </button>
+                              )}
+                            </div>
+                            <div className="flex items-center justify-between text-[11px]">
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditNppFilterTab("ALL")}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded text-[10px] font-semibold transition-colors",
+                                    editNppFilterTab === "ALL"
+                                      ? "bg-sky-600 text-white"
+                                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                                  )}
+                                >
+                                  Tất cả ({nppProductOptions.length})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditNppFilterTab("UNMAPPED")}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded text-[10px] font-semibold transition-colors",
+                                    editNppFilterTab === "UNMAPPED"
+                                      ? "bg-sky-600 text-white"
+                                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                                  )}
+                                >
+                                  Chưa ghép SKU ({nppUnmappedCount})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditNppFilterTab("MAPPED")}
+                                  className={cn(
+                                    "px-2 py-0.5 rounded text-[10px] font-semibold transition-colors",
+                                    editNppFilterTab === "MAPPED"
+                                      ? "bg-sky-600 text-white"
+                                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                                  )}
+                                >
+                                  Đã ghép ({nppMappedCount})
+                                </button>
+                              </div>
+                              <span className="text-slate-500 text-[10px]">
+                                Kết quả: <strong>{filteredEditNppOptions.length}</strong> mã
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Danh sách cuộn */}
+                          <div className="overflow-y-auto max-h-64 divide-y divide-slate-100">
+                            {filteredEditNppOptions.length === 0 ? (
+                              <div className="p-4 text-center text-xs text-slate-400">
+                                Không tìm thấy mã sản phẩm NPP nào phù hợp.
+                              </div>
+                            ) : (
+                              filteredEditNppOptions.map((npp) => {
+                                const isSelected =
+                                  editForm.npp_code.toUpperCase() === npp.code.toUpperCase();
+                                const isMappedToCurrent =
+                                  npp.mappedSku &&
+                                  editingProduct &&
+                                  npp.mappedSku.toUpperCase() === editingProduct.code.toUpperCase();
+                                const isMappedToOther =
+                                  npp.mappedSku &&
+                                  (!editingProduct ||
+                                    npp.mappedSku.toUpperCase() !==
+                                      editingProduct.code.toUpperCase());
+
+                                return (
+                                  <div
+                                    key={npp.code}
+                                    onClick={() => {
+                                      setEditForm({ ...editForm, npp_code: npp.code });
+                                      setShowEditNppDropdown(false);
+                                      setEditNppSearchQuery("");
+                                    }}
+                                    className={cn(
+                                      "p-2.5 hover:bg-sky-50/80 cursor-pointer transition-colors flex items-center justify-between gap-3 text-left",
+                                      isSelected && "bg-sky-100/70 border-l-4 border-sky-600"
+                                    )}
+                                  >
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-mono text-xs font-bold text-sky-800 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">
+                                          {npp.code}
+                                        </span>
+                                        <span className="text-xs font-semibold text-slate-800 truncate">
+                                          {npp.name}
+                                        </span>
+                                        {isMappedToCurrent ? (
+                                          <span className="rounded bg-emerald-100 px-1.5 py-0.2 text-[9px] font-bold text-emerald-800">
+                                            ✓ Đang gắn SKU này
+                                          </span>
+                                        ) : isMappedToOther ? (
+                                          <span className="rounded bg-amber-100 px-1.5 py-0.2 text-[9px] font-medium text-amber-800">
+                                            Đã ghép: {npp.mappedSku}
+                                          </span>
+                                        ) : (
+                                          <span className="rounded bg-slate-100 px-1.5 py-0.2 text-[9px] text-slate-500">
+                                            Chưa ghép
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="mt-1 flex items-center gap-3 text-[10px] text-slate-500">
+                                        <span>
+                                          NCC: <strong className="text-slate-700">{npp.supplier}</strong>
+                                        </span>
+                                        {npp.unit && (
+                                          <span>
+                                            ĐVT: <strong className="text-slate-700">{npp.unit}</strong>
+                                          </span>
+                                        )}
+                                        {npp.orderCount > 0 && (
+                                          <span>
+                                            Đơn đặt: <strong>{npp.orderCount}</strong>
+                                          </span>
+                                        )}
+                                        {npp.companyName && (
+                                          <span>NPP: {npp.companyName}</span>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    <div className="text-right shrink-0">
+                                      {npp.unitPrice > 0 && (
+                                        <div className="text-xs font-bold text-slate-800 font-mono">
+                                          {formatNumber(npp.unitPrice)} đ
+                                        </div>
+                                      )}
+                                      <span className="inline-block mt-0.5 rounded bg-sky-600 hover:bg-sky-700 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors">
+                                        Chọn ↵
+                                      </span>
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+
+                          {/* Footer dropdown */}
+                          <div className="p-1.5 border-t border-slate-200 bg-slate-50 text-[10px] text-slate-500 flex items-center justify-between px-3">
+                            <span>Nhấn vào dòng bất kỳ để chọn mã NPP</span>
+                            <button
+                              type="button"
+                              onClick={() => setShowEditNppDropdown(false)}
+                              className="font-semibold text-sky-600 hover:underline"
+                            >
+                              Đóng [Esc]
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Tên sản phẩm đầy đủ */}
+                  <div className="col-span-12">
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-1">
+                      Tên sản phẩm đầy đủ (Tên hiển thị) <span className="text-red-600">*</span>
+                    </label>
                     <input
                       required
                       value={editForm.name}
                       onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "text-xs font-medium")}
                     />
-                  </label>
+                  </div>
+                </div>
+              </section>
 
-                  <label className="text-[10px] font-semibold text-slate-600 block sm:col-span-2">
+              {/* KHỐI 2: THÔNG TIN PHÂN LOẠI & NHÀ CUNG CẤP */}
+              <section className="border-b border-slate-200 p-4">
+                <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5 mb-3">
+                  <Building2 size={13} className="text-sky-600" />
+                  <span>2. Phân loại, Đơn vị tính & Nhà cung cấp</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                  <label className="text-[10px] font-semibold text-slate-600 block">
                     Danh mục ngành hàng
                     <select
                       value={editForm.category_id}
                       onChange={(e) =>
                         setEditForm({ ...editForm, category_id: e.target.value })
                       }
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "mt-1")}
                     >
                       {categories.map((cat) => (
                         <option key={cat.id} value={cat.id}>
@@ -2050,7 +2751,7 @@ export default function ProductsPage() {
                     <select
                       value={editForm.unit_id}
                       onChange={(e) => setEditForm({ ...editForm, unit_id: e.target.value })}
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "mt-1")}
                     >
                       {units.map((u) => (
                         <option key={u.id} value={u.id}>
@@ -2068,7 +2769,7 @@ export default function ProductsPage() {
                       onChange={(e) =>
                         setEditForm({ ...editForm, supplier: e.target.value })
                       }
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "mt-1")}
                     />
                     <datalist id="sku-suppliers-datalist-edit">
                       {supplierOptions.map((s) => (
@@ -2077,6 +2778,29 @@ export default function ProductsPage() {
                     </datalist>
                   </label>
 
+                  <label className="text-[10px] font-semibold text-slate-600 block">
+                    Quy cách (Số hộp/thùng)
+                    <input
+                      type="number"
+                      min={1}
+                      value={editForm.boxes_per_carton}
+                      onChange={(e) =>
+                        setEditForm({ ...editForm, boxes_per_carton: e.target.value })
+                      }
+                      className={cn(inputCls, "mt-1 text-center font-semibold")}
+                    />
+                  </label>
+                </div>
+              </section>
+
+              {/* KHỐI 3: GIÁ BÁN & CHÍNH SÁCH TỒN KHO */}
+              <section className="border-b border-slate-200 p-4">
+                <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5 mb-3">
+                  <Tag size={13} className="text-sky-600" />
+                  <span>3. Giá bán niêm yết & Chính sách tồn kho</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
                   <label className="text-[10px] font-semibold text-slate-600 block">
                     Giá bán niêm yết (VNĐ)
                     <input
@@ -2087,7 +2811,7 @@ export default function ProductsPage() {
                       onChange={(e) =>
                         setEditForm({ ...editForm, base_price: e.target.value })
                       }
-                      className={cn(inputCls, "mt-0.5 text-right font-semibold")}
+                      className={cn(inputCls, "mt-1 text-right font-semibold")}
                     />
                   </label>
 
@@ -2101,20 +2825,20 @@ export default function ProductsPage() {
                       onChange={(e) =>
                         setEditForm({ ...editForm, cost_price: e.target.value })
                       }
-                      className={cn(inputCls, "mt-0.5 text-right font-semibold")}
+                      className={cn(inputCls, "mt-1 text-right font-semibold")}
                     />
                   </label>
 
                   <label className="text-[10px] font-semibold text-slate-600 block">
-                    Quy cách (Số hộp/thùng)
+                    Tồn kho tối thiểu (Tái đặt)
                     <input
                       type="number"
-                      min={1}
-                      value={editForm.boxes_per_carton}
+                      min={0}
+                      value={editForm.reorder_level}
                       onChange={(e) =>
-                        setEditForm({ ...editForm, boxes_per_carton: e.target.value })
+                        setEditForm({ ...editForm, reorder_level: e.target.value })
                       }
-                      className={cn(inputCls, "mt-0.5 text-center font-semibold")}
+                      className={cn(inputCls, "mt-1 text-center font-semibold")}
                     />
                   </label>
 
@@ -2123,39 +2847,59 @@ export default function ProductsPage() {
                     <select
                       value={editForm.status}
                       onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}
-                      className={cn(inputCls, "mt-0.5")}
+                      className={cn(inputCls, "mt-1")}
                     >
                       <option value="active">Đang kinh doanh</option>
                       <option value="inactive">Ngừng kinh doanh</option>
                     </select>
                   </label>
                 </div>
+              </section>
 
-                {/* Thông tin thống kê phát sinh thực tế của SKU */}
-                <div className="mt-3 rounded border border-sky-100 bg-sky-50/60 px-3 py-2 text-[11px] text-slate-700 flex flex-wrap items-center justify-between gap-2">
-                  <span>
-                    <strong>Thống kê đồng bộ:</strong> Xuất hiện trong{" "}
-                    <strong className="text-sky-800">{editingProduct.order_count}</strong> đơn hàng
-                    DMS (Tổng SL:{" "}
-                    <strong>{formatNumber(editingProduct.total_ordered_qty)}</strong>{" "}
-                    {editingProduct.unit}) và{" "}
-                    <strong className="text-emerald-800">
-                      {editingProduct.purchase_invoice_count}
-                    </strong>{" "}
-                    hóa đơn mua vào CQT.
-                  </span>
+              {/* KHỐI 4: THỐNG KÊ PHÁT SINH THỰC TẾ CỦA SKU */}
+              <section className="px-4 py-3 bg-sky-50/40">
+                <div className="rounded border border-sky-200 bg-white p-3 text-[11px] text-slate-700 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+                  <div className="flex items-center gap-4">
+                    <div>
+                      <span className="text-slate-500 block text-[10px]">Đơn hàng DMS:</span>
+                      <strong className="text-sky-800 text-xs">
+                        {editingProduct.order_count} đơn
+                      </strong>{" "}
+                      ({formatNumber(editingProduct.total_ordered_qty)} {editingProduct.unit})
+                    </div>
+                    <div className="h-6 w-px bg-slate-200" />
+                    <div>
+                      <span className="text-slate-500 block text-[10px]">Hóa đơn mua vào CQT:</span>
+                      <strong className="text-emerald-800 text-xs">
+                        {editingProduct.purchase_invoice_count} hóa đơn
+                      </strong>{" "}
+                      ({formatNumber(editingProduct.total_purchased_qty)} {editingProduct.unit})
+                    </div>
+                    {editingProduct.distributors && editingProduct.distributors.length > 0 && (
+                      <>
+                        <div className="h-6 w-px bg-slate-200" />
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">Nhà phân phối:</span>
+                          <strong className="text-slate-800 text-xs">
+                            {editingProduct.distributors.map((d) => d.name).join(", ")}
+                          </strong>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
                   <Link
                     href={`/products/${editingProduct.id}`}
-                    className="font-semibold text-sky-700 hover:underline"
+                    className="inline-flex items-center gap-1 font-semibold text-xs text-sky-700 hover:text-sky-900 hover:underline"
                   >
-                    Xem trang chi tiết SKU →
+                    Xem chi tiết SKU →
                   </Link>
                 </div>
               </section>
 
-              <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
+              <footer className="border-t border-slate-300 bg-slate-100 px-4 py-2.5 flex items-center justify-between gap-3 shrink-0">
                 <span className="text-[10px] text-slate-500">
-                  ID hệ thống: #{editingProduct.id}
+                  ID hệ thống: #{editingProduct.id} · Mã SKU: {editingProduct.code}
                 </span>
                 <div className="flex items-center gap-2">
                   <button
@@ -2171,7 +2915,7 @@ export default function ProductsPage() {
                   <button
                     type="submit"
                     disabled={submitting}
-                    className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
+                    className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-4 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
                   >
                     {submitting ? (
                       <Loader2 size={13} className="animate-spin" />
@@ -2299,6 +3043,15 @@ export default function ProductsPage() {
           </div>
         </div>
       )}
+
+      {/* DATALIST GỢI Ý MÃ NPP NỘI BỘ TOÀN HỆ THỐNG */}
+      <datalist id="sku-npp-options-datalist">
+        {nppProductOptions.map((npp) => (
+          <option key={npp.code} value={npp.code}>
+            {npp.name} ({npp.supplier}{npp.unit ? ` - ${npp.unit}` : ""})
+          </option>
+        ))}
+      </datalist>
     </div>
   );
 }

@@ -44,6 +44,7 @@ class Product(Base):
     boxes_per_carton: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    sync_source: Mapped[str | None] = mapped_column(String(30), default="MANUAL", index=True, nullable=True)
     _npp_code: Mapped[str | None] = mapped_column("npp_code", String(50), nullable=True)
 
     category: Mapped["ProductCategory"] = relationship(back_populates="products")

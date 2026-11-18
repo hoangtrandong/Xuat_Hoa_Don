@@ -448,10 +448,12 @@ def _preview_new_workbook(
             for order in candidates[:30]
         ]
 
-    products = {
-        product.sku.upper(): product
-        for product in db.scalars(select(Product)).all()
-    }
+    products = {}
+    for product in db.scalars(select(Product)).all():
+        if product.sku:
+            products[product.sku.upper()] = product
+        if product.npp_code:
+            products[product.npp_code.upper()] = product
     from app.crud.npp import NppDirectory
     directory = NppDirectory(db)
     issues: list[str] = []

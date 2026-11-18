@@ -277,19 +277,11 @@ def _apply_representative_upload(db: Session, product: ProductModel, representat
 
 @router.get("/categories/", response_model=List[ProductCategoryOption])
 def list_categories(db: Session = Depends(get_db)):
-    try:
-        product_crud.ensure_default_categories_and_units(db, commit=True)
-    except Exception:
-        db.rollback()
     return db.query(ProductCategory).order_by(ProductCategory.code, ProductCategory.name).all()
 
 
 @router.get("/units/", response_model=List[ProductUnitOption])
 def list_units(db: Session = Depends(get_db)):
-    try:
-        product_crud.ensure_default_categories_and_units(db, commit=True)
-    except Exception:
-        db.rollback()
     return db.query(ProductUnit).order_by(ProductUnit.name).all()
 
 

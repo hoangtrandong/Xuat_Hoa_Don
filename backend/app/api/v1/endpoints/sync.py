@@ -2095,10 +2095,12 @@ def list_local_vinamilk_orders(
             if src_num and src_num not in pending_split_for:
                 pending_split_for[src_num] = req_item
 
-    products_by_sku = {
-        product.sku.strip().upper(): product
-        for product in db.scalars(select(Product)).all()
-    }
+    products_by_sku = {}
+    for product in db.scalars(select(Product)).all():
+        if product.sku:
+            products_by_sku[product.sku.strip().upper()] = product
+        if product.npp_code:
+            products_by_sku[product.npp_code.strip().upper()] = product
 
     order_delivery_status: dict[str, str] = {}
     try:

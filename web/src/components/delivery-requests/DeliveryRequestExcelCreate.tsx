@@ -1003,7 +1003,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                   <th className="text-left px-4 py-3">Mã hàng</th>
                   <th className="text-left px-4 py-3">Tên sản phẩm</th>
                   {isNewWorkbook && <th className="text-left px-4 py-3">Mã DMS nguồn</th>}
-                  <th className="text-center px-3 py-3 w-20">Quy cách</th>
+                  <th className="text-center px-3 py-3 w-20">Quy cách (H/T)</th>
                   <th className="text-right px-3 py-3 bg-sky-50 font-bold text-sky-900 w-24">Thùng (T)</th>
                   <th className="text-right px-3 py-3 bg-amber-50 font-bold text-amber-900 w-20">Lẻ (H)</th>
                   <th className="text-right px-4 py-3">Tổng yêu cầu</th>
@@ -1033,7 +1033,7 @@ export default function DeliveryRequestExcelCreate({ embedded = false, onCreated
                       </td>
                       <td className="px-4 py-2 font-medium text-gray-800">{item.product_name}</td>
                       {isNewWorkbook && <td className="px-4 py-2 font-mono text-gray-600">{item.dms_skus?.join(", ") || "—"}</td>}
-                      <td className="px-3 py-2 text-center text-gray-500">{bpc} H/T</td>
+                      <td className="px-3 py-2 text-center text-gray-500">{bpc}</td>
                       <td className="px-3 py-2 text-right font-black text-sky-950 bg-sky-50/40">
                         {cartons > 0 ? cartons.toLocaleString("vi-VN") : "—"}
                       </td>

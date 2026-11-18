@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
-import { formatNumber, formatVND } from "@/lib/format";
+import { formatNumber } from "@/lib/format";
 import { downloadExcel } from "@/lib/excel";
 
 const inputCls =
@@ -44,11 +44,25 @@ interface CredentialStatus {
   distributor_id: number;
   distributor_name: string;
   username: string;
+  has_bearer_token: boolean;
+  last_synced_at: string | null;
+  accounts: TaxAccount[];
+}
+
+interface TaxAccount {
+  id: number;
+  username: string;
   has_password: boolean;
   has_bearer_token: boolean;
   token_preview: string;
   token_updated_at: string | null;
   last_synced_at: string | null;
+  invoice_count: number;
+}
+
+interface CaptchaData {
+  key: string;
+  content: string;
 }
 
 interface SellerOption {
@@ -72,6 +86,8 @@ interface PurchaseInvoiceLine {
 interface PurchaseInvoiceRow {
   id: number;
   distributor_id: number;
+  tax_credential_id: number | null;
+  tax_account_username: string;
   invoice_template: string;
   invoice_symbol: string;
   invoice_number: string;
@@ -132,6 +148,8 @@ interface PurchaseStats {
 
 interface PurchaseInvoiceDetail {
   id: number;
+  tax_credential_id: number | null;
+  tax_account_username: string;
   invoice_template: string;
   invoice_symbol: string;
   invoice_number: string;
@@ -219,21 +237,36 @@ export default function PurchaseInvoicesPage() {
   const [loading, setLoading] = useState<boolean>(false);
   const [syncing, setSyncing] = useState<boolean>(false);
   const [bannerMsg, setBannerMsg] = useState<{
-    type: "success" | "error" | "info";
+    type: "success" | "error" | "info" | "warning";
     text: string;
   } | null>(null);
 
-  // Modal xác thực Cổng Thuế (Mặc định: Mở Web Thuế đăng nhập thủ công & tự bắt Token)
+  // Modal xác thực Cổng Thuế (Bearer Token CQT / cURL / Playwright)
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [authUsername, setAuthUsername] = useState<string>("");
   const [authPassword, setAuthPassword] = useState<string>("");
+  const [authManualToken, setAuthManualToken] = useState<string>("");
+  const [savingToken, setSavingToken] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string>("");
+  const [captcha, setCaptcha] = useState<CaptchaData | null>(null);
+  const [captchaValue, setCaptchaValue] = useState<string>("");
+  const [captchaLoading, setCaptchaLoading] = useState<boolean>(false);
+  const [showManualToken, setShowManualToken] = useState<boolean>(false);
+  const [activeTaxCredentialId, setActiveTaxCredentialId] = useState<number | null>(null);
+  const [deletingTaxAccount, setDeletingTaxAccount] = useState<TaxAccount | null>(null);
+  const [deletingAccount, setDeletingAccount] = useState<boolean>(false);
 
   // Modal xem chi tiết Hóa đơn mua vào
   const [detailModalOpen, setDetailModalOpen] = useState<boolean>(false);
   const [detailLoading, setDetailLoading] = useState<boolean>(false);
   const [detailData, setDetailData] = useState<PurchaseInvoiceDetail | null>(null);
   const [detailViewMode, setDetailViewMode] = useState<"html" | "items" | "xml">("items");
+  const activeTaxAccount = useMemo(
+    () =>
+      credStatus?.accounts.find((account) => account.id === activeTaxCredentialId) ??
+      null,
+    [credStatus, activeTaxCredentialId]
+  );
 
   // 1. Tải danh sách Nhà phân phối
   useEffect(() => {
@@ -259,7 +292,14 @@ export default function PurchaseInvoicesPage() {
       if (res.ok) {
         const data = (await res.json()) as CredentialStatus;
         setCredStatus(data);
-        setAuthUsername(data.username || "");
+        const accounts = data.accounts || [];
+        setActiveTaxCredentialId((current) =>
+          current && accounts.some((account) => account.id === current)
+            ? current
+            : accounts[0]?.id ?? null
+        );
+        const activeAccount = accounts[0];
+        setAuthUsername(activeAccount?.username || data.username || "");
       }
     } catch {
       // ignore
@@ -329,6 +369,8 @@ export default function PurchaseInvoicesPage() {
 
   useEffect(() => {
     if (selectedDistId) {
+      // These callbacks perform asynchronous external data loading.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       loadCredentialsStatus(selectedDistId);
       loadPurchaseInvoices();
     }
@@ -373,6 +415,42 @@ export default function PurchaseInvoicesPage() {
     return filteredInvoicesByTab.slice(start, start + pageSize);
   }, [filteredInvoicesByTab, currentPage, pageSize]);
 
+  const isLocalHost =
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1");
+
+  const loadCaptcha = useCallback(async () => {
+    setCaptchaLoading(true);
+    setCaptchaValue("");
+    try {
+      const res = await apiFetch(`${API_URL}/einvoice/purchase-invoices/captcha`);
+      const data = (await res.json()) as CaptchaData & { detail?: string };
+      if (!res.ok) {
+        throw new Error(data.detail || "Không thể tải CAPTCHA Cổng Thuế.");
+      }
+      setCaptcha(data);
+    } catch (err) {
+      setCaptcha(null);
+      setAuthError(
+        err instanceof Error ? err.message : "Không thể tải CAPTCHA Cổng Thuế."
+      );
+    } finally {
+      setCaptchaLoading(false);
+    }
+  }, []);
+
+  const captchaSrc = useMemo(() => {
+    if (!captcha?.content) return "";
+    if (captcha.content.startsWith("data:image/")) return captcha.content;
+    if (captcha.content.trim().startsWith("<")) {
+      return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+        captcha.content
+      )}`;
+    }
+    return `data:image/svg+xml;base64,${captcha.content}`;
+  }, [captcha]);
+
   // Reset bộ lọc ("Bỏ tìm kiếm" giống Web Thuế)
   const handleResetFilters = () => {
     const def = getDefaultMonthRange();
@@ -390,12 +468,147 @@ export default function PurchaseInvoicesPage() {
     setCurrentPage(1);
   };
 
-  const openAuthModal = useCallback(() => {
+  const openAuthModal = useCallback((accountId?: number) => {
+    const account =
+      credStatus?.accounts.find((item) => item.id === accountId) ??
+      credStatus?.accounts[0];
+    setActiveTaxCredentialId(account?.id ?? null);
+    setAuthUsername(account?.username ?? "");
+    setAuthPassword("");
+    setAuthManualToken("");
+    setShowManualToken(false);
     setAuthError("");
     setAuthModalOpen(true);
-  }, []);
+    void loadCaptcha();
+  }, [credStatus, loadCaptcha]);
 
-  // Mở cửa sổ trình duyệt hoadondientu.gdt.gov.vn để đăng nhập thủ công -> Tự bắt Token -> Tự đồng bộ
+  // Lưu Bearer Token CQT (hoặc parse cURL) và đồng bộ trực tiếp qua HTTP thuần
+  const handleSaveTokenAndSync = useCallback(async () => {
+    if (!selectedDistId) return;
+    const cleanToken = authManualToken.trim();
+    const hasExistingToken = Boolean(
+      activeTaxAccount?.has_bearer_token || credStatus?.has_bearer_token
+    );
+
+    if (!cleanToken && !hasExistingToken && !captchaValue.trim()) {
+      setAuthError(
+        "Vui lòng dán Bearer Token hoặc lệnh cURL từ Cổng Thuế (hoadondientu.gdt.gov.vn)."
+      );
+      return;
+    }
+
+    setSavingToken(true);
+    setAuthError("");
+    try {
+      let targetCredId = activeTaxCredentialId;
+
+      // 1. Nếu người dùng dán Token mới -> Lưu Token vào hệ thống
+      if (cleanToken || captchaValue.trim()) {
+        const authRes = await apiFetch(
+          `${API_URL}/einvoice/purchase-invoices/authenticate`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              distributor_id: selectedDistId,
+              credential_id: activeTaxCredentialId || undefined,
+              username: authUsername,
+              password: authPassword || undefined,
+              manual_bearer_token: cleanToken || undefined,
+              ckey: cleanToken ? undefined : captcha?.key,
+              cvalue: cleanToken ? undefined : captchaValue.trim(),
+            }),
+          }
+        );
+        const authData = await authRes.json();
+        if (!authRes.ok && !cleanToken) {
+          await loadCaptcha();
+          setAuthError(
+            authData.detail ||
+              "Đăng nhập Cổng Thuế thất bại. Vui lòng kiểm tra CAPTCHA và mật khẩu."
+          );
+          return;
+        }
+        if (!authRes.ok) {
+          throw new Error(authData.detail || "Không thể lưu Bearer Token CQT.");
+        }
+        targetCredId = authData.credential_id || activeTaxCredentialId;
+        await loadCredentialsStatus(selectedDistId);
+      }
+
+      setAuthModalOpen(false);
+      setBannerMsg({
+        type: "info",
+        text: cleanToken
+          ? "Đã cập nhật Bearer Token CQT. Đang kết nối tải danh sách hóa đơn mua vào..."
+          : "Đang kết nối tải danh sách hóa đơn mua vào từ Cổng Tổng cục Thuế...",
+      });
+
+      // 2. Chạy đồng bộ hóa đơn mua vào qua HTTP
+      setSyncing(true);
+      const syncRes = await apiFetch(
+        `${API_URL}/einvoice/purchase-invoices/sync`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            distributor_id: selectedDistId,
+            tax_credential_id: targetCredId || undefined,
+            from_date: fromDate,
+            to_date: toDate,
+          }),
+        }
+      );
+      const syncData = await syncRes.json();
+      if (syncRes.status === 428 || syncRes.status === 401) {
+        setAuthModalOpen(true);
+        void loadCaptcha();
+        setAuthError(
+          "Phiên Bearer Token đã hết hạn (Cổng Thuế hết hạn sau 24h). Vui lòng mở https://hoadondientu.gdt.gov.vn, đăng nhập lại và dán Token mới vào khung bên dưới."
+        );
+        return;
+      }
+      if (!syncRes.ok) {
+        throw new Error(
+          syncData.detail || "Lỗi khi đồng bộ hóa đơn mua vào từ Tổng cục Thuế."
+        );
+      }
+
+      setBannerMsg({
+        type: "success",
+        text: `Đồng bộ thành công từ Tổng cục Thuế: Tìm thấy ${syncData.total_found} hóa đơn, đã lưu ${syncData.saved_invoices} hóa đơn và bóc tách chi tiết ${syncData.xml_extracted_count} file XML!`,
+      });
+      await loadPurchaseInvoices();
+    } catch (err) {
+      setBannerMsg({
+        type: "error",
+        text:
+          err instanceof Error
+            ? err.message
+            : "Lỗi khi cập nhật Token hoặc tải hóa đơn.",
+      });
+    } finally {
+      setSavingToken(false);
+      setSyncing(false);
+    }
+  }, [
+    selectedDistId,
+    activeTaxCredentialId,
+    activeTaxAccount,
+    credStatus,
+    authManualToken,
+    authUsername,
+    authPassword,
+    captcha,
+    captchaValue,
+    fromDate,
+    toDate,
+    loadCredentialsStatus,
+    loadCaptcha,
+    loadPurchaseInvoices,
+  ]);
+
+  // Mở cửa sổ trình duyệt hoadondientu.gdt.gov.vn để đăng nhập thủ công -> Tự bắt Token -> Tự đồng bộ (dành cho local có Playwright)
   const handleInteractiveLoginAndSync = useCallback(async () => {
     if (!selectedDistId) return;
     setSyncing(true);
@@ -412,6 +625,7 @@ export default function PurchaseInvoicesPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             distributor_id: selectedDistId,
+            tax_credential_id: activeTaxCredentialId || undefined,
             from_date: fromDate,
             to_date: toDate,
             username: authUsername || undefined,
@@ -444,6 +658,7 @@ export default function PurchaseInvoicesPage() {
     }
   }, [
     selectedDistId,
+    activeTaxCredentialId,
     fromDate,
     toDate,
     authUsername,
@@ -472,15 +687,38 @@ export default function PurchaseInvoicesPage() {
       });
       const data = await res.json();
       if (res.status === 428 || res.status === 401) {
-        await handleInteractiveLoginAndSync();
+        setAuthModalOpen(true);
+        setAuthError(
+          data.detail ||
+            "Phiên Bearer Token Cổng Thuế chưa có hoặc đã hết hạn. Vui lòng dán Bearer Token (hoặc lệnh cURL từ F12 DevTools) để làm mới phiên."
+        );
+        setBannerMsg({
+          type: "warning",
+          text: "Phiên kết nối Cổng Thuế đã hết hạn. Vui lòng cập nhật Bearer Token CQT để tiếp tục.",
+        });
         return;
       }
       if (!res.ok) {
         throw new Error(data.detail || "Không thể đồng bộ hóa đơn mua vào.");
       }
       setBannerMsg({
-        type: "success",
-        text: `Đồng bộ thành công từ Tổng cục Thuế: Tìm thấy ${data.total_found} hóa đơn, đã lưu ${data.saved_invoices} hóa đơn và bóc tách chi tiết ${data.xml_extracted_count} file XML.`,
+        type:
+          data.errors?.length || data.warnings?.length || data.skipped_accounts
+            ? "warning"
+            : "success",
+        text: `Đồng bộ ${data.synced_accounts || 1} tài khoản: Tìm thấy ${data.total_found} hóa đơn, đã lưu ${data.saved_invoices} hóa đơn, bóc tách ${data.xml_extracted_count} XML.${
+          data.errors?.length
+            ? ` Có ${data.errors.length} tài khoản lỗi.`
+            : ""
+        }${
+          data.skipped_accounts
+            ? ` Có ${data.skipped_accounts} tài khoản chưa có token nên bị bỏ qua.`
+            : ""
+        }${
+          data.warnings?.length
+            ? ` Có ${data.warnings.length} cảnh báo trong quá trình lấy dữ liệu.`
+            : ""
+        }`,
       });
       await loadCredentialsStatus(selectedDistId);
       await loadPurchaseInvoices();
@@ -496,14 +734,44 @@ export default function PurchaseInvoicesPage() {
     selectedDistId,
     fromDate,
     toDate,
-    handleInteractiveLoginAndSync,
     loadCredentialsStatus,
     loadPurchaseInvoices,
   ]);
 
   const handleAuthenticateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await handleInteractiveLoginAndSync();
+    await handleSaveTokenAndSync();
+  };
+
+  const handleDeleteTaxAccount = async () => {
+    if (!deletingTaxAccount) return;
+    setDeletingAccount(true);
+    try {
+      const res = await apiFetch(
+        `${API_URL}/einvoice/purchase-invoices/credentials/${deletingTaxAccount.id}?distributor_id=${selectedDistId}`,
+        { method: "DELETE" }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Không thể xóa tài khoản thuế.");
+      }
+      setBannerMsg({
+        type: "success",
+        text: `Đã xóa tài khoản thuế ${data.username} cùng ${data.deleted_invoices} hóa đơn đã đồng bộ.`,
+      });
+      setDeletingTaxAccount(null);
+      await Promise.all([
+        loadCredentialsStatus(selectedDistId),
+        loadPurchaseInvoices(),
+      ]);
+    } catch (err) {
+      setBannerMsg({
+        type: "error",
+        text: err instanceof Error ? err.message : "Lỗi khi xóa tài khoản thuế.",
+      });
+    } finally {
+      setDeletingAccount(false);
+    }
   };
 
   // Xem chi tiết Hóa đơn mua vào (Khi click vào dòng hoặc bấm nút Xem)
@@ -832,7 +1100,8 @@ export default function PurchaseInvoicesPage() {
             {credStatus?.has_bearer_token ? (
               <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 border border-emerald-400/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
                 <ShieldCheck size={12} />
-                Đã kết nối CQT ({credStatus.username})
+                Đã kết nối {credStatus.accounts.filter((item) => item.has_bearer_token).length}/
+                {credStatus.accounts.length} tài khoản CQT
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 rounded bg-amber-500/20 border border-amber-400/40 px-2 py-0.5 text-[10px] font-semibold text-amber-200">
@@ -1092,6 +1361,8 @@ export default function PurchaseInvoicesPage() {
             className={`border-b px-3 py-2 text-xs flex items-center justify-between ${
               bannerMsg.type === "error"
                 ? "border-red-200 bg-red-50 text-red-700"
+                : bannerMsg.type === "warning"
+                ? "border-amber-200 bg-amber-50 text-amber-800"
                 : bannerMsg.type === "success"
                 ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                 : "border-sky-200 bg-sky-50 text-sky-800"
@@ -1328,6 +1599,9 @@ export default function PurchaseInvoicesPage() {
                     STT
                   </th>
                   <th className="border-b border-r border-slate-200 px-2.5 py-2 text-center">
+                    Tài khoản đồng bộ
+                  </th>
+                  <th className="border-b border-r border-slate-200 px-2.5 py-2 text-center">
                     Mã số thuế
                   </th>
                   <th className="border-b border-r border-slate-200 px-2 py-2 text-center">
@@ -1372,7 +1646,7 @@ export default function PurchaseInvoicesPage() {
                 {loading ? (
                   <tr>
                     <td
-                      colSpan={15}
+                      colSpan={16}
                       className="px-3 py-8 text-center text-xs text-slate-500"
                     >
                       <Loader2 size={16} className="animate-spin inline mr-1.5" />
@@ -1382,7 +1656,7 @@ export default function PurchaseInvoicesPage() {
                 ) : pagedInvoices.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={15}
+                      colSpan={16}
                       className="px-3 py-8 text-center text-xs text-slate-500"
                     >
                       Không có hóa đơn nào khớp với điều kiện lọc. Hãy bấm{" "}
@@ -1423,6 +1697,9 @@ export default function PurchaseInvoicesPage() {
                         </td>
                         <td className="border-r border-slate-200 px-2 py-2 text-center font-semibold text-slate-600">
                           {stt}
+                        </td>
+                        <td className="border-r border-slate-200 px-2 py-2 text-center font-mono font-semibold text-sky-800">
+                          {inv.tax_account_username || "—"}
                         </td>
                         <td className="border-r border-slate-200 px-2.5 py-2 text-center font-mono text-slate-700">
                           {inv.buyer_tax_code || "—"}
@@ -1689,14 +1966,14 @@ export default function PurchaseInvoicesPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <form
             onSubmit={handleAuthenticateSubmit}
-            className="w-full max-w-lg border border-slate-400 bg-white shadow-lg"
+            className="w-full max-w-2xl border border-slate-400 bg-white shadow-lg"
           >
             {/* Header */}
             <div className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <KeyRound size={17} className="text-red-500" />
                 <span className="text-xs font-bold uppercase tracking-wide text-white">
-                  Xác Thực Tài Khoản Cổng Thuế (hoadondientu.gdt.gov.vn)
+                  Xác Thực Cổng Hóa Đơn Điện Tử Tổng Cục Thuế (hoadondientu.gdt.gov.vn)
                 </span>
               </div>
               <button
@@ -1709,52 +1986,198 @@ export default function PurchaseInvoicesPage() {
             </div>
 
             {/* Body */}
-            <div className="border-b border-slate-200 px-3 py-3 space-y-2.5">
+            <div className="border-b border-slate-200 px-3 py-3 space-y-3 max-h-[80vh] overflow-y-auto">
               {authError && (
                 <div className="rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs text-red-700">
                   {authError}
                 </div>
               )}
 
-              <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2">
-                <div>
-                  <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                    Mã số thuế đăng nhập CQT (Tự điền khi mở Web Thuế)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="VD: 0315566789"
-                    value={authUsername}
-                    onChange={(e) => setAuthUsername(e.target.value)}
-                    className={inputCls}
-                  />
+              <div className="rounded border border-slate-300 bg-white p-2.5">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold uppercase text-slate-700">
+                    Tài khoản thuế của NPP
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTaxCredentialId(null);
+                      setAuthUsername("");
+                      setAuthPassword("");
+                      setAuthManualToken("");
+                    }}
+                    className="inline-flex items-center gap-1 rounded bg-sky-600 px-2 py-1 text-[10px] font-semibold text-white hover:bg-sky-700"
+                  >
+                    + Thêm tài khoản
+                  </button>
                 </div>
-                <div>
-                  <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                    Mật khẩu Cổng Thuế{" "}
-                    {credStatus?.has_password
-                      ? "(Đã lưu - tự điền khi mở Web)"
-                      : "(Tùy chọn - để tự điền)"}
+                {credStatus?.accounts.length ? (
+                  <div className="grid gap-1 sm:grid-cols-2">
+                    {credStatus.accounts.map((account) => (
+                      <div
+                        key={account.id}
+                        className={`flex items-center justify-between gap-2 rounded border px-2 py-1.5 ${
+                          account.id === activeTaxCredentialId
+                            ? "border-sky-500 bg-sky-50"
+                            : "border-slate-200 bg-slate-50"
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveTaxCredentialId(account.id);
+                            setAuthUsername(account.username);
+                            setAuthPassword("");
+                            setAuthManualToken("");
+                          }}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <div className="font-mono text-[11px] font-bold text-slate-800">
+                            {account.username}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {account.invoice_count} hóa đơn ·{" "}
+                            {account.has_bearer_token ? "Đã có token" : "Chưa có token"}
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeletingTaxAccount(account)}
+                          className="rounded p-1 text-red-700 hover:bg-red-100"
+                          title={`Xóa tài khoản ${account.username}`}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-slate-500">
+                    NPP chưa có tài khoản thuế. Nhập MST, mật khẩu và CAPTCHA để thêm tài khoản đầu tiên.
+                  </p>
+                )}
+              </div>
+
+              {/* KHỐI 1: NHẬP / DÁN TOKEN CQT (KHUYẾN NGHỊ) */}
+              <details
+                className="rounded border border-slate-300 bg-slate-50 p-2.5"
+                open={showManualToken}
+                onToggle={(event) => setShowManualToken(event.currentTarget.open)}
+              >
+                <summary className="flex cursor-pointer list-none items-center justify-between mb-1.5">
+                  <label className="text-[11px] font-bold text-sky-900 uppercase flex items-center gap-1.5">
+                    <CheckCircle2 size={13} className="text-sky-600" />
+                    Cách 1: Dán Bearer Token hoặc Lệnh cURL từ Cổng Thuế (Khuyến nghị)
                   </label>
-                  <input
-                    type="password"
-                    placeholder={
-                      credStatus?.has_password
-                        ? "•••••••• (Đã lưu mật khẩu)"
-                        : "Nhập mật khẩu để tự điền khi mở Web Thuế"
-                    }
-                    value={authPassword}
-                    onChange={(e) => setAuthPassword(e.target.value)}
-                    className={inputCls}
-                  />
+                  {activeTaxAccount?.has_bearer_token && (
+                    <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-100 px-2 py-0.5 rounded">
+                      Đã có Token ({activeTaxAccount.token_preview})
+                    </span>
+                  )}
+                </summary>
+
+                <textarea
+                  rows={4}
+                  placeholder="Dán Bearer eyJ... hoặc toàn bộ lệnh cURL tại đây..."
+                  value={authManualToken}
+                  onChange={(e) => setAuthManualToken(e.target.value)}
+                  className="mt-2 w-full min-w-0 rounded border border-sky-300 bg-white p-2 text-xs font-mono text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                />
+              </details>
+
+              {/* KHỐI 2: THÔNG TIN TÀI KHOẢN THUẾ (TÙY CHỌN ĐỂ TỰ ĐIỀN) */}
+              <div className="border border-slate-200 rounded p-2.5 bg-slate-50">
+                <div className="text-[11px] font-bold text-slate-700 uppercase mb-2">
+                  Đăng nhập Cổng Thuế bằng CAPTCHA
+                </div>
+                <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2">
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Mã số thuế đăng nhập CQT
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="VD: 0315566789"
+                      value={authUsername}
+                      onChange={(e) => setAuthUsername(e.target.value)}
+                      className={inputCls}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Mật khẩu Cổng Thuế{" "}
+                      {activeTaxAccount?.has_password
+                        ? "(Đã lưu mật khẩu)"
+                        : "(Tùy chọn)"}
+                    </label>
+                    <input
+                      type="password"
+                      placeholder={
+                        activeTaxAccount?.has_password
+                          ? "•••••••• (Đã lưu mật khẩu)"
+                          : "Nhập mật khẩu Cổng Thuế"
+                      }
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      className={inputCls}
+                    />
+                  </div>
+                </div>
+                <div className="mt-2 grid gap-2 sm:grid-cols-[180px_1fr] sm:items-end">
+                  <button
+                    type="button"
+                    onClick={() => void loadCaptcha()}
+                    disabled={captchaLoading}
+                    className="flex min-h-14 items-center justify-center rounded border border-slate-300 bg-white p-1 hover:bg-sky-50 disabled:cursor-wait"
+                    title="Lấy CAPTCHA mới"
+                  >
+                    {captchaLoading ? (
+                      <Loader2 size={18} className="animate-spin text-sky-600" />
+                    ) : captchaSrc ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={captchaSrc}
+                        alt="Mã CAPTCHA Cổng Thuế"
+                        className="max-h-16 w-full object-contain"
+                      />
+                    ) : (
+                      <span className="text-[10px] text-slate-500">
+                        Bấm để tải CAPTCHA
+                      </span>
+                    )}
+                  </button>
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Ký tự CAPTCHA
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        placeholder="Nhập CAPTCHA"
+                        value={captchaValue}
+                        onChange={(event) => setCaptchaValue(event.target.value)}
+                        className={inputCls}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void loadCaptcha()}
+                        disabled={captchaLoading}
+                        className="inline-flex shrink-0 items-center gap-1 rounded border border-slate-300 bg-white px-2 text-[10px] font-semibold text-slate-700 hover:bg-slate-100 disabled:bg-slate-100"
+                      >
+                        <RefreshCw size={12} />
+                        Đổi mã
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
 
             {/* Footer Action Bar */}
-            <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
+            <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
               <span className="text-[10px] text-slate-500">
-                Tự động lưu phiên Bearer Token (~24h).
+                Token CQT có hiệu lực 24 giờ. Kết nối trực tiếp HTTP an toàn.
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -1764,22 +2187,101 @@ export default function PurchaseInvoicesPage() {
                 >
                   Đóng
                 </button>
+                {isLocalHost && (
+                  <button
+                    type="button"
+                    onClick={handleInteractiveLoginAndSync}
+                    disabled={syncing || savingToken}
+                    title="Chỉ hoạt động khi chạy trên máy tính nội bộ có cài Playwright"
+                    className="inline-flex items-center gap-1 rounded bg-slate-600 hover:bg-slate-700 px-2.5 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    {syncing ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <KeyRound size={12} />
+                    )}
+                    Mở Web Thuế (Local)
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={handleInteractiveLoginAndSync}
-                  disabled={syncing}
+                  onClick={handleSaveTokenAndSync}
+                  disabled={syncing || savingToken}
                   className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
                 >
-                  {syncing ? (
+                  {savingToken || syncing ? (
                     <Loader2 size={13} className="animate-spin" />
                   ) : (
-                    <KeyRound size={13} />
+                    <CheckCircle2 size={13} />
                   )}
-                  Mở Web Thuế Đăng nhập & Tự bắt Token
+                  {captchaValue.trim()
+                    ? "Đăng nhập & Đồng bộ"
+                    : authManualToken.trim()
+                    ? "Lưu Token & Đồng bộ ngay"
+                    : activeTaxAccount?.has_bearer_token || credStatus?.has_bearer_token
+                    ? "Đồng bộ ngay với Token đã lưu"
+                    : "Nhập CAPTCHA để đăng nhập"}
                 </button>
               </div>
             </div>
           </form>
+        </div>
+      )}
+
+      {deletingTaxAccount && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md border border-slate-400 bg-white shadow-lg">
+            <div className="flex items-center justify-between bg-[#14263d] px-3 py-2 text-white">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={17} className="text-red-500" />
+                <span className="text-xs font-bold uppercase tracking-wide">
+                  Xác nhận xóa tài khoản thuế
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingTaxAccount(null)}
+                disabled={deletingAccount}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="border-b border-slate-200 px-3 py-3 text-xs text-slate-700">
+              Tài khoản{" "}
+              <strong className="font-mono text-slate-900">
+                {deletingTaxAccount.username}
+              </strong>{" "}
+              và{" "}
+              <strong className="text-red-700">
+                {deletingTaxAccount.invoice_count} hóa đơn đã đồng bộ
+              </strong>{" "}
+              sẽ bị xóa khỏi hệ thống. Các tài khoản thuế khác của NPP không bị ảnh hưởng.
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-slate-300 bg-slate-100 px-3 py-2">
+              <button
+                type="button"
+                onClick={() => setDeletingTaxAccount(null)}
+                disabled={deletingAccount}
+                className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-800 disabled:bg-slate-300"
+              >
+                Không xóa
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteTaxAccount}
+                disabled={deletingAccount}
+                className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 disabled:bg-slate-300"
+              >
+                {deletingAccount ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <Trash2 size={13} />
+                )}
+                Xác nhận xóa
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1923,6 +2425,12 @@ export default function PurchaseInvoicesPage() {
                       <span className="block text-[11px] font-mono text-slate-600">
                         MST người mua: {detailData.buyer_tax_code || "—"}
                       </span>
+                      <div className="text-[11px] text-slate-600">
+                        Tài khoản thuế đồng bộ:{" "}
+                        <strong className="font-mono text-sky-800">
+                          {detailData.tax_account_username || "—"}
+                        </strong>
+                      </div>
                     </div>
                     <div>
                       <span className="text-[10px] font-semibold text-slate-500 block">

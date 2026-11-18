@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from io import BytesIO
 import time
@@ -9,7 +10,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.multi_tenant_invoice import (
@@ -31,12 +32,63 @@ DEFAULT_HEADERS = {
     "Referer": f"{GDT_BASE_URL}/",
     "Origin": GDT_BASE_URL,
 }
+GDT_MAX_XML_WORKERS = 4
+GDT_MAX_REQUEST_ATTEMPTS = 3
+GDT_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
+
+def _gdt_get(
+    client: httpx.Client,
+    url: str,
+    *,
+    headers: dict[str, str],
+) -> httpx.Response:
+    last_error: Exception | None = None
+    for attempt in range(GDT_MAX_REQUEST_ATTEMPTS):
+        try:
+            response = client.get(url, headers=headers)
+            if response.status_code not in GDT_RETRYABLE_STATUS_CODES:
+                return response
+            last_error = RuntimeError(
+                f"Cổng Thuế trả về HTTP {response.status_code}"
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_error = exc
+        if attempt + 1 < GDT_MAX_REQUEST_ATTEMPTS:
+            time.sleep(0.5 * (2**attempt))
+    if last_error is not None:
+        raise RuntimeError(f"Không thể kết nối Cổng Thuế: {last_error}") from last_error
+    raise RuntimeError("Không thể kết nối Cổng Thuế.")
+
+
+import re
 
 def normalize_bearer_token(token: str) -> str:
     clean = (token or "").strip()
     if not clean:
         return ""
+
+    # 1. Nếu dán cURL hoặc header chứa "authorization: Bearer <token>"
+    bearer_match = re.search(
+        r"bearer\s+([A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+)",
+        clean,
+        re.IGNORECASE,
+    )
+    if bearer_match:
+        return f"Bearer {bearer_match.group(1).strip()}"
+
+    # 2. Nếu dán chuỗi JWT 3 đoạn (eyJ...)
+    jwt_match = re.search(
+        r"([A-Za-z0-9\-_=]{20,}\.[A-Za-z0-9\-_=]{20,}\.[A-Za-z0-9\-_=]+)",
+        clean,
+    )
+    if jwt_match:
+        return f"Bearer {jwt_match.group(1).strip()}"
+
+    # 3. Chuỗi thông thường
+    clean = clean.strip("'\"")
+    if clean.lower().startswith("authorization:"):
+        clean = clean[14:].strip()
     if not clean.lower().startswith("bearer "):
         return f"Bearer {clean}"
     return "Bearer " + clean[7:].strip()
@@ -436,7 +488,7 @@ def _download_and_extract_invoice_zip(
         "Referer": f"{GDT_BASE_URL}/tra-cuu/tra-cuu-hoa-don",
     }
 
-    resp = client.get(xml_url, headers=headers)
+    resp = _gdt_get(client, xml_url, headers=headers)
     if resp.status_code != 200 or not resp.content:
         return None, None
 
@@ -465,9 +517,11 @@ def _download_and_extract_invoice_zip(
 def sync_gdt_purchase_invoices(
     db: Session,
     distributor_id: int,
+    tax_credential_id: int,
     from_date: date,
     to_date: date,
     bearer_token: str,
+    sync_products: bool = True,
 ) -> dict[str, Any]:
     """Đồng bộ toàn bộ Hóa đơn điện tử mua vào (Có mã, Không mã, Máy tính tiền) từ Cổng Thuế
     và tự động tải + bóc tách XML hàng hóa lưu vào PostgreSQL."""
@@ -487,6 +541,7 @@ def sync_gdt_purchase_invoices(
     page_size = 50
     all_raw_items: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
+    warnings: list[str] = []
 
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
         for job_idx, job in enumerate(searches_to_run):
@@ -524,11 +579,16 @@ def sync_gdt_purchase_invoices(
                 }
                 state_param = f"&state={state}" if state else ""
                 url = f"{api_endpoint}?sort=tdlap:desc&size={page_size}{state_param}&search={search_param}"
-                resp = client.get(url, headers=headers)
+                try:
+                    resp = _gdt_get(client, url, headers=headers)
+                except RuntimeError as exc:
+                    warnings.append(f"{category}: {exc}")
+                    break
 
                 if resp.status_code == 401:
                     raise PermissionError("CQT_TOKEN_EXPIRED")
                 if resp.status_code != 200:
+                    warnings.append(f"{category}: Cổng Thuế trả về HTTP {resp.status_code}")
                     break
 
                 data = resp.json()
@@ -573,8 +633,50 @@ def sync_gdt_purchase_invoices(
                 if not state or len(page_datas) < page_size:
                     break
 
+            if state and fetched_for_ttxly >= page_size * 50:
+                warnings.append(
+                    f"{category}: đã đạt giới hạn 50 trang; hãy thu hẹp khoảng ngày để đồng bộ đủ."
+                )
+
         saved_invoices = 0
         xml_extracted_count = 0
+        saved_invoice_ids: list[int] = []
+        xml_download_jobs: list[tuple[PurchaseInvoice, dict[str, Any]]] = []
+        identity_rows: list[tuple[str, str, str, str]] = []
+
+        for raw in all_raw_items:
+            nbmst = str(raw.get("nbmst") or raw.get("mst") or raw.get("mstban") or "").strip()
+            khhdon = str(raw.get("khhdon") or raw.get("kyHieu") or "").strip()
+            shdon = str(raw.get("shdon") or raw.get("soHoaDon") or raw.get("soHd") or "").strip()
+            khmshdon = str(raw.get("khmshdon") or raw.get("mauSo") or "1").strip()
+            if nbmst and khhdon and shdon:
+                identity_rows.append((nbmst, khmshdon, khhdon, shdon))
+
+        existing_by_identity: dict[tuple[str, str, str, str], PurchaseInvoice] = {}
+        if identity_rows:
+            existing_rows = db.scalars(
+                select(PurchaseInvoice)
+                .options(selectinload(PurchaseInvoice.items))
+                .where(
+                    PurchaseInvoice.distributor_id == distributor_id,
+                    PurchaseInvoice.tax_credential_id == tax_credential_id,
+                    tuple_(
+                        PurchaseInvoice.seller_tax_code,
+                        PurchaseInvoice.invoice_template,
+                        PurchaseInvoice.invoice_symbol,
+                        PurchaseInvoice.invoice_number,
+                    ).in_(identity_rows),
+                )
+            ).all()
+            existing_by_identity = {
+                (
+                    row.seller_tax_code,
+                    row.invoice_template,
+                    row.invoice_symbol,
+                    row.invoice_number,
+                ): row
+                for row in existing_rows
+            }
 
         for raw in all_raw_items:
             ext_id = str(raw.get("id") or raw.get("maHoaDon") or raw.get("hdonId") or "").strip() or None
@@ -600,20 +702,12 @@ def sync_gdt_purchase_invoices(
             if not (nbmst and khhdon and shdon):
                 continue
 
-            existing = db.scalar(
-                select(PurchaseInvoice)
-                .options(selectinload(PurchaseInvoice.items))
-                .where(
-                    PurchaseInvoice.distributor_id == distributor_id,
-                    PurchaseInvoice.seller_tax_code == nbmst,
-                    PurchaseInvoice.invoice_template == khmshdon,
-                    PurchaseInvoice.invoice_symbol == khhdon,
-                    PurchaseInvoice.invoice_number == shdon,
-                )
-            )
+            identity = (nbmst, khmshdon, khhdon, shdon)
+            existing = existing_by_identity.get(identity)
             if existing is None:
                 existing = PurchaseInvoice(
                     distributor_id=distributor_id,
+                    tax_credential_id=tax_credential_id,
                     external_id=ext_id,
                     invoice_template=khmshdon,
                     invoice_symbol=khhdon,
@@ -635,6 +729,7 @@ def sync_gdt_purchase_invoices(
                 )
                 db.add(existing)
                 db.flush()
+                existing_by_identity[identity] = existing
             else:
                 existing.external_id = ext_id or existing.external_id
                 existing.invoice_date = inv_date or existing.invoice_date
@@ -654,86 +749,118 @@ def sync_gdt_purchase_invoices(
                 existing.raw_metadata = raw
                 existing.synced_at = datetime.utcnow()
 
-            # Tải ZIP/XML và bóc tách dòng hàng hóa nếu chưa tải
             if not existing.xml_downloaded or not existing.items:
-                try:
-                    if xml_extracted_count > 0:
-                        time.sleep(0.8)
-                    xml_text, html_text = _download_and_extract_invoice_zip(
-                        client=client,
-                        bearer_token=norm_token,
-                        nbmst=nbmst,
-                        khhdon=khhdon,
-                        shdon=shdon,
-                        khmshdon=khmshdon,
-                        is_mtt=is_mtt,
+                xml_download_jobs.append(
+                    (
+                        existing,
+                        {
+                            "nbmst": nbmst,
+                            "khhdon": khhdon,
+                            "shdon": shdon,
+                            "khmshdon": khmshdon,
+                            "is_mtt": is_mtt,
+                        },
                     )
-                    if xml_text:
-                        existing.xml_content = xml_text
-                        existing.html_content = html_text
-                        existing.xml_downloaded = True
-                        parsed_xml = parse_gdt_invoice_xml(xml_text)
-
-                        if parsed_xml.get("seller_name"):
-                            existing.seller_name = parsed_xml["seller_name"]
-                        if parsed_xml.get("seller_address"):
-                            existing.seller_address = parsed_xml["seller_address"]
-                        if parsed_xml.get("buyer_tax_code"):
-                            existing.buyer_tax_code = parsed_xml["buyer_tax_code"]
-                        if parsed_xml.get("buyer_name"):
-                            existing.buyer_name = parsed_xml["buyer_name"]
-                        if parsed_xml.get("replaced_invoice_number"):
-                            existing.replaced_invoice_number = parsed_xml["replaced_invoice_number"]
-                        if parsed_xml.get("replaced_invoice_date"):
-                            existing.replaced_invoice_date = parsed_xml["replaced_invoice_date"]
-                        if parsed_xml.get("amount_before_tax", 0) > 0:
-                            existing.amount_before_tax = parsed_xml["amount_before_tax"]
-                        if parsed_xml.get("tax_amount", 0) > 0:
-                            existing.tax_amount = parsed_xml["tax_amount"]
-                        if parsed_xml.get("total_amount", 0) > 0:
-                            existing.total_amount = parsed_xml["total_amount"]
-
-                        existing.items.clear()
-                        db.flush()
-                        for item_dict in parsed_xml.get("items", []):
-                            db.add(
-                                PurchaseInvoiceItem(
-                                    purchase_invoice_id=existing.id,
-                                    line_number=item_dict["line_number"],
-                                    product_code=item_dict["product_code"] or None,
-                                    product_name=item_dict["product_name"] or "(Không tên)",
-                                    unit_name=item_dict["unit_name"] or None,
-                                    quantity=item_dict["quantity"],
-                                    unit_price=item_dict["unit_price"],
-                                    discount_amount=item_dict["discount_amount"],
-                                    amount_before_tax=item_dict["amount_before_tax"],
-                                    vat_rate=item_dict["vat_rate"] or None,
-                                )
-                            )
-                        xml_extracted_count += 1
-                except Exception:
-                    pass
+                )
 
             saved_invoices += 1
+            if existing.id and existing.id not in saved_invoice_ids:
+                saved_invoice_ids.append(existing.id)
+
+        def download_job(params: dict[str, Any]) -> tuple[str | None, str | None]:
+            with httpx.Client(timeout=30.0, follow_redirects=True) as download_client:
+                return _download_and_extract_invoice_zip(
+                    client=download_client,
+                    bearer_token=norm_token,
+                    **params,
+                )
+
+        if xml_download_jobs:
+            with ThreadPoolExecutor(max_workers=GDT_MAX_XML_WORKERS) as executor:
+                futures = {
+                    executor.submit(download_job, params): existing
+                    for existing, params in xml_download_jobs
+                }
+                for future in as_completed(futures):
+                    existing = futures[future]
+                    try:
+                        xml_text, html_text = future.result()
+                    except Exception as exc:
+                        warnings.append(
+                            f"HĐ {existing.invoice_number}: không tải được XML ({exc})"
+                        )
+                        continue
+                    if not xml_text:
+                        continue
+                    existing.xml_content = xml_text
+                    existing.html_content = html_text
+                    existing.xml_downloaded = True
+                    parsed_xml = parse_gdt_invoice_xml(xml_text)
+                    if parsed_xml.get("seller_name"):
+                        existing.seller_name = parsed_xml["seller_name"]
+                    if parsed_xml.get("seller_address"):
+                        existing.seller_address = parsed_xml["seller_address"]
+                    if parsed_xml.get("buyer_tax_code"):
+                        existing.buyer_tax_code = parsed_xml["buyer_tax_code"]
+                    if parsed_xml.get("buyer_name"):
+                        existing.buyer_name = parsed_xml["buyer_name"]
+                    if parsed_xml.get("replaced_invoice_number"):
+                        existing.replaced_invoice_number = parsed_xml["replaced_invoice_number"]
+                    if parsed_xml.get("replaced_invoice_date"):
+                        existing.replaced_invoice_date = parsed_xml["replaced_invoice_date"]
+                    if parsed_xml.get("amount_before_tax", 0) > 0:
+                        existing.amount_before_tax = parsed_xml["amount_before_tax"]
+                    if parsed_xml.get("tax_amount", 0) > 0:
+                        existing.tax_amount = parsed_xml["tax_amount"]
+                    if parsed_xml.get("total_amount", 0) > 0:
+                        existing.total_amount = parsed_xml["total_amount"]
+
+                    existing.items.clear()
+                    db.flush()
+                    for item_dict in parsed_xml.get("items", []):
+                        db.add(
+                            PurchaseInvoiceItem(
+                                purchase_invoice_id=existing.id,
+                                line_number=item_dict["line_number"],
+                                product_code=item_dict["product_code"] or None,
+                                product_name=item_dict["product_name"] or "(Không tên)",
+                                unit_name=item_dict["unit_name"] or None,
+                                quantity=item_dict["quantity"],
+                                unit_price=item_dict["unit_price"],
+                                discount_amount=item_dict["discount_amount"],
+                                amount_before_tax=item_dict["amount_before_tax"],
+                                vat_rate=item_dict["vat_rate"] or None,
+                            )
+                        )
+                    xml_extracted_count += 1
 
     cred = db.scalar(
-        select(TaxAuthorityCredential).where(TaxAuthorityCredential.distributor_id == distributor_id)
+        select(TaxAuthorityCredential).where(
+            TaxAuthorityCredential.id == tax_credential_id,
+            TaxAuthorityCredential.distributor_id == distributor_id,
+        )
     )
     if cred:
         cred.last_synced_at = datetime.utcnow()
 
-    try:
-        from app.crud.product import sync_products_from_system_data
-        db.flush()
-        sync_products_from_system_data(db, commit=False)
-    except Exception:
-        pass
+    if sync_products:
+        try:
+            from app.crud.product import sync_products_from_system_data
+            db.flush()
+            if saved_invoice_ids:
+                sync_products_from_system_data(
+                    db, invoice_ids=saved_invoice_ids, commit=False
+                )
+        except Exception as exc:
+            warnings.append(f"Không đồng bộ được danh mục sản phẩm: {exc}")
 
     db.commit()
     return {
         "total_found": len(all_raw_items),
         "saved_invoices": saved_invoices,
         "xml_extracted_count": xml_extracted_count,
+        "saved_invoice_ids": saved_invoice_ids,
+        "warnings": warnings,
     }
 
 

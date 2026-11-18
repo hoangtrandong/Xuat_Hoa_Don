@@ -373,25 +373,144 @@ def list_product_companies(product_id: int, db: Session = Depends(get_db)):
 
 @router.get("/products/company-links", response_model=list[ProductCompanyManagementView])
 def list_product_company_links(db: Session = Depends(get_db)):
-    groups = db.scalars(select(ProductGroup).options(selectinload(ProductGroup.items).selectinload(ProductGroupItem.product), selectinload(ProductGroup.company_links).selectinload(ProductGroupCompany.company))).all()
+    from app.models.vinamilk import VinamilkOrderSnapshot
+    from app.models.multi_tenant_invoice import Distributor
+    from sqlalchemy import func
+
+    # 1. Danh sách Nhà phân phối và Công ty
+    distributors = db.scalars(select(Distributor)).all()
+    default_dist = next((d for d in distributors if "MAIGOLD" in (d.code or "").upper()), None) or (distributors[0] if distributors else None)
+    dist_id = default_dist.id if default_dist else 1
+    dist_name = default_dist.name if default_dist else "Nhà Phân Phối Mai Gold"
+
+    # 2. Toàn bộ mã sản phẩm đồng bộ từ web nhà cung cấp từ đơn hàng (SQL Aggregated - Fast & Scalable)
+    agg_sql = text("""
+        SELECT
+            UPPER(TRIM(product_code)) as code,
+            MAX(product_name) as name,
+            COUNT(DISTINCT order_number) as order_count,
+            COALESCE(MAX(raw_payload->>'ĐVT'), MAX(raw_payload->>'unit'), 'HOP') as unit,
+            COALESCE(MAX(raw_payload->>'supplier'), 'Vinamilk') as supplier,
+            COALESCE(MAX(CASE WHEN (raw_payload->>'Đơn giá') ~ '^[0-9.]+$' THEN CAST(raw_payload->>'Đơn giá' AS FLOAT) ELSE 0 END), 0.0) as price,
+            COALESCE(SUM(CASE WHEN (raw_payload->>'Số lượng') ~ '^[0-9.]+$' THEN CAST(raw_payload->>'Số lượng' AS FLOAT) ELSE 0 END), 0.0) +
+            COALESCE(SUM(CASE WHEN (raw_payload->>'Số lượng KM') ~ '^[0-9.]+$' THEN CAST(raw_payload->>'Số lượng KM' AS FLOAT) ELSE 0 END), 0.0) as total_qty
+        FROM vinamilk_order_snapshots
+        WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+        GROUP BY UPPER(TRIM(product_code))
+    """)
+    agg_rows = db.execute(agg_sql).mappings().all()
+
+    dms_map: dict[str, dict] = {}
+    for r in agg_rows:
+        c = r["code"]
+        dms_map[c] = {
+            "code": c,
+            "name": r["name"] or f"Sản phẩm {c}",
+            "unit": r["unit"] or "HOP",
+            "price": float(r["price"] or 0.0),
+            "order_count": int(r["order_count"] or 0),
+            "total_qty": float(r["total_qty"] or 0.0),
+            "supplier": r["supplier"] or "Vinamilk",
+        }
+
+    # 3. Tra cứu sản phẩm SKU trong DB (nguồn CQT)
+    all_products = db.scalars(select(Product)).all()
+    prod_by_npp: dict[str, Product] = {}
+    prod_by_sku: dict[str, Product] = {}
+    for p in all_products:
+        if p.sku:
+            prod_by_sku[p.sku.strip().upper()] = p
+        if p.npp_code:
+            prod_by_npp[p.npp_code.strip().upper()] = p
+
+    # 4. Nhóm ProductGroup hiện tại
+    groups = db.scalars(
+        select(ProductGroup).options(
+            selectinload(ProductGroup.items).selectinload(ProductGroupItem.product),
+            selectinload(ProductGroup.company_links).selectinload(ProductGroupCompany.company),
+        )
+    ).all()
+
     result: list[ProductCompanyManagementView] = []
+    seen_dms_codes: set[str] = set()
+
     for group in groups:
         members = [item.product for item in group.items]
         companies = []
         for link in group.company_links:
-            company = link.company
-            if company:
-                companies.append({"id": link.id, "company_id": company.id, "company_name": company.name, "role": link.role, "status": link.status, "distributor_sku": link.distributor_sku, "distributor_name": link.distributor_name})
+            c_name = link.company.name if link.company else dist_name
+            c_id = link.company.id if link.company else dist_id
+            companies.append({
+                "id": link.id,
+                "company_id": c_id,
+                "company_name": c_name,
+                "role": link.role,
+                "status": link.status,
+                "distributor_sku": link.distributor_sku,
+                "distributor_name": link.distributor_name,
+            })
+            if link.distributor_sku:
+                seen_dms_codes.add(link.distributor_sku.strip().upper())
+
         representative = next((p for p in members if p.id == group.representative_product_id), None)
+        rep_sku = representative.sku if representative else str(group.representative_product_id)
+        rep_name = representative.name if representative else group.name
+
+        # Tìm thông tin đơn hàng DMS tương ứng
+        dms_info = next((dms_map[c] for c in dms_map if c == rep_sku or any(c == (l.get("distributor_sku") or "").upper() for l in companies)), None)
+
         result.append(ProductCompanyManagementView(
             product_group_id=group.id,
             group_name=group.name,
-            representative_sku=representative.sku if representative else str(group.representative_product_id),
-            representative_name=representative.name if representative else "Chưa xác định",
+            representative_sku=rep_sku,
+            representative_name=rep_name,
             member_skus=[p.sku for p in members],
             member_names=[p.name for p in members],
             companies=companies,
+            supplier=dms_info.get("supplier") if dms_info else "Vinamilk",
+            order_count=dms_info.get("order_count", 0) if dms_info else 0,
+            total_ordered_qty=round(dms_info.get("total_qty", 0.0), 2) if dms_info else 0.0,
+            unit_price=dms_info.get("price", 0.0) if dms_info else 0.0,
+            unit=dms_info.get("unit") if dms_info else None,
         ))
+
+    # 5. Bổ sung TOÀN BỘ các mã sản phẩm từ web NCC từ đơn hàng (chưa có trong ProductGroup)
+    virtual_id = 900000
+    for code, dms in sorted(dms_map.items()):
+        if code in seen_dms_codes:
+            continue
+        virtual_id += 1
+
+        # Kiểm tra xem mã này đã được gán vào SKU nào chưa
+        matched_prod = prod_by_npp.get(code) or prod_by_sku.get(code)
+        rep_sku = matched_prod.sku if matched_prod else "Chưa gán SKU CQT"
+        rep_name = matched_prod.name if matched_prod else "Chờ đồng bộ HĐ CQT hoặc ghép mã"
+
+        companies = [{
+            "id": virtual_id,
+            "company_id": dist_id,
+            "company_name": dist_name,
+            "role": "MANAGER",
+            "status": "active",
+            "distributor_sku": code,
+            "distributor_name": dms["name"],
+        }]
+
+        result.append(ProductCompanyManagementView(
+            product_group_id=virtual_id,
+            group_name=dms["name"],
+            representative_sku=rep_sku,
+            representative_name=rep_name,
+            member_skus=[code],
+            member_names=[dms["name"]],
+            companies=companies,
+            supplier=dms["supplier"],
+            order_count=dms["order_count"],
+            total_ordered_qty=round(dms["total_qty"], 2),
+            unit_price=round(dms["price"], 4),
+            unit=dms["unit"],
+        ))
+
     return result
 
 
@@ -408,3 +527,290 @@ def unlink_product_company(product_id: int, company_id: int, db: Session = Depen
     db.delete(link)
     db.commit()
     return {"success": True}
+
+
+from pydantic import BaseModel
+
+class DistributorSkuMappingPayload(BaseModel):
+    distributor_sku: str
+    target_sku: str | None = None
+    distributor_name: str | None = None
+
+
+@router.post("/distributor-mapping")
+def map_distributor_sku(payload: DistributorSkuMappingPayload, db: Session = Depends(get_db)):
+    """Ghép hoặc cập nhật ánh xạ giữa Mã sản phẩm web NCC (Mã NPP) và Mã SKU CQT."""
+    dms_code = payload.distributor_sku.strip().upper()
+    target_sku = payload.target_sku.strip().upper() if payload.target_sku else None
+
+    # Tìm sản phẩm CQT đích
+    target_prod = None
+    if target_sku:
+        target_prod = db.scalar(select(Product).where(Product.sku == target_sku))
+        if not target_prod:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy mã SKU CQT '{target_sku}'.")
+
+    # Cập nhật Product nếu có
+    if target_prod:
+        target_prod.npp_code = dms_code
+        db.commit()
+
+    return {
+        "success": True,
+        "distributor_sku": dms_code,
+        "mapped_sku": target_prod.sku if target_prod else None,
+        "message": f"Đã ghép mã NPP '{dms_code}' với SKU CQT '{target_prod.sku}'." if target_prod else f"Đã lưu mã NPP '{dms_code}'."
+    }
+
+
+class DistributorProductUpdatePayload(BaseModel):
+    original_code: str
+    new_code: str
+    distributor_name: str | None = None
+    unit: str | None = None
+    supplier: str | None = None
+
+
+@router.put("/distributor-products")
+def update_distributor_product(payload: DistributorProductUpdatePayload, db: Session = Depends(get_db)):
+    """Chỉnh sửa thông tin mã sản phẩm NPP nội bộ."""
+    orig = payload.original_code.strip().upper()
+    new_c = payload.new_code.strip().upper()
+    new_name = payload.distributor_name.strip() if payload.distributor_name else None
+    unit = payload.unit.strip().upper() if payload.unit else None
+
+    if not orig or not new_c:
+        raise HTTPException(status_code=400, detail="Mã sản phẩm không được để trống.")
+
+    from app.models.vinamilk import VinamilkOrderSnapshot
+
+    # 1. Cập nhật trong ProductGroupCompany
+    pg_links = db.scalars(select(ProductGroupCompany).where(ProductGroupCompany.distributor_sku == orig)).all()
+    for link in pg_links:
+        link.distributor_sku = new_c
+        if new_name:
+            link.distributor_name = new_name
+
+    # 2. Cập nhật trong VinamilkOrderSnapshot
+    snaps = db.scalars(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.product_code == orig)).all()
+    for s in snaps:
+        s.product_code = new_c
+        if new_name:
+            s.product_name = new_name
+        if unit and isinstance(s.raw_payload, dict):
+            raw = dict(s.raw_payload)
+            raw["ĐVT"] = unit
+            s.raw_payload = raw
+
+    # 3. Cập nhật trong Product.npp_code nếu có ánh xạ
+    prods = db.scalars(select(Product).where(Product.npp_code == orig)).all()
+    for p in prods:
+        p.npp_code = new_c
+
+    db.commit()
+    return {
+        "success": True,
+        "message": f"Đã cập nhật mã sản phẩm NPP '{orig}' thành '{new_c}'.",
+        "original_code": orig,
+        "new_code": new_c,
+    }
+
+
+@router.delete("/distributor-products/{code}")
+def delete_distributor_product(code: str, db: Session = Depends(get_db)):
+    """Xóa mã sản phẩm NPP nội bộ khỏi danh mục."""
+    clean_code = code.strip().upper()
+    if not clean_code:
+        raise HTTPException(status_code=400, detail="Mã sản phẩm không hợp lệ.")
+
+    from app.models.vinamilk import VinamilkOrderSnapshot
+
+    # 1. Xóa trong ProductGroupCompany
+    pg_links = db.scalars(select(ProductGroupCompany).where(ProductGroupCompany.distributor_sku == clean_code)).all()
+    for link in pg_links:
+        group_id = link.product_group_id
+        db.delete(link)
+        other_links = db.scalars(
+            select(ProductGroupCompany).where(
+                ProductGroupCompany.product_group_id == group_id,
+                ProductGroupCompany.id != link.id,
+            )
+        ).all()
+        if not other_links:
+            items = db.scalars(select(ProductGroupItem).where(ProductGroupItem.product_group_id == group_id)).all()
+            for it in items:
+                db.delete(it)
+            grp = db.get(ProductGroup, group_id)
+            if grp:
+                db.delete(grp)
+
+    # 2. Xóa các bản ghi snapshot có mã này
+    snaps = db.scalars(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.product_code == clean_code)).all()
+    for s in snaps:
+        db.delete(s)
+
+    # 3. Gỡ npp_code trong Product nếu có
+    prods = db.scalars(select(Product).where(Product.npp_code == clean_code)).all()
+    for p in prods:
+        p.npp_code = None
+
+    db.commit()
+    return {
+        "success": True,
+        "message": f"Đã xóa mã sản phẩm NPP '{clean_code}' thành công.",
+        "deleted_code": clean_code,
+    }
+
+
+@router.get("/distributor-products/template")
+def download_distributor_product_template():
+    """Tải file Excel mẫu để thêm danh sách mã sản phẩm NPP."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "DS_Ma_SP_NPP"
+    ws.append(["Mã SP NPP", "Tên sản phẩm", "ĐVT", "Nhà cung cấp", "Nhà phân phối"])
+    ws.append(["01TD03", "Sữa tươi tiệt trùng có đường 180ml", "HOP", "Vinamilk", "Nhà Phân Phối Mai Gold"])
+    ws.append(["07KD12", "Sữa chua ăn lựu đỏ 100g", "HOP", "Vinamilk", "Nhà Phân Phối Mai Gold"])
+    ws.append(["01SX11", "Sữa dinh dưỡng Optimum Gold 110ml", "HOP", "Vinamilk", "Nhà Phân Phối Mai Gold"])
+
+    # Định dạng độ rộng cột
+    ws.column_dimensions["A"].width = 16
+    ws.column_dimensions["B"].width = 42
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 20
+    ws.column_dimensions["E"].width = 26
+
+    output = BytesIO()
+    wb.save(output)
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="mau-danh-sach-ma-sp-npp.xlsx"'},
+    )
+
+
+@router.post("/distributor-products/upload")
+def upload_distributor_products(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload file Excel để thêm / cập nhật danh sách mã sản phẩm NPP vào hệ thống."""
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
+        raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel định dạng .xlsx hoặc .xls.")
+
+    import uuid
+    from datetime import datetime
+    from app.models.vinamilk import VinamilkOrderSnapshot
+
+    try:
+        content = file.file.read()
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        sheet = wb.active
+        rows = list(sheet.iter_rows(values_only=True))
+        if not rows or len(rows) < 2:
+            raise HTTPException(status_code=400, detail="File Excel không có dữ liệu để xử lý.")
+
+        # Chuẩn hóa headers
+        raw_headers = [str(c or "").strip().lower() for c in rows[0]]
+
+        # Tìm index các cột
+        code_idx = -1
+        name_idx = -1
+        unit_idx = -1
+        supplier_idx = -1
+        dist_idx = -1
+
+        for idx, h in enumerate(raw_headers):
+            if any(k in h for k in ["mã sp npp", "mã sp", "distributor_sku", "sku", "mã sản phẩm", "ma_sp"]):
+                code_idx = idx
+            elif any(k in h for k in ["tên sản phẩm", "tên sp", "distributor_name", "name", "ten_sp", "sản phẩm"]):
+                name_idx = idx
+            elif any(k in h for k in ["đvt", "unit", "đơn vị tính", "dvt"]):
+                unit_idx = idx
+            elif any(k in h for k in ["nhà cung cấp", "supplier", "ncc"]):
+                supplier_idx = idx
+            elif any(k in h for k in ["nhà phân phối", "distributor", "npp"]):
+                dist_idx = idx
+
+        if code_idx == -1:
+            code_idx = 0  # Mặc định cột đầu tiên là Mã SP NPP
+
+        added = 0
+        updated = 0
+        now = datetime.utcnow()
+
+        # Cache existing snapshot products
+        existing_snaps = {
+            (s.product_code or "").strip().upper(): s
+            for s in db.scalars(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.product_code.is_not(None))).all()
+        }
+
+        # Cache existing product group company links
+        existing_links = {
+            (l.distributor_sku or "").strip().upper(): l
+            for l in db.scalars(select(ProductGroupCompany).where(ProductGroupCompany.distributor_sku.is_not(None))).all()
+        }
+
+        for row_num, row in enumerate(rows[1:], start=2):
+            if not row or all(v is None or str(v).strip() == "" for v in row):
+                continue
+
+            code_val = str(row[code_idx] or "").strip().upper() if code_idx < len(row) else ""
+            if not code_val:
+                continue
+
+            name_val = str(row[name_idx] or "").strip() if name_idx != -1 and name_idx < len(row) and row[name_idx] is not None else ""
+            if not name_val:
+                name_val = f"Sản phẩm {code_val}"
+
+            unit_val = str(row[unit_idx] or "").strip().upper() if unit_idx != -1 and unit_idx < len(row) and row[unit_idx] is not None else "HOP"
+            supplier_val = str(row[supplier_idx] or "").strip() if supplier_idx != -1 and supplier_idx < len(row) and row[supplier_idx] is not None else "Vinamilk"
+            dist_val = str(row[dist_idx] or "").strip() if dist_idx != -1 and dist_idx < len(row) and row[dist_idx] is not None else "Nhà Phân Phối Mai Gold"
+
+            # Cập nhật hoặc thêm vào ProductGroupCompany nếu có link
+            if code_val in existing_links:
+                link = existing_links[code_val]
+                link.distributor_name = name_val
+
+            # Cập nhật hoặc thêm vào VinamilkOrderSnapshot
+            if code_val in existing_snaps:
+                snap = existing_snaps[code_val]
+                snap.product_name = name_val
+                raw = dict(snap.raw_payload) if isinstance(snap.raw_payload, dict) else {}
+                raw["ĐVT"] = unit_val
+                raw["supplier"] = supplier_val
+                raw["Sản phẩm"] = name_val
+                snap.raw_payload = raw
+                updated += 1
+            else:
+                new_snap = VinamilkOrderSnapshot(
+                    remote_key=f"MANUAL_{code_val}_{uuid.uuid4().hex[:8]}",
+                    is_synthetic=True,
+                    product_code=code_val,
+                    product_name=name_val,
+                    status="active",
+                    synced_from=now,
+                    synced_to=now,
+                    synced_at=now,
+                    raw_payload={
+                        "ĐVT": unit_val,
+                        "supplier": supplier_val,
+                        "Sản phẩm": name_val,
+                        "is_manual": True,
+                    },
+                )
+                db.add(new_snap)
+                existing_snaps[code_val] = new_snap
+                added += 1
+
+        db.commit()
+        return {
+            "success": True,
+            "message": f"Tải lên thành công: Đã thêm mới {added} mã và cập nhật {updated} mã SP NPP.",
+            "added": added,
+            "updated": updated,
+            "total_processed": added + updated,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Lỗi khi đọc file Excel: {str(e)}")

@@ -264,7 +264,7 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
                     <th className="py-2 px-2 border-r border-gray-300 w-8 text-center">STT</th>
                     <th className="py-2 px-2 border-r border-gray-300 w-24">Mã SKU</th>
                     <th className="py-2 px-2 border-r border-gray-300">Tên sản phẩm</th>
-                    <th className="py-2 px-2 border-r border-gray-300 w-16 text-center">Quy cách</th>
+                    <th className="py-2 px-2 border-r border-gray-300 w-16 text-center">Quy cách (H/T)</th>
                     <th className="py-2 px-2 border-r border-gray-300 w-20 text-right bg-sky-50 print:bg-gray-100 font-bold">
                       Thùng (T)
                     </th>
@@ -292,7 +292,7 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
                         <td className="py-2 px-2 border-r border-gray-300 text-center text-gray-500">{idx + 1}</td>
                         <td className="py-2 px-2 border-r border-gray-300 font-mono font-medium text-gray-900">{item.sku}</td>
                         <td className="py-2 px-2 border-r border-gray-300 font-medium text-gray-900">{item.product_name}</td>
-                        <td className="py-2 px-2 border-r border-gray-300 text-center text-gray-500">{bpc} H/T</td>
+                        <td className="py-2 px-2 border-r border-gray-300 text-center text-gray-500">{bpc}</td>
                         <td className="py-2 px-2 border-r border-gray-300 text-right font-black text-sky-950 text-sm bg-sky-50/40 print:bg-transparent">
                           {cartons > 0 ? formatNumber(cartons) : "—"}
                         </td>
@@ -458,7 +458,7 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
                           <th className="border-r border-gray-300 px-2 py-2 text-center">STT</th>
                           <th className="border-r border-gray-300 px-2 py-2">Mã SKU</th>
                           <th className="border-r border-gray-300 px-2 py-2">Tên sản phẩm</th>
-                          <th className="border-r border-gray-300 px-2 py-2 text-center">Quy cách</th>
+                          <th className="border-r border-gray-300 px-2 py-2 text-center">Quy cách (H/T)</th>
                           <th className="border-r border-gray-300 px-2 py-2 text-right">Thùng</th>
                           <th className="border-r border-gray-300 px-2 py-2 text-right">Hộp lẻ</th>
                           <th className="px-2 py-2 text-right">Tổng hộp</th>
@@ -472,7 +472,7 @@ export default function DeliveryDispatchPrintModal({ open, onClose, request, war
                               <td className="border-r border-gray-300 px-2 py-2 text-center">{index + 1}</td>
                               <td className="border-r border-gray-300 px-2 py-2 font-mono">{item.sku}</td>
                               <td className="border-r border-gray-300 px-2 py-2 font-medium">{item.product_name}</td>
-                              <td className="border-r border-gray-300 px-2 py-2 text-center">{bpc} H/T</td>
+                              <td className="border-r border-gray-300 px-2 py-2 text-center">{bpc}</td>
                               <td className="border-r border-gray-300 px-2 py-2 text-right">{formatNumber(cartons)}</td>
                               <td className="border-r border-gray-300 px-2 py-2 text-right">{formatNumber(looseBoxes)}</td>
                               <td className="px-2 py-2 text-right font-bold">{formatNumber(quantity)}</td>

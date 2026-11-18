@@ -2025,12 +2025,36 @@ def list_local_vinamilk_orders(
         ).all()
         for allocation in allocations:
             allocations_by_snapshot[allocation.snapshot_id].append(allocation)
+    customer_codes = {
+        (
+            row.customer_code
+            or _field(row.raw_payload, ("customerCode", "shopCode", "Mã KH"))
+            or ""
+        ).strip().upper()
+        for row in rows
+    }
+    customer_codes.discard("")
+    customer_code_suffixes = {code[-3:] for code in customer_codes if len(code) >= 3}
+    customer_match = (
+        or_(
+            func.upper(func.trim(Customer.code)).in_(customer_codes),
+            func.substr(func.upper(func.trim(Customer.code)), -3, 3).in_(
+                customer_code_suffixes
+            ),
+        )
+        if customer_codes
+        else Customer.id == -1
+    )
     customer_manager_by_code: dict[str, tuple[str | None, str | None]] = {}
     customer_managers_by_suffix: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
     if rows:
         customer_assignments = db.execute(
             select(Customer.code, Customer.manager_code, Customer.manager_name).where(
-                or_(Customer.manager_code.is_not(None), Customer.manager_name.is_not(None))
+                customer_match,
+                or_(
+                    Customer.manager_code.is_not(None),
+                    Customer.manager_name.is_not(None),
+                ),
             )
         ).all()
         for customer_code, manager_code, manager_name in customer_assignments:
@@ -2040,23 +2064,13 @@ def list_local_vinamilk_orders(
                 customer_manager_by_code[normalized_code] = assignment
                 if len(normalized_code) >= 3:
                     customer_managers_by_suffix[normalized_code[-3:]].append(assignment)
-    customer_codes = {
-        (row.customer_code or _field(row.raw_payload, ("customerCode", "shopCode", "Mã KH")) or "").strip().upper()
-        for row in rows
-    }
-    customer_code_suffixes = {code[-3:] for code in customer_codes if len(code) >= 3}
     customers_by_code: dict[str, str | None] = {}
     customers_by_suffix: dict[str, list[str | None]] = defaultdict(list)
     if customer_codes:
         customer_rows = db.execute(
             select(Customer.code, Store.name)
             .outerjoin(Store, Customer.store_id == Store.id)
-            .where(
-                or_(
-                    func.upper(Customer.code).in_(customer_codes),
-                    func.upper(Customer.code).in_(customer_code_suffixes),
-                )
-            )
+            .where(customer_match)
         ).all()
         for customer_code, store_name in customer_rows:
             normalized_code = (customer_code or "").strip().upper()
@@ -2099,8 +2113,28 @@ def list_local_vinamilk_orders(
             if src_num and src_num not in pending_split_for:
                 pending_split_for[src_num] = req_item
 
+    order_numbers = {
+        (row.order_number or "").strip().upper()
+        for row in rows
+        if (row.order_number or "").strip()
+    }
+    product_codes = {
+        (row.product_code or "").strip().upper()
+        for row in rows
+        if (row.product_code or "").strip()
+    }
     products_by_sku = {}
-    for product in db.scalars(select(Product)).all():
+    product_stmt = select(Product)
+    if product_codes:
+        product_stmt = product_stmt.where(
+            or_(
+                func.upper(Product.sku).in_(product_codes),
+                func.upper(Product._npp_code).in_(product_codes),
+            )
+        )
+    else:
+        product_stmt = product_stmt.where(Product.id == -1)
+    for product in db.scalars(product_stmt):
         if product.sku:
             products_by_sku[product.sku.strip().upper()] = product
         if product.npp_code:
@@ -2108,11 +2142,23 @@ def list_local_vinamilk_orders(
 
     order_delivery_status: dict[str, str] = {}
     try:
-        dr_rows = db.execute(
-            select(DeliveryRequestOrder.order_number, DeliveryRequest.status)
-            .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
-            .order_by(DeliveryRequest.created_at.desc(), DeliveryRequest.id.desc())
-        ).all()
+        dr_rows = (
+            db.execute(
+                select(DeliveryRequestOrder.order_number, DeliveryRequest.status)
+                .join(
+                    DeliveryRequest,
+                    DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id,
+                )
+                .where(
+                    func.upper(func.trim(DeliveryRequestOrder.order_number)).in_(
+                        order_numbers
+                    )
+                )
+                .order_by(DeliveryRequest.created_at.desc(), DeliveryRequest.id.desc())
+            ).all()
+            if order_numbers
+            else []
+        )
         delivery_status_labels = {
             "DRAFT": "Chờ Admin duyệt",
             "SUBMITTED": "Đã duyệt - chờ kho nhận",
@@ -2129,7 +2175,6 @@ def list_local_vinamilk_orders(
     except Exception:
         pass
     delivery_assignments: dict[tuple[str, date | None], dict[str, str]] = defaultdict(dict)
-    order_numbers = {(row.order_number or "").strip().upper() for row in rows if (row.order_number or "").strip()}
     if order_numbers:
         assignments = db.execute(
             select(
@@ -2399,7 +2444,7 @@ def list_grouped_vinamilk_orders(
     while True:
         page = list_local_vinamilk_orders(
             from_date=from_date, to_date=to_date, source="sync", search=None,
-            status=None, skip=offset, limit=2000, db=db, current_user=current_user,
+            status=None, skip=offset, limit=10_000, db=db, current_user=current_user,
         )
         last_synced_at = page["last_synced_at"]
         for row in page["rows"]:

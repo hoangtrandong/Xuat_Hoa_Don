@@ -2078,46 +2078,30 @@ return Array.from(map.values());
         throw new Error("Nhà phân phối chưa có nguồn dữ liệu Nhà cung cấp nào đang hoạt động.");
       }
 
-      let syncedOrders = 0;
-      const succeededSources: string[] = [];
-      const failedSources: string[] = [];
-      for (let index = 0; index < activeSources.length; index += 1) {
-        const source = activeSources[index];
-        const sourceName = source.supplier_name || source.supplier_code;
-        setToast(`Đang đồng bộ nguồn ${index + 1}/${activeSources.length}: ${sourceName}...`);
-        try {
-          const response = await apiFetch(
-            `${API_URL}/einvoice/supplier-configs/${source.id}/sync-orders`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                from_date: fromDate,
-                to_date: toDate,
-              }),
-            }
-          );
-          const payload = await response.json() as {
-            synced_orders?: number;
-            detail?: string;
-          };
-          if (!response.ok) throw new Error(payload.detail ?? "Không lấy được dữ liệu.");
-          syncedOrders += payload.synced_orders ?? 0;
-          succeededSources.push(sourceName);
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : "Lỗi không xác định.";
-          failedSources.push(`${sourceName}: ${reason}`);
+      // Gửi yêu cầu vào Hàng Đợi Ngầm (Queue Engine)
+      const asyncRes = await apiFetch(
+        `${API_URL}/einvoice/supplier-configs/sync-all-async`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            distributor_id: distributorId,
+            from_date: fromDate,
+            to_date: toDate,
+          }),
         }
+      );
+      const asyncData = await asyncRes.json() as { message?: string; job_id?: string; detail?: string };
+      if (!asyncRes.ok) {
+        throw new Error(asyncData.detail || "Không thể kích hoạt hàng đợi đồng bộ ngầm.");
       }
 
-      await loadLocalOrders();
-      if (succeededSources.length === 0) {
-        throw new Error(`Không đồng bộ được nguồn nào:\n${failedSources.join("\n")}`);
-      }
-      if (failedSources.length > 0) {
-        setRemoteError(`Không đồng bộ được một số nguồn:\n${failedSources.join("\n")}`);
-      }
-      setToast(`Đã đồng bộ ${syncedOrders} đơn từ ${succeededSources.join(", ")}.`);
+      setToast("Đã đưa tác vụ đồng bộ vào hàng đợi ngầm! Theo dõi tiến độ % trên thanh thông báo.");
+      
+      // Hẹn giờ làm mới dữ liệu sau khi tiến trình ngầm hoàn tất
+      setTimeout(() => {
+        void loadLocalOrders();
+      }, 4000);
     } catch (error) {
       setRemoteError(error instanceof Error ? error.message : "Lỗi kết nối tới Server.");
       setToast("");

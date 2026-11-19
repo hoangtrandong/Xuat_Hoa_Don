@@ -1,15 +1,20 @@
+import asyncio
 from collections import defaultdict
 from datetime import date, datetime
 from io import BytesIO
 from typing import Any
+import httpx
 import zipfile
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.job_queue import job_manager
+
 from app.core.auth import get_current_user, hash_password, is_super_admin_user
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
 from app.models.multi_tenant_invoice import (
     Distributor,
     DistributorInvoiceConfig,
@@ -416,7 +421,6 @@ def _ensure_default_distributors_seeded(db: Session) -> None:
             connector_type="REST_API",
             api_endpoint_url="http://dms21.nazzy.vn/handler/BillsHandler.ashx",
             auth_type="COOKIE",
-            session_cookie=default_nazzy_cookie,
             field_mapping=preset_nazzy.get("field_mapping", {}),
             request_config={
                 "groupId": "1124|1064|1058|1059|1061|1062|1063|1060|-1",
@@ -1298,6 +1302,159 @@ def sync_orders_from_supplier_config(
     }
 
 
+class SyncAllSupplierOrdersAsyncRequest(BaseModel):
+    distributor_id: int
+    from_date: date | None = None
+    to_date: date | None = None
+
+
+async def _run_sync_supplier_configs_background(
+    job_id: str,
+    distributor_id: int,
+    target_from: date,
+    target_to: date,
+):
+    from app.core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        from app.models.multi_tenant_invoice import DistributorSupplierConfig
+        from app.services.supplier_connectors import RestApiSupplierConnector, DynamicFieldMapper, persist_canonical_orders_to_snapshots
+
+        configs = db.scalars(
+            select(DistributorSupplierConfig)
+            .options(selectinload(DistributorSupplierConfig.distributor))
+            .where(
+                DistributorSupplierConfig.distributor_id == distributor_id,
+                func.lower(DistributorSupplierConfig.status) == "active"
+            )
+        ).all()
+
+        if not configs:
+            job_manager.set_failed(job_id, "Không có nguồn nhà cung cấp nào đang kích hoạt (active).")
+            return
+
+        total_configs = len(configs)
+        job_manager.start_job(job_id, f"Bắt đầu đồng bộ từ {total_configs} nguồn nhà cung cấp...")
+        connector = RestApiSupplierConnector()
+        total_synced_orders = 0
+        total_saved_lines = 0
+
+        for idx, cfg in enumerate(configs, start=1):
+            source_name = cfg.supplier_name or cfg.supplier_code
+            job_manager.update_progress(
+                job_id,
+                current_step=idx - 1,
+                message=f"Đang đồng bộ nguồn {idx}/{total_configs}: {source_name}...",
+            )
+            try:
+                raw_rows = connector.fetch_raw_orders(cfg, target_from, target_to, allow_sample_fallback=False)
+                dist_code = cfg.distributor.code if cfg.distributor else None
+                canonical_orders = DynamicFieldMapper.transform_rows_to_canonical(
+                    raw_rows=raw_rows,
+                    supplier_code=cfg.supplier_code,
+                    field_mapping=cfg.field_mapping or {},
+                    distributor_code=dist_code,
+                )
+                saved_lines = persist_canonical_orders_to_snapshots(
+                    db=db,
+                    canonical_orders=canonical_orders,
+                    distributor_code=dist_code,
+                )
+                cfg.last_synced_at = datetime.utcnow()
+                db.commit()
+                total_synced_orders += len(canonical_orders)
+                total_saved_lines += saved_lines
+                job_manager.update_progress(
+                    job_id,
+                    current_step=idx,
+                    message=f"Đã đồng bộ {source_name}: {len(canonical_orders)} đơn ({saved_lines} dòng hàng).",
+                )
+            except Exception as src_err:
+                db.rollback()
+                job_manager.update_progress(
+                    job_id,
+                    current_step=idx,
+                    message=f"Nguồn {source_name} gặp lỗi: {src_err}",
+                )
+
+        job_manager.set_success(
+            job_id,
+            result_summary={"total_synced_orders": total_synced_orders, "total_saved_lines": total_saved_lines},
+            message=f"Đồng bộ hoàn tất! Đã lưu {total_synced_orders} đơn hàng ({total_saved_lines} dòng) từ {total_configs} nguồn.",
+        )
+    except Exception as exc:
+        db.rollback()
+        job_manager.set_failed(job_id, str(exc))
+    finally:
+        db.close()
+
+
+@router.post("/supplier-configs/sync-all-async")
+async def sync_all_supplier_configs_async(
+    payload: SyncAllSupplierOrdersAsyncRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Kích hoạt đồng bộ tất cả các nguồn NCC đang kích hoạt vào Hàng Đợi Ngầm (Queue) - 0ms."""
+    _ensure_user_can_access_supplier_config(current_user, payload.distributor_id)
+    target_from = payload.from_date or datetime.utcnow().date()
+    target_to = payload.to_date or target_from
+
+    job = job_manager.create_job(
+        job_type="SYNC_SUPPLIER_CONFIGS",
+        title=f"Đồng bộ đơn hàng NCC ({target_from:%d/%m} → {target_to:%d/%m})",
+        total_steps=100,
+    )
+
+    asyncio.create_task(
+        _run_sync_supplier_configs_background(job.id, payload.distributor_id, target_from, target_to)
+    )
+
+    return {
+        "job_id": job.id,
+        "status": "RUNNING",
+        "title": job.title,
+        "message": "Đã đưa tiến trình đồng bộ vào hàng đợi xử lý ngầm thành công.",
+    }
+
+
+class ViettelExportRequest(BaseModel):
+    order_numbers: list[str]
+    mode: str = "AGGREGATED"  # "AGGREGATED" | "SEPARATE"
+    default_tax: int = 8
+    custom_note: str = ""
+
+
+@router.post("/export/viettel-sinvoice")
+def export_viettel_sinvoice_endpoint(
+    payload: ViettelExportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Xuất file Excel theo đúng định dạng mẫu của Viettel S-Invoice (C26TTD)."""
+    from app.services.viettel_sinvoice_exporter import export_orders_to_viettel_sinvoice
+    try:
+        out = export_orders_to_viettel_sinvoice(
+            db=db,
+            order_numbers=payload.order_numbers,
+            mode=payload.mode,
+            default_tax=payload.default_tax,
+            custom_note=payload.custom_note,
+        )
+        now_str = datetime.now().strftime("%d%m%Y_%H%M%S")
+        filename = f"Viettel_SInvoice_{payload.mode}_{now_str}.xls"
+        return Response(
+            content=out.getvalue(),
+            media_type="application/vnd.ms-excel",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Access-Control-Expose-Headers": "Content-Disposition",
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/parse-curl")
 def parse_curl_endpoint(
     payload: CurlParseRequest,
@@ -2157,6 +2314,39 @@ def authenticate_gdt_account(
     }
 
 
+def _parse_sync_error_reason(exc: Exception) -> str:
+    """Xác định và diễn giải nguyên nhân lỗi thân thiện với người dùng khi đồng bộ Cổng Thuế."""
+    if isinstance(exc, PermissionError) or "cqt_token_expired" in str(exc).lower():
+        return "Phiên Bearer Token đã hết hạn (Cổng Thuế hết hạn sau 24h). Vui lòng cập nhật Bearer Token mới."
+
+    err_str = str(exc).strip()
+    err_lower = err_str.lower()
+
+    if "401" in err_str or "unauthorized" in err_lower:
+        return "Xác thực không thành công (HTTP 401 Unauthorized) - Bearer Token không đúng hoặc đã hết hạn."
+    if "403" in err_str or "forbidden" in err_lower:
+        return "Bị từ chối truy cập (HTTP 403 Forbidden) - Cổng Thuế tạm chặn kết nối hoặc giới hạn tần suất gọi."
+    if (
+        isinstance(exc, (httpx.TimeoutException, TimeoutError))
+        or "timeout" in err_lower
+        or "timed out" in err_lower
+    ):
+        return "Hết thời gian chờ phản hồi từ Cổng Thuế (Timeout). Máy chủ Thuế đang tải cao hoặc phản hồi chậm."
+    if (
+        isinstance(exc, (httpx.NetworkError, httpx.ConnectError))
+        or "connection" in err_lower
+        or "không thể kết nối" in err_lower
+    ):
+        return "Không thể kết nối đến máy chủ Cổng Thuế (hoadondientu.gdt.gov.vn). Lỗi mạng hoặc gián đoạn đường truyền."
+    if any(code in err_str for code in ["500", "502", "503", "504"]):
+        return f"Máy chủ Cổng Thuế đang gặp sự cố nội bộ ({err_str}). Vui lòng thử lại sau ít phút."
+    if "json" in err_lower or "decode" in err_lower:
+        return "Dữ liệu trả về từ Cổng Thuế không hợp lệ (máy chủ Thuế trả về định dạng bất thường)."
+    if "integrityerror" in err_lower or "duplicate" in err_lower or "unique" in err_lower:
+        return "Xung đột ràng buộc dữ liệu trong CSDL hệ thống."
+    return err_str or "Lỗi không xác định khi gọi Cổng Thuế."
+
+
 @router.post("/purchase-invoices/sync")
 def sync_purchase_invoices_endpoint(
     payload: GdtSyncPurchaseRequest,
@@ -2178,6 +2368,9 @@ def sync_purchase_invoices_endpoint(
     ready_credentials = [
         cred for cred in credentials if cred.bearer_token and cred.bearer_token.strip()
     ]
+    unready_credentials = [
+        cred for cred in credentials if not cred.bearer_token or not cred.bearer_token.strip()
+    ]
     if not ready_credentials:
         raise HTTPException(
             status_code=428,
@@ -2190,12 +2383,16 @@ def sync_purchase_invoices_endpoint(
             "saved_invoices": 0,
             "xml_extracted_count": 0,
             "synced_accounts": 0,
-            "skipped_accounts": len(credentials) - len(ready_credentials),
+            "skipped_accounts": len(unready_credentials),
+            "skipped_account_names": [
+                cred.username or f"Tài khoản #{cred.id}" for cred in unready_credentials
+            ],
             "errors": [],
             "warnings": [],
         }
         saved_invoice_ids: set[int] = set()
         for cred in ready_credentials:
+            cred_label = cred.username or f"Tài khoản #{cred.id}"
             try:
                 result = sync_gdt_purchase_invoices(
                     db=db,
@@ -2209,20 +2406,37 @@ def sync_purchase_invoices_endpoint(
                 for key in ("total_found", "saved_invoices", "xml_extracted_count"):
                     combined[key] += result[key]
                 saved_invoice_ids.update(result.get("saved_invoice_ids", []))
-                combined["warnings"].extend(result.get("warnings", []))
+                for w in result.get("warnings", []):
+                    w_str = str(w)
+                    if not w_str.startswith("["):
+                        w_str = f"[{cred_label}] {w_str}"
+                    combined["warnings"].append(w_str)
                 combined["synced_accounts"] += 1
             except Exception as exc:
                 db.rollback()
+                reason = _parse_sync_error_reason(exc)
                 combined["errors"].append(
                     {
                         "credential_id": cred.id,
-                        "username": cred.username,
+                        "username": cred_label,
+                        "reason": reason,
                         "detail": str(exc),
                     }
                 )
         if combined["synced_accounts"] == 0 and combined["errors"]:
+            if all(
+                "cqt_token_expired" in (err.get("detail", "") + err.get("reason", "")).lower()
+                for err in combined["errors"]
+            ):
+                raise PermissionError(
+                    "Phiên Bearer Token Cổng Thuế đã hết hạn. Vui lòng đăng nhập lại Cổng Thuế để làm mới phiên."
+                )
+            err_msgs = [
+                f"{e.get('username')}: {e.get('reason') or e.get('detail')}"
+                for e in combined["errors"]
+            ]
             raise RuntimeError(
-                f"Không tài khoản CQT nào đồng bộ thành công: {combined['errors'][0]['detail']}"
+                f"Không tài khoản CQT nào đồng bộ thành công: {'; '.join(err_msgs)}"
             )
         if saved_invoice_ids:
             from app.crud.product import sync_products_from_system_data
@@ -2249,6 +2463,185 @@ def sync_purchase_invoices_endpoint(
             status_code=502,
             detail=f"Lỗi khi đồng bộ hóa đơn mua vào từ Tổng cục Thuế: {exc}",
         ) from exc
+
+
+@router.post("/purchase-invoices/sync-stream")
+def sync_purchase_invoices_stream_endpoint(
+    payload: GdtSyncPurchaseRequest,
+    db: Session = Depends(get_db),
+):
+    """Đồng bộ hóa đơn mua vào từ Cổng Tổng cục Thuế với tính năng phát tiến trình trực tiếp (Live Stream Events)."""
+    if payload.to_date < payload.from_date:
+        raise HTTPException(status_code=400, detail="Từ ngày không được lớn hơn Đến ngày.")
+
+    credentials_stmt = select(TaxAuthorityCredential).where(
+        TaxAuthorityCredential.distributor_id == payload.distributor_id
+    )
+    if payload.tax_credential_id is not None:
+        credentials_stmt = credentials_stmt.where(
+            TaxAuthorityCredential.id == payload.tax_credential_id
+        )
+    credentials = list(db.scalars(credentials_stmt.order_by(TaxAuthorityCredential.id)))
+    if not credentials:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản CQT để đồng bộ.")
+    ready_credentials = [
+        cred for cred in credentials if cred.bearer_token and cred.bearer_token.strip()
+    ]
+    unready_credentials = [
+        cred for cred in credentials if not cred.bearer_token or not cred.bearer_token.strip()
+    ]
+    if not ready_credentials:
+        raise HTTPException(
+            status_code=428,
+            detail="CQT_TOKEN_REQUIRED: Chưa có phiên đăng nhập Cổng Thuế. Vui lòng xác thực tài khoản CQT.",
+        )
+
+    import json
+    import queue
+    import threading
+
+    event_q: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+    def sync_worker():
+        with SessionLocal() as worker_db:
+            try:
+                combined = {
+                    "total_found": 0,
+                    "saved_invoices": 0,
+                    "xml_extracted_count": 0,
+                    "synced_accounts": 0,
+                    "skipped_accounts": len(unready_credentials),
+                    "skipped_account_names": [
+                        cred.username or f"Tài khoản #{cred.id}" for cred in unready_credentials
+                    ],
+                    "errors": [],
+                    "warnings": [],
+                }
+                saved_invoice_ids: set[int] = set()
+
+                event_q.put({
+                    "type": "start",
+                    "total_accounts": len(ready_credentials),
+                    "skipped_accounts": len(unready_credentials),
+                    "skipped_names": combined["skipped_account_names"],
+                    "message": f"Bắt đầu đồng bộ cho {len(ready_credentials)} tài khoản CQT...",
+                })
+
+                for idx, cred in enumerate(ready_credentials):
+                    cred_label = cred.username or f"Tài khoản #{cred.id}"
+                    event_q.put({
+                        "type": "account_start",
+                        "account_index": idx + 1,
+                        "total_accounts": len(ready_credentials),
+                        "username": cred_label,
+                        "message": f"[{idx + 1}/{len(ready_credentials)}] Đang kết nối tài khoản: {cred_label}...",
+                    })
+
+                    def on_account_progress(progress_data: dict[str, Any]):
+                        event_q.put({
+                            "type": "progress",
+                            "account_index": idx + 1,
+                            "total_accounts": len(ready_credentials),
+                            "username": cred_label,
+                            **progress_data,
+                        })
+
+                    try:
+                        result = sync_gdt_purchase_invoices(
+                            db=worker_db,
+                            distributor_id=payload.distributor_id,
+                            tax_credential_id=cred.id,
+                            from_date=payload.from_date,
+                            to_date=payload.to_date,
+                            bearer_token=cred.bearer_token,
+                            sync_products=False,
+                            progress_callback=on_account_progress,
+                        )
+                        for key in ("total_found", "saved_invoices", "xml_extracted_count"):
+                            combined[key] += result[key]
+                        saved_invoice_ids.update(result.get("saved_invoice_ids", []))
+                        for w in result.get("warnings", []):
+                            w_str = str(w)
+                            if not w_str.startswith("["):
+                                w_str = f"[{cred_label}] {w_str}"
+                            combined["warnings"].append(w_str)
+                        combined["synced_accounts"] += 1
+
+                        event_q.put({
+                            "type": "account_done",
+                            "account_index": idx + 1,
+                            "total_accounts": len(ready_credentials),
+                            "username": cred_label,
+                            "found": result["total_found"],
+                            "saved": result["saved_invoices"],
+                            "xml_count": result["xml_extracted_count"],
+                            "message": f"[{idx + 1}/{len(ready_credentials)}] Hoàn tất {cred_label}: {result['saved_invoices']} HĐ đã lưu, {result['xml_extracted_count']} XML",
+                        })
+                    except Exception as exc:
+                        worker_db.rollback()
+                        reason = _parse_sync_error_reason(exc)
+                        combined["errors"].append({
+                            "credential_id": cred.id,
+                            "username": cred_label,
+                            "reason": reason,
+                            "detail": str(exc),
+                        })
+                        event_q.put({
+                            "type": "account_error",
+                            "account_index": idx + 1,
+                            "total_accounts": len(ready_credentials),
+                            "username": cred_label,
+                            "reason": reason,
+                            "detail": str(exc),
+                            "message": f"[{idx + 1}/{len(ready_credentials)}] Lỗi {cred_label}: {reason}",
+                        })
+
+                if saved_invoice_ids:
+                    event_q.put({
+                        "type": "sync_products",
+                        "message": "Đang đồng bộ danh mục sản phẩm từ hóa đơn...",
+                    })
+                    from app.crud.product import sync_products_from_system_data
+                    try:
+                        worker_db.flush()
+                        sync_products_from_system_data(worker_db, invoice_ids=sorted(saved_invoice_ids), commit=False)
+                        worker_db.commit()
+                    except Exception as exc:
+                        worker_db.rollback()
+                        combined["warnings"].append(f"Đã lưu hóa đơn nhưng chưa đồng bộ được danh mục sản phẩm: {exc}")
+
+                event_q.put({
+                    "type": "complete",
+                    "success": True,
+                    "data": combined,
+                    "message": f"Hoàn tất: Đồng bộ {combined['synced_accounts']}/{len(ready_credentials)} tài khoản thành công ({combined['total_found']} HĐ, {combined['saved_invoices']} đã lưu).",
+                })
+            except Exception as exc:
+                event_q.put({
+                    "type": "fatal_error",
+                    "message": str(exc),
+                })
+            finally:
+                event_q.put(None)
+
+    threading.Thread(target=sync_worker, daemon=True).start()
+
+    def stream_generator():
+        while True:
+            item = event_q.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/purchase-invoices/interactive-login-sync")

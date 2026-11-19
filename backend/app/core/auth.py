@@ -26,7 +26,7 @@ _RESOURCE_CODES = {
     "delivery-requests", "sync", "users",
     "employee-debts", "store-debts", "cash-receipts", "debt-transfers",
     "delivery-returns", "bank-receipts", "employee-borrowing", "promotions",
-    "einvoice",
+    "einvoice", "supplier-dictionaries",
 }
 
 

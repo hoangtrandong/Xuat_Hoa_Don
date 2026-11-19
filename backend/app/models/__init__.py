@@ -3,6 +3,7 @@ from app.models.customer import Customer, CustomerAddress, CustomerContact, Stor
 from app.models.product import (
     Product, ProductCategory, ProductUnit, PriceList, PriceListItem,
     ProductGroup, ProductGroupItem, ProductCompany, ProductGroupCompany,
+    DistributorProduct,
 )
 from app.models.inventory import (
     Warehouse, WarehouseLocation, InventoryLot, InventoryTransaction, DeliveryRequest, DeliveryRequestItem,
@@ -37,11 +38,14 @@ from app.models.multi_tenant_invoice import (
     TaxAuthorityCredential,
 )
 
+from app.models.supplier_dictionary import SupplierDictionary
+
 __all__ = [
     "User", "Role", "Permission", "AuditLog",
     "Customer", "CustomerAddress", "CustomerContact", "Store", "Company",
     "Product", "ProductCategory", "ProductUnit", "PriceList", "PriceListItem",
     "ProductGroup", "ProductGroupItem", "ProductCompany", "ProductGroupCompany",
+    "DistributorProduct", "SupplierDictionary",
     "Warehouse", "WarehouseLocation", "InventoryLot", "InventoryTransaction", "DeliveryRequest", "DeliveryRequestItem",
     "DeliveryAllocation", "InventoryTransfer", "InventoryTransferItem", "SupplierGoodsDiscrepancy",
     "SupplierGoodsDiscrepancySource", "SupplierGoodsDiscrepancyOffset", "DeliveryRequestEmployeeSummary",

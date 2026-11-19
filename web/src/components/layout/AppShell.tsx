@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { CheckCircle2, Loader2, LockKeyhole } from "lucide-react";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
+import GlobalTaskProgressBar from "@/components/layout/GlobalTaskProgressBar";
 import { API_URL, apiFetch } from "@/lib/api";
 import {
   AUTH_EXPIRED_EVENT,
@@ -244,6 +245,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           distributorTaxCode={session.distributorTaxCode}
           isSuperAdmin={session.isSuperAdmin}
         />
+        <GlobalTaskProgressBar />
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">{children}</main>
       </div>
     </div>

@@ -15,6 +15,9 @@ import {
   Layers,
   ShieldCheck,
   AlertTriangle,
+  AlertCircle,
+  Info,
+  Calendar,
   Printer,
   Trash2,
   Search,
@@ -58,6 +61,42 @@ interface TaxAccount {
   token_updated_at: string | null;
   last_synced_at: string | null;
   invoice_count: number;
+}
+
+interface SyncErrorItem {
+  credential_id?: number;
+  username: string;
+  reason?: string;
+  detail?: string;
+}
+
+interface BannerMessage {
+  type: "success" | "error" | "info" | "warning";
+  text: string;
+  errors?: SyncErrorItem[];
+  warnings?: string[];
+  skippedAccountNames?: string[];
+}
+
+interface SyncProgressLog {
+  time: string;
+  message: string;
+  type: "info" | "success" | "warning" | "error";
+}
+
+interface SyncProgressState {
+  open: boolean;
+  active: boolean;
+  totalAccounts: number;
+  currentAccountIndex: number;
+  currentUsername: string;
+  totalFound: number;
+  savedInvoices: number;
+  extractedXml: number;
+  statusText: string;
+  logs: SyncProgressLog[];
+  completed: boolean;
+  error: string | null;
 }
 
 interface CaptchaData {
@@ -236,10 +275,21 @@ export default function PurchaseInvoicesPage() {
   const [goodsSummary, setGoodsSummary] = useState<GoodsSummaryRow[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [syncing, setSyncing] = useState<boolean>(false);
-  const [bannerMsg, setBannerMsg] = useState<{
-    type: "success" | "error" | "info" | "warning";
-    text: string;
-  } | null>(null);
+  const [bannerMsg, setBannerMsg] = useState<BannerMessage | null>(null);
+  const [syncProgress, setSyncProgress] = useState<SyncProgressState>({
+    open: false,
+    active: false,
+    totalAccounts: 0,
+    currentAccountIndex: 0,
+    currentUsername: "",
+    totalFound: 0,
+    savedInvoices: 0,
+    extractedXml: 0,
+    statusText: "",
+    logs: [],
+    completed: false,
+    error: null,
+  });
 
   // Modal xác thực Cổng Thuế (Bearer Token CQT / cURL / Playwright)
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
@@ -574,9 +624,35 @@ export default function PurchaseInvoicesPage() {
         );
       }
 
+      const errorList: SyncErrorItem[] = Array.isArray(syncData.errors) ? syncData.errors : [];
+      const warningList: string[] = Array.isArray(syncData.warnings) ? syncData.warnings : [];
+      const skippedNames: string[] = Array.isArray(syncData.skipped_account_names) ? syncData.skipped_account_names : [];
+
+      const parts: string[] = [
+        `Đồng bộ thành công từ Tổng cục Thuế: Tìm thấy ${syncData.total_found} hóa đơn, đã lưu ${syncData.saved_invoices} hóa đơn và bóc tách chi tiết ${syncData.xml_extracted_count} file XML!`,
+      ];
+      if (errorList.length > 0) {
+        const errorDescriptions = errorList
+          .map((e) => `${e.username}: ${e.reason || e.detail || "Lỗi không xác định"}`)
+          .join("; ");
+        parts.push(`Có ${errorList.length} tài khoản lỗi: [${errorDescriptions}].`);
+      }
+      if (syncData.skipped_accounts) {
+        parts.push(`Có ${syncData.skipped_accounts} tài khoản chưa có token.`);
+      }
+      if (warningList.length > 0) {
+        parts.push(`Có ${warningList.length} cảnh báo trong quá trình lấy dữ liệu.`);
+      }
+
       setBannerMsg({
-        type: "success",
-        text: `Đồng bộ thành công từ Tổng cục Thuế: Tìm thấy ${syncData.total_found} hóa đơn, đã lưu ${syncData.saved_invoices} hóa đơn và bóc tách chi tiết ${syncData.xml_extracted_count} file XML!`,
+        type:
+          errorList.length || warningList.length || syncData.skipped_accounts
+            ? "warning"
+            : "success",
+        text: parts.join(" "),
+        errors: errorList,
+        warnings: warningList,
+        skippedAccountNames: skippedNames,
       });
       await loadPurchaseInvoices();
     } catch (err) {
@@ -639,9 +715,35 @@ export default function PurchaseInvoicesPage() {
           data.detail || "Không thể lấy Token hoặc đồng bộ từ cửa sổ trình duyệt."
         );
       }
+      const errorList: SyncErrorItem[] = Array.isArray(data.errors) ? data.errors : [];
+      const warningList: string[] = Array.isArray(data.warnings) ? data.warnings : [];
+      const skippedNames: string[] = Array.isArray(data.skipped_account_names) ? data.skipped_account_names : [];
+
+      const parts: string[] = [
+        `Đã tự động bắt Bearer Token & đồng bộ thành công: Tìm thấy ${data.total_found} hóa đơn, lưu ${data.saved_invoices} hóa đơn và bóc tách chi tiết ${data.xml_extracted_count} file XML!`,
+      ];
+      if (errorList.length > 0) {
+        const errorDescriptions = errorList
+          .map((e) => `${e.username}: ${e.reason || e.detail || "Lỗi không xác định"}`)
+          .join("; ");
+        parts.push(`Có ${errorList.length} tài khoản lỗi: [${errorDescriptions}].`);
+      }
+      if (data.skipped_accounts) {
+        parts.push(`Có ${data.skipped_accounts} tài khoản chưa có token.`);
+      }
+      if (warningList.length > 0) {
+        parts.push(`Có ${warningList.length} cảnh báo trong quá trình lấy dữ liệu.`);
+      }
+
       setBannerMsg({
-        type: "success",
-        text: `Đã tự động bắt Bearer Token & đồng bộ thành công: Tìm thấy ${data.total_found} hóa đơn, lưu ${data.saved_invoices} hóa đơn và bóc tách chi tiết ${data.xml_extracted_count} file XML!`,
+        type:
+          errorList.length || warningList.length || data.skipped_accounts
+            ? "warning"
+            : "success",
+        text: parts.join(" "),
+        errors: errorList,
+        warnings: warningList,
+        skippedAccountNames: skippedNames,
       });
       await loadCredentialsStatus(selectedDistId);
       await loadPurchaseInvoices();
@@ -667,16 +769,37 @@ export default function PurchaseInvoicesPage() {
     loadPurchaseInvoices,
   ]);
 
-  // Thực thi đồng bộ từ Cổng Thuế
+  // Thực thi đồng bộ từ Cổng Thuế với luồng sự kiện trực tiếp (Live Progress Streaming)
   const handleSyncFromGdt = useCallback(async () => {
     if (!selectedDistId) return;
     setSyncing(true);
-    setBannerMsg({
-      type: "info",
-      text: "Đang kết nối Cổng Tổng cục Thuế (hoadondientu.gdt.gov.vn) để tra cứu và bóc tách XML hóa đơn mua vào...",
+
+    const nowStr = () => new Date().toLocaleTimeString("vi-VN");
+    const activeAccountCount = credStatus?.accounts.filter((a) => a.has_bearer_token).length || 1;
+
+    setSyncProgress({
+      open: true,
+      active: true,
+      totalAccounts: activeAccountCount,
+      currentAccountIndex: 0,
+      currentUsername: "",
+      totalFound: 0,
+      savedInvoices: 0,
+      extractedXml: 0,
+      statusText: "Đang kết nối Cổng Tổng cục Thuế (hoadondientu.gdt.gov.vn)...",
+      logs: [
+        {
+          time: nowStr(),
+          message: `Khởi động phiên đồng bộ từ ngày ${fromDate} đến ngày ${toDate}...`,
+          type: "info",
+        },
+      ],
+      completed: false,
+      error: null,
     });
+
     try {
-      const res = await apiFetch(`${API_URL}/einvoice/purchase-invoices/sync`, {
+      const res = await apiFetch(`${API_URL}/einvoice/purchase-invoices/sync-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -685,12 +808,12 @@ export default function PurchaseInvoicesPage() {
           to_date: toDate,
         }),
       });
-      const data = await res.json();
+
       if (res.status === 428 || res.status === 401) {
+        setSyncProgress((prev) => ({ ...prev, active: false, open: false }));
         setAuthModalOpen(true);
         setAuthError(
-          data.detail ||
-            "Phiên Bearer Token Cổng Thuế chưa có hoặc đã hết hạn. Vui lòng dán Bearer Token (hoặc lệnh cURL từ F12 DevTools) để làm mới phiên."
+          "Phiên Bearer Token Cổng Thuế chưa có hoặc đã hết hạn. Vui lòng dán Bearer Token (hoặc lệnh cURL từ F12 DevTools) để làm mới phiên."
         );
         setBannerMsg({
           type: "warning",
@@ -698,34 +821,193 @@ export default function PurchaseInvoicesPage() {
         });
         return;
       }
+
       if (!res.ok) {
-        throw new Error(data.detail || "Không thể đồng bộ hóa đơn mua vào.");
+        let errDetail = "Không thể đồng bộ hóa đơn mua vào.";
+        try {
+          const errData = await res.json();
+          errDetail = errData.detail || errDetail;
+        } catch {}
+        throw new Error(errDetail);
       }
-      setBannerMsg({
-        type:
-          data.errors?.length || data.warnings?.length || data.skipped_accounts
-            ? "warning"
-            : "success",
-        text: `Đồng bộ ${data.synced_accounts || 1} tài khoản: Tìm thấy ${data.total_found} hóa đơn, đã lưu ${data.saved_invoices} hóa đơn, bóc tách ${data.xml_extracted_count} XML.${
-          data.errors?.length
-            ? ` Có ${data.errors.length} tài khoản lỗi.`
-            : ""
-        }${
-          data.skipped_accounts
-            ? ` Có ${data.skipped_accounts} tài khoản chưa có token nên bị bỏ qua.`
-            : ""
-        }${
-          data.warnings?.length
-            ? ` Có ${data.warnings.length} cảnh báo trong quá trình lấy dữ liệu.`
-            : ""
-        }`,
-      });
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        throw new Error("Trình duyệt không hỗ trợ đọc luồng dữ liệu (Stream Reader).");
+      }
+
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let finalCombinedData: any = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ")) continue;
+          const jsonStr = trimmed.slice(6).trim();
+          if (!jsonStr) continue;
+
+          try {
+            const event = JSON.parse(jsonStr);
+
+            setSyncProgress((prev) => {
+              const updated = { ...prev };
+              const time = nowStr();
+
+              if (event.type === "start") {
+                updated.totalAccounts = event.total_accounts || prev.totalAccounts;
+                updated.statusText = event.message;
+                updated.logs = [
+                  ...prev.logs,
+                  { time, message: event.message, type: "info" },
+                ];
+              } else if (event.type === "account_start") {
+                updated.currentAccountIndex = event.account_index;
+                updated.currentUsername = event.username;
+                updated.statusText = event.message;
+                updated.logs = [
+                  ...prev.logs,
+                  { time, message: event.message, type: "info" },
+                ];
+              } else if (event.type === "progress") {
+                updated.statusText = event.message || prev.statusText;
+                if (event.total_found !== undefined) updated.totalFound = event.total_found;
+                if (event.saved !== undefined) updated.savedInvoices = event.saved;
+                if (event.xml_extracted !== undefined) updated.extractedXml = event.xml_extracted;
+
+                if (event.step === "searching") {
+                  updated.logs = [
+                    ...prev.logs,
+                    { time, message: `[${prev.currentUsername || "CQT"}] ${event.message}`, type: "info" },
+                  ];
+                } else if (event.step === "category_done") {
+                  updated.logs = [
+                    ...prev.logs,
+                    { time, message: `[${prev.currentUsername || "CQT"}] ${event.message}`, type: "success" },
+                  ];
+                } else if (event.step === "xml_start") {
+                  updated.logs = [
+                    ...prev.logs,
+                    { time, message: `[${prev.currentUsername || "CQT"}] ${event.message}`, type: "info" },
+                  ];
+                }
+              } else if (event.type === "account_done") {
+                updated.totalFound = (prev.totalFound || 0) + (event.found || 0);
+                updated.savedInvoices = (prev.savedInvoices || 0) + (event.saved || 0);
+                updated.extractedXml = (prev.extractedXml || 0) + (event.xml_count || 0);
+                updated.statusText = event.message;
+                updated.logs = [
+                  ...prev.logs,
+                  { time, message: event.message, type: "success" },
+                ];
+              } else if (event.type === "account_error") {
+                updated.statusText = event.message;
+                updated.logs = [
+                  ...prev.logs,
+                  { time, message: event.message, type: "error" },
+                ];
+              } else if (event.type === "sync_products") {
+                updated.statusText = event.message;
+                updated.logs = [
+                  ...prev.logs,
+                  { time, message: event.message, type: "info" },
+                ];
+              } else if (event.type === "complete") {
+                finalCombinedData = event.data;
+                updated.completed = true;
+                updated.active = false;
+                updated.statusText = event.message;
+                updated.logs = [
+                  ...prev.logs,
+                  { time, message: event.message, type: "success" },
+                ];
+              } else if (event.type === "fatal_error") {
+                updated.active = false;
+                updated.error = event.message;
+                updated.statusText = `Lỗi: ${event.message}`;
+                updated.logs = [
+                  ...prev.logs,
+                  { time, message: `Lỗi: ${event.message}`, type: "error" },
+                ];
+              }
+
+              return updated;
+            });
+          } catch {}
+        }
+      }
+
+      if (finalCombinedData) {
+        const errorList: SyncErrorItem[] = Array.isArray(finalCombinedData.errors) ? finalCombinedData.errors : [];
+        const warningList: string[] = Array.isArray(finalCombinedData.warnings) ? finalCombinedData.warnings : [];
+        const skippedNames: string[] = Array.isArray(finalCombinedData.skipped_account_names) ? finalCombinedData.skipped_account_names : [];
+        const syncedCount = Number(finalCombinedData.synced_accounts || 0);
+        const totalFound = Number(finalCombinedData.total_found || 0);
+        const savedInvoices = Number(finalCombinedData.saved_invoices || 0);
+        const xmlExtracted = Number(finalCombinedData.xml_extracted_count || 0);
+
+        const parts: string[] = [];
+        if (syncedCount > 0) {
+          parts.push(
+            `Đồng bộ ${syncedCount} tài khoản thành công: Tìm thấy ${totalFound} hóa đơn, đã lưu ${savedInvoices} hóa đơn, bóc tách ${xmlExtracted} XML.`
+          );
+        }
+        if (errorList.length > 0) {
+          const errorDescriptions = errorList
+            .map((e) => `${e.username}: ${e.reason || e.detail || "Lỗi không xác định"}`)
+            .join("; ");
+          parts.push(`Có ${errorList.length} tài khoản lỗi: [${errorDescriptions}].`);
+        }
+        if (finalCombinedData.skipped_accounts) {
+          parts.push(
+            `Có ${finalCombinedData.skipped_accounts} tài khoản chưa có token nên bị bỏ qua${
+              skippedNames.length ? ` (${skippedNames.join(", ")})` : ""
+            }.`
+          );
+        }
+        if (warningList.length > 0) {
+          parts.push(`Có ${warningList.length} cảnh báo trong quá trình lấy dữ liệu.`);
+        }
+
+        setBannerMsg({
+          type:
+            errorList.length || warningList.length || finalCombinedData.skipped_accounts
+              ? "warning"
+              : "success",
+          text: parts.join(" ") || "Đồng bộ hóa đơn hoàn tất.",
+          errors: errorList,
+          warnings: warningList,
+          skippedAccountNames: skippedNames,
+        });
+      }
+
       await loadCredentialsStatus(selectedDistId);
       await loadPurchaseInvoices();
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "Lỗi đồng bộ hóa đơn mua vào.";
+      setSyncProgress((prev) => ({
+        ...prev,
+        active: false,
+        error: errMsg,
+        statusText: `Thất bại: ${errMsg}`,
+        logs: [
+          ...prev.logs,
+          {
+            time: nowStr(),
+            message: `Lỗi: ${errMsg}`,
+            type: "error",
+          },
+        ],
+      }));
       setBannerMsg({
         type: "error",
-        text: err instanceof Error ? err.message : "Lỗi đồng bộ hóa đơn mua vào.",
+        text: errMsg,
       });
     } finally {
       setSyncing(false);
@@ -734,6 +1016,7 @@ export default function PurchaseInvoicesPage() {
     selectedDistId,
     fromDate,
     toDate,
+    credStatus,
     loadCredentialsStatus,
     loadPurchaseInvoices,
   ]);
@@ -1119,6 +1402,17 @@ export default function PurchaseInvoicesPage() {
               Mở Web Thuế / Token CQT
             </button>
 
+            {syncing && !syncProgress.open && (
+              <button
+                type="button"
+                onClick={() => setSyncProgress((prev) => ({ ...prev, open: true }))}
+                className="inline-flex items-center gap-1.5 rounded bg-amber-500/20 border border-amber-400/40 hover:bg-amber-500/30 px-2.5 py-1 text-[11px] font-semibold text-amber-200 transition-colors"
+              >
+                <Loader2 size={12} className="animate-spin text-amber-300" />
+                <span>Xem tiến trình...</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={handleSyncFromGdt}
@@ -1358,24 +1652,112 @@ export default function PurchaseInvoicesPage() {
         {/* Thông báo trạng thái */}
         {bannerMsg && (
           <div
-            className={`border-b px-3 py-2 text-xs flex items-center justify-between ${
+            className={`border-b px-3 py-2 text-xs ${
               bannerMsg.type === "error"
                 ? "border-red-200 bg-red-50 text-red-700"
                 : bannerMsg.type === "warning"
-                ? "border-amber-200 bg-amber-50 text-amber-800"
+                ? "border-amber-200 bg-amber-50 text-amber-900"
                 : bannerMsg.type === "success"
                 ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                 : "border-sky-200 bg-sky-50 text-sky-800"
             }`}
           >
-            <span>{bannerMsg.text}</span>
-            <button
-              type="button"
-              onClick={() => setBannerMsg(null)}
-              className="text-slate-400 hover:text-slate-600"
-            >
-              <X size={14} />
-            </button>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2 flex-1 min-w-0">
+                {bannerMsg.type === "error" ? (
+                  <AlertCircle size={16} className="text-red-600 mt-0.5 shrink-0" />
+                ) : bannerMsg.type === "warning" ? (
+                  <AlertTriangle size={16} className="text-amber-600 mt-0.5 shrink-0" />
+                ) : bannerMsg.type === "success" ? (
+                  <CheckCircle2 size={16} className="text-emerald-600 mt-0.5 shrink-0" />
+                ) : (
+                  <Info size={16} className="text-sky-600 mt-0.5 shrink-0" />
+                )}
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <div className="font-medium leading-relaxed break-words">{bannerMsg.text}</div>
+
+                  {/* Danh sách tài khoản lỗi và xác định nguyên nhân */}
+                  {bannerMsg.errors && bannerMsg.errors.length > 0 && (
+                    <div className="mt-2 rounded border border-red-200 bg-red-100/70 p-2 text-red-950">
+                      <div className="flex items-center gap-1.5 font-bold text-red-800 text-[11px] mb-1.5">
+                        <AlertCircle size={13} className="text-red-600" />
+                        <span>Chi tiết tài khoản thuế gặp lỗi ({bannerMsg.errors.length}):</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {bannerMsg.errors.map((err, idx) => (
+                          <div
+                            key={idx}
+                            className="flex flex-wrap items-baseline gap-1.5 rounded bg-white/90 p-2 border border-red-200 shadow-sm text-[11px]"
+                          >
+                            <span className="font-mono font-bold text-red-900 bg-red-100 px-2 py-0.5 rounded border border-red-300">
+                              {err.username || `Tài khoản #${err.credential_id}`}
+                            </span>
+                            <span className="font-semibold text-slate-700">Nguyên nhân:</span>
+                            <span className="font-semibold text-red-700">
+                              {err.reason || err.detail || "Lỗi không xác định"}
+                            </span>
+                            {err.credential_id && (
+                              <button
+                                type="button"
+                                onClick={() => openAuthModal(err.credential_id)}
+                                className="ml-auto inline-flex items-center gap-1 rounded bg-sky-600 hover:bg-sky-700 px-2 py-1 text-[10px] font-semibold text-white transition-colors"
+                              >
+                                <KeyRound size={11} />
+                                Cập nhật Token tài khoản này
+                              </button>
+                            )}
+                            {err.detail && err.detail !== err.reason && (
+                              <div className="w-full text-[10px] text-slate-500 font-mono mt-1 pt-1 border-t border-slate-100">
+                                Chi tiết kỹ thuật: {err.detail}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Danh sách tài khoản bị bỏ qua */}
+                  {bannerMsg.skippedAccountNames && bannerMsg.skippedAccountNames.length > 0 && (
+                    <div className="mt-1 text-[11px] text-amber-900">
+                      <span className="font-semibold">Tài khoản bỏ qua do chưa có Bearer Token:</span>{" "}
+                      {bannerMsg.skippedAccountNames.map((name, idx) => (
+                        <span
+                          key={idx}
+                          className="inline-block font-mono bg-amber-100 border border-amber-300 text-amber-900 px-1.5 py-0.5 rounded text-[10px] mr-1"
+                        >
+                          {name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Chi tiết cảnh báo */}
+                  {bannerMsg.warnings && bannerMsg.warnings.length > 0 && (
+                    <div className="mt-1 text-[11px]">
+                      <details className="cursor-pointer group">
+                        <summary className="font-semibold text-amber-900 hover:text-amber-950 inline-flex items-center gap-1">
+                          <span>Xem chi tiết {bannerMsg.warnings.length} cảnh báo trong quá trình lấy dữ liệu</span>
+                        </summary>
+                        <ul className="mt-1 max-h-36 overflow-y-auto rounded border border-amber-200 bg-amber-100/50 p-2 list-disc pl-5 space-y-0.5 text-[10px] font-mono text-slate-800">
+                          {bannerMsg.warnings.map((warn, idx) => (
+                            <li key={idx}>{warn}</li>
+                          ))}
+                        </ul>
+                      </details>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setBannerMsg(null)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded hover:bg-black/5"
+              >
+                <X size={15} />
+              </button>
+            </div>
           </div>
         )}
 
@@ -1960,6 +2342,195 @@ export default function PurchaseInvoicesPage() {
       </div>
 
       {/* ===================================================================== */}
+      {/* MODAL TIẾN TRÌNH ĐỒNG BỘ HÓA ĐƠN CỔNG THUẾ (LIVE STREAMING)           */}
+      {/* ===================================================================== */}
+      {syncProgress.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-2xl border border-slate-400 bg-white shadow-2xl">
+            {/* Header */}
+            <div className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <RefreshCw
+                  size={17}
+                  className={`text-sky-400 ${syncProgress.active ? "animate-spin" : ""}`}
+                />
+                <span className="text-xs font-bold uppercase tracking-wide text-white">
+                  {syncProgress.completed
+                    ? "Đồng Bộ Hóa Đơn Hoàn Tất"
+                    : syncProgress.active
+                    ? "Đang Đồng Bộ Hóa Đơn Từ Cổng Thuế..."
+                    : "Tiến Trình Đồng Bộ Hóa Đơn"}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSyncProgress((prev) => ({ ...prev, open: false }))}
+                className="rounded p-1 text-white hover:bg-white/10"
+                title="Đóng / Thu nhỏ cửa sổ"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-3.5 space-y-3">
+              {/* Thanh tiến trình (Progress Bar) */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-slate-800 flex items-center gap-1.5 truncate">
+                    {syncProgress.active && (
+                      <Loader2 size={13} className="animate-spin text-sky-600 shrink-0" />
+                    )}
+                    {syncProgress.completed && (
+                      <CheckCircle2 size={13} className="text-emerald-600 shrink-0" />
+                    )}
+                    {syncProgress.error && (
+                      <AlertCircle size={13} className="text-red-600 shrink-0" />
+                    )}
+                    <span className="truncate">{syncProgress.statusText}</span>
+                  </span>
+                  <span className="font-mono font-bold text-sky-700 ml-2 shrink-0">
+                    {syncProgress.completed
+                      ? "100%"
+                      : syncProgress.totalAccounts > 0
+                      ? `${Math.min(
+                          95,
+                          Math.max(
+                            5,
+                            Math.round(
+                              ((syncProgress.currentAccountIndex || 0) /
+                                syncProgress.totalAccounts) *
+                                90
+                            )
+                          )
+                        )}%`
+                      : "5%"}
+                  </span>
+                </div>
+                <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-300 ${
+                      syncProgress.completed
+                        ? "bg-emerald-500 w-full"
+                        : syncProgress.error
+                        ? "bg-red-500 w-full"
+                        : "bg-sky-600"
+                    }`}
+                    style={{
+                      width: syncProgress.completed
+                        ? "100%"
+                        : syncProgress.totalAccounts > 0
+                        ? `${Math.min(
+                            95,
+                            Math.max(
+                              5,
+                              Math.round(
+                                ((syncProgress.currentAccountIndex || 0) /
+                                  syncProgress.totalAccounts) *
+                                  90
+                              )
+                            )
+                          )}%`
+                        : "5%",
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Khoảng ngày thực hiện đồng bộ */}
+              <div className="flex items-center justify-between text-[11px] text-slate-600 bg-slate-50 px-2.5 py-1 rounded border border-slate-200">
+                <span className="inline-flex items-center gap-1.5 font-medium">
+                  <Calendar size={13} className="text-sky-600" />
+                  <span>Khoảng ngày thực hiện:</span>
+                  <strong className="text-slate-900 font-semibold">{fromDate}</strong>
+                  <span>đến</span>
+                  <strong className="text-slate-900 font-semibold">{toDate}</strong>
+                </span>
+                <span className="text-[10px] text-slate-500">
+                  (Theo ô Ngày lập HĐ trên bộ lọc)
+                </span>
+              </div>
+
+              {/* 4 Thẻ thông số thời gian thực (Real-time Metric Cards) */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div className="rounded border border-slate-200 bg-slate-50 p-2 text-center">
+                  <div className="text-[10px] font-semibold text-slate-500 uppercase">Tài khoản</div>
+                  <div className="text-sm font-bold text-slate-900 mt-0.5 font-mono">
+                    {syncProgress.currentAccountIndex} / {syncProgress.totalAccounts || 1}
+                  </div>
+                </div>
+                <div className="rounded border border-slate-200 bg-sky-50/60 p-2 text-center">
+                  <div className="text-[10px] font-semibold text-sky-700 uppercase">HĐ Tìm thấy</div>
+                  <div className="text-sm font-bold text-sky-900 mt-0.5 font-mono">
+                    {formatNumber(syncProgress.totalFound)}
+                  </div>
+                </div>
+                <div className="rounded border border-slate-200 bg-emerald-50/60 p-2 text-center">
+                  <div className="text-[10px] font-semibold text-emerald-700 uppercase">Đã lưu CSDL</div>
+                  <div className="text-sm font-bold text-emerald-900 mt-0.5 font-mono">
+                    {formatNumber(syncProgress.savedInvoices)}
+                  </div>
+                </div>
+                <div className="rounded border border-slate-200 bg-purple-50/60 p-2 text-center">
+                  <div className="text-[10px] font-semibold text-purple-700 uppercase">Bóc tách XML</div>
+                  <div className="text-sm font-bold text-purple-900 mt-0.5 font-mono">
+                    {formatNumber(syncProgress.extractedXml)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Hộp nhật ký hoạt động trực tiếp (Live Terminal Log) */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[10px] font-semibold text-slate-600">
+                  <span>NHẬT KÝ HOẠT ĐỘNG TRỰC TIẾP (LIVE LOG)</span>
+                  <span>{syncProgress.logs.length} sự kiện</span>
+                </div>
+                <div className="max-h-52 overflow-y-auto rounded border border-slate-800 bg-slate-900 p-2.5 font-mono text-[11px] text-slate-200 space-y-1 shadow-inner flex flex-col-reverse">
+                  {[...syncProgress.logs].reverse().map((log, i) => (
+                    <div
+                      key={i}
+                      className={`flex items-start gap-1.5 ${
+                        log.type === "error"
+                          ? "text-red-400 font-semibold"
+                          : log.type === "warning"
+                          ? "text-amber-300"
+                          : log.type === "success"
+                          ? "text-emerald-300 font-semibold"
+                          : "text-slate-300"
+                      }`}
+                    >
+                      <span className="text-slate-500 shrink-0 font-normal">[{log.time}]</span>
+                      <span className="flex-1 break-words">{log.message}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Action Bar */}
+            <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
+              <span className="text-[10px] text-slate-500">
+                {syncProgress.active
+                  ? "Hệ thống đang gọi API Tổng cục Thuế... Bạn có thể thu nhỏ cửa sổ này để xem bảng dữ liệu."
+                  : syncProgress.completed
+                  ? "Đã hoàn tất đồng bộ toàn bộ hóa đơn từ các tài khoản CQT."
+                  : "Phiên đồng bộ đã dừng."}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSyncProgress((prev) => ({ ...prev, open: false }))}
+                  className="rounded border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors"
+                >
+                  {syncProgress.active ? "Thu nhỏ cửa sổ" : "Đóng"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
       {/* MODAL 1: ĐĂNG NHẬP & XÁC THỰC TÀI KHOẢN CỔNG THUẾ                     */}
       {/* ===================================================================== */}
       {authModalOpen && (
@@ -2013,43 +2584,65 @@ export default function PurchaseInvoicesPage() {
                 </div>
                 {credStatus?.accounts.length ? (
                   <div className="grid gap-1 sm:grid-cols-2">
-                    {credStatus.accounts.map((account) => (
-                      <div
-                        key={account.id}
-                        className={`flex items-center justify-between gap-2 rounded border px-2 py-1.5 ${
-                          account.id === activeTaxCredentialId
-                            ? "border-sky-500 bg-sky-50"
-                            : "border-slate-200 bg-slate-50"
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActiveTaxCredentialId(account.id);
-                            setAuthUsername(account.username);
-                            setAuthPassword("");
-                            setAuthManualToken("");
-                          }}
-                          className="min-w-0 flex-1 text-left"
+                    {credStatus.accounts.map((account) => {
+                      const accountErr = bannerMsg?.errors?.find(
+                        (e) => e.credential_id === account.id || e.username === account.username
+                      );
+                      return (
+                        <div
+                          key={account.id}
+                          className={`flex items-center justify-between gap-2 rounded border px-2 py-1.5 ${
+                            accountErr
+                              ? "border-red-300 bg-red-50/70"
+                              : account.id === activeTaxCredentialId
+                              ? "border-sky-500 bg-sky-50"
+                              : "border-slate-200 bg-slate-50"
+                          }`}
                         >
-                          <div className="font-mono text-[11px] font-bold text-slate-800">
-                            {account.username}
-                          </div>
-                          <div className="text-[10px] text-slate-500">
-                            {account.invoice_count} hóa đơn ·{" "}
-                            {account.has_bearer_token ? "Đã có token" : "Chưa có token"}
-                          </div>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setDeletingTaxAccount(account)}
-                          className="rounded p-1 text-red-700 hover:bg-red-100"
-                          title={`Xóa tài khoản ${account.username}`}
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    ))}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveTaxCredentialId(account.id);
+                              setAuthUsername(account.username);
+                              setAuthPassword("");
+                              setAuthManualToken("");
+                            }}
+                            className="min-w-0 flex-1 text-left"
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-[11px] font-bold text-slate-800">
+                                {account.username}
+                              </span>
+                              {accountErr && (
+                                <span className="rounded bg-red-100 px-1 py-0.5 text-[9px] font-bold text-red-700 border border-red-300">
+                                  Lỗi đồng bộ
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-slate-500 truncate">
+                              {accountErr ? (
+                                <span className="text-red-600 font-medium">
+                                  {accountErr.reason || accountErr.detail}
+                                </span>
+                              ) : (
+                                <>
+                                  {account.invoice_count} hóa đơn ·{" "}
+                                  {account.has_bearer_token ? "Đã có token" : "Chưa có token"}
+                                </>
+                              )}
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeletingTaxAccount(account)}
+                            className="rounded p-1 text-red-700 hover:bg-red-100"
+                            title={`Xóa tài khoản ${account.username}`}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className="text-[10px] text-slate-500">

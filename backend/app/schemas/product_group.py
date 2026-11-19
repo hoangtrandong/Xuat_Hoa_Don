@@ -70,8 +70,9 @@ class ProductGroupCompanyLinkView(BaseModel):
 
 class ProductCompanyAssignmentView(BaseModel):
     id: int
-    company_id: int
-    company_name: str
+    company_id: Optional[int] = None
+    company_code: Optional[str] = None
+    company_name: Optional[str] = None
     role: str = "MANAGER"
     status: str = "active"
     distributor_sku: Optional[str] = None
@@ -91,3 +92,42 @@ class ProductCompanyManagementView(BaseModel):
     total_ordered_qty: float = 0.0
     unit_price: float = 0.0
     unit: Optional[str] = None
+
+
+class DistributorProductItem(BaseModel):
+    id: int
+    distributor_name: str
+    distributor_sku: str
+    distributor_product_name: str
+    supplier: str
+    unit: Optional[str] = "HOP"
+    company_id: Optional[int] = None
+    company_code: Optional[str] = None
+    company_name: Optional[str] = None
+    status: str = "active"
+
+
+class DistributorProductCreate(BaseModel):
+    distributor_name: Optional[str] = "Nhà Phân Phối Mai Gold"
+    distributor_sku: str
+    distributor_product_name: str
+    supplier: Optional[str] = "Vinamilk"
+    unit: Optional[str] = "HOP"
+    company_id: Optional[int] = None
+
+
+class DistributorProductUpdate(BaseModel):
+    id: Optional[int] = None
+    original_code: Optional[str] = None
+    distributor_sku: str
+    distributor_product_name: str
+    distributor_name: Optional[str] = "Nhà Phân Phối Mai Gold"
+    supplier: Optional[str] = "Vinamilk"
+    unit: Optional[str] = "HOP"
+    company_id: Optional[int] = None
+
+
+class DistributorProductBulkDelete(BaseModel):
+    ids: Optional[List[int]] = None
+    codes: Optional[List[str]] = None
+

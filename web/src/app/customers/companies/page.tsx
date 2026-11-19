@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Building2, CheckCircle2, Users, ShieldAlert, Plus, Download, Upload,
-  Phone, MapPin, Hash, CreditCard,
+  Phone, MapPin, Hash, CreditCard, Loader2,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
@@ -29,12 +29,16 @@ interface CompanyRow {
 
 const emptyForm = { code: "", name: "", tax_code: "", phone: "", address: "", status: "active" };
 
+const inputCls =
+  "w-full min-w-0 rounded border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100";
+
 export default function CompaniesPage() {
   const [rows, setRows] = useState<CompanyRow[]>([]);
   const [selected, setSelected] = useState<CompanyRow | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
@@ -72,6 +76,7 @@ export default function CompaniesPage() {
 
   async function saveCompany() {
     setError(""); setMessage("");
+    setSaving(true);
     try {
       const response = await apiFetch(`${API_URL}/companies/${editingId ? editingId : ""}`, {
         method: editingId ? "PATCH" : "POST",
@@ -85,6 +90,8 @@ export default function CompaniesPage() {
       load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không thể lưu công ty.");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -188,20 +195,121 @@ const columns: Column<CompanyRow>[] = [
           </button>
         }
       />
-<Drawer open={createOpen} onClose={() => setCreateOpen(false)} title={editingId ? "Sửa công ty" : "Thêm công ty"} subtitle="Công ty quản lý / xuất hóa đơn">
-        <div className="p-5 space-y-4">
-          {error && <div className="bg-red-50 text-red-700 rounded-lg px-3 py-2 text-sm">{error}</div>}
-          <input disabled={Boolean(editingId)} placeholder="Mã công ty" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg disabled:bg-gray-100" />
-          <input placeholder="Tên công ty" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-          <input placeholder="Mã số thuế (có thể trùng với công ty khác)" value={form.tax_code} onChange={(e) => setForm({ ...form, tax_code: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-          <input placeholder="Điện thoại" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-          <input placeholder="Địa chỉ" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg" />
-          <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="w-full px-3 py-2 text-sm border rounded-lg">
-            <option value="active">Hoạt động</option>
-            <option value="inactive">Ngưng giao</option>
-          </select>
-          <button onClick={saveCompany} className="w-full bg-sky-500 text-white rounded-lg py-2.5 text-sm font-medium">{editingId ? "Cập nhật công ty" : "Lưu công ty"}</button>
-        </div>
+      <Drawer open={createOpen} onClose={() => setCreateOpen(false)} title={editingId ? "Sửa công ty" : "Thêm công ty"} subtitle="Công ty quản lý / xuất hóa đơn">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void saveCompany();
+          }}
+          className="p-5 space-y-3"
+        >
+          {error && <div className="bg-red-50 text-red-700 rounded-lg px-3 py-2 text-xs border border-red-200">{error}</div>}
+          
+          <div>
+            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+              Mã công ty <span className="text-red-600">*</span>
+            </label>
+            <input
+              required
+              disabled={Boolean(editingId)}
+              placeholder="VD: CT001, CT002, 2902292227..."
+              value={form.code}
+              onChange={(e) => setForm({ ...form, code: e.target.value.trim() })}
+              className={inputCls}
+            />
+            <span className="text-[10px] text-slate-400 mt-0.5 block">
+              Mã định danh duy nhất để liên kết với sản phẩm NPP và hóa đơn
+            </span>
+          </div>
+
+          <div>
+            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+              Tên công ty quản lý <span className="text-red-600">*</span>
+            </label>
+            <input
+              required
+              placeholder="VD: Công ty TNHH Phân Phối Mai Gold"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              className={inputCls}
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+              Mã số thuế (MST)
+            </label>
+            <input
+              placeholder="VD: 2902292227 (có thể trùng MST với chi nhánh khác)"
+              value={form.tax_code}
+              onChange={(e) => setForm({ ...form, tax_code: e.target.value.trim() })}
+              className={inputCls}
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+              Số điện thoại liên hệ
+            </label>
+            <input
+              placeholder="VD: 0238 3123 456"
+              value={form.phone}
+              onChange={(e) => setForm({ ...form, phone: e.target.value })}
+              className={inputCls}
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+              Địa chỉ kinh doanh / xuất hóa đơn
+            </label>
+            <input
+              placeholder="VD: Khối 3, Thị trấn Đô Lương, Nghệ An"
+              value={form.address}
+              onChange={(e) => setForm({ ...form, address: e.target.value })}
+              className={inputCls}
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+              Trạng thái hoạt động
+            </label>
+            <select
+              value={form.status}
+              onChange={(e) => setForm({ ...form, status: e.target.value })}
+              className={inputCls}
+            >
+              <option value="active">Hoạt động (Active)</option>
+              <option value="inactive">Ngưng giao (Inactive)</option>
+            </select>
+          </div>
+
+          <div className="pt-2 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setCreateOpen(false)}
+              className="rounded bg-slate-200 hover:bg-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors"
+            >
+              Hủy
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300 shadow-sm"
+            >
+              {saving ? (
+                <>
+                  <Loader2 size={13} className="animate-spin" /> Đang lưu...
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 size={13} /> {editingId ? "Cập nhật công ty" : "Lưu công ty"}
+                </>
+              )}
+            </button>
+          </div>
+        </form>
       </Drawer>
 <Drawer open={selected !== null} onClose={() => setSelected(null)} title="Chi tiết công ty" subtitle={selected?.name}>
         {selected && (

@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy import String, Boolean, DateTime, ForeignKey, Integer, Float, Text, Enum, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from typing import List
+from typing import List, Optional
 
 from app.core.database import Base
 
@@ -184,3 +184,21 @@ class PriceListItem(Base):
 
     price_list: Mapped["PriceList"] = relationship(back_populates="items")
     product: Mapped["Product"] = relationship(back_populates="price_list_items")
+
+
+class DistributorProduct(Base):
+    """Mã sản phẩm Nhà Phân Phối nội bộ do người dùng quản lý / upload."""
+    __tablename__ = "distributor_products"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    distributor_name: Mapped[str] = mapped_column(String(200), default="Nhà Phân Phối Mai Gold")
+    distributor_sku: Mapped[str] = mapped_column(String(60), unique=True, index=True)
+    distributor_product_name: Mapped[str] = mapped_column(String(255))
+    supplier: Mapped[str] = mapped_column(String(100), default="Vinamilk")
+    unit: Mapped[str | None] = mapped_column(String(30), default="HOP")
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    company: Mapped[Optional["Company"]] = relationship(foreign_keys=[company_id])

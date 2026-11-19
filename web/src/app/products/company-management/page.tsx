@@ -1,25 +1,23 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import {
   Building2,
   Search,
   X,
   Loader2,
   FileSpreadsheet,
-  Layers,
-  ArrowRight,
   RefreshCw,
   ChevronLeft,
   ChevronRight,
-  Truck,
   Pencil,
   Trash2,
   CheckCircle2,
   AlertTriangle,
   Upload,
   Download,
+  Info,
+  Check,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { API_URL, apiFetch } from "@/lib/api";
@@ -29,64 +27,65 @@ import { downloadExcel } from "@/lib/excel";
 const inputCls =
   "w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100";
 
-type CompanyAssignment = {
+type DistributorProductRow = {
   id: number;
-  company_id: number;
-  company_name: string;
-  role: string;
+  distributor_name: string;
+  distributor_sku: string;
+  distributor_product_name: string;
+  supplier: string;
+  unit: string;
+  company_id: number | null;
+  company_code: string | null;
+  company_name: string | null;
   status: string;
-  distributor_sku?: string | null;
-  distributor_name?: string | null;
 };
 
-type ProductCompanyRow = {
-  product_group_id: number;
-  group_name: string;
-  representative_sku: string;
-  representative_name: string;
-  member_skus: string[];
-  member_names: string[];
-  companies: CompanyAssignment[];
-  supplier?: string | null;
-  order_count?: number;
-  total_ordered_qty?: number;
-  unit_price?: number;
-  unit?: string | null;
+type CompanyOption = {
+  id: number;
+  code: string;
+  name: string;
 };
 
 type ExcelPreviewRow = {
-  code: string;
-  name: string;
-  unit: string;
+  stt: number;
+  distributor_name: string;
+  distributor_sku: string;
+  distributor_product_name: string;
   supplier: string;
-  distributor: string;
+  company_code: string;
+  company_name: string;
+  action_type: "Thêm mới" | "Cập nhật";
 };
 
 export default function ProductCompanyManagementPage() {
-  const [rows, setRows] = useState<ProductCompanyRow[]>([]);
+  const [rows, setRows] = useState<DistributorProductRow[]>([]);
+  const [companies, setCompanies] = useState<CompanyOption[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [distributorFilter, setDistributorFilter] = useState<string>("ALL");
   const [supplierFilter, setSupplierFilter] = useState<string>("ALL");
-  const [pageSize, setPageSize] = useState<number>(50);
+  const [companyFilter, setCompanyFilter] = useState<string>("ALL");
+  const [pageSize, setPageSize] = useState<number>(20);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [error, setError] = useState<string>("");
   const [toastMessage, setToastMessage] = useState<string>("");
 
-  // State Chỉnh sửa
-  const [editingRow, setEditingRow] = useState<ProductCompanyRow | null>(null);
-  const [editOrigCode, setEditOrigCode] = useState<string>("");
-  const [editNewCode, setEditNewCode] = useState<string>("");
+  // State Chỉnh sửa Modal
+  const [editingRow, setEditingRow] = useState<DistributorProductRow | null>(null);
+  const [editSku, setEditSku] = useState<string>("");
   const [editName, setEditName] = useState<string>("");
-  const [editUnit, setEditUnit] = useState<string>("");
+  const [editDistributor, setEditDistributor] = useState<string>("");
+  const [editSupplier, setEditSupplier] = useState<string>("");
+  const [editCompanyId, setEditCompanyId] = useState<string>("");
   const [savingEdit, setSavingEdit] = useState<boolean>(false);
   const [editError, setEditError] = useState<string>("");
 
-  // State Xóa
-  const [deletingRow, setDeletingRow] = useState<ProductCompanyRow | null>(null);
+  // State Xóa Modal
+  const [deletingRow, setDeletingRow] = useState<DistributorProductRow | null>(null);
   const [deleting, setDeleting] = useState<boolean>(false);
   const [deleteError, setDeleteError] = useState<string>("");
 
-  // State Upload Excel
+  // State Upload Excel Modal
   const [showUploadModal, setShowUploadModal] = useState<boolean>(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewRows, setPreviewRows] = useState<ExcelPreviewRow[]>([]);
@@ -98,10 +97,24 @@ export default function ProductCompanyManagementPage() {
     setLoading(true);
     setError("");
     try {
-      const res = await apiFetch(`${API_URL}/product-groups/products/company-links`);
-      if (!res.ok) throw new Error("Không thể tải danh sách mã sản phẩm từ web NCC.");
-      const data = (await res.json()) as ProductCompanyRow[];
+      const [resProducts, resCompanies] = await Promise.all([
+        apiFetch(`${API_URL}/product-groups/distributor-products`),
+        apiFetch(`${API_URL}/companies/?limit=5000`),
+      ]);
+
+      if (!resProducts.ok) throw new Error("Không thể tải danh sách mã sản phẩm NPP nội bộ.");
+      const data = (await resProducts.json()) as DistributorProductRow[];
       setRows(data);
+
+      if (resCompanies.ok) {
+        const compsData = (await resCompanies.json()) as Array<Record<string, unknown>>;
+        const mappedComps: CompanyOption[] = compsData.map((c) => ({
+          id: Number(c.id),
+          code: String(c.code ?? ""),
+          name: String(c.name ?? ""),
+        }));
+        setCompanies(mappedComps);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Lỗi khi tải dữ liệu.");
     } finally {
@@ -117,42 +130,59 @@ export default function ProductCompanyManagementPage() {
   const filteredRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return rows.filter((row) => {
-      const dmsCode = (row.companies[0]?.distributor_sku || row.member_skus[0] || "").toLowerCase();
-      const dmsName = (row.companies[0]?.distributor_name || row.group_name || "").toLowerCase();
-      const supplier = (row.supplier || "").toLowerCase();
-      const compName = (row.companies[0]?.company_name || "").toLowerCase();
-
-      if (supplierFilter !== "ALL" && (row.supplier || "Vinamilk") !== supplierFilter) return false;
+      if (distributorFilter !== "ALL" && row.distributor_name !== distributorFilter) return false;
+      if (supplierFilter !== "ALL" && row.supplier !== supplierFilter) return false;
+      if (companyFilter === "ASSIGNED" && !row.company_id) return false;
+      if (companyFilter === "UNASSIGNED" && row.company_id) return false;
+      if (companyFilter !== "ALL" && companyFilter !== "ASSIGNED" && companyFilter !== "UNASSIGNED") {
+        if (String(row.company_id) !== companyFilter) return false;
+      }
 
       if (q) {
         const match =
-          dmsCode.includes(q) ||
-          dmsName.includes(q) ||
-          supplier.includes(q) ||
-          compName.includes(q);
+          row.distributor_sku.toLowerCase().includes(q) ||
+          row.distributor_product_name.toLowerCase().includes(q) ||
+          row.distributor_name.toLowerCase().includes(q) ||
+          row.supplier.toLowerCase().includes(q) ||
+          (row.company_code && row.company_code.toLowerCase().includes(q)) ||
+          (row.company_name && row.company_name.toLowerCase().includes(q));
         if (!match) return false;
       }
       return true;
     });
-  }, [rows, searchQuery, supplierFilter]);
+  }, [rows, searchQuery, distributorFilter, supplierFilter, companyFilter]);
+
+  // Danh sách các NPP và NCC duy nhất để lọc
+  const filterOptions = useMemo(() => {
+    const dists = new Set<string>();
+    const supps = new Set<string>();
+    for (const r of rows) {
+      if (r.distributor_name) dists.add(r.distributor_name);
+      if (r.supplier) supps.add(r.supplier);
+    }
+    return {
+      distributors: Array.from(dists),
+      suppliers: Array.from(supps),
+    };
+  }, [rows]);
 
   // Thống kê KPI
   const stats = useMemo(() => {
-    const distributors = new Set<string>();
-    const suppliers = new Set<string>();
-
+    const total = rows.length;
+    let assigned = 0;
+    let unassigned = 0;
     for (const r of rows) {
-      const compName = r.companies[0]?.company_name;
-      if (compName) distributors.add(compName);
-      if (r.supplier) suppliers.add(r.supplier);
+      if (r.company_id) assigned++;
+      else unassigned++;
     }
-
     return {
-      total: rows.length,
-      distributorCount: distributors.size || 1,
-      supplierCount: suppliers.size || 1,
+      total,
+      distributorsCount: filterOptions.distributors.length,
+      suppliersCount: filterOptions.suppliers.length,
+      assignedCount: assigned,
+      unassignedCount: unassigned,
     };
-  }, [rows]);
+  }, [rows, filterOptions]);
 
   // Phân trang
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
@@ -163,77 +193,93 @@ export default function ProductCompanyManagementPage() {
   }, [filteredRows, safePage, pageSize]);
 
   // Mở modal sửa
-  function openEditModal(row: ProductCompanyRow) {
-    const code = row.companies[0]?.distributor_sku || row.member_skus[0] || "";
-    const name = row.companies[0]?.distributor_name || row.group_name || "";
+  function openEditModal(row: DistributorProductRow) {
     setEditingRow(row);
-    setEditOrigCode(code);
-    setEditNewCode(code);
-    setEditName(name);
-    setEditUnit(row.unit || "HOP");
+    setEditSku(row.distributor_sku);
+    setEditName(row.distributor_product_name);
+    setEditDistributor(row.distributor_name);
+    setEditSupplier(row.supplier);
+    setEditCompanyId(row.company_id ? String(row.company_id) : "");
     setEditError("");
   }
 
   // Lưu chỉnh sửa
   async function handleSaveEdit(e: React.FormEvent) {
     e.preventDefault();
-    if (!editNewCode.trim()) {
-      setEditError("Mã sản phẩm NPP không được để trống.");
+    if (!editingRow) return;
+    if (!editSku.trim() || !editName.trim()) {
+      setEditError("Mã SP NPP và Tên sản phẩm không được để trống.");
       return;
     }
+
     setSavingEdit(true);
     setEditError("");
     try {
+      const selectedComp = companies.find((c) => String(c.id) === editCompanyId);
       const res = await apiFetch(`${API_URL}/product-groups/distributor-products`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          original_code: editOrigCode,
-          new_code: editNewCode.trim().toUpperCase(),
-          distributor_name: editName.trim() || null,
-          unit: editUnit.trim().toUpperCase() || null,
-          supplier: editingRow?.supplier || "Vinamilk",
+          id: editingRow.id,
+          original_code: editingRow.distributor_sku,
+          distributor_sku: editSku.trim().toUpperCase(),
+          distributor_product_name: editName.trim(),
+          distributor_name: editDistributor.trim() || "Nhà Phân Phối Mai Gold",
+          supplier: editSupplier.trim() || "Vinamilk",
+          company_id: editCompanyId ? Number(editCompanyId) : null,
         }),
       });
+
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Không thể cập nhật mã sản phẩm NPP.");
 
-      setToastMessage(data.message || "Cập nhật mã sản phẩm NPP thành công.");
-      setTimeout(() => setToastMessage(""), 3500);
+      // Cập nhật Optimistic vào State
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === editingRow.id
+            ? {
+                ...r,
+                distributor_sku: editSku.trim().toUpperCase(),
+                distributor_product_name: editName.trim(),
+                distributor_name: editDistributor.trim() || "Nhà Phân Phối Mai Gold",
+                supplier: editSupplier.trim() || "Vinamilk",
+                company_id: editCompanyId ? Number(editCompanyId) : null,
+                company_code: selectedComp ? selectedComp.code : null,
+                company_name: selectedComp ? selectedComp.name : null,
+              }
+            : r
+        )
+      );
+
+      setToastMessage(`Đã cập nhật mã sản phẩm NPP '${editSku.trim().toUpperCase()}' thành công.`);
+      setTimeout(() => setToastMessage(""), 4000);
       setEditingRow(null);
-      await loadData();
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : "Lỗi khi lưu thông tin.");
+      setEditError(err instanceof Error ? err.message : "Lỗi khi cập nhật.");
     } finally {
       setSavingEdit(false);
     }
   }
 
-  // Mở modal xóa
-  function openDeleteModal(row: ProductCompanyRow) {
-    setDeletingRow(row);
-    setDeleteError("");
-  }
-
-  // Thực hiện xóa
+  // Xóa mã SP NPP
   async function handleConfirmDelete() {
     if (!deletingRow) return;
-    const code = deletingRow.companies[0]?.distributor_sku || deletingRow.member_skus[0] || "";
-    if (!code) return;
-
     setDeleting(true);
     setDeleteError("");
     try {
-      const res = await apiFetch(`${API_URL}/product-groups/distributor-products/${encodeURIComponent(code)}`, {
-        method: "DELETE",
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Không thể xóa mã sản phẩm NPP.");
+      const res = await apiFetch(
+        `${API_URL}/product-groups/distributor-products/${deletingRow.id}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Không thể xóa mã sản phẩm NPP.");
+      }
 
-      setToastMessage(data.message || `Đã xóa mã sản phẩm '${code}' thành công.`);
-      setTimeout(() => setToastMessage(""), 3500);
+      setRows((prev) => prev.filter((r) => r.id !== deletingRow.id));
+      setToastMessage(`Đã xóa mã sản phẩm NPP '${deletingRow.distributor_sku}' khỏi danh mục.`);
+      setTimeout(() => setToastMessage(""), 4000);
       setDeletingRow(null);
-      await loadData();
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : "Lỗi khi xóa mã sản phẩm.");
     } finally {
@@ -241,8 +287,8 @@ export default function ProductCompanyManagementPage() {
     }
   }
 
-  // Xử lý khi chọn file Excel upload
-  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+  // Đọc file Excel xem trước trong modal upload
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -251,72 +297,94 @@ export default function ProductCompanyManagementPage() {
     setPreviewRows([]);
 
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const wb = XLSX.read(arrayBuffer, { type: "array" });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const jsonData = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 });
+      const buffer = await file.arrayBuffer();
+      const wb = XLSX.read(buffer, { type: "array" });
+      const sheetName = wb.SheetNames[0];
+      const sheet = wb.Sheets[sheetName];
+      const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
 
-      if (jsonData.length < 2) {
-        setUploadError("File Excel không có dữ liệu để xử lý.");
+      if (!rawData || rawData.length < 2) {
+        setUploadError("File Excel không có dữ liệu hoặc thiếu dòng tiêu đề.");
         return;
       }
 
-      const headers = (jsonData[0] || []).map((h) => String(h || "").trim().toLowerCase());
-      let codeIdx = -1;
+      const headers = (rawData[0] || []).map((c) => String(c || "").trim().toLowerCase());
+
+      let skuIdx = -1;
       let nameIdx = -1;
-      let unitIdx = -1;
-      let supplierIdx = -1;
       let distIdx = -1;
+      let supplierIdx = -1;
+      let compCodeIdx = -1;
 
       headers.forEach((h, idx) => {
-        if (h.includes("mã") || h.includes("code") || h.includes("sku")) codeIdx = idx;
-        else if (h.includes("tên") || h.includes("name") || h.includes("sản phẩm")) nameIdx = idx;
-        else if (h.includes("đvt") || h.includes("unit") || h.includes("dvt")) unitIdx = idx;
-        else if (h.includes("cung cấp") || h.includes("supplier") || h.includes("ncc")) supplierIdx = idx;
-        else if (h.includes("phân phối") || h.includes("distributor") || h.includes("npp")) distIdx = idx;
+        if (h.includes("mã sp npp") || h.includes("mã sp") || h.includes("distributor_sku") || h.includes("sku")) {
+          skuIdx = idx;
+        } else if (h.includes("tên sản phẩm") || h.includes("tên sp") || h.includes("distributor_name") || h.includes("distributor_product_name")) {
+          nameIdx = idx;
+        } else if (h.includes("nhà phân phối") || h.includes("distributor") || h.includes("npp")) {
+          distIdx = idx;
+        } else if (h.includes("nhà cung cấp") || h.includes("supplier") || h.includes("ncc")) {
+          supplierIdx = idx;
+        } else if (h.includes("mã công ty ql") || h.includes("mã công ty") || h.includes("company_code") || h.includes("mã cty")) {
+          compCodeIdx = idx;
+        }
       });
 
-      if (codeIdx === -1) codeIdx = 0;
+      if (skuIdx === -1) skuIdx = 2 < headers.length ? 2 : 0;
+      if (nameIdx === -1) nameIdx = 3 < headers.length ? 3 : 1;
 
-      const parsed: ExcelPreviewRow[] = [];
-      for (let i = 1; i < jsonData.length; i++) {
-        const row = jsonData[i];
+      const existingMap = new Map(rows.map((r) => [r.distributor_sku.toUpperCase(), r]));
+      const companyMap = new Map(companies.map((c) => [c.code.toUpperCase(), c]));
+
+      const previewList: ExcelPreviewRow[] = [];
+      for (let i = 1; i < rawData.length; i++) {
+        const row = rawData[i];
         if (!row || row.length === 0) continue;
-        const c = String(row[codeIdx] || "").trim().toUpperCase();
-        if (!c) continue;
-        const n = nameIdx !== -1 && row[nameIdx] ? String(row[nameIdx]).trim() : `Sản phẩm ${c}`;
-        const u = unitIdx !== -1 && row[unitIdx] ? String(row[unitIdx]).trim().toUpperCase() : "HOP";
-        const s = supplierIdx !== -1 && row[supplierIdx] ? String(row[supplierIdx]).trim() : "Vinamilk";
-        const d = distIdx !== -1 && row[distIdx] ? String(row[distIdx]).trim() : "Nhà Phân Phối Mai Gold";
-        parsed.push({ code: c, name: n, unit: u, supplier: s, distributor: d });
+
+        const sku = String(row[skuIdx] || "").trim().toUpperCase();
+        if (!sku || sku.includes("BẮT BUỘC") || sku.includes("MÃ SP")) continue;
+
+        const name = String(row[nameIdx] || "").trim() || `Sản phẩm ${sku}`;
+        const dist = distIdx !== -1 && row[distIdx] ? String(row[distIdx]).trim() : "Nhà Phân Phối Mai Gold";
+        const supplier = supplierIdx !== -1 && row[supplierIdx] ? String(row[supplierIdx]).trim() : "Vinamilk";
+        const compCode = compCodeIdx !== -1 && row[compCodeIdx] ? String(row[compCodeIdx]).trim().toUpperCase() : "";
+        const matchedComp = compCode ? companyMap.get(compCode) : null;
+        const compName = matchedComp ? matchedComp.name : compCode ? "Mã chưa khớp công ty QL" : "";
+
+        const actionType: ExcelPreviewRow["action_type"] = existingMap.has(sku) ? "Cập nhật" : "Thêm mới";
+
+        previewList.push({
+          stt: previewList.length + 1,
+          distributor_name: dist || "Nhà Phân Phối Mai Gold",
+          distributor_sku: sku,
+          distributor_product_name: name,
+          supplier: supplier || "Vinamilk",
+          company_code: compCode,
+          company_name: compName,
+          action_type: actionType,
+        });
       }
 
-      if (parsed.length === 0) {
-        setUploadError("Không tìm thấy dòng mã sản phẩm hợp lệ nào trong file.");
+      if (previewList.length === 0) {
+        setUploadError("Không tìm thấy dòng dữ liệu sản phẩm hợp lệ trong file Excel.");
       } else {
-        setPreviewRows(parsed);
+        setPreviewRows(previewList);
       }
     } catch (err) {
-      setUploadError("Không thể đọc nội dung file Excel: " + (err instanceof Error ? err.message : ""));
+      setUploadError(err instanceof Error ? err.message : "Lỗi khi đọc file Excel.");
     }
   }
 
-  // Gửi file lên backend
-  async function handleSubmitUpload(e: React.FormEvent) {
-    e.preventDefault();
-    if (!selectedFile) {
-      setUploadError("Vui lòng chọn một file Excel (.xlsx, .xls).");
-      return;
-    }
-
+  // Thực thi Upload Excel lên Server
+  async function handleExecuteUpload() {
+    if (!selectedFile) return;
     setUploading(true);
     setUploadError("");
-
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
 
-      const res = await fetch(`${API_URL}/product-groups/distributor-products/upload`, {
+      const res = await apiFetch(`${API_URL}/product-groups/distributor-products/upload`, {
         method: "POST",
         body: formData,
       });
@@ -326,63 +394,71 @@ export default function ProductCompanyManagementPage() {
         throw new Error(data.detail || "Tải lên file không thành công.");
       }
 
-      setToastMessage(data.message || `Đã thêm thành công ${data.added || previewRows.length} mã sản phẩm NPP.`);
-      setTimeout(() => setToastMessage(""), 4500);
+      setToastMessage(data.message || "Tải lên và cập nhật danh sách mã sản phẩm NPP thành công!");
+      setTimeout(() => setToastMessage(""), 5000);
       setShowUploadModal(false);
       setSelectedFile(null);
       setPreviewRows([]);
       if (fileInputRef.current) fileInputRef.current.value = "";
       await loadData();
     } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "Lỗi khi tải file lên server.");
+      setUploadError(err instanceof Error ? err.message : "Lỗi khi tải file lên máy chủ.");
     } finally {
       setUploading(false);
     }
   }
 
-  // Tải file Excel mẫu
+  // Tải file Excel mẫu 7 cột chuẩn
   function handleDownloadTemplate() {
     const templateRows = [
       {
+        STT: 1,
+        "Nhà phân phối": "Nhà Phân Phối Mai Gold",
         "Mã SP NPP": "01TD03",
-        "Tên sản phẩm": "Sữa tươi tiệt trùng có đường 180ml",
-        "ĐVT": "HOP",
+        "Tên Sản Phẩm NPP": "Sữa tươi tiệt trùng có đường 180ml",
         "Nhà cung cấp": "Vinamilk",
-        "Nhà phân phối": "Nhà Phân Phối Mai Gold",
+        "Mã Công ty QL": "CT01",
+        "Tên Công ty QL": "Công ty TNHH Phân Phối Mai Gold",
       },
       {
+        STT: 2,
+        "Nhà phân phối": "Nhà Phân Phối Mai Gold",
         "Mã SP NPP": "07KD12",
-        "Tên sản phẩm": "Sữa chua ăn lựu đỏ 100g",
-        "ĐVT": "HOP",
+        "Tên Sản Phẩm NPP": "Sữa chua ăn lựu đỏ 100g",
         "Nhà cung cấp": "Vinamilk",
-        "Nhà phân phối": "Nhà Phân Phối Mai Gold",
+        "Mã Công ty QL": "",
+        "Tên Công ty QL": "",
       },
       {
-        "Mã SP NPP": "01SX11",
-        "Tên sản phẩm": "Sữa dinh dưỡng Optimum Gold 110ml",
-        "ĐVT": "HOP",
-        "Nhà cung cấp": "Vinamilk",
+        STT: 3,
         "Nhà phân phối": "Nhà Phân Phối Mai Gold",
+        "Mã SP NPP": "01SX11",
+        "Tên Sản Phẩm NPP": "Sữa dinh dưỡng Optimum Gold 110ml",
+        "Nhà cung cấp": "Vinamilk",
+        "Mã Công ty QL": "",
+        "Tên Công ty QL": "",
       },
     ];
-    downloadExcel(templateRows, "mau-danh-sach-ma-sp-npp");
+    downloadExcel(templateRows, "mau_danh_sach_ma_sp_npp_noi_bo", "DS Mã SP NPP");
   }
 
+  // Xuất Excel toàn bộ dữ liệu khớp bộ lọc
   function handleExportExcel() {
     if (filteredRows.length === 0) return;
-    const excelData = filteredRows.map((r, idx) => {
-      const dmsCode = r.companies[0]?.distributor_sku || r.member_skus[0] || "";
-      const dmsName = r.companies[0]?.distributor_name || r.group_name || "";
-      return {
-        STT: idx + 1,
-        "Nhà phân phối": r.companies[0]?.company_name || "Nhà Phân Phối Mai Gold",
-        "Mã SP Web NCC (Mã NPP)": dmsCode,
-        "Tên SP theo Web NCC": dmsName,
-        "Nhà cung cấp": r.supplier || "Vinamilk",
-        "ĐVT": r.unit || "HOP",
-      };
-    });
-    downloadExcel(excelData, `Quan_ly_ma_NPP_noi_bo_${new Date().toISOString().slice(0, 10)}`);
+    const excelData = filteredRows.map((r, idx) => ({
+      STT: idx + 1,
+      "Nhà phân phối": r.distributor_name || "Nhà Phân Phối Mai Gold",
+      "Mã SP NPP": r.distributor_sku,
+      "Tên Sản Phẩm NPP": r.distributor_product_name,
+      "Nhà cung cấp": r.supplier || "Vinamilk",
+      "Mã Công ty QL": r.company_code || "",
+      "Tên Công ty QL": r.company_name || "",
+    }));
+    downloadExcel(
+      excelData,
+      `Quan_ly_ma_NPP_noi_bo_${new Date().toISOString().slice(0, 10)}`,
+      "Mã SP NPP Nội Bộ"
+    );
   }
 
   return (
@@ -410,30 +486,17 @@ export default function ProductCompanyManagementPage() {
         <header className="bg-[#14263d] px-3 py-2 text-white flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Building2 size={17} className="text-red-500" />
-            <div>
-              <span className="text-xs font-bold uppercase tracking-wide text-white">
-                Quản Lý Mã Sản Phẩm Nhà Phân Phối Nội Bộ
-              </span>
-              <span className="ml-2 text-[10px] text-sky-200">
-                (Đồng bộ từ Đơn hàng Web NCC hoặc Upload danh mục nội bộ)
-              </span>
-            </div>
+            <h1 className="text-xs font-bold uppercase tracking-wide text-white">
+              Quản Lý Mã Sản Phẩm Nhà Phân Phối Nội Bộ
+            </h1>
           </div>
 
           <div className="flex items-center gap-2">
-            <Link
-              href="/products"
-              className="inline-flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors"
-            >
-              <ArrowRight size={12} />
-              Sang Danh sách SKU (CQT)
-            </Link>
-
             <button
               type="button"
               onClick={handleDownloadTemplate}
               className="inline-flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors"
-              title="Tải file Excel mẫu để nhập danh sách mã SP NPP"
+              title="Tải file Excel mẫu gồm 7 cột chuẩn để nhập dữ liệu"
             >
               <Download size={12} />
               Tải file mẫu
@@ -448,10 +511,10 @@ export default function ProductCompanyManagementPage() {
                 setUploadError("");
               }}
               className="inline-flex items-center gap-1 rounded bg-emerald-700 hover:bg-emerald-800 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors shadow-sm"
-              title="Upload file Excel để thêm danh sách mã sản phẩm NPP"
+              title="Upload file Excel để thêm mới và chỉnh sửa hàng loạt nhiều mã SP NPP"
             >
               <Upload size={12} />
-              Tải lên Excel
+              Upload thêm & Sửa hàng loạt
             </button>
 
             <button
@@ -466,82 +529,81 @@ export default function ProductCompanyManagementPage() {
 
             <button
               type="button"
-              onClick={loadData}
+              onClick={() => void loadData()}
               disabled={loading}
-              className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors disabled:bg-slate-500"
+              className="rounded p-1 text-white hover:bg-white/10 transition-colors"
+              title="Làm mới danh sách"
             >
-              {loading ? (
-                <Loader2 size={12} className="animate-spin" />
-              ) : (
-                <RefreshCw size={12} />
-              )}
-              Làm mới
+              <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
             </button>
           </div>
         </header>
 
-        {/* 2. THANH CHỈ SỐ NGHIỆP VỤ (COMPACT KPI STRIP) */}
-        <section className="border-b border-slate-200 bg-slate-50/90 px-3 py-2">
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-            <div className="flex items-center justify-between rounded border border-slate-300 bg-white px-2.5 py-1.5">
-              <div>
-                <p className="text-[10px] font-semibold uppercase text-slate-500">
-                  Mã SP từ Web NCC
-                </p>
-                <p className="text-sm font-bold text-sky-900">
-                  {formatNumber(stats.total)}{" "}
-                  <span className="text-[10px] font-normal text-slate-500">mã hàng</span>
-                </p>
-              </div>
-              <Layers size={16} className="text-sky-700" />
-            </div>
-
-            <div className="flex items-center justify-between rounded border border-slate-300 bg-white px-2.5 py-1.5">
-              <div>
-                <p className="text-[10px] font-semibold uppercase text-slate-500">
-                  Nhà Phân Phối
-                </p>
-                <p className="text-sm font-bold text-indigo-900">
-                  {formatNumber(stats.distributorCount)}{" "}
-                  <span className="text-[10px] font-normal text-slate-500">đơn vị</span>
-                </p>
-              </div>
-              <Building2 size={16} className="text-indigo-600" />
-            </div>
-
-            <div className="flex items-center justify-between rounded border border-slate-300 bg-white px-2.5 py-1.5">
-              <div>
-                <p className="text-[10px] font-semibold uppercase text-slate-500">
-                  Nhà Cung Cấp
-                </p>
-                <p className="text-sm font-bold text-emerald-800">
-                  {formatNumber(stats.supplierCount)}{" "}
-                  <span className="text-[10px] font-normal text-slate-500">đơn vị</span>
-                </p>
-              </div>
-              <Truck size={16} className="text-emerald-600" />
-            </div>
+        {/* 2. THỐNG KÊ NHANH (KPI STATS) */}
+        <section className="grid grid-cols-2 sm:grid-cols-5 divide-x divide-slate-200 border-b border-slate-200 bg-slate-50/60 text-center text-xs">
+          <div className="py-2 px-3">
+            <span className="block text-[10px] font-semibold text-slate-500 uppercase">
+              Tổng Mã SP NPP
+            </span>
+            <span className="text-sm font-bold text-slate-800">
+              {formatNumber(stats.total)}
+            </span>
+          </div>
+          <div className="py-2 px-3">
+            <span className="block text-[10px] font-semibold text-slate-500 uppercase">
+              Nhà phân phối
+            </span>
+            <span className="text-sm font-bold text-indigo-700">
+              {stats.distributorsCount}
+            </span>
+          </div>
+          <div className="py-2 px-3">
+            <span className="block text-[10px] font-semibold text-slate-500 uppercase">
+              Nhà cung cấp
+            </span>
+            <span className="text-sm font-bold text-sky-700">
+              {stats.suppliersCount}
+            </span>
+          </div>
+          <div className="py-2 px-3">
+            <span className="block text-[10px] font-semibold text-emerald-700 uppercase">
+              Đã gán Công ty QL
+            </span>
+            <span className="text-sm font-bold text-emerald-700">
+              {formatNumber(stats.assignedCount)}
+            </span>
+          </div>
+          <div className="py-2 px-3">
+            <span className="block text-[10px] font-semibold text-amber-700 uppercase">
+              Chưa gán Công ty QL
+            </span>
+            <span className="text-sm font-bold text-amber-700">
+              {formatNumber(stats.unassignedCount)}
+            </span>
           </div>
         </section>
 
-        {/* 3. BỘ LỌC TRA CỨU */}
-        <section className="border-b border-slate-200 px-3 py-2">
-          <div className="grid gap-x-3 gap-y-2 sm:grid-cols-3 xl:grid-cols-4">
-            <div className="sm:col-span-2 xl:col-span-3">
+        {/* 3. BỘ LỌC TÌM KIẾM */}
+        <section className="border-b border-slate-200 px-3 py-2.5 bg-white">
+          <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div>
               <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                Tìm kiếm Mã SP Web NCC / Tên sản phẩm / Nhà phân phối
+                Tìm kiếm mã SP, tên SP hoặc Công ty QL
               </label>
               <div className="relative">
                 <Search
                   size={13}
-                  className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400"
+                  className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
                 />
                 <input
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Nhập mã sản phẩm web NCC (VD: 01TD03, 07KD12, 01SX11) hoặc tên hàng, nhà phân phối..."
-                  className={`${inputCls} pl-7 pr-6`}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  placeholder="Nhập mã SP, tên sản phẩm, công ty..."
+                  className={`${inputCls} pl-7 pr-7`}
                 />
                 {searchQuery && (
                   <button
@@ -557,33 +619,83 @@ export default function ProductCompanyManagementPage() {
 
             <div>
               <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                Nhà phân phối
+              </label>
+              <select
+                value={distributorFilter}
+                onChange={(e) => {
+                  setDistributorFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className={inputCls}
+              >
+                <option value="ALL">Tất cả Nhà phân phối</option>
+                {filterOptions.distributors.map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                 Nhà cung cấp
               </label>
               <select
                 value={supplierFilter}
-                onChange={(e) => setSupplierFilter(e.target.value)}
+                onChange={(e) => {
+                  setSupplierFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
                 className={inputCls}
               >
                 <option value="ALL">Tất cả Nhà cung cấp</option>
-                <option value="Vinamilk">Vinamilk</option>
-                <option value="FrieslandCampina">FrieslandCampina</option>
-                <option value="KiotViet">KiotViet</option>
+                {filterOptions.suppliers.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                Trạng thái gán Công ty Quản lý
+              </label>
+              <select
+                value={companyFilter}
+                onChange={(e) => {
+                  setCompanyFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className={inputCls}
+              >
+                <option value="ALL">Tất cả trạng thái</option>
+                <option value="ASSIGNED">Đã gán Công ty QL</option>
+                <option value="UNASSIGNED">Chưa gán Công ty QL</option>
+                {companies.map((c) => (
+                  <option key={c.id} value={String(c.id)}>
+                    {c.code} - {c.name}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
         </section>
 
-        {/* 4. BẢNG DỮ LIỆU MÃ SẢN PHẨM WEB NCC (MÃ NPP NỘI BỘ) */}
+        {/* 4. BẢNG DỮ LIỆU ĐÚNG 7 CỘT CHUẨN */}
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-left">
             <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase">
               <tr className="border-b border-slate-300">
-                <th className="w-10 px-2 py-2 text-center">STT</th>
+                <th className="w-12 px-2 py-2 text-center">STT</th>
                 <th className="px-2.5 py-2">Nhà phân phối</th>
-                <th className="px-2.5 py-2">Mã SP Web NCC (Mã NPP)</th>
-                <th className="px-2.5 py-2">Tên sản phẩm theo Web NCC</th>
+                <th className="px-2.5 py-2">Mã SP NPP</th>
+                <th className="px-2.5 py-2">Tên Sản Phẩm NPP</th>
                 <th className="px-2.5 py-2">Nhà cung cấp</th>
-                <th className="px-2.5 py-2 text-center">ĐVT</th>
+                <th className="px-2.5 py-2">Mã Công ty QL</th>
+                <th className="px-2.5 py-2">Tên Công ty QL</th>
                 <th className="w-24 px-2 py-2 text-center">Thao tác</th>
               </tr>
             </thead>
@@ -591,29 +703,25 @@ export default function ProductCompanyManagementPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={8} className="px-4 py-10 text-center text-xs text-slate-500">
                     <span className="inline-flex items-center gap-2">
                       <Loader2 size={15} className="animate-spin text-sky-600" />
-                      Đang tải danh sách mã sản phẩm đồng bộ từ web nhà cung cấp...
+                      Đang tải danh sách mã sản phẩm NPP nội bộ...
                     </span>
                   </td>
                 </tr>
               ) : pagedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-xs text-slate-500">
-                    {error || "Không có mã sản phẩm nào khớp với điều kiện lọc hiện tại."}
+                  <td colSpan={8} className="px-4 py-10 text-center text-xs text-slate-500">
+                    {error || "Chưa có mã sản phẩm NPP nào. Hãy bấm 'Upload thêm & Sửa hàng loạt' hoặc tải file mẫu để tải lên."}
                   </td>
                 </tr>
               ) : (
                 pagedRows.map((row, idx) => {
                   const stt = (safePage - 1) * pageSize + idx + 1;
-                  const dmsCode = row.companies[0]?.distributor_sku || row.member_skus[0] || "—";
-                  const dmsName = row.companies[0]?.distributor_name || row.group_name || "—";
-                  const compName = row.companies[0]?.company_name || "Nhà Phân Phối Mai Gold";
-
                   return (
                     <tr
-                      key={row.product_group_id || idx}
+                      key={row.id}
                       className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/50 text-[11px] transition-colors"
                     >
                       <td className="px-2 py-1.5 text-center font-medium text-slate-500">
@@ -622,18 +730,18 @@ export default function ProductCompanyManagementPage() {
 
                       <td className="px-2.5 py-1.5 whitespace-nowrap">
                         <span className="inline-block rounded border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-800">
-                          {compName}
+                          {row.distributor_name || "Nhà Phân Phối Mai Gold"}
                         </span>
                       </td>
 
                       <td className="px-2.5 py-1.5 whitespace-nowrap font-mono font-bold text-sky-800">
                         <span className="rounded bg-sky-50 border border-sky-300 px-1.5 py-0.5">
-                          {dmsCode}
+                          {row.distributor_sku}
                         </span>
                       </td>
 
                       <td className="px-2.5 py-1.5 font-medium text-slate-800">
-                        {dmsName}
+                        {row.distributor_product_name}
                       </td>
 
                       <td className="px-2.5 py-1.5 whitespace-nowrap">
@@ -642,8 +750,26 @@ export default function ProductCompanyManagementPage() {
                         </span>
                       </td>
 
-                      <td className="px-2.5 py-1.5 text-center font-semibold text-slate-700">
-                        {row.unit || "HOP"}
+                      <td className="px-2.5 py-1.5 whitespace-nowrap font-mono">
+                        {row.company_code ? (
+                          <span className="inline-block rounded border border-sky-300 bg-sky-50 px-1.5 py-0.5 text-[10px] font-bold text-sky-800">
+                            {row.company_code}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 text-[10px] italic">—</span>
+                        )}
+                      </td>
+
+                      <td className="px-2.5 py-1.5">
+                        {row.company_name ? (
+                          <span className="inline-block rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
+                            {row.company_name}
+                          </span>
+                        ) : (
+                          <span className="inline-block rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                            Chưa gán Công ty QL
+                          </span>
+                        )}
                       </td>
 
                       <td className="px-2 py-1.5 text-center whitespace-nowrap">
@@ -651,20 +777,21 @@ export default function ProductCompanyManagementPage() {
                           <button
                             type="button"
                             onClick={() => openEditModal(row)}
-                            className="inline-flex items-center gap-1 rounded bg-sky-600 hover:bg-sky-700 px-2 py-1 text-[10px] font-semibold text-white transition-colors"
-                            title="Chỉnh sửa thông tin mã NPP"
+                            className="rounded p-1 text-sky-600 hover:bg-sky-100 hover:text-sky-800 transition-colors"
+                            title="Chỉnh sửa thông tin & gán Công ty QL"
                           >
-                            <Pencil size={11} />
-                            Sửa
+                            <Pencil size={13} />
                           </button>
                           <button
                             type="button"
-                            onClick={() => openDeleteModal(row)}
-                            className="inline-flex items-center gap-1 rounded bg-red-600 hover:bg-red-700 px-2 py-1 text-[10px] font-semibold text-white transition-colors"
-                            title="Xóa mã NPP khỏi danh mục"
+                            onClick={() => {
+                              setDeletingRow(row);
+                              setDeleteError("");
+                            }}
+                            className="rounded p-1 text-red-600 hover:bg-red-100 hover:text-red-800 transition-colors"
+                            title="Xóa mã sản phẩm NPP"
                           >
-                            <Trash2 size={11} />
-                            Xóa
+                            <Trash2 size={13} />
                           </button>
                         </div>
                       </td>
@@ -677,68 +804,203 @@ export default function ProductCompanyManagementPage() {
         </div>
 
         {/* 5. FOOTER PHÂN TRANG */}
-        <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-          <div className="text-slate-600 text-[11px]">
-            Hiển thị <strong>{filteredRows.length > 0 ? (safePage - 1) * pageSize + 1 : 0}</strong> -{" "}
-            <strong>{Math.min(safePage * pageSize, filteredRows.length)}</strong> trên tổng số{" "}
-            <strong>{formatNumber(filteredRows.length)}</strong> mã sản phẩm từ web NCC
+        <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3 text-[10px] text-slate-500">
+            <span>
+              * Dữ liệu mã sản phẩm NPP nội bộ do người dùng upload & gán Công ty Quản lý xuất hóa đơn.
+            </span>
+            <label className="inline-flex items-center gap-1 font-semibold text-slate-700">
+              Hiển thị:
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
+                className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] text-slate-800 focus:border-sky-500 focus:outline-none"
+              >
+                <option value={20}>20 dòng</option>
+                <option value={50}>50 dòng</option>
+                <option value={100}>100 dòng</option>
+                <option value={200}>200 dòng</option>
+              </select>
+            </label>
           </div>
 
-          <div className="flex items-center gap-2">
-            <select
-              value={pageSize}
-              onChange={(e) => {
-                setPageSize(Number(e.target.value));
-                setCurrentPage(1);
-              }}
-              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-semibold text-slate-600 mr-1">
+              Trang {safePage} / {totalPages} (Tổng {formatNumber(filteredRows.length)} mã)
+            </span>
+            <button
+              type="button"
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={safePage <= 1}
+              className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white hover:bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <option value={20}>20 dòng / trang</option>
-              <option value={50}>50 dòng / trang</option>
-              <option value={100}>100 dòng / trang</option>
-            </select>
-
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                disabled={safePage <= 1}
-                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                className="rounded border border-slate-300 bg-white p-1 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-              >
-                <ChevronLeft size={14} />
-              </button>
-              <span className="px-2 text-xs font-semibold text-slate-700">
-                {safePage} / {totalPages}
-              </span>
-              <button
-                type="button"
-                disabled={safePage >= totalPages}
-                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                className="rounded border border-slate-300 bg-white p-1 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-              >
-                <ChevronRight size={14} />
-              </button>
-            </div>
+              <ChevronLeft size={13} />
+              Trước
+            </button>
+            <button
+              type="button"
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={safePage >= totalPages}
+              className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white hover:bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Sau
+              <ChevronRight size={13} />
+            </button>
           </div>
-        </div>
+        </footer>
       </div>
 
-      {/* ===================================================================== */}
-      {/* MODAL: TẢI LÊN EXCEL THÊM DANH SÁCH MÃ SP NPP                         */}
-      {/* ===================================================================== */}
-      {showUploadModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <form
-            onSubmit={handleSubmitUpload}
-            className="w-full max-w-2xl border border-slate-400 bg-white shadow-xl animate-in fade-in-50 zoom-in-95"
-          >
-            {/* Header Modal */}
-            <div className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
+      {/* MODAL CHỈNH SỬA MÃ SP NPP & GÁN CÔNG TY QUẢN LÝ (Standard GEMINI.md) */}
+      {editingRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 animate-in fade-in-50">
+          <div className="w-full max-w-xl border border-slate-400 bg-white shadow-2xl">
+            <header className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Upload size={17} className="text-emerald-400" />
-                <span className="text-xs font-bold uppercase tracking-wide text-white">
-                  Tải Lên Danh Sách Mã Sản Phẩm NPP (Excel)
+                <Pencil size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  Chỉnh Sửa Mã SP NPP & Gán Công Ty Quản Lý
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingRow(null)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <form onSubmit={handleSaveEdit}>
+              <div className="p-3.5 space-y-3">
+                {editError && (
+                  <div className="rounded border border-red-300 bg-red-50 p-2 text-xs text-red-800 flex items-center gap-2">
+                    <AlertTriangle size={14} className="shrink-0 text-red-600" />
+                    <span>{editError}</span>
+                  </div>
+                )}
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Mã SP NPP <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={editSku}
+                      onChange={(e) => setEditSku(e.target.value.toUpperCase())}
+                      className={inputCls}
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Nhà phân phối
+                    </label>
+                    <input
+                      type="text"
+                      value={editDistributor}
+                      onChange={(e) => setEditDistributor(e.target.value)}
+                      className={inputCls}
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Tên Sản Phẩm NPP <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      className={inputCls}
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Nhà cung cấp
+                    </label>
+                    <input
+                      type="text"
+                      value={editSupplier}
+                      onChange={(e) => setEditSupplier(e.target.value)}
+                      className={inputCls}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Công ty Quản lý (Khớp từ Đăng ký quản lý)
+                    </label>
+                    <select
+                      value={editCompanyId}
+                      onChange={(e) => setEditCompanyId(e.target.value)}
+                      className={inputCls}
+                    >
+                      <option value="">[-- Chưa gán Công ty Quản lý --]</option>
+                      {companies.map((c) => (
+                        <option key={c.id} value={String(c.id)}>
+                          [{c.code}] - {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="rounded bg-sky-50 border border-sky-200 p-2 text-[11px] text-sky-800 flex items-start gap-1.5">
+                  <Info size={14} className="shrink-0 mt-0.5 text-sky-600" />
+                  <span>
+                    Nếu chọn <strong>[-- Chưa gán Công ty Quản lý --]</strong>, sản phẩm sẽ để trống và chưa thuộc công ty con nào phụ trách xuất hóa đơn.
+                  </span>
+                </div>
+              </div>
+
+              <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
+                <span className="text-[10px] text-slate-500">
+                  Mã gốc: <strong>{editingRow.distributor_sku}</strong>
                 </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingRow(null)}
+                    className="rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
+                  >
+                    Hủy bỏ
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingEdit}
+                    className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    {savingEdit ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <CheckCircle2 size={13} />
+                    )}
+                    Lưu thay đổi
+                  </button>
+                </div>
+              </footer>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL UPLOAD THÊM & CHỈNH SỬA HÀNG LOẠT TỪ EXCEL (Standard GEMINI.md) */}
+      {showUploadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 animate-in fade-in-50">
+          <div className="w-full max-w-4xl max-h-[90vh] flex flex-col border border-slate-400 bg-white shadow-2xl">
+            <header className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <Upload size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  Upload Thêm Mới & Chỉnh Sửa Hàng Loạt Từ Excel
+                </h2>
               </div>
               <button
                 type="button"
@@ -747,83 +1009,123 @@ export default function ProductCompanyManagementPage() {
               >
                 <X size={16} />
               </button>
-            </div>
+            </header>
 
-            {/* Body */}
-            <div className="border-b border-slate-200 px-4 py-3 space-y-3">
+            <div className="p-3.5 space-y-3 overflow-y-auto">
+              <div className="rounded border border-sky-200 bg-sky-50/70 p-3 text-xs text-sky-900 space-y-1.5">
+                <div className="font-bold flex items-center gap-1.5 text-sky-950">
+                  <Info size={14} className="text-sky-700" />
+                  Quy tắc Thêm mới & Chỉnh sửa hàng loạt:
+                </div>
+                <ul className="list-disc list-inside space-y-0.5 text-[11px] text-slate-700">
+                  <li>
+                    <strong>File Excel gồm 7 cột:</strong> STT, Nhà phân phối, Mã SP NPP, Tên Sản Phẩm NPP, Nhà cung cấp, Mã Công ty QL, Tên Công ty QL.
+                  </li>
+                  <li>
+                    <strong>Mã Công ty QL:</strong> Khớp theo mã của Công ty trong <em>Đăng ký quản lý</em>. Nếu để trống thì hệ thống sẽ <strong>để trống (chưa gán)</strong>.
+                  </li>
+                  <li>
+                    <strong>Chỉnh sửa hàng loạt:</strong> Nếu Mã SP NPP đã có trong danh mục, hệ thống sẽ tự động cập nhật lại thông tin từ file Excel (Bulk Edit). Nếu mã chưa có, hệ thống sẽ thêm mới.
+                  </li>
+                </ul>
+              </div>
+
               {uploadError && (
-                <div className="rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs text-red-700 flex items-center gap-1.5">
-                  <AlertTriangle size={14} className="shrink-0" />
+                <div className="rounded border border-red-300 bg-red-50 p-2.5 text-xs text-red-800 flex items-center gap-2">
+                  <AlertTriangle size={15} className="shrink-0 text-red-600" />
                   <span>{uploadError}</span>
                 </div>
               )}
 
-              {/* Hướng dẫn và Nút tải mẫu */}
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-sky-200 bg-sky-50/70 p-2.5 text-xs">
-                <div>
-                  <p className="font-semibold text-sky-900">
-                    Quy chuẩn file Excel:
-                  </p>
-                  <p className="text-[11px] text-slate-600">
-                    Cột: <strong>Mã SP NPP</strong>, <strong>Tên sản phẩm</strong>, <strong>ĐVT</strong>, <strong>Nhà cung cấp</strong>, <strong>Nhà phân phối</strong>.
-                  </p>
+              <div className="flex flex-wrap items-center justify-between gap-2 border border-dashed border-slate-300 rounded p-3 bg-slate-50">
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".xlsx,.xlsm,.xls"
+                    onChange={handleFileSelect}
+                    className="text-xs file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-sky-600 file:text-white hover:file:bg-sky-700"
+                  />
+                  {selectedFile && (
+                    <span className="text-[11px] font-semibold text-slate-700">
+                      ({formatNumber(previewRows.length)} dòng dữ liệu)
+                    </span>
+                  )}
                 </div>
+
                 <button
                   type="button"
                   onClick={handleDownloadTemplate}
-                  className="inline-flex items-center gap-1 rounded border border-sky-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-sky-800 hover:bg-sky-50 shadow-sm"
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-sky-700 hover:text-sky-900 underline"
                 >
-                  <Download size={12} />
-                  Tải file Excel mẫu
+                  <Download size={13} />
+                  Tải file Excel mẫu 7 cột
                 </button>
               </div>
 
-              {/* Ô chọn file */}
-              <div>
-                <label className="text-[10px] font-semibold text-slate-600 block mb-1">
-                  Chọn file dữ liệu Excel (.xlsx, .xls) <span className="text-red-500">*</span>
-                </label>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".xlsx, .xls, .xlsm"
-                  onChange={handleFileChange}
-                  className="w-full text-xs text-slate-700 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-sky-50 file:text-sky-700 hover:file:bg-sky-100 cursor-pointer border border-dashed border-slate-300 p-2 rounded bg-slate-50"
-                  required
-                />
-              </div>
-
-              {/* Preview Bảng dữ liệu */}
+              {/* BẢNG XEM TRƯỚC (PREVIEW) */}
               {previewRows.length > 0 && (
                 <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-slate-700">
-                      Xem trước dữ liệu ({previewRows.length} mã sản phẩm được nhận diện):
-                    </span>
-                    <span className="text-[10px] text-slate-500">
-                      Hiển thị tối đa 5 dòng đầu
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                    <span>Xem trước dữ liệu tải lên ({previewRows.length} dòng):</span>
+                    <span className="text-[11px] text-slate-500">
+                      {previewRows.filter((r) => r.action_type === "Thêm mới").length} Thêm mới,{" "}
+                      {previewRows.filter((r) => r.action_type === "Cập nhật").length} Cập nhật hàng loạt
                     </span>
                   </div>
 
-                  <div className="max-h-48 overflow-y-auto border border-slate-200 rounded">
+                  <div className="max-h-60 overflow-y-auto border border-slate-200 rounded">
                     <table className="w-full border-collapse text-left text-[11px]">
-                      <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 sticky top-0">
-                        <tr className="border-b border-slate-200">
-                          <th className="px-2 py-1 text-center w-8">#</th>
-                          <th className="px-2 py-1">Mã SP NPP</th>
-                          <th className="px-2 py-1">Tên sản phẩm</th>
-                          <th className="px-2 py-1 text-center">ĐVT</th>
-                          <th className="px-2 py-1">Nhà cung cấp</th>
+                      <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase sticky top-0">
+                        <tr className="border-b border-slate-300">
+                          <th className="px-2 py-1.5 text-center w-10">STT</th>
+                          <th className="px-2 py-1.5">Nhà phân phối</th>
+                          <th className="px-2 py-1.5">Mã SP NPP</th>
+                          <th className="px-2 py-1.5">Tên Sản Phẩm NPP</th>
+                          <th className="px-2 py-1.5">Nhà cung cấp</th>
+                          <th className="px-2 py-1.5">Mã Công ty QL</th>
+                          <th className="px-2 py-1.5">Tên Công ty QL</th>
+                          <th className="px-2 py-1.5 text-center w-24">Phân loại</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {previewRows.slice(0, 5).map((row, i) => (
-                          <tr key={i} className="border-b border-slate-100 even:bg-slate-50">
-                            <td className="px-2 py-1 text-center text-slate-400">{i + 1}</td>
-                            <td className="px-2 py-1 font-mono font-bold text-sky-800">{row.code}</td>
-                            <td className="px-2 py-1 text-slate-800 truncate max-w-xs">{row.name}</td>
-                            <td className="px-2 py-1 text-center">{row.unit}</td>
-                            <td className="px-2 py-1 text-slate-600">{row.supplier}</td>
+                        {previewRows.map((p, idx) => (
+                          <tr
+                            key={idx}
+                            className="border-b border-slate-100 even:bg-slate-50/50 hover:bg-sky-50/50"
+                          >
+                            <td className="px-2 py-1 text-center text-slate-500">{p.stt}</td>
+                            <td className="px-2 py-1 whitespace-nowrap">{p.distributor_name}</td>
+                            <td className="px-2 py-1 font-mono font-bold text-sky-800 whitespace-nowrap">
+                              {p.distributor_sku}
+                            </td>
+                            <td className="px-2 py-1">{p.distributor_product_name}</td>
+                            <td className="px-2 py-1 whitespace-nowrap">{p.supplier}</td>
+                            <td className="px-2 py-1 font-mono whitespace-nowrap">
+                              {p.company_code ? (
+                                <span className="font-semibold text-sky-800">{p.company_code}</span>
+                              ) : (
+                                <span className="text-slate-400 italic">Để trống</span>
+                              )}
+                            </td>
+                            <td className="px-2 py-1">
+                              {p.company_name ? (
+                                <span className="text-emerald-700">{p.company_name}</span>
+                              ) : (
+                                <span className="text-amber-600 italic">Chưa gán</span>
+                              )}
+                            </td>
+                            <td className="px-2 py-1 text-center whitespace-nowrap">
+                              <span
+                                className={`inline-block px-1.5 py-0.5 text-[9px] font-bold rounded uppercase ${
+                                  p.action_type === "Thêm mới"
+                                    ? "bg-emerald-100 text-emerald-800"
+                                    : "bg-sky-100 text-sky-800"
+                                }`}
+                              >
+                                {p.action_type}
+                              </span>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -833,12 +1135,9 @@ export default function ProductCompanyManagementPage() {
               )}
             </div>
 
-            {/* Footer Action Bar */}
-            <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
+            <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3 shrink-0">
               <span className="text-[10px] text-slate-500">
-                {previewRows.length > 0
-                  ? `Sẵn sàng nạp ${previewRows.length} mã vào danh mục nội bộ.`
-                  : "Vui lòng chọn file Excel để bắt đầu."}
+                {selectedFile ? `Đã chọn: ${selectedFile.name}` : "Vui lòng chọn file Excel"}
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -849,163 +1148,34 @@ export default function ProductCompanyManagementPage() {
                   Đóng
                 </button>
                 <button
-                  type="submit"
+                  type="button"
+                  onClick={handleExecuteUpload}
                   disabled={uploading || previewRows.length === 0}
                   className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
                 >
                   {uploading ? (
                     <Loader2 size={13} className="animate-spin" />
                   ) : (
-                    <Upload size={13} />
+                    <Check size={13} />
                   )}
-                  {uploading ? "Đang xử lý..." : `Xác nhận tải lên (${previewRows.length})`}
+                  Xác nhận Tải lên & Cập nhật ({previewRows.length})
                 </button>
               </div>
-            </div>
-          </form>
+            </footer>
+          </div>
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* MODAL: CHỈNH SỬA MÃ SẢN PHẨM NPP NỘI BỘ (CreateOrderForm Standard)      */}
-      {/* ===================================================================== */}
-      {editingRow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <form
-            onSubmit={handleSaveEdit}
-            className="w-full max-w-lg border border-slate-400 bg-white shadow-lg animate-in fade-in-50 zoom-in-95"
-          >
-            {/* Header Modal */}
-            <div className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Pencil size={17} className="text-sky-400" />
-                <span className="text-xs font-bold uppercase tracking-wide text-white">
-                  Chỉnh Sửa Mã Sản Phẩm NPP Nội Bộ
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setEditingRow(null)}
-                className="rounded p-1 text-white hover:bg-white/10"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            {/* Body */}
-            <div className="border-b border-slate-200 px-3 py-3 space-y-3">
-              {editError && (
-                <div className="rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs text-red-700 flex items-center gap-1.5">
-                  <AlertTriangle size={14} />
-                  <span>{editError}</span>
-                </div>
-              )}
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                    Mã SP NPP (Mã Web NCC) <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={editNewCode}
-                    onChange={(e) => setEditNewCode(e.target.value.toUpperCase())}
-                    className={`${inputCls} font-mono font-bold text-sky-800`}
-                    placeholder="VD: 01TD03..."
-                    required
-                  />
-                  <span className="text-[9px] text-slate-500 mt-0.5 block">
-                    Mã gốc: <strong className="font-mono">{editOrigCode}</strong>
-                  </span>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                    Đơn vị tính (ĐVT)
-                  </label>
-                  <input
-                    type="text"
-                    value={editUnit}
-                    onChange={(e) => setEditUnit(e.target.value.toUpperCase())}
-                    className={inputCls}
-                    placeholder="VD: HOP, THUNG, CHAI..."
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                  Tên sản phẩm theo Web NCC (hoặc NPP)
-                </label>
-                <input
-                  type="text"
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  className={inputCls}
-                  placeholder="Nhập tên sản phẩm..."
-                />
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2 text-xs bg-slate-50 p-2 rounded border border-slate-200">
-                <div>
-                  <span className="text-[10px] text-slate-500 block">Nhà cung cấp</span>
-                  <span className="font-semibold text-slate-700">
-                    {editingRow.supplier || "Vinamilk"}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-500 block">Nhà phân phối</span>
-                  <span className="font-semibold text-indigo-700">
-                    {editingRow.companies[0]?.company_name || "Nhà Phân Phối Mai Gold"}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Footer Action Bar */}
-            <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
-              <span className="text-[10px] text-slate-500">
-                Cập nhật thông tin mã NPP trên toàn hệ thống nội bộ.
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditingRow(null)}
-                  className="rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
-                >
-                  Đóng
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingEdit}
-                  className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
-                >
-                  {savingEdit ? (
-                    <Loader2 size={13} className="animate-spin" />
-                  ) : (
-                    <CheckCircle2 size={13} />
-                  )}
-                  Lưu thay đổi
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* ===================================================================== */}
-      {/* MODAL: XÁC NHẬN XÓA MÃ SẢN PHẨM NPP                                   */}
-      {/* ===================================================================== */}
+      {/* MODAL XÁC NHẬN XÓA (Standard GEMINI.md) */}
       {deletingRow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md border border-slate-400 bg-white shadow-lg animate-in fade-in-50 zoom-in-95">
-            {/* Header Modal */}
-            <div className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 animate-in fade-in-50">
+          <div className="w-full max-w-md border border-slate-400 bg-white shadow-2xl">
+            <header className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Trash2 size={17} className="text-red-500" />
-                <span className="text-xs font-bold uppercase tracking-wide text-white">
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
                   Xác Nhận Xóa Mã Sản Phẩm NPP
-                </span>
+                </h2>
               </div>
               <button
                 type="button"
@@ -1014,70 +1184,51 @@ export default function ProductCompanyManagementPage() {
               >
                 <X size={16} />
               </button>
-            </div>
+            </header>
 
-            {/* Body */}
-            <div className="border-b border-slate-200 px-4 py-3 space-y-2">
+            <div className="p-3.5 space-y-2 text-xs text-slate-700">
               {deleteError && (
-                <div className="rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs text-red-700 flex items-center gap-1.5">
-                  <AlertTriangle size={14} />
+                <div className="rounded border border-red-300 bg-red-50 p-2 text-xs text-red-800 flex items-center gap-2">
+                  <AlertTriangle size={14} className="shrink-0 text-red-600" />
                   <span>{deleteError}</span>
                 </div>
               )}
 
-              <p className="text-xs text-slate-700 leading-relaxed">
-                Bạn có chắc chắn muốn xóa mã sản phẩm này khỏi danh mục NPP nội bộ?
+              <p>
+                Bạn có chắc chắn muốn xóa mã sản phẩm NPP <strong>{deletingRow.distributor_sku}</strong> không?
               </p>
-
-              <div className="rounded border border-red-200 bg-red-50/60 p-2.5 text-xs">
-                <p className="font-semibold text-red-900">
-                  Mã SP NPP:{" "}
-                  <span className="font-mono font-bold text-red-700">
-                    {deletingRow.companies[0]?.distributor_sku || deletingRow.member_skus[0]}
-                  </span>
-                </p>
-                <p className="text-slate-700 mt-0.5">
-                  Tên sản phẩm:{" "}
-                  <strong>{deletingRow.companies[0]?.distributor_name || deletingRow.group_name}</strong>
-                </p>
-                <p className="text-slate-500 text-[10px] mt-0.5">
-                  Nhà cung cấp: {deletingRow.supplier || "Vinamilk"} · ĐVT: {deletingRow.unit || "HOP"}
-                </p>
-              </div>
-
-              <p className="text-[10px] text-amber-700 italic">
-                * Hành động này sẽ gỡ mã sản phẩm này khỏi danh mục nội bộ và hủy các liên kết mã tương ứng.
-              </p>
-            </div>
-
-            {/* Footer Action Bar */}
-            <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
-              <span className="text-[10px] text-slate-500">
-                Thao tác không thể hoàn tác.
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setDeletingRow(null)}
-                  className="rounded bg-slate-200 hover:bg-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors"
-                >
-                  Hủy bỏ
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmDelete}
-                  disabled={deleting}
-                  className="inline-flex items-center gap-1.5 rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
-                >
-                  {deleting ? (
-                    <Loader2 size={13} className="animate-spin" />
-                  ) : (
-                    <Trash2 size={13} />
-                  )}
-                  Xác nhận xóa
-                </button>
+              <div className="rounded bg-slate-100 p-2 text-[11px] space-y-1">
+                <div>
+                  <span className="text-slate-500">Tên SP:</span> <strong>{deletingRow.distributor_product_name}</strong>
+                </div>
+                <div>
+                  <span className="text-slate-500">Nhà phân phối:</span> {deletingRow.distributor_name}
+                </div>
+                <div>
+                  <span className="text-slate-500">Công ty QL:</span>{" "}
+                  {deletingRow.company_name || <em className="text-amber-600">Chưa gán</em>}
+                </div>
               </div>
             </div>
+
+            <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeletingRow(null)}
+                className="rounded border border-slate-300 bg-white hover:bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={deleting}
+                className="inline-flex items-center gap-1.5 rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:opacity-50"
+              >
+                {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                Xác nhận Xóa
+              </button>
+            </footer>
           </div>
         </div>
       )}

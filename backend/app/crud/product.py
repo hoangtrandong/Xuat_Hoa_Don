@@ -1,7 +1,7 @@
 import re
 import unicodedata
 from typing import Any, List, Optional
-from sqlalchemy import func, select, text, or_, bindparam
+from sqlalchemy import func, select, text, or_, and_, bindparam
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -113,17 +113,60 @@ def _normalize_unit_code(raw_unit: str | None) -> tuple[str, str]:
     return short_code, (raw_unit or short_code).strip()[:40]
 
 
-def _normalize_supplier_name(raw_supplier: str | None, fallback: str = "Vinamilk") -> str:
+def _normalize_supplier_name(
+    raw_supplier: str | None,
+    seller_tax_code: str | None = None,
+    fallback: str = "Vinamilk",
+    db: Session | None = None,
+) -> str:
     text_sup = (raw_supplier or "").strip()
-    if not text_sup:
+    if not text_sup and not seller_tax_code:
         return fallback
     if text_sup.upper().startswith("NCC:"):
         text_sup = text_sup[4:].strip()
     upper = text_sup.upper()
+    tax_clean = (seller_tax_code or "").strip()
+
+    # 1. Tra cứu động từ Từ điển Nhà cung cấp trong Database
+    if db is not None:
+        try:
+            from app.models.supplier_dictionary import SupplierDictionary
+            dicts = db.scalars(select(SupplierDictionary).where(SupplierDictionary.is_active == True)).all()
+            # 1a. Tra cứu theo Mã số thuế (MST CQT)
+            if tax_clean:
+                for d in dicts:
+                    if d.tax_codes and tax_clean in d.tax_codes:
+                        return d.standard_name
+            # 1b. Tra cứu theo Từ khóa nhận diện
+            if upper:
+                for d in dicts:
+                    if d.keywords:
+                        for kw in d.keywords:
+                            kw_clean = (kw or "").strip().upper()
+                            if kw_clean and kw_clean in upper:
+                                return d.standard_name
+        except Exception:
+            pass
+
+    # 2. Quy tắc dự phòng (Fallback built-in)
     if "VINAMILK" in upper or "SỮA VIỆT NAM" in upper or "SUA VIET NAM" in upper:
         return "Vinamilk"
-    if "FRIESLAND" in upper or "CAMPINA" in upper or "DUTCH LADY" in upper:
-        return "FrieslandCampina"
+    if "FRIESLAND" in upper or "CAMPINA" in upper or "DUTCH LADY" in upper or "HÀ LAN" in upper or "HA LAN" in upper:
+        return "Hà Lan"
+    if "NABATI" in upper:
+        return "Nabati"
+    if "Á CHÂU" in upper or "A CHAU" in upper or "GẤU ĐỎ" in upper or "GAU DO" in upper:
+        return "Gấu đỏ"
+    if "VIỆT SING" in upper or "VIET SING" in upper or "VIETSING" in upper:
+        return "Bỉm VietSing"
+    if "HÙNG CƯỜNG" in upper or "HUNG CUONG" in upper:
+        return "Hùng Cường"
+    if "HAYAT" in upper or "MOLFIX" in upper:
+        return "Hayat"
+    if "VIỆT ĐÀI" in upper or "VIET DAI" in upper:
+        return "Việt Đài"
+    if "PETROLIMEX" in upper:
+        return "Petrolimex"
     if "MASAN" in upper:
         return "Masan"
     if "UNILEVER" in upper:
@@ -143,7 +186,22 @@ def _normalize_supplier_name(raw_supplier: str | None, fallback: str = "Vinamilk
     ):
         if upper.startswith(prefix):
             return text_sup[len(prefix):].strip().title()[:120]
-    return text_sup[:120]
+    return text_sup[:120] if text_sup else fallback
+
+
+def normalize_all_products_suppliers(db: Session) -> int:
+    """Quét và chuẩn hóa toàn bộ trường supplier trong bảng products theo từ điển DB."""
+    prods = db.scalars(select(Product)).all()
+    updated = 0
+    for p in prods:
+        curr = p.supplier or ""
+        norm = _normalize_supplier_name(curr, fallback=curr, db=db)
+        if norm and norm != curr:
+            p.supplier = norm
+            updated += 1
+    if updated > 0:
+        db.commit()
+    return updated
 
 
 def _infer_category_code(sku: str, name: str, supplier: str = "") -> str:
@@ -841,6 +899,237 @@ def list_(
     return products
 
 
+def list_paged(
+    db: Session,
+    page: int = 1,
+    page_size: int = 50,
+    search: Optional[str] = None,
+    category_id: Optional[int] = None,
+    supplier: Optional[str] = None,
+    unit: Optional[str] = None,
+    status: Optional[str] = None,
+    distributor_code: Optional[str] = None,
+    sort_field: str = "code",
+    sort_order: str = "asc",
+) -> tuple[List[Product], int, dict[str, Any]]:
+    conditions = [Product.sku.is_not(None), Product.sku != ""]
+
+    if category_id:
+        conditions.append(Product.category_id == category_id)
+
+    if supplier and supplier != "ALL":
+        conditions.append(Product.supplier == supplier)
+
+    if unit and unit != "ALL":
+        conditions.append(Product.unit.has(ProductUnit.name == unit))
+
+    if status and status != "ALL":
+        if status == "active":
+            conditions.append(Product.status == "active")
+        elif status == "inactive":
+            conditions.append(Product.status == "inactive")
+        elif status == "HAS_PRICE":
+            conditions.append(or_(Product.base_price > 0, Product.cost_price > 0))
+        elif status == "ZERO_PRICE":
+            conditions.append(
+                and_(
+                    or_(Product.base_price <= 0, Product.base_price.is_(None)),
+                    or_(Product.cost_price <= 0, Product.cost_price.is_(None)),
+                )
+            )
+
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        conditions.append(
+            or_(
+                func.lower(Product.sku).like(term),
+                func.lower(Product.name).like(term),
+                func.lower(Product._npp_code).like(term),
+                func.lower(Product.supplier).like(term),
+            )
+        )
+
+    # 1. Đếm tổng số bản ghi phù hợp điều kiện lọc (Single fast indexed COUNT)
+    count_query = select(func.count(Product.id)).where(*conditions)
+    total = db.scalar(count_query) or 0
+
+    # 2. Xử lý sắp xếp
+    sort_col_map = {
+        "code": Product.sku,
+        "nppCode": Product._npp_code,
+        "name": Product.name,
+        "category": ProductCategory.name,
+        "unit": ProductUnit.name,
+        "boxes_per_carton": Product.boxes_per_carton,
+        "supplier": Product.supplier,
+        "price": Product.base_price,
+        "cost_price": Product.cost_price,
+    }
+    col = sort_col_map.get(sort_field, Product.sku)
+    order_clause = col.desc() if sort_order == "desc" else col.asc()
+
+    # 3. Phân trang
+    safe_page = max(1, page)
+    safe_page_size = min(500, max(1, page_size))
+    offset = (safe_page - 1) * safe_page_size
+
+    paged_query = (
+        select(Product)
+        .options(joinedload(Product.category), joinedload(Product.unit))
+        .outerjoin(Product.category)
+        .outerjoin(Product.unit)
+        .where(*conditions)
+        .order_by(order_clause)
+        .offset(offset)
+        .limit(safe_page_size)
+    )
+    products = list(db.execute(paged_query).scalars().unique().all())
+
+    # 4. Thống kê tổng quan (Single pass SQL aggregation < 2ms)
+    stats_dict = {
+        "total": total,
+        "active_count": 0,
+        "priced_count": 0,
+        "zero_price_count": 0,
+        "supplier_count": 0,
+    }
+    try:
+        stats_row = db.execute(text("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE status = 'active') as active_count,
+                COUNT(*) FILTER (WHERE (base_price > 0 OR cost_price > 0)) as priced_count,
+                COUNT(*) FILTER (WHERE (base_price <= 0 OR base_price IS NULL) AND (cost_price <= 0 OR cost_price IS NULL)) as zero_price_count,
+                COUNT(DISTINCT supplier) as supplier_count
+            FROM products
+            WHERE sku IS NOT NULL AND sku <> ''
+        """)).mappings().first()
+        if stats_row:
+            stats_dict = dict(stats_row)
+    except Exception:
+        pass
+
+    if not products:
+        return products, total, stats_dict
+
+    # 5. Làm giàu dữ liệu CHỈ CHO ĐÚNG các sản phẩm trên trang này (50 bản ghi)
+    current_product_ids = [p.id for p in products]
+    rep_rows = db.execute(
+        text(
+            "SELECT pgi.product_id, rp.sku AS rep_sku, rp.name AS rep_name "
+            "FROM product_group_items pgi "
+            "JOIN product_groups pg ON pg.id = pgi.product_group_id "
+            "JOIN products rp ON rp.id = pg.representative_product_id "
+            "WHERE pgi.product_id IN :pids"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": current_product_ids},
+    ).all()
+    rep_map = {row.product_id: (row.rep_sku, row.rep_name) for row in rep_rows}
+
+    relevant_codes = {p.sku.strip().upper() for p in products if p.sku} | {
+        (p.npp_code or "").strip().upper() for p in products if p.npp_code
+    }
+    relevant_codes = {c for c in relevant_codes if c}
+
+    order_stats_map: dict[str, tuple[int, float]] = {}
+    try:
+        if relevant_codes:
+            snaps = db.execute(
+                select(
+                    func.upper(func.trim(VinamilkOrderSnapshot.product_code)),
+                    func.count(func.distinct(VinamilkOrderSnapshot.order_number)),
+                    func.count(VinamilkOrderSnapshot.id),
+                )
+                .where(
+                    VinamilkOrderSnapshot.product_code.is_not(None),
+                    func.upper(func.trim(VinamilkOrderSnapshot.product_code)).in_(relevant_codes),
+                )
+                .group_by(func.upper(func.trim(VinamilkOrderSnapshot.product_code)))
+            ).all()
+            for s_code, ord_cnt, line_cnt in snaps:
+                if s_code:
+                    order_stats_map[str(s_code)] = (int(ord_cnt or 0), float(line_cnt or 0))
+    except Exception:
+        pass
+
+    purchase_stats_map: dict[str, tuple[int, float]] = {}
+    try:
+        from app.models.multi_tenant_invoice import PurchaseInvoiceItem
+
+        if relevant_codes:
+            p_rows = db.execute(
+                select(
+                    func.upper(func.trim(PurchaseInvoiceItem.product_code)),
+                    func.count(func.distinct(PurchaseInvoiceItem.purchase_invoice_id)),
+                    func.sum(PurchaseInvoiceItem.quantity),
+                )
+                .where(
+                    PurchaseInvoiceItem.product_code.is_not(None),
+                    func.upper(func.trim(PurchaseInvoiceItem.product_code)).in_(relevant_codes),
+                )
+                .group_by(func.upper(func.trim(PurchaseInvoiceItem.product_code)))
+            ).all()
+            for p_code, inv_cnt, sum_qty in p_rows:
+                if p_code:
+                    purchase_stats_map[str(p_code)] = (int(inv_cnt or 0), round(float(sum_qty or 0.0), 2))
+    except Exception:
+        pass
+
+    npp_directory = NppDirectory(db)
+    for product in products:
+        rep = rep_map.get(product.id)
+        product._rep_sku_cache = rep[0] if rep else None
+        product._rep_name_cache = rep[1] if rep else None
+        product._npp_code_cache = npp_directory.code(product.id, product.sku)
+
+        sku_key = (product.sku or "").strip().upper()
+        npp_key = (product.npp_code or "").strip().upper()
+        ord_cnt, ord_qty = order_stats_map.get(npp_key) or order_stats_map.get(sku_key) or (0, 0.0)
+        pur_cnt, pur_qty = purchase_stats_map.get(sku_key) or purchase_stats_map.get(npp_key) or (0, 0.0)
+
+        product.category_code = product.category.code if product.category else None
+        product.category_name = product.category.name if product.category else None
+        product.unit_code = product.unit.code if product.unit else None
+        product.unit_name = product.unit.name if product.unit else None
+        product.order_count = ord_cnt
+        product.total_ordered_qty = ord_qty
+        product.purchase_invoice_count = pur_cnt
+        product.total_purchased_qty = pur_qty
+        if ord_cnt > 0 and pur_cnt > 0:
+            product.sync_source = "DMS_AND_CQT"
+        elif ord_cnt > 0:
+            product.sync_source = "ORDER_SYNC"
+        elif pur_cnt > 0:
+            product.sync_source = "PURCHASE_INVOICE"
+        else:
+            product.sync_source = "MANUAL"
+
+    return products, total, stats_dict
+
+
+def get_filter_options(db: Session) -> dict[str, Any]:
+    from app.models.multi_tenant_invoice import Distributor
+    supplier_rows = db.execute(text("""
+        SELECT supplier, COUNT(*) as count
+        FROM products
+        WHERE supplier IS NOT NULL AND supplier <> ''
+        GROUP BY supplier
+        ORDER BY count DESC, supplier ASC
+    """)).all()
+    cat_rows = db.execute(text("""
+        SELECT category_id, COUNT(*) as count
+        FROM products
+        WHERE category_id IS NOT NULL
+        GROUP BY category_id
+    """)).all()
+    distributors = db.scalars(select(Distributor).order_by(Distributor.name)).all()
+    return {
+        "suppliers": [{"name": str(r[0]), "count": int(r[1])} for r in supplier_rows if r[0]],
+        "category_counts": {int(r[0]): int(r[1]) for r in cat_rows if r[0] is not None},
+        "distributors": [{"code": d.code, "name": d.name} for d in distributors if d.code],
+    }
+
+
 def create(db: Session, obj_in: ProductCreate) -> Product:
     data = obj_in.model_dump()
     if data.get("sku"):
@@ -918,6 +1207,8 @@ def bulk_delete(db: Session, product_ids: List[int]) -> int:
 class ProductCRUD:
     get = staticmethod(get)
     list_ = staticmethod(list_)
+    list_paged = staticmethod(list_paged)
+    get_filter_options = staticmethod(get_filter_options)
     create = staticmethod(create)
     update = staticmethod(update)
     delete = staticmethod(delete)

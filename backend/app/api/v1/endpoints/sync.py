@@ -3517,3 +3517,104 @@ def update_order_allocation(
     except (ValueError, TypeError) as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# =========================================================================
+# TIẾN TRÌNH CHẠY NGẦM & HÀNG ĐỢI XỬ LÝ ĐỒNG BỘ THỜI GIAN THỰC (JOB QUEUE)
+# =========================================================================
+
+from app.core.job_queue import job_manager, JobInfo
+
+
+async def _run_vinamilk_sync_background(job_id: str, form_dict: dict, days: list[date]):
+    from app.core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        job_manager.start_job(job_id, f"Khởi tạo kết nối cào dữ liệu {len(days)} ngày từ cổng Vinamilk...")
+        session_cookie = read_cookie()
+        saved_total = 0
+        total_days = len(days)
+
+        for idx, day in enumerate(days, start=1):
+            day_str = day.strftime("%d/%m/%Y")
+            job_manager.update_progress(
+                job_id,
+                current_step=idx - 1,
+                message=f"Đang đồng bộ ngày {day_str} ({idx}/{total_days})...",
+            )
+            day_form = {**form_dict, "fromDate": day_str, "toDate": day_str}
+            try:
+                session_cookie, row_count = await sync_vinamilk_day(db, day_form, day, session_cookie)
+                saved_total += row_count
+                job_manager.update_progress(
+                    job_id,
+                    current_step=idx,
+                    message=f"Đã lưu ngày {day_str} (+{row_count} đơn, tổng cộng {saved_total} đơn).",
+                )
+            except Exception as day_exc:
+                db.rollback()
+                job_manager.update_progress(
+                    job_id,
+                    current_step=idx,
+                    message=f"Ngày {day_str} gặp sự cố: {day_exc}",
+                )
+
+        job_manager.set_success(
+            job_id,
+            result_summary={"saved_total": saved_total, "days_total": total_days},
+            message=f"Đồng bộ hoàn tất! Đã lưu {saved_total} dòng đơn hàng từ Vinamilk DMS.",
+        )
+    except Exception as exc:
+        db.rollback()
+        job_manager.set_failed(job_id, str(exc))
+    finally:
+        db.close()
+
+
+@router.post("/vinamilk/async")
+async def trigger_sync_async(request: VinamilkSearchRequest):
+    """Kích hoạt cào đơn Vinamilk vào Hàng Đợi Ngầm (Queue) - phản hồi 0ms không làm đơ trang."""
+    form = request.model_dump()
+    form["page"] = str(form["page"])
+    form["rows"] = str(form["rows"])
+    from_date = _date_value(request.fromDate)
+    to_date = _date_value(request.toDate)
+
+    try:
+        days = list(iter_inclusive_dates(from_date, to_date))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    title = f"Đồng bộ đơn Vinamilk ({from_date:%d/%m} → {to_date:%d/%m})"
+    job = job_manager.create_job(
+        job_type="SYNC_VINAMILK",
+        title=title,
+        total_steps=len(days),
+    )
+
+    # Đưa tác vụ vào hàng đợi ngầm asyncio
+    asyncio.create_task(_run_vinamilk_sync_background(job.id, form, days))
+
+    return {
+        "job_id": job.id,
+        "status": "RUNNING",
+        "title": job.title,
+        "total_days": len(days),
+        "message": "Đã đưa tiến trình cào đơn vào hàng đợi xử lý ngầm thành công.",
+    }
+
+
+@router.get("/jobs/active", response_model=list[JobInfo])
+def get_active_sync_jobs():
+    """Lấy danh sách các tiến trình ngầm đang xử lý hoặc vừa hoàn tất để hiển thị % tiến độ."""
+    return job_manager.list_active_jobs()
+
+
+@router.get("/jobs/{job_id}", response_model=JobInfo)
+def get_sync_job_status(job_id: str):
+    """Kiểm tra chi tiết % tiến độ của một tác vụ ngầm."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tác vụ.")
+    return job
+

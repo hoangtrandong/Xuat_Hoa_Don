@@ -9,7 +9,17 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.core.database import get_db
-from app.schemas.product import Product, ProductCreate, ProductUpdate, PriceList, PriceListCreate, ProductCategoryOption, ProductUnitOption
+from app.schemas.product import (
+    Product,
+    ProductCreate,
+    ProductUpdate,
+    PriceList,
+    PriceListCreate,
+    ProductCategoryOption,
+    ProductUnitOption,
+    ProductPagination,
+    ProductStats,
+)
 from app.models.product import ProductCategory, ProductUnit, ProductGroup, ProductGroupItem
 from app.models.product import Product as ProductModel
 from app.models.multi_tenant_invoice import (
@@ -172,12 +182,31 @@ def upload_products(file: UploadFile = File(...), db: Session = Depends(get_db))
         rows = list(workbook.active.iter_rows(values_only=True))
         if not rows:
             raise HTTPException(status_code=400, detail="File Excel không có dữ liệu.")
-        headers = [str(value).strip() if value is not None else "" for value in rows[0]]
-        required = {"sku", "name", "category_code", "unit_code"}
+        raw_headers = [str(value).strip() if value is not None else "" for value in rows[0]]
+        header_map = {
+            "mã sku": "sku", "ma sku": "sku", "mã sản phẩm": "sku", "sku": "sku",
+            "tên sản phẩm": "name", "ten san pham": "name", "tên sp": "name", "name": "name",
+            "mã danh mục": "category_code", "ma danh muc": "category_code", "danh mục": "category_code", "category_code": "category_code",
+            "đvt": "unit_code", "dvt": "unit_code", "đơn vị tính": "unit_code", "unit_code": "unit_code",
+            "nhà cung cấp": "supplier", "nha cung cap": "supplier", "supplier": "supplier",
+            "giá bán / đvt (vnđ)": "base_price", "giá bán": "base_price", "gia ban": "base_price", "đơn giá": "base_price", "base_price": "base_price",
+            "giá vốn": "cost_price", "gia von": "cost_price", "cost_price": "cost_price",
+            "mức tồn tối thiểu": "reorder_level", "reorder_level": "reorder_level",
+            "trạng thái": "status", "trang thai": "status", "status": "status",
+            "quy cách (hộp/thùng)": "boxes_per_carton", "quy cách": "boxes_per_carton", "boxes_per_carton": "boxes_per_carton",
+            "mã sku đại diện": "representative_sku", "representative_sku": "representative_sku",
+            "tên sku đại diện": "representative_name", "representative_name": "representative_name",
+        }
+        headers = [header_map.get(h.lower(), h) for h in raw_headers]
+        required = {"sku", "name"}
         if not required.issubset(headers):
             raise HTTPException(status_code=400, detail=f"Thiếu cột bắt buộc: {', '.join(sorted(required - set(headers)))}")
-        categories = {item.code: item.id for item in db.query(ProductCategory).all()}
-        units = {item.code: item.id for item in db.query(ProductUnit).all()}
+        categories = {item.code.upper(): item.id for item in db.query(ProductCategory).all()}
+        categories.update({item.name.upper(): item.id for item in db.query(ProductCategory).all()})
+        units = {item.code.upper(): item.id for item in db.query(ProductUnit).all()}
+        units.update({item.name.upper(): item.id for item in db.query(ProductUnit).all()})
+        default_category_id = next(iter(categories.values()), 1)
+        default_unit_id = next(iter(units.values()), 1)
         products = {item.sku: item for item in db.scalars(select(ProductModel)).all()}
         has_representative_columns = "representative_sku" in headers or "representative_name" in headers
         imported = 0
@@ -196,19 +225,45 @@ def upload_products(file: UploadFile = File(...), db: Session = Depends(get_db))
             unit_code = str(data.get("unit_code") or "").strip().upper()
             if not sku or not name:
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: SKU và tên sản phẩm là bắt buộc.")
-            if category_code not in categories or unit_code not in units:
-                raise HTTPException(status_code=400, detail=f"Dòng {row_number}: category_code hoặc unit_code không tồn tại.")
+            
             product = products.get(sku)
+            category_id = categories.get(category_code) or (product.category_id if product else default_category_id)
+            unit_id = units.get(unit_code) or (product.unit_id if product else default_unit_id)
+
+            status_val = str(data.get("status") or "").strip().lower()
+            if status_val in ["active", "đang kinh doanh", "1", "true", ""]:
+                clean_status = "active"
+            else:
+                clean_status = "inactive"
+
+            raw_boxes = data.get("boxes_per_carton")
+            try:
+                boxes_val = max(1, int(float(raw_boxes))) if raw_boxes is not None and str(raw_boxes).strip() != "" else (product.boxes_per_carton if product else 1)
+            except (ValueError, TypeError):
+                boxes_val = 1
+
+            raw_base_price = data.get("base_price")
+            try:
+                base_price_val = float(str(raw_base_price).replace(",", "").strip()) if raw_base_price is not None and str(raw_base_price).strip() != "" else (product.base_price if product else 0.0)
+            except (ValueError, TypeError):
+                base_price_val = 0.0
+
+            raw_cost_price = data.get("cost_price")
+            try:
+                cost_price_val = float(str(raw_cost_price).replace(",", "").strip()) if raw_cost_price is not None and str(raw_cost_price).strip() != "" else (product.cost_price if product else 0.0)
+            except (ValueError, TypeError):
+                cost_price_val = 0.0
+
             values_to_apply = {
                 "name": str(data["name"]).strip(),
-                "category_id": categories[category_code],
-                "unit_id": units[unit_code],
-                "supplier": str(data.get("supplier") or "").strip() or None,
-                "base_price": float(data.get("base_price") or 0),
-                "cost_price": float(data.get("cost_price") or 0),
-                "reorder_level": int(data.get("reorder_level") or 20),
-                "status": str(data.get("status") or "active").strip(),
-                "boxes_per_carton": max(1, int(data.get("boxes_per_carton") or 1)),
+                "category_id": category_id,
+                "unit_id": unit_id,
+                "supplier": str(data.get("supplier") or "").strip() or (product.supplier if product else "Vinamilk"),
+                "base_price": base_price_val,
+                "cost_price": cost_price_val,
+                "reorder_level": int(data.get("reorder_level") or (product.reorder_level if product else 20)),
+                "status": clean_status,
+                "boxes_per_carton": boxes_val,
             }
             if product is None:
                 product = ProductModel(sku=sku, **values_to_apply)
@@ -298,6 +353,57 @@ def sync_products_from_system(db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Không thể đồng bộ danh mục SKU từ hệ thống: {exc}",
         ) from exc
+
+
+@router.get("/filter-options")
+def get_product_filter_options(db: Session = Depends(get_db)):
+    return product_crud.get_filter_options(db)
+
+
+@router.get("/paged", response_model=ProductPagination)
+def list_products_paged(
+    page: int = 1,
+    page_size: int = 50,
+    search: str | None = None,
+    category_id: int | None = None,
+    supplier: str | None = None,
+    unit: str | None = None,
+    status: str | None = None,
+    distributor_code: str | None = None,
+    sort_field: str = "code",
+    sort_order: str = "asc",
+    db: Session = Depends(get_db),
+):
+    items, total, stats_dict = product_crud.list_paged(
+        db,
+        page=page,
+        page_size=page_size,
+        search=search,
+        category_id=category_id,
+        supplier=supplier,
+        unit=unit,
+        status=status,
+        distributor_code=distributor_code,
+        sort_field=sort_field,
+        sort_order=sort_order,
+    )
+    distributor_map = _product_distributors(db, {product.sku.strip().upper() for product in items if product.sku})
+    total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
+
+    return {
+        "items": [
+            {
+                **Product.model_validate(product).model_dump(),
+                "distributors": distributor_map.get(product.sku.strip().upper(), []),
+            }
+            for product in items
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "stats": stats_dict,
+    }
 
 
 @router.get("/", response_model=List[Product])

@@ -110,6 +110,7 @@ type ProductRow = {
   total_purchased_qty: number;
   sync_source: "ORDER_SYNC" | "PURCHASE_INVOICE" | "DMS_AND_CQT" | "MANUAL";
   distributors: ProductDistributor[];
+  _searchKey?: string;
 };
 
 type NppProductOption = {
@@ -144,6 +145,22 @@ function normalizeSearchText(value: string): string {
     .toLowerCase();
 }
 
+function buildProductSearchKey(p: {
+  code: string;
+  nppCode: string;
+  name: string;
+  supplier: string;
+  category: string;
+  unit: string;
+  representative_sku: string;
+  distributors?: ProductDistributor[];
+}): string {
+  const distText = (p.distributors || []).map((d) => `${d.code} ${d.name}`).join(" ");
+  return normalizeSearchText(
+    `${p.code} ${p.nppCode} ${p.name} ${p.supplier} ${p.category} ${p.unit} ${p.representative_sku} ${distText}`
+  );
+}
+
 export default function ProductsPage() {
   const authSession = useAuthSession();
   const isSuperAdmin = authSession.isSuperAdmin || !authSession.distributorCode;
@@ -156,6 +173,7 @@ export default function ProductsPage() {
   const [submitting, setSubmitting] = useState(false);
 
   // Bộ lọc tra cứu
+  const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [distributorFilter, setDistributorFilter] = useState<string>("ALL");
   const [categoryFilter, setCategoryFilter] = useState<string>("ALL");
@@ -170,11 +188,37 @@ export default function ProductsPage() {
     }
   }, [isSuperAdmin, authSession.distributorCode]);
 
-  // Sắp xếp & Phân trang
+  // Sắp xếp & Phân trang Server-side
   const [sortField, setSortField] = useState<SortField>("code");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
-  const [pageSize, setPageSize] = useState<number>(50);
+  const [pageSize, setPageSize] = useState<number>(20);
   const [currentPage, setCurrentPage] = useState<number>(1);
+  const [totalItems, setTotalItems] = useState<number>(0);
+  const [totalPages, setTotalPages] = useState<number>(1);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+
+  // Thống kê & Tuỳ chọn bộ lọc Server
+  const [stats, setStats] = useState({
+    total: 0,
+    activeCount: 0,
+    fromOrdersCount: 0,
+    fromPurchaseCount: 0,
+    pricedCount: 0,
+    zeroPriceCount: 0,
+    supplierCount: 0,
+  });
+  const [supplierOptions, setSupplierOptions] = useState<{ name: string; count: number }[]>([]);
+  const [categoryCounts, setCategoryCounts] = useState<Map<number, number>>(new Map());
+  const [distributorOptions, setDistributorOptions] = useState<{ code: string; name: string }[]>([]);
+
+  // Debounce tìm kiếm 300ms
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearchQuery(searchInput);
+      setCurrentPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
   // Chọn dòng & Modal
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -200,6 +244,9 @@ export default function ProductsPage() {
   const [showCreateNppDropdown, setShowCreateNppDropdown] = useState(false);
   const [createNppFilterTab, setCreateNppFilterTab] = useState<"ALL" | "UNMAPPED" | "MAPPED">("ALL");
   const createNppContainerRef = useRef<HTMLDivElement>(null);
+
+  const editNppSearchInputRef = useRef<HTMLInputElement>(null);
+  const createNppSearchInputRef = useRef<HTMLInputElement>(null);
 
   const [form, setForm] = useState({
     sku: "",
@@ -237,23 +284,50 @@ export default function ProductsPage() {
 
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const loadCatalog = useCallback(async (showSpinner = false) => {
-    if (showSpinner) setLoading(true);
+  const loadFilterOptions = useCallback(async () => {
     try {
-      const [categoryResponse, unitResponse, productResponse, companyLinksResponse] = await Promise.all([
+      const res = await apiFetch(`${API_URL}/products/filter-options`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.suppliers)) setSupplierOptions(data.suppliers);
+        if (Array.isArray(data.distributors)) setDistributorOptions(data.distributors);
+        if (data.category_counts && typeof data.category_counts === "object") {
+          const map = new Map<number, number>();
+          for (const [k, v] of Object.entries(data.category_counts)) {
+            map.set(Number(k), Number(v));
+          }
+          setCategoryCounts(map);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const loadMetadata = useCallback(async () => {
+    try {
+      const [categoryResponse, unitResponse, companyLinksResponse] = await Promise.all([
         apiFetch(`${API_URL}/products/categories/`),
         apiFetch(`${API_URL}/products/units/`),
-        apiFetch(`${API_URL}/products/?limit=10000`),
         apiFetch(`${API_URL}/product-groups/products/company-links`).catch(() => null),
       ]);
-      if (!categoryResponse.ok || !unitResponse.ok || !productResponse.ok) {
-        throw new Error("Không thể tải danh mục ngành hàng, đơn vị tính và danh sách SKU.");
+      if (categoryResponse.ok) {
+        const loadedCategories = (await categoryResponse.json()) as CategoryOption[];
+        setCategories(loadedCategories);
+        setForm((prev) => ({
+          ...prev,
+          category_id: prev.category_id || String(loadedCategories[0]?.id ?? "1"),
+        }));
       }
-      const loadedCategories = (await categoryResponse.json()) as CategoryOption[];
-      const loadedUnits = (await unitResponse.json()) as UnitOption[];
-      const loadedProducts = (await productResponse.json()) as ApiProductItem[];
+      if (unitResponse.ok) {
+        const loadedUnits = (await unitResponse.json()) as UnitOption[];
+        setUnits(loadedUnits);
+        setForm((prev) => ({
+          ...prev,
+          unit_id: prev.unit_id || String(loadedUnits[0]?.id ?? "1"),
+        }));
+      }
 
-      // Tải danh sách mã sản phẩm NPP nội bộ để phục vụ tìm kiếm & gắn mã
       if (companyLinksResponse && companyLinksResponse.ok) {
         const rawLinks = (await companyLinksResponse.json().catch(() => [])) as Array<Record<string, unknown>>;
         if (Array.isArray(rawLinks)) {
@@ -290,14 +364,39 @@ export default function ProductsPage() {
           setNppProductOptions(nppList);
         }
       }
+    } catch {
+      // ignore
+    }
+  }, []);
 
-      setCategories(loadedCategories);
-      setUnits(loadedUnits);
+  const loadCatalog = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(currentPage),
+        page_size: String(pageSize),
+        sort_field: sortField,
+        sort_order: sortOrder,
+      });
+      if (searchQuery.trim()) params.set("search", searchQuery.trim());
+      if (categoryFilter !== "ALL") params.set("category_id", categoryFilter);
+      if (supplierFilter !== "ALL") params.set("supplier", supplierFilter);
+      if (unitFilter !== "ALL") params.set("unit", unitFilter);
+      if (statusFilter !== "ALL") params.set("status", statusFilter);
+      if (!isSuperAdmin && authSession.distributorCode) {
+        params.set("distributor_code", authSession.distributorCode);
+      } else if (distributorFilter !== "ALL") {
+        params.set("distributor_code", distributorFilter);
+      }
 
-      const catById = new Map(loadedCategories.map((c) => [c.id, c]));
-      const unitById = new Map(loadedUnits.map((u) => [u.id, u]));
+      const res = await apiFetch(`${API_URL}/products/paged?${params.toString()}`);
+      if (!res.ok) throw new Error("Không thể tải danh sách SKU.");
+      const data = await res.json();
 
-      const mappedRows: ProductRow[] = loadedProducts.map((product) => {
+      const catById = new Map(categories.map((c) => [c.id, c]));
+      const unitById = new Map(units.map((u) => [u.id, u]));
+
+      const mappedRows: ProductRow[] = (data.items || []).map((product: ApiProductItem) => {
         const catObj = catById.get(product.category_id);
         const unitObj = unitById.get(product.unit_id);
         const rawSource = (product.sync_source || "MANUAL").toUpperCase();
@@ -306,7 +405,7 @@ export default function ProductsPage() {
             ? rawSource
             : "MANUAL";
 
-        return {
+        const row: ProductRow = {
           id: product.id,
           code: product.sku,
           nppCode: product.npp_code || "",
@@ -332,14 +431,24 @@ export default function ProductsPage() {
           sync_source: syncSource,
           distributors: product.distributors ?? [],
         };
+        row._searchKey = buildProductSearchKey(row);
+        return row;
       });
 
       setProducts(mappedRows);
-      setForm((prev) => ({
-        ...prev,
-        category_id: prev.category_id || String(loadedCategories[0]?.id ?? "1"),
-        unit_id: prev.unit_id || String(loadedUnits[0]?.id ?? "1"),
-      }));
+      setTotalItems(data.total || 0);
+      setTotalPages(data.total_pages || 1);
+      if (data.stats) {
+        setStats({
+          total: data.stats.total || 0,
+          activeCount: data.stats.active_count || 0,
+          pricedCount: data.stats.priced_count || 0,
+          zeroPriceCount: data.stats.zero_price_count || 0,
+          supplierCount: data.stats.supplier_count || 0,
+          fromOrdersCount: 0,
+          fromPurchaseCount: 0,
+        });
+      }
     } catch (loadErr) {
       setBannerMsg({
         type: "error",
@@ -348,7 +457,27 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [
+    currentPage,
+    pageSize,
+    sortField,
+    sortOrder,
+    searchQuery,
+    categoryFilter,
+    supplierFilter,
+    unitFilter,
+    statusFilter,
+    distributorFilter,
+    isSuperAdmin,
+    authSession.distributorCode,
+    categories,
+    units,
+  ]);
+
+  useEffect(() => {
+    void loadMetadata();
+    void loadFilterOptions();
+  }, [loadMetadata, loadFilterOptions]);
 
   useEffect(() => {
     void loadCatalog(true);
@@ -451,13 +580,43 @@ export default function ProductsPage() {
           status: form.status || "active",
         }),
       });
-      const result = (await response.json()) as { detail?: string };
+      const result = (await response.json()) as ApiProductItem & { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo mới SKU.");
+      
+      const catObj = categories.find((c) => c.id === Number(form.category_id || 1));
+      const unitObj = units.find((u) => u.id === Number(form.unit_id || 1));
+      const newRow: ProductRow = {
+        id: result.id,
+        code: form.sku.trim().toUpperCase(),
+        nppCode: form.npp_code.trim().toUpperCase() || "",
+        name: form.name.trim(),
+        category_id: Number(form.category_id || 1),
+        categoryCode: catObj?.code || "",
+        category: catObj?.name || "Chưa phân loại",
+        unit_id: Number(form.unit_id || 1),
+        unitCode: unitObj?.code || "",
+        unit: unitObj?.name || "Hộp",
+        supplier: form.supplier.trim() || "Vinamilk",
+        price: Number(form.base_price) || 0,
+        cost_price: Number(form.cost_price) || 0,
+        boxes_per_carton: Math.max(1, Number(form.boxes_per_carton) || 1),
+        reorder_level: Math.max(0, Number(form.reorder_level) || 20),
+        status: form.status || "active",
+        representative_sku: "",
+        representative_name: "",
+        order_count: 0,
+        total_ordered_qty: 0,
+        purchase_invoice_count: 0,
+        total_purchased_qty: 0,
+        sync_source: "MANUAL",
+        distributors: [],
+      };
+      newRow._searchKey = buildProductSearchKey(newRow);
+      setProducts((prev) => [newRow, ...prev]);
       setCreateOpen(false);
-      await loadCatalog(false);
       setBannerMsg({
         type: "success",
-        text: `Đã thêm mới mã sản phẩm ${form.sku.trim().toUpperCase()} - ${form.name.trim()} thành công.`,
+        text: `Đã thêm mới mã sản phẩm ${newRow.code} - ${newRow.name} thành công.`,
       });
     } catch (err) {
       setModalError(err instanceof Error ? err.message : "Không thể tạo SKU.");
@@ -495,12 +654,45 @@ export default function ProductsPage() {
       });
       const result = (await response.json()) as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể cập nhật SKU.");
+
+      const updatedSku = editForm.sku.trim().toUpperCase();
+      const updatedNppCode = editForm.npp_code.trim().toUpperCase();
+      const targetCatId = Number(editForm.category_id);
+      const targetUnitId = Number(editForm.unit_id);
+      const catObj = categories.find((c) => c.id === targetCatId);
+      const unitObj = units.find((u) => u.id === targetUnitId);
+
+      setProducts((prev) =>
+        prev.map((p) => {
+          if (p.id !== editingProduct.id) return p;
+          const updated: ProductRow = {
+            ...p,
+            code: updatedSku,
+            nppCode: updatedNppCode,
+            name: editForm.name.trim(),
+            category_id: targetCatId,
+            categoryCode: catObj?.code || p.categoryCode,
+            category: catObj?.name || p.category,
+            unit_id: targetUnitId,
+            unitCode: unitObj?.code || p.unitCode,
+            unit: unitObj?.name || p.unit,
+            supplier: editForm.supplier.trim() || p.supplier,
+            price: Number(editForm.base_price) || 0,
+            cost_price: Number(editForm.cost_price) || 0,
+            boxes_per_carton: Math.max(1, Number(editForm.boxes_per_carton) || 1),
+            reorder_level: Math.max(0, Number(editForm.reorder_level) || 20),
+            status: editForm.status,
+          };
+          updated._searchKey = buildProductSearchKey(updated);
+          return updated;
+        })
+      );
+
       setEditOpen(false);
       setEditingProduct(null);
-      await loadCatalog(false);
       setBannerMsg({
         type: "success",
-        text: `Đã cập nhật thông tin SKU ${editForm.sku.trim().toUpperCase()} thành công.`,
+        text: `Đã cập nhật thông tin SKU ${updatedSku} thành công.`,
       });
     } catch (err) {
       setModalError(err instanceof Error ? err.message : "Không thể cập nhật SKU.");
@@ -530,7 +722,12 @@ export default function ProductsPage() {
         throw new Error(data.detail || "Không thể cập nhật Mã NPP.");
       }
       setProducts((prev) =>
-        prev.map((p) => (p.id === product.id ? { ...p, nppCode: formatted } : p))
+        prev.map((p) => {
+          if (p.id !== product.id) return p;
+          const updated = { ...p, nppCode: formatted };
+          updated._searchKey = buildProductSearchKey(updated);
+          return updated;
+        })
       );
       setBannerMsg({
         type: "success",
@@ -561,7 +758,7 @@ export default function ProductsPage() {
         next.delete(productId);
         return next;
       });
-      await loadCatalog(false);
+      setProducts((prev) => prev.filter((p) => p.id !== productId));
       setBannerMsg({
         type: "success",
         text: `Đã xóa mã sản phẩm ${skuCode} khỏi danh mục.`,
@@ -593,8 +790,8 @@ export default function ProductsPage() {
       if (!response.ok) throw new Error(result.detail ?? "Không thể xóa các SKU đã chọn.");
       const count = result.deleted ?? selectedIds.size;
       setBulkDeleteConfirm(false);
+      setProducts((prev) => prev.filter((p) => !selectedIds.has(p.id)));
       setSelectedIds(new Set());
-      await loadCatalog(false);
       setBannerMsg({
         type: "success",
         text: `Đã xóa thành công ${count} mã sản phẩm đã chọn.`,
@@ -651,18 +848,6 @@ export default function ProductsPage() {
     setEditOpen(true);
   }
 
-  // Danh sách Nhà cung cấp động kèm số lượng SKU
-  const supplierOptions = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const p of products) {
-      const sup = (p.supplier || "Chưa xác định").trim();
-      counts.set(sup, (counts.get(sup) || 0) + 1);
-    }
-    return Array.from(counts.entries())
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "vi"));
-  }, [products]);
-
   // Đếm số lượng mã NPP đã ghép / chưa ghép
   const nppUnmappedCount = useMemo(
     () => nppProductOptions.filter((x) => !x.mappedSku).length,
@@ -696,6 +881,23 @@ export default function ProductsPage() {
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
+
+  // Tự động focus nhanh mượt khi mở dropdown mã NPP mà không gây giật lag
+  useEffect(() => {
+    if (showEditNppDropdown) {
+      requestAnimationFrame(() => {
+        editNppSearchInputRef.current?.focus();
+      });
+    }
+  }, [showEditNppDropdown]);
+
+  useEffect(() => {
+    if (showCreateNppDropdown) {
+      requestAnimationFrame(() => {
+        createNppSearchInputRef.current?.focus();
+      });
+    }
+  }, [showCreateNppDropdown]);
 
   // Lọc danh sách mã NPP nội bộ khi tìm kiếm trong Modal Chỉnh sửa SKU
   const filteredEditNppOptions = useMemo(() => {
@@ -757,133 +959,15 @@ export default function ProductsPage() {
     );
   }, [nppProductOptions, form.npp_code]);
 
-  const distributorOptions = useMemo(() => {
-    const options = new Map<string, { name: string; count: number }>();
-    for (const product of products) {
-      for (const distributor of product.distributors) {
-        const existing = options.get(distributor.code);
-        options.set(distributor.code, {
-          name: distributor.name,
-          count: (existing?.count ?? 0) + 1,
-        });
-      }
-    }
-    return Array.from(options, ([code, value]) => ({ code, ...value }))
-      .sort((a, b) => a.name.localeCompare(b.name, "vi"));
-  }, [products]);
-
-  // Số lượng SKU theo danh mục
-  const categoryCounts = useMemo(() => {
-    const counts = new Map<number, number>();
-    for (const p of products) {
-      counts.set(p.category_id, (counts.get(p.category_id) || 0) + 1);
-    }
-    return counts;
-  }, [products]);
-
-  // Thống kê tổng quan
-  const stats = useMemo(() => {
-    let activeCount = 0;
-    let fromOrdersCount = 0;
-    let fromPurchaseCount = 0;
-    let pricedCount = 0;
-    for (const p of products) {
-      if (p.status === "active") activeCount++;
-      if (p.sync_source === "ORDER_SYNC" || p.sync_source === "DMS_AND_CQT") fromOrdersCount++;
-      if (p.sync_source === "PURCHASE_INVOICE" || p.sync_source === "DMS_AND_CQT") fromPurchaseCount++;
-      if (p.price > 0 || p.cost_price > 0) pricedCount++;
-    }
-    return {
-      total: products.length,
-      activeCount,
-      fromOrdersCount,
-      fromPurchaseCount,
-      pricedCount,
-      zeroPriceCount: products.length - pricedCount,
-      supplierCount: supplierOptions.length,
-    };
-  }, [products, supplierOptions]);
-
-  // Lọc và sắp xếp danh sách sản phẩm
-  const filteredProducts = useMemo(() => {
-    const q = normalizeSearchText(searchQuery.trim());
-    const filtered = products.filter((p) => {
-      // Phân quyền NPP: Từng NPP chỉ nhìn thấy danh sách SKU của NPP mình
-      if (!isSuperAdmin && authSession.distributorCode) {
-        if (!p.distributors.some((dist) => dist.code.toUpperCase() === authSession.distributorCode.toUpperCase())) {
-          return false;
-        }
-      } else if (distributorFilter !== "ALL") {
-        // Admin lọc theo từng NPP cụ thể
-        if (!p.distributors.some((dist) => dist.code.toUpperCase() === distributorFilter.toUpperCase())) {
-          return false;
-        }
-      }
-
-      if (categoryFilter !== "ALL" && String(p.category_id) !== categoryFilter) return false;
-      if (supplierFilter !== "ALL" && p.supplier !== supplierFilter) return false;
-      if (unitFilter !== "ALL" && p.unit !== unitFilter) return false;
-
-      if (statusFilter === "active" && p.status !== "active") return false;
-      if (statusFilter === "inactive" && p.status !== "inactive") return false;
-      if (statusFilter === "HAS_PRICE" && p.price <= 0 && p.cost_price <= 0) return false;
-      if (statusFilter === "ZERO_PRICE" && (p.price > 0 || p.cost_price > 0)) return false;
-
-      if (q) {
-        const haystack = normalizeSearchText(
-          `${p.code} ${p.nppCode} ${p.name} ${p.supplier} ${p.category} ${p.unit} ${p.representative_sku} ${p.distributors.map((distributor) => `${distributor.code} ${distributor.name}`).join(" ")}`
-        );
-        if (!haystack.includes(q)) return false;
-      }
-      return true;
-    });
-
-    filtered.sort((a, b) => {
-      let cmp = 0;
-      if (sortField === "code") cmp = a.code.localeCompare(b.code, "vi");
-      else if (sortField === "nppCode") cmp = a.nppCode.localeCompare(b.nppCode, "vi");
-      else if (sortField === "name") cmp = a.name.localeCompare(b.name, "vi");
-      else if (sortField === "category") cmp = a.category.localeCompare(b.category, "vi");
-      else if (sortField === "unit") cmp = a.unit.localeCompare(b.unit, "vi");
-      else if (sortField === "boxes_per_carton") cmp = a.boxes_per_carton - b.boxes_per_carton;
-      else if (sortField === "supplier") cmp = a.supplier.localeCompare(b.supplier, "vi");
-      else if (sortField === "price") cmp = a.price - b.price;
-      else if (sortField === "cost_price") cmp = a.cost_price - b.cost_price;
-      return sortOrder === "asc" ? cmp : -cmp;
-    });
-
-    return filtered;
-  }, [
-    products,
-    searchQuery,
-    isSuperAdmin,
-    authSession.distributorCode,
-    distributorFilter,
-    categoryFilter,
-    supplierFilter,
-    unitFilter,
-    statusFilter,
-    sortField,
-    sortOrder,
-  ]);
-
-  // Reset trang khi đổi bộ lọc
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchQuery, distributorFilter, categoryFilter, supplierFilter, unitFilter, statusFilter, pageSize]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
-  const safePage = Math.min(currentPage, totalPages);
-  const pagedProducts = useMemo(() => {
-    const start = (safePage - 1) * pageSize;
-    return filteredProducts.slice(start, start + pageSize);
-  }, [filteredProducts, safePage, pageSize]);
+  const pagedProducts = products;
+  const filteredProducts = products;
+  const safePage = currentPage;
 
   const filteredTotals = useMemo(() => {
     let totalOrderedQty = 0;
     let totalPurchasedQty = 0;
     let withPriceCount = 0;
-    for (const p of filteredProducts) {
+    for (const p of products) {
       totalOrderedQty += p.total_ordered_qty;
       totalPurchasedQty += p.total_purchased_qty;
       if (p.price > 0) withPriceCount++;
@@ -893,7 +977,7 @@ export default function ProductsPage() {
       totalPurchasedQty,
       withPriceCount,
     };
-  }, [filteredProducts]);
+  }, [products]);
 
   function handleSort(field: SortField) {
     if (sortField === field) {
@@ -902,6 +986,7 @@ export default function ProductsPage() {
       setSortField(field);
       setSortOrder(field === "price" || field === "cost_price" || field === "activity" ? "desc" : "asc");
     }
+    setCurrentPage(1);
   }
 
   function renderSortIcon(field: SortField) {
@@ -937,44 +1022,88 @@ export default function ProductsPage() {
   }
 
   function resetFilters() {
+    setSearchInput("");
     setSearchQuery("");
     setDistributorFilter(isSuperAdmin ? "ALL" : (authSession.distributorCode || "ALL"));
     setCategoryFilter("ALL");
     setSupplierFilter("ALL");
     setUnitFilter("ALL");
     setStatusFilter("ALL");
+    setCurrentPage(1);
   }
 
-  function exportProducts() {
-    if (filteredProducts.length === 0) return;
-    downloadExcel(
-      filteredProducts.map((product, index) => {
-        const activeCode = !isSuperAdmin
-          ? authSession.distributorCode
-          : (distributorFilter !== "ALL" ? distributorFilter : "");
-        const matchedDist = activeCode
-          ? product.distributors.find((d) => d.code.toUpperCase() === activeCode.toUpperCase())
-          : product.distributors[0];
-        const distName = matchedDist?.name || product.distributors[0]?.name || "Chưa xác định";
+  async function exportProducts() {
+    if (totalItems === 0) return;
+    setIsExporting(true);
+    setBannerMsg(null);
+    try {
+      const params = new URLSearchParams({
+        page: "1",
+        page_size: String(Math.max(1000, totalItems)),
+        sort_field: sortField,
+        sort_order: sortOrder,
+      });
+      if (searchQuery.trim()) params.set("search", searchQuery.trim());
+      if (categoryFilter !== "ALL") params.set("category_id", categoryFilter);
+      if (supplierFilter !== "ALL") params.set("supplier", supplierFilter);
+      if (unitFilter !== "ALL") params.set("unit", unitFilter);
+      if (statusFilter !== "ALL") params.set("status", statusFilter);
+      if (!isSuperAdmin && authSession.distributorCode) {
+        params.set("distributor_code", authSession.distributorCode);
+      } else if (distributorFilter !== "ALL") {
+        params.set("distributor_code", distributorFilter);
+      }
+
+      const res = await apiFetch(`${API_URL}/products/paged?${params.toString()}`);
+      if (!res.ok) throw new Error("Không thể tải toàn bộ danh sách sản phẩm theo bộ lọc.");
+      const data = await res.json();
+      const rawItems: ApiProductItem[] = data.items || [];
+
+      const catById = new Map(categories.map((c) => [c.id, c]));
+      const unitById = new Map(units.map((u) => [u.id, u]));
+
+      const activeDistCode = !isSuperAdmin
+        ? authSession.distributorCode
+        : (distributorFilter !== "ALL" ? distributorFilter : "");
+
+      const exportRows = rawItems.map((product, index) => {
+        const catObj = catById.get(product.category_id);
+        const unitObj = unitById.get(product.unit_id);
+        const dists = product.distributors || [];
+        const matchedDist = activeDistCode
+          ? dists.find((d) => d.code.toUpperCase() === activeDistCode.toUpperCase())
+          : dists[0];
+        const distName = matchedDist?.name || dists[0]?.name || "Chưa xác định";
 
         return {
           STT: index + 1,
           "Nhà phân phối": distName,
-          "Mã SKU": product.code,
-          "Mã NPP nội bộ": product.nppCode || product.code,
+          "Mã SKU": product.sku,
+          "Mã NPP nội bộ": product.npp_code || product.sku,
           "Tên sản phẩm": product.name,
-          "Mã danh mục": product.categoryCode,
-          "Danh mục ngành hàng": product.category,
-          ĐVT: product.unit,
-          "Quy cách (Hộp/Thùng)": product.boxes_per_carton,
-          "Nhà cung cấp": product.supplier || "—",
-          "Giá bán / ĐVT (VNĐ)": product.price,
+          "Mã danh mục": product.category_code || catObj?.code || "",
+          "Danh mục ngành hàng": product.category_name || catObj?.name || "Chưa phân loại",
+          ĐVT: product.unit_name || unitObj?.name || "Hộp",
+          "Quy cách (Hộp/Thùng)": Math.max(1, Number(product.boxes_per_carton ?? 1)),
+          "Nhà cung cấp": (product.supplier || "Vinamilk").trim(),
+          "Giá bán / ĐVT (VNĐ)": Number(product.base_price ?? 0),
           "Trạng thái": product.status === "active" ? "Đang kinh doanh" : "Ngừng kinh doanh",
         };
-      }),
-      `Danh_sach_SKU_${new Date().toISOString().slice(0, 10)}`,
-      "Danh sách SKU"
-    );
+      });
+
+      downloadExcel(
+        exportRows,
+        `Danh_sach_SKU_${new Date().toISOString().slice(0, 10)}`,
+        "Danh sách SKU"
+      );
+    } catch (err) {
+      setBannerMsg({
+        type: "error",
+        text: err instanceof Error ? err.message : "Lỗi khi xuất file Excel.",
+      });
+    } finally {
+      setIsExporting(false);
+    }
   }
 
   const allPageChecked =
@@ -1044,11 +1173,16 @@ export default function ProductsPage() {
             <button
               type="button"
               onClick={exportProducts}
-              disabled={filteredProducts.length === 0}
+              disabled={isExporting || totalItems === 0}
               className="inline-flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors disabled:opacity-50"
+              title={`Xuất toàn bộ ${totalItems} SKU theo bộ lọc ra file Excel`}
             >
-              <FileSpreadsheet size={12} />
-              Xuất Excel ({filteredProducts.length})
+              {isExporting ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <FileSpreadsheet size={12} />
+              )}
+              Xuất Excel ({totalItems})
             </button>
 
             <button
@@ -1214,15 +1348,19 @@ export default function ProductsPage() {
                 />
                 <input
                   type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
                   placeholder="Nhập mã SKU (VD: 01TD03, 04ED33, 1277436) hoặc tên sản phẩm..."
                   className={cn(inputCls, "pl-7 pr-6")}
                 />
-                {searchQuery && (
+                {searchInput && (
                   <button
                     type="button"
-                    onClick={() => setSearchQuery("")}
+                    onClick={() => {
+                      setSearchInput("");
+                      setSearchQuery("");
+                      setCurrentPage(1);
+                    }}
                     className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
                     title="Xóa tìm kiếm"
                   >
@@ -1245,7 +1383,7 @@ export default function ProductsPage() {
                   <option value="ALL">Tất cả NPP ({distributorOptions.length})</option>
                   {distributorOptions.map((distributor) => (
                     <option key={distributor.code} value={distributor.code}>
-                      {distributor.name} ({distributor.count} SKU)
+                      {distributor.name}
                     </option>
                   ))}
                 </select>
@@ -1822,21 +1960,23 @@ export default function ProductsPage() {
               Hiển thị:
               <select
                 value={pageSize}
-                onChange={(e) => setPageSize(Number(e.target.value))}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
                 className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] text-slate-800 focus:border-sky-500 focus:outline-none"
               >
-                <option value={25}>25 dòng</option>
+                <option value={20}>20 dòng</option>
                 <option value={50}>50 dòng</option>
                 <option value={100}>100 dòng</option>
                 <option value={200}>200 dòng</option>
-                <option value={1000}>Tất cả</option>
               </select>
             </label>
           </div>
 
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] font-semibold text-slate-600 mr-1">
-              Trang {safePage} / {totalPages}
+              Trang {safePage} / {totalPages} (Tổng {formatNumber(totalItems)} SKU)
             </span>
             <button
               type="button"
@@ -2013,23 +2153,22 @@ export default function ProductsPage() {
                     )}
 
                     {/* POPUP DROPDOWN TÌM KIẾM MÃ NPP */}
-                    {showCreateNppDropdown && (
-                      <div className="relative">
-                        <div className="absolute left-0 right-0 top-1.5 z-[70] rounded-md border border-slate-300 bg-white shadow-2xl overflow-hidden flex flex-col">
-                          <div className="p-2 border-b border-slate-200 bg-slate-50 space-y-1.5">
-                            <div className="relative">
-                              <Search
-                                size={13}
-                                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
-                              />
-                              <input
-                                type="text"
-                                autoFocus
-                                value={createNppSearchQuery}
-                                onChange={(e) => setCreateNppSearchQuery(e.target.value)}
-                                placeholder="Gõ mã hoặc tên sản phẩm NPP để lọc nhanh..."
-                                className="w-full rounded border border-slate-300 bg-white pl-8 pr-7 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
-                              />
+                    <div className={cn("relative", !showCreateNppDropdown && "hidden")}>
+                      <div className="absolute left-0 right-0 top-1.5 z-[70] rounded-md border border-slate-300 bg-white shadow-2xl overflow-hidden flex flex-col">
+                        <div className="p-2 border-b border-slate-200 bg-slate-50 space-y-1.5">
+                          <div className="relative">
+                            <Search
+                              size={13}
+                              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                            />
+                            <input
+                              ref={createNppSearchInputRef}
+                              type="text"
+                              value={createNppSearchQuery}
+                              onChange={(e) => setCreateNppSearchQuery(e.target.value)}
+                              placeholder="Gõ mã hoặc tên sản phẩm NPP để lọc nhanh..."
+                              className="w-full rounded border border-slate-300 bg-white pl-8 pr-7 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+                            />
                               {createNppSearchQuery && (
                                 <button
                                   type="button"
@@ -2091,7 +2230,7 @@ export default function ProductsPage() {
                                 Không tìm thấy mã sản phẩm NPP nào phù hợp.
                               </div>
                             ) : (
-                              filteredCreateNppOptions.map((npp) => {
+                              filteredCreateNppOptions.slice(0, 50).map((npp) => {
                                 const isSelected =
                                   form.npp_code.toUpperCase() === npp.code.toUpperCase();
 
@@ -2121,12 +2260,16 @@ export default function ProductsPage() {
                                         <span className="text-xs font-semibold text-slate-800 truncate">
                                           {npp.name}
                                         </span>
-                                        {npp.mappedSku ? (
-                                          <span className="rounded bg-amber-100 px-1.5 py-0.2 text-[9px] font-medium text-amber-800">
+                                        {isSelected ? (
+                                          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">
+                                            ✓ Đang chọn
+                                          </span>
+                                        ) : npp.mappedSku ? (
+                                          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium text-amber-800">
                                             Đã ghép: {npp.mappedSku}
                                           </span>
                                         ) : (
-                                          <span className="rounded bg-slate-100 px-1.5 py-0.2 text-[9px] text-slate-500">
+                                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500">
                                             Chưa ghép
                                           </span>
                                         )}
@@ -2157,13 +2300,24 @@ export default function ProductsPage() {
                                           {formatNumber(npp.unitPrice)} đ
                                         </div>
                                       )}
-                                      <span className="inline-block mt-0.5 rounded bg-sky-600 hover:bg-sky-700 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors">
-                                        Chọn ↵
-                                      </span>
+                                      {isSelected ? (
+                                        <span className="inline-block mt-0.5 rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+                                          Đang chọn ✓
+                                        </span>
+                                      ) : (
+                                        <span className="inline-block mt-0.5 rounded bg-sky-600 hover:bg-sky-700 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors">
+                                          Chọn ↵
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
                                 );
                               })
+                            )}
+                            {filteredCreateNppOptions.length > 50 && (
+                              <div className="p-2 text-center text-[10px] text-slate-500 bg-slate-50 border-t border-slate-100">
+                                Đang hiển thị 50 / {filteredCreateNppOptions.length} mã. Nhập thêm từ khóa để tìm chính xác hơn.
+                              </div>
                             )}
                           </div>
 
@@ -2179,8 +2333,7 @@ export default function ProductsPage() {
                           </div>
                         </div>
                       </div>
-                    )}
-                  </div>
+                    </div>
 
                   {/* Tên sản phẩm */}
                   <div className="col-span-12">
@@ -2526,24 +2679,23 @@ export default function ProductsPage() {
                     )}
 
                     {/* POPUP DROPDOWN TÌM KIẾM MÃ NPP CHUYÊN NGHIỆP */}
-                    {showEditNppDropdown && (
-                      <div className="relative">
-                        <div className="absolute left-0 right-0 top-1.5 z-[70] rounded-md border border-slate-300 bg-white shadow-2xl overflow-hidden flex flex-col">
-                          {/* Header: Input tìm kiếm & Tabs lọc */}
-                          <div className="p-2 border-b border-slate-200 bg-slate-50 space-y-1.5">
-                            <div className="relative">
-                              <Search
-                                size={13}
-                                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
-                              />
-                              <input
-                                type="text"
-                                autoFocus
-                                value={editNppSearchQuery}
-                                onChange={(e) => setEditNppSearchQuery(e.target.value)}
-                                placeholder="Gõ mã hoặc tên sản phẩm NPP để lọc nhanh..."
-                                className="w-full rounded border border-slate-300 bg-white pl-8 pr-7 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
-                              />
+                    <div className={cn("relative", !showEditNppDropdown && "hidden")}>
+                      <div className="absolute left-0 right-0 top-1.5 z-[70] rounded-md border border-slate-300 bg-white shadow-2xl overflow-hidden flex flex-col">
+                        {/* Header: Input tìm kiếm & Tabs lọc */}
+                        <div className="p-2 border-b border-slate-200 bg-slate-50 space-y-1.5">
+                          <div className="relative">
+                            <Search
+                              size={13}
+                              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                            />
+                            <input
+                              ref={editNppSearchInputRef}
+                              type="text"
+                              value={editNppSearchQuery}
+                              onChange={(e) => setEditNppSearchQuery(e.target.value)}
+                              placeholder="Gõ mã hoặc tên sản phẩm NPP để lọc nhanh..."
+                              className="w-full rounded border border-slate-300 bg-white pl-8 pr-7 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+                            />
                               {editNppSearchQuery && (
                                 <button
                                   type="button"
@@ -2606,14 +2758,16 @@ export default function ProductsPage() {
                                 Không tìm thấy mã sản phẩm NPP nào phù hợp.
                               </div>
                             ) : (
-                              filteredEditNppOptions.map((npp) => {
+                              filteredEditNppOptions.slice(0, 50).map((npp) => {
                                 const isSelected =
                                   editForm.npp_code.toUpperCase() === npp.code.toUpperCase();
-                                const isMappedToCurrent =
-                                  npp.mappedSku &&
+                                const isPreviouslySavedOnCurrent =
+                                  !isSelected &&
                                   editingProduct &&
+                                  npp.mappedSku &&
                                   npp.mappedSku.toUpperCase() === editingProduct.code.toUpperCase();
                                 const isMappedToOther =
+                                  !isSelected &&
                                   npp.mappedSku &&
                                   (!editingProduct ||
                                     npp.mappedSku.toUpperCase() !==
@@ -2640,16 +2794,20 @@ export default function ProductsPage() {
                                         <span className="text-xs font-semibold text-slate-800 truncate">
                                           {npp.name}
                                         </span>
-                                        {isMappedToCurrent ? (
-                                          <span className="rounded bg-emerald-100 px-1.5 py-0.2 text-[9px] font-bold text-emerald-800">
-                                            ✓ Đang gắn SKU này
+                                        {isSelected ? (
+                                          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-800">
+                                            ✓ Đang chọn cho SKU này
+                                          </span>
+                                        ) : isPreviouslySavedOnCurrent ? (
+                                          <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[9px] font-medium text-sky-800">
+                                            Đang lưu ở SKU này
                                           </span>
                                         ) : isMappedToOther ? (
-                                          <span className="rounded bg-amber-100 px-1.5 py-0.2 text-[9px] font-medium text-amber-800">
+                                          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium text-amber-800">
                                             Đã ghép: {npp.mappedSku}
                                           </span>
                                         ) : (
-                                          <span className="rounded bg-slate-100 px-1.5 py-0.2 text-[9px] text-slate-500">
+                                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500">
                                             Chưa ghép
                                           </span>
                                         )}
@@ -2680,13 +2838,24 @@ export default function ProductsPage() {
                                           {formatNumber(npp.unitPrice)} đ
                                         </div>
                                       )}
-                                      <span className="inline-block mt-0.5 rounded bg-sky-600 hover:bg-sky-700 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors">
-                                        Chọn ↵
-                                      </span>
+                                      {isSelected ? (
+                                        <span className="inline-block mt-0.5 rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+                                          Đang chọn ✓
+                                        </span>
+                                      ) : (
+                                        <span className="inline-block mt-0.5 rounded bg-sky-600 hover:bg-sky-700 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors">
+                                          Chọn ↵
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
                                 );
                               })
+                            )}
+                            {filteredEditNppOptions.length > 50 && (
+                              <div className="p-2 text-center text-[10px] text-slate-500 bg-slate-50 border-t border-slate-100">
+                                Đang hiển thị 50 / {filteredEditNppOptions.length} mã. Nhập thêm từ khóa để tìm chính xác hơn.
+                              </div>
                             )}
                           </div>
 
@@ -2703,8 +2872,7 @@ export default function ProductsPage() {
                           </div>
                         </div>
                       </div>
-                    )}
-                  </div>
+                    </div>
 
                   {/* Tên sản phẩm đầy đủ */}
                   <div className="col-span-12">

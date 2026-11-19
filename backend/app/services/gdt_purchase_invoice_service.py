@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import calendar
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 import time
 from typing import Any
@@ -468,16 +469,8 @@ def _download_and_extract_invoice_zip(
     if not (nbmst and khhdon and shdon and khmshdon):
         return None, None
 
-    base_url = (
-        f"{GDT_BASE_URL}/api/sco-query/invoices"
-        if is_mtt
-        else f"{GDT_BASE_URL}/api/query/invoices"
-    )
-    export_action = (
-        "Xu%E1%BA%A5t%20xml%20(h%C3%B3a%20%C4%91%C6%A1n%20m%C3%A1y%20t%C3%ADnh%20ti%E1%BB%81n%20mua%20v%C3%A0o)"
-        if is_mtt
-        else "Xu%E1%BA%A5t%20xml%20(h%C3%B3a%20%C4%91%C6%A1n%20mua%20v%C3%A0o)"
-    )
+    base_url = f"{GDT_BASE_URL}/api/query/invoices"
+    export_action = "Xu%E1%BA%A5t%20xml%20(h%C3%B3a%20%C4%91%C6%A1n%20mua%20v%C3%A0o)"
     xml_url = f"{base_url}/export-xml?nbmst={nbmst}&khhdon={khhdon}&shdon={shdon}&khmshdon={khmshdon}"
     headers = {
         **DEFAULT_HEADERS,
@@ -514,6 +507,22 @@ def _download_and_extract_invoice_zip(
     return None, None
 
 
+def split_date_range_monthly(from_date: date, to_date: date) -> list[tuple[date, date]]:
+    """Chia nhỏ khoảng ngày thành các phân đoạn theo từng tháng (tối đa trong 1 tháng dương lịch)
+    để tuân thủ quy định không quá 1 tháng / lần tra cứu của Cổng Tổng cục Thuế."""
+    if from_date > to_date:
+        return []
+    chunks: list[tuple[date, date]] = []
+    curr_start = from_date
+    while curr_start <= to_date:
+        _, last_day = calendar.monthrange(curr_start.year, curr_start.month)
+        curr_month_end = date(curr_start.year, curr_start.month, last_day)
+        curr_end = min(curr_month_end, to_date)
+        chunks.append((curr_start, curr_end))
+        curr_start = curr_end + timedelta(days=1)
+    return chunks
+
+
 def sync_gdt_purchase_invoices(
     db: Session,
     distributor_id: int,
@@ -522,6 +531,7 @@ def sync_gdt_purchase_invoices(
     to_date: date,
     bearer_token: str,
     sync_products: bool = True,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     """Đồng bộ toàn bộ Hóa đơn điện tử mua vào (Có mã, Không mã, Máy tính tiền) từ Cổng Thuế
     và tự động tải + bóc tách XML hàng hóa lưu vào PostgreSQL."""
@@ -529,8 +539,9 @@ def sync_gdt_purchase_invoices(
     if not norm_token:
         raise PermissionError("CQT_TOKEN_EXPIRED")
 
-    date_from_fmt = f"{from_date:%d/%m/%Y}T00:00:00"
-    date_to_fmt = f"{to_date:%d/%m/%Y}T23:59:59"
+    date_chunks = split_date_range_monthly(from_date, to_date)
+    if not date_chunks:
+        raise ValueError("Khoảng ngày tra cứu không hợp lệ (Ngày bắt đầu lớn hơn ngày kết thúc).")
 
     searches_to_run = [
         {"ttxly": "5", "is_mtt": False, "category": "CO_MA"},
@@ -544,99 +555,129 @@ def sync_gdt_purchase_invoices(
     warnings: list[str] = []
 
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        for job_idx, job in enumerate(searches_to_run):
-            if job_idx > 0:
-                time.sleep(1.2)
-            ttxly = job["ttxly"]
-            is_mtt = job["is_mtt"]
-            category = job["category"]
+        for chunk_idx, (chunk_start, chunk_end) in enumerate(date_chunks):
+            chunk_suffix = f" (tháng {chunk_start.month}/{chunk_start.year})" if len(date_chunks) > 1 else ""
+            date_from_fmt = f"{chunk_start:%d/%m/%Y}T00:00:00"
+            date_to_fmt = f"{chunk_end:%d/%m/%Y}T23:59:59"
 
-            base_url = (
-                f"{GDT_BASE_URL}/api/sco-query/invoices"
-                if is_mtt
-                else f"{GDT_BASE_URL}/api/query/invoices"
-            )
-            api_endpoint = f"{base_url}/purchase"
-            action_header = (
-                "T%C3%ACm%20ki%E1%BA%BFm%20(h%C3%B3a%20%C4%91%C6%A1n%20m%C3%A1y%20t%C3%ADnh%20ti%E1%BB%81n%20mua%20v%C3%A0o)"
-                if is_mtt
-                else "T%C3%ACm%20ki%E1%BA%BFm%20(h%C3%B3a%20%C4%91%C6%A1n%20mua%20v%C3%A0o)"
-            )
-            search_param = f"tdlap=ge={date_from_fmt};tdlap=le={date_to_fmt};ttxly=={ttxly}"
+            for job_idx, job in enumerate(searches_to_run):
+                if chunk_idx > 0 or job_idx > 0:
+                    time.sleep(1.0)
+                ttxly = job["ttxly"]
+                is_mtt = job["is_mtt"]
+                category = job["category"]
 
-            state: str | None = None
-            total_for_ttxly: int | None = None
-            fetched_for_ttxly = 0
+                api_endpoint = f"{GDT_BASE_URL}/api/query/invoices/purchase"
+                action_header = "T%C3%ACm%20ki%E1%BA%BFm%20(h%C3%B3a%20%C4%91%C6%A1n%20mua%20v%C3%A0o)"
+                search_param = f"tdlap=ge={date_from_fmt};tdlap=le={date_to_fmt};ttxly=={ttxly}"
 
-            for _ in range(50):
-                headers = {
-                    **DEFAULT_HEADERS,
-                    "Authorization": norm_token,
-                    "request-id": str(uuid.uuid4()),
-                    "Action": action_header,
-                    "End-Point": "/tra-cuu/tra-cuu-hoa-don",
-                    "Referer": f"{GDT_BASE_URL}/tra-cuu/tra-cuu-hoa-don",
-                }
-                state_param = f"&state={state}" if state else ""
-                url = f"{api_endpoint}?sort=tdlap:desc&size={page_size}{state_param}&search={search_param}"
-                try:
-                    resp = _gdt_get(client, url, headers=headers)
-                except RuntimeError as exc:
-                    warnings.append(f"{category}: {exc}")
-                    break
+                state: str | None = None
+                total_for_ttxly: int | None = None
+                fetched_for_ttxly = 0
 
-                if resp.status_code == 401:
-                    raise PermissionError("CQT_TOKEN_EXPIRED")
-                if resp.status_code != 200:
-                    warnings.append(f"{category}: Cổng Thuế trả về HTTP {resp.status_code}")
-                    break
+                cat_label = {
+                    "CO_MA": "HĐ có mã CQT",
+                    "KHONG_MA": "HĐ không mã",
+                    "MAY_TINH_TIEN": "HĐ máy tính tiền",
+                }.get(category, category)
 
-                data = resp.json()
-                page_datas = (
-                    data.get("datas")
-                    if isinstance(data, dict) and isinstance(data.get("datas"), list)
-                    else data.get("data")
-                    if isinstance(data, dict) and isinstance(data.get("data"), list)
-                    else data
-                    if isinstance(data, list)
-                    else []
-                )
-                if isinstance(data, dict) and isinstance(data.get("total"), int) and total_for_ttxly is None:
-                    total_for_ttxly = data["total"]
+                display_cat = f"{cat_label}{chunk_suffix}"
 
-                if not page_datas:
-                    break
+                if progress_callback:
+                    progress_callback({
+                        "step": "searching",
+                        "category": display_cat,
+                        "message": f"Đang tra cứu {display_cat}...",
+                    })
 
-                state = data.get("state") if isinstance(data, dict) and data.get("state") else None
-                new_count = 0
-                for it in page_datas:
-                    if not isinstance(it, dict):
-                        continue
-                    fetched_for_ttxly += 1
-                    key = str(
-                        it.get("id")
-                        or it.get("maHoaDon")
-                        or f"{it.get('nbmst') or it.get('mst') or ''}_{it.get('khmshdon') or it.get('mauSo') or ''}_{it.get('khhdon') or it.get('kyHieu') or ''}_{it.get('shdon') or it.get('soHoaDon') or ''}"
+                for _ in range(50):
+                    headers = {
+                        **DEFAULT_HEADERS,
+                        "Authorization": norm_token,
+                        "request-id": str(uuid.uuid4()),
+                        "Action": action_header,
+                        "End-Point": "/tra-cuu/tra-cuu-hoa-don",
+                        "Referer": f"{GDT_BASE_URL}/tra-cuu/tra-cuu-hoa-don",
+                    }
+                    state_param = f"&state={state}" if state else ""
+                    url = f"{api_endpoint}?sort=tdlap:desc&size={page_size}{state_param}&search={search_param}"
+                    try:
+                        resp = _gdt_get(client, url, headers=headers)
+                    except RuntimeError as exc:
+                        warnings.append(f"{display_cat}: {exc}")
+                        break
+
+                    if resp.status_code == 401:
+                        raise PermissionError("CQT_TOKEN_EXPIRED")
+                    if resp.status_code != 200:
+                        err_text = ""
+                        try:
+                            err_json = resp.json()
+                            if isinstance(err_json, dict):
+                                err_text = err_json.get("message") or err_json.get("details") or ""
+                        except Exception:
+                            err_text = ""
+                        if err_text:
+                            warnings.append(f"{display_cat}: Cổng Thuế phản hồi HTTP {resp.status_code} ({err_text})")
+                        else:
+                            warnings.append(f"{display_cat}: Cổng Thuế phản hồi HTTP {resp.status_code}")
+                        break
+
+                    data = resp.json()
+                    page_datas = (
+                        data.get("datas")
+                        if isinstance(data, dict) and isinstance(data.get("datas"), list)
+                        else data.get("data")
+                        if isinstance(data, dict) and isinstance(data.get("data"), list)
+                        else data
+                        if isinstance(data, list)
+                        else []
                     )
-                    if key not in seen_keys:
-                        seen_keys.add(key)
-                        it["_is_mtt"] = is_mtt
-                        it["_ttxly"] = ttxly
-                        it["_category"] = category
-                        all_raw_items.append(it)
-                        new_count += 1
+                    if isinstance(data, dict) and isinstance(data.get("total"), int) and total_for_ttxly is None:
+                        total_for_ttxly = data["total"]
 
-                if new_count == 0:
-                    break
-                if total_for_ttxly is not None and fetched_for_ttxly >= total_for_ttxly:
-                    break
-                if not state or len(page_datas) < page_size:
-                    break
+                    if not page_datas:
+                        break
 
-            if state and fetched_for_ttxly >= page_size * 50:
-                warnings.append(
-                    f"{category}: đã đạt giới hạn 50 trang; hãy thu hẹp khoảng ngày để đồng bộ đủ."
-                )
+                    state = data.get("state") if isinstance(data, dict) and data.get("state") else None
+                    new_count = 0
+                    for it in page_datas:
+                        if not isinstance(it, dict):
+                            continue
+                        fetched_for_ttxly += 1
+                        key = str(
+                            it.get("id")
+                            or it.get("maHoaDon")
+                            or f"{it.get('nbmst') or it.get('mst') or ''}_{it.get('khmshdon') or it.get('mauSo') or ''}_{it.get('khhdon') or it.get('kyHieu') or ''}_{it.get('shdon') or it.get('soHoaDon') or ''}"
+                        )
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            it["_is_mtt"] = is_mtt
+                            it["_ttxly"] = ttxly
+                            it["_category"] = category
+                            all_raw_items.append(it)
+                            new_count += 1
+
+                    if new_count == 0:
+                        break
+                    if total_for_ttxly is not None and fetched_for_ttxly >= total_for_ttxly:
+                        break
+                    if not state or len(page_datas) < page_size:
+                        break
+
+                if state and fetched_for_ttxly >= page_size * 50:
+                    warnings.append(
+                        f"{display_cat}: đã đạt giới hạn 50 trang; hãy thu hẹp khoảng ngày để đồng bộ đủ."
+                    )
+
+                if progress_callback:
+                    progress_callback({
+                        "step": "category_done",
+                        "category": display_cat,
+                        "found_in_category": fetched_for_ttxly,
+                        "total_found": len(all_raw_items),
+                        "message": f"{display_cat}: Tìm thấy {fetched_for_ttxly} hóa đơn",
+                    })
 
         saved_invoices = 0
         xml_extracted_count = 0
@@ -776,12 +817,28 @@ def sync_gdt_purchase_invoices(
                 )
 
         if xml_download_jobs:
+            if progress_callback:
+                progress_callback({
+                    "step": "xml_start",
+                    "total_xml_jobs": len(xml_download_jobs),
+                    "message": f"Bắt đầu tải và bóc tách {len(xml_download_jobs)} file XML...",
+                })
+            xml_done_count = 0
             with ThreadPoolExecutor(max_workers=GDT_MAX_XML_WORKERS) as executor:
                 futures = {
                     executor.submit(download_job, params): existing
                     for existing, params in xml_download_jobs
                 }
                 for future in as_completed(futures):
+                    xml_done_count += 1
+                    if progress_callback and (xml_done_count % 5 == 0 or xml_done_count == len(xml_download_jobs)):
+                        progress_callback({
+                            "step": "xml_progress",
+                            "completed": xml_done_count,
+                            "total": len(xml_download_jobs),
+                            "extracted": xml_extracted_count,
+                            "message": f"Đang tải & bóc tách XML: {xml_done_count}/{len(xml_download_jobs)}",
+                        })
                     existing = futures[future]
                     try:
                         xml_text, html_text = future.result()
@@ -853,6 +910,14 @@ def sync_gdt_purchase_invoices(
                 )
         except Exception as exc:
             warnings.append(f"Không đồng bộ được danh mục sản phẩm: {exc}")
+
+    if progress_callback:
+        progress_callback({
+            "step": "saving_db",
+            "saved": saved_invoices,
+            "xml_extracted": xml_extracted_count,
+            "message": f"Đã lưu {saved_invoices} hóa đơn, bóc tách {xml_extracted_count} XML",
+        })
 
     db.commit()
     return {

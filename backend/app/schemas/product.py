@@ -13,7 +13,7 @@ class ProductBase(BaseModel):
     base_price: float = 0
     cost_price: float = 0
     reorder_level: int = 20
-    boxes_per_carton: int = Field(default=1, gt=0)
+    boxes_per_carton: Optional[int] = Field(default=1)
     status: str = "active"
 
 
@@ -72,6 +72,23 @@ class Product(ProductBase):
     total_purchased_qty: float = 0
     sync_source: str = "MANUAL"
     distributors: List[ProductDistributor] = Field(default_factory=list)
+
+
+class ProductStats(BaseModel):
+    total: int = 0
+    active_count: int = 0
+    priced_count: int = 0
+    zero_price_count: int = 0
+    supplier_count: int = 0
+
+
+class ProductPagination(BaseModel):
+    items: List[Product]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    stats: Optional[ProductStats] = None
 
 
 class PriceListItem(BaseModel):

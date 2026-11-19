@@ -57,6 +57,7 @@ async def lifespan(_: FastAPI):
             conn.execute(text("ALTER TABLE vinamilk_order_snapshots ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN DEFAULT FALSE NOT NULL"))
             conn.execute(text("ALTER TABLE employees ADD COLUMN IF NOT EXISTS nickname VARCHAR(100)"))
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS distributor_id INTEGER REFERENCES distributors(id) ON DELETE SET NULL"))
+            conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"))
             conn.commit()
     except Exception as exc:
         logger.warning("Could not auto-create tables: %s", exc)

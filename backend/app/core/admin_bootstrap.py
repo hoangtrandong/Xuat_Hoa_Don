@@ -14,7 +14,7 @@ RESOURCES = (
     "delivery-requests", "sync", "users",
     "employee-debts", "store-debts", "cash-receipts", "debt-transfers",
     "delivery-returns", "bank-receipts", "employee-borrowing", "promotions",
-    "einvoice",
+    "einvoice", "supplier-dictionaries",
 )
 ENVIRONMENT_VARIABLES = (
     "INITIAL_ADMIN_USERNAME",

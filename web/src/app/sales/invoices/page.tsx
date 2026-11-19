@@ -14,11 +14,13 @@ import {
   Sparkles,
   Layers,
   ShieldCheck,
+  FileSpreadsheet,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
+import ExportViettelSinvoiceModal from "@/components/sales/ExportViettelSinvoiceModal";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
 import { formatVND } from "@/lib/format";
@@ -171,6 +173,7 @@ export default function EInvoiceGatewayPage() {
   const [issuedList, setIssuedList] = useState<IssuedInvoiceRecord[]>([]);
   const [showPayloadJson, setShowPayloadJson] = useState(false);
   const [selectedHistoryInvoice, setSelectedHistoryInvoice] = useState<IssuedInvoiceRecord | null>(null);
+  const [isExportViettelModalOpen, setIsExportViettelModalOpen] = useState(false);
 
   // Tùy chỉnh nhanh thông tin người mua trên Form Preview
   const [buyerOverride, setBuyerOverride] = useState({
@@ -281,6 +284,14 @@ export default function EInvoiceGatewayPage() {
     );
   }
 
+  function toggleSelectAllCandidateOrders() {
+    if (selectedOrders.length === candidateOrders.length && candidateOrders.length > 0) {
+      setSelectedOrders([]);
+    } else {
+      setSelectedOrders(candidateOrders.map((o) => o.order_number));
+    }
+  }
+
   async function quickSyncSampleMultiSupplierOrders() {
     if (!selectedDistId) return;
     setLoading(true);
@@ -374,6 +385,13 @@ export default function EInvoiceGatewayPage() {
         subtitle="Tự động sinh Form Hóa đơn theo quy chuẩn riêng của từng Nhà phân phối (MISA meInvoice, Viettel S-Invoice, VNPT e-Invoice, EasyInvoice)"
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setIsExportViettelModalOpen(true)}
+              className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold shadow-sm transition-colors"
+              title="Xuất file Excel theo đúng định dạng mẫu của Viettel S-Invoice (C26TTD)"
+            >
+              <FileSpreadsheet size={16} /> Xuất Excel Viettel S-Invoice (C26TTD)
+            </button>
             <button
               onClick={quickSyncSampleMultiSupplierOrders}
               className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium shadow-sm"
@@ -521,6 +539,36 @@ export default function EInvoiceGatewayPage() {
                 <option value="NESTLE">NESTLE</option>
               </select>
             </div>
+
+            {/* Quick Action Toolbar for Candidates */}
+            {candidateOrders.length > 0 && (
+              <div className="bg-slate-50 px-3.5 py-2 border-b border-gray-200 flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={toggleSelectAllCandidateOrders}
+                    className="font-medium text-sky-700 hover:text-sky-900 hover:underline"
+                  >
+                    {selectedOrders.length === candidateOrders.length
+                      ? "Bỏ chọn tất cả"
+                      : `Chọn tất cả (${candidateOrders.length})`}
+                  </button>
+                  <span className="text-gray-400">|</span>
+                  <span className="text-gray-600 font-medium">
+                    Đã chọn: <strong className="text-sky-800">{selectedOrders.length}</strong>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsExportViettelModalOpen(true)}
+                  disabled={selectedOrders.length === 0}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                  title="Xuất các đơn đang chọn ra file Excel mẫu Viettel S-Invoice"
+                >
+                  <FileSpreadsheet size={13} /> Xuất Viettel ({selectedOrders.length})
+                </button>
+              </div>
+            )}
 
             <div className="max-h-[620px] overflow-y-auto divide-y divide-gray-100">
               {candidateOrders.length === 0 ? (
@@ -1030,6 +1078,15 @@ export default function EInvoiceGatewayPage() {
           </div>
         )}
       </Drawer>
+
+      {/* Modal Xuất Excel Viettel S-Invoice */}
+      <ExportViettelSinvoiceModal
+        isOpen={isExportViettelModalOpen}
+        onClose={() => setIsExportViettelModalOpen(false)}
+        selectedOrderNumbers={selectedOrders}
+        candidateOrders={candidateOrders}
+        onSuccess={(msg) => setMessage(msg)}
+      />
     </div>
   );
 }

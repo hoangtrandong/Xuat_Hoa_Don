@@ -42,6 +42,7 @@ from app.services.supplier_connectors import (
     parse_excel_with_dynamic_mapping,
     persist_canonical_orders_to_snapshots,
 )
+from app.services.supplier_secrets import encrypt_supplier_secret
 
 router = APIRouter(prefix="/einvoice", tags=["Multi-Tenant & E-Invoice Gateway"])
 
@@ -407,20 +408,6 @@ def _ensure_default_distributors_seeded(db: Session) -> None:
         )
     )
     preset_nazzy = SUPPLIER_FIELD_MAPPING_PRESETS.get("NAZZY", {})
-    default_nazzy_cookie = (
-        "ASP.NET_SessionId=0vvy5x0vajrgt2eqegk1jylv; "
-        "ses_adminName=5YvN8dzRH2qNSyBM3Z541w==; "
-        "ses_adminCode=AVL4HrI+4owVtPgffyzsJA==; "
-        "ses_adminId=zqYY5Ufpw0Dh4gOAckxx8g==; "
-        "ses_disId=rpkyw8TV/3/1fam27mR5zQ==; "
-        "ses_FacId=XFopTPqmWW6vPT6ckYisKw==; "
-        "ses_EmType=PCPi3XdBCEgWsHYazVHa6Q==; "
-        "ses_Config=RTDwg3UT5AUcXEqdWp+GWg==; "
-        "ses_adminFullName=33jbvoXUNe/qLFm2AdoLnpRVktIG/zG6GPsX9lrskb4=; "
-        "ses_adminIsAdmin=BhmlvxJVhfl5nXE8Gv3VDA==; "
-        "ses_IsMobile=zzghSkrMV9IlKMcK2UsXPg==; "
-        "ses_adminPermission=UypW6KbG68GZpgAPYnSEJA=="
-    )
     if nazzy_cfg is None:
         nazzy_cfg = DistributorSupplierConfig(
             distributor_id=maigold.id,
@@ -489,6 +476,24 @@ def _ensure_default_distributors_seeded(db: Session) -> None:
             _ensure_distributor_account(db, d)
             created_any_user = True
     if created_any_user:
+        db.commit()
+
+    changed_legacy_secrets = False
+    for supplier_cfg in db.scalars(select(DistributorSupplierConfig)).all():
+        encrypted_secret = encrypt_supplier_secret(supplier_cfg.encrypted_secret)
+        encrypted_cookie = encrypt_supplier_secret(supplier_cfg.session_cookie)
+        if encrypted_secret != supplier_cfg.encrypted_secret:
+            supplier_cfg.encrypted_secret = encrypted_secret
+            changed_legacy_secrets = True
+        if encrypted_cookie != supplier_cfg.session_cookie:
+            supplier_cfg.session_cookie = encrypted_cookie
+            changed_legacy_secrets = True
+    for invoice_cfg in db.scalars(select(DistributorInvoiceConfig)).all():
+        encrypted_secret = encrypt_supplier_secret(invoice_cfg.encrypted_secret)
+        if encrypted_secret != invoice_cfg.encrypted_secret:
+            invoice_cfg.encrypted_secret = encrypted_secret
+            changed_legacy_secrets = True
+    if changed_legacy_secrets:
         db.commit()
 
 
@@ -785,8 +790,8 @@ def create_supplier_config(
         api_endpoint_url=(payload.api_endpoint_url or "").strip() or preset.get("api_endpoint_url"),
         auth_type=payload.auth_type,
         username=(payload.username or "").strip() or None,
-        encrypted_secret=(payload.encrypted_secret or "").strip() or None,
-        session_cookie=(payload.session_cookie or "").strip() or None,
+        encrypted_secret=encrypt_supplier_secret(payload.encrypted_secret),
+        session_cookie=encrypt_supplier_secret(payload.session_cookie),
         field_mapping=mapping,
         request_config=payload.request_config or {"root_data_path": "data", "live_http": False},
         status=payload.status or "active",
@@ -828,8 +833,8 @@ def update_supplier_config(
             api_endpoint_url=(payload.api_endpoint_url or "").strip() or None,
             auth_type=payload.auth_type,
             username=(payload.username or "").strip() or None,
-            encrypted_secret=(payload.encrypted_secret or "").strip() or None,
-            session_cookie=(payload.session_cookie or "").strip() or None,
+            encrypted_secret=encrypt_supplier_secret(payload.encrypted_secret),
+            session_cookie=encrypt_supplier_secret(payload.session_cookie),
             field_mapping=payload.field_mapping or {},
             request_config=payload.request_config or {},
             status=payload.status or "active",
@@ -846,9 +851,9 @@ def update_supplier_config(
     cfg.auth_type = payload.auth_type
     cfg.username = (payload.username or "").strip() or None
     if payload.encrypted_secret is not None and payload.encrypted_secret.strip() != "":
-        cfg.encrypted_secret = payload.encrypted_secret.strip()
+        cfg.encrypted_secret = encrypt_supplier_secret(payload.encrypted_secret)
     if payload.session_cookie is not None and payload.session_cookie.strip() != "":
-        cfg.session_cookie = payload.session_cookie.strip()
+        cfg.session_cookie = encrypt_supplier_secret(payload.session_cookie)
     cfg.field_mapping = payload.field_mapping or {}
     cfg.request_config = payload.request_config or {}
     cfg.status = payload.status or "active"
@@ -1294,9 +1299,17 @@ def sync_orders_from_supplier_config(
 
 
 @router.post("/parse-curl")
-def parse_curl_endpoint(payload: CurlParseRequest) -> dict[str, Any]:
-    """Phân tích lệnh bash cURL và trích xuất URL, headers, cookies, query parameters."""
+def parse_curl_endpoint(
+    payload: CurlParseRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Phân tích cURL đã xác thực mà không phản hồi lại thông tin bí mật."""
     parsed = parse_curl_command(payload.curl_command)
+    parsed["cookies"] = ""
+    parsed["cookies_dict"] = {}
+    for key in list(parsed["headers"]):
+        if key.lower() in {"authorization", "cookie", "x-api-key"}:
+            parsed["headers"][key] = "******"
     return {
         "success": bool(parsed.get("url")),
         "parsed": parsed,
@@ -1328,7 +1341,7 @@ def sync_orders_from_curl_command(
     # Tự động cập nhật cookie và request config nếu người dùng bật lưu cấu hình
     if payload.save_config:
         if parsed.get("cookies"):
-            cfg.session_cookie = parsed["cookies"]
+            cfg.session_cookie = encrypt_supplier_secret(parsed["cookies"])
         if parsed.get("url"):
             cfg.api_endpoint_url = parsed["url"]
         cur_req_cfg = dict(cfg.request_config or {})
@@ -1523,7 +1536,7 @@ def create_invoice_config(
         api_url=(payload.api_url or "").strip() or None,
         app_id=(payload.app_id or "").strip() or None,
         username=(payload.username or "").strip() or None,
-        encrypted_secret=(payload.encrypted_secret or "").strip() or None,
+        encrypted_secret=encrypt_supplier_secret(payload.encrypted_secret),
         invoice_template_code=payload.invoice_template_code.strip(),
         invoice_series=payload.invoice_series.strip().upper(),
         default_vat_rate=payload.default_vat_rate,
@@ -1571,7 +1584,7 @@ def update_invoice_config(
     cfg.app_id = (payload.app_id or "").strip() or None
     cfg.username = (payload.username or "").strip() or None
     if payload.encrypted_secret is not None and payload.encrypted_secret.strip() != "":
-        cfg.encrypted_secret = payload.encrypted_secret.strip()
+        cfg.encrypted_secret = encrypt_supplier_secret(payload.encrypted_secret)
     cfg.invoice_template_code = payload.invoice_template_code.strip()
     cfg.invoice_series = payload.invoice_series.strip().upper()
     cfg.default_vat_rate = payload.default_vat_rate

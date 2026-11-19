@@ -23,7 +23,9 @@ from app.services.vinamilk_credentials import (
     get_credentials_status,
     load_db_credentials,
     upsert_db_credentials,
+    load_db_session_cookie,
 )
+from app.services.supplier_secrets import is_encrypted_supplier_secret
 
 
 @pytest.fixture
@@ -68,7 +70,9 @@ def test_upsert_and_load_db_credentials(db: Session):
     )
     assert record.username == "vnm_user_01"
     assert record.encrypted_password != "PassWord#2026"
+    assert is_encrypted_supplier_secret(record.session_cookie)
     assert load_db_credentials(db) == ("vnm_user_01", "PassWord#2026")
+    assert load_db_session_cookie(db) == "JSESSIONID=abc123"
 
     status_info = get_credentials_status(db)
     assert status_info["username"] == "vnm_user_01"

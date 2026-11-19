@@ -15,7 +15,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from zipfile import BadZipFile
 from pydantic import BaseModel, Field
 import httpx
-from dotenv import dotenv_values, set_key
+from dotenv import dotenv_values
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 from app.api.v1.endpoints.promotions import promotion_matches_customer
@@ -1594,10 +1594,6 @@ def _persist_cookie(cookie: str) -> None:
     if not cookie:
         return
     save_db_session_cookie(cookie)
-    try:
-        set_key(str(_ENV_LOCAL), "VINAMILK_SESSION_COOKIE", cookie, quote_mode="never")
-    except Exception:
-        pass
 
 
 async def refresh_cookie() -> str:

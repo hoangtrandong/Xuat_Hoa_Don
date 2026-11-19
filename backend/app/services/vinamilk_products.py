@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from dotenv import dotenv_values, set_key
+from dotenv import dotenv_values
 from playwright.sync_api import sync_playwright
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -67,20 +67,12 @@ def _fetch_rows(page, cookie_header: str, page_number: int) -> dict[str, Any]:
 
 
 def _persist_cookie(cookie_header: str) -> None:
-    """Lưu cookie mới vào database và backend/.env.local để lần chạy sau không cần đăng nhập lại."""
+    """Mã hóa và lưu cookie mới vào database để tái sử dụng."""
     if not cookie_header:
         return
-    try:
-        from app.services.vinamilk_credentials import save_db_session_cookie
+    from app.services.vinamilk_credentials import save_db_session_cookie
 
-        save_db_session_cookie(cookie_header)
-    except Exception:
-        pass
-    try:
-        env_path = Path(__file__).resolve().parents[2] / ".env.local"
-        set_key(str(env_path), "VINAMILK_SESSION_COOKIE", cookie_header, quote_mode="never")
-    except Exception:
-        pass
+    save_db_session_cookie(cookie_header)
 
 
 def _fetch_all_pages(cookie_header: str) -> list[dict[str, Any]]:

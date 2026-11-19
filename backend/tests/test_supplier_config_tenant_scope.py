@@ -6,8 +6,13 @@ from openpyxl import Workbook
 import pytest
 from fastapi import HTTPException
 
-from app.api.v1.endpoints.multi_tenant_einvoice import _ensure_user_can_access_supplier_config
+from app.api.v1.endpoints.multi_tenant_einvoice import (
+    CurlParseRequest,
+    _ensure_user_can_access_supplier_config,
+    parse_curl_endpoint,
+)
 from app.services.supplier_connectors import fetch_vinamilk_orders
+from app.services.supplier_secrets import decrypt_supplier_secret
 
 
 def _user(distributor_id: int | None, username: str = "tenant-user", roles=None):
@@ -39,6 +44,27 @@ def test_supplier_config_scope_rejects_unassigned_non_admin():
 def test_supplier_config_scope_allows_system_admin():
     admin = _user(None, username="admin")
     _ensure_user_can_access_supplier_config(admin, 2)
+
+
+def test_parse_curl_does_not_return_credentials():
+    response = parse_curl_endpoint(
+        CurlParseRequest(
+            curl_command=(
+                "curl 'https://supplier.example/orders' "
+                "-H 'Authorization: Bearer top-secret' "
+                "-H 'Cookie: session=private' "
+                "-H 'X-API-Key: key-private'"
+            )
+        ),
+        current_user=_user(1),
+    )
+
+    parsed = response["parsed"]
+    assert parsed["cookies"] == ""
+    assert parsed["cookies_dict"] == {}
+    assert parsed["headers"]["Authorization"] == "******"
+    assert parsed["headers"]["Cookie"] == "******"
+    assert parsed["headers"]["X-API-Key"] == "******"
 
 
 def _vinamilk_workbook() -> bytes:
@@ -142,5 +168,5 @@ def test_vinamilk_reauthenticates_when_export_returns_login_html(monkeypatch):
         to_date=__import__("datetime").date(2026, 1, 2),
     )
 
-    assert config.session_cookie == "JSESSIONID=fresh"
+    assert decrypt_supplier_secret(config.session_cookie) == "JSESSIONID=fresh"
     assert rows[0]["Số đơn hàng"] == "SO-001"

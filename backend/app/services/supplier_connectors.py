@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 import hashlib
 from io import BytesIO
+import time
 from typing import Any
 import httpx
 from openpyxl import load_workbook
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.models.multi_tenant_invoice import DistributorSupplierConfig
 from app.models.vinamilk import VinamilkOrderSnapshot
+from app.services.supplier_secrets import decrypt_supplier_secret, encrypt_supplier_secret
 
 
 class CanonicalOrderItem(BaseModel):
@@ -340,10 +342,12 @@ def fetch_vinamilk_orders(
     from scripts.vinamilk_login import login_and_get_cookie
 
     endpoint = "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel"
-    cookie = (config.session_cookie or "").strip()
+    cookie = decrypt_supplier_secret(config.session_cookie)
+    config.session_cookie = encrypt_supplier_secret(config.session_cookie)
+    config.encrypted_secret = encrypt_supplier_secret(config.encrypted_secret)
     if not cookie:
         username = (config.username or "").strip()
-        password = (config.encrypted_secret or "").strip()
+        password = decrypt_supplier_secret(config.encrypted_secret)
         if not username or not password:
             raise RuntimeError(
                 "Thiếu tài khoản hoặc mật khẩu Vinamilk DMS trong cấu hình nguồn. "
@@ -386,14 +390,14 @@ def fetch_vinamilk_orders(
 
     def relogin() -> str:
         username = (config.username or "").strip()
-        password = (config.encrypted_secret or "").strip()
+        password = decrypt_supplier_secret(config.encrypted_secret)
         if not username or not password:
             raise RuntimeError(
                 "Phiên đăng nhập Vinamilk đã hết hạn; cấu hình chưa có đủ "
                 "tài khoản/mật khẩu để đăng nhập lại."
             )
         refreshed_cookie = login_and_get_cookie(username, password)
-        config.session_cookie = refreshed_cookie
+        config.session_cookie = encrypt_supplier_secret(refreshed_cookie)
         return refreshed_cookie
 
     def parse_workbook(content: bytes) -> list[dict[str, Any]]:
@@ -417,49 +421,54 @@ def fetch_vinamilk_orders(
         return rows
 
     with httpx.Client(timeout=60.0, headers=headers, follow_redirects=True) as client:
-        for attempt in range(2):
-            client.cookies.update(
-                {
-                    part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip()
-                    for part in cookie.split(";")
-                    if "=" in part and part.split("=", 1)[0].strip()
-                }
-            )
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            cookie_values = {
+                part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip()
+                for part in cookie.split(";")
+                if "=" in part and part.split("=", 1)[0].strip()
+            }
+            client.cookies.clear()
+            client.cookies.update(cookie_values)
             response = client.post(endpoint, data=export_form)
-            content_type = response.headers.get("content-type", "").lower()
+            response_headers = getattr(response, "headers", {})
+            content_type = response_headers.get("content-type", "").lower()
             needs_login = (
                 response.status_code in (401, 403)
-                or response.headers.get("requires_auth") == "1"
+                or response_headers.get("requires_auth") == "1"
                 or "text/html" in content_type
-                or "/login" in str(response.url).lower()
+                or "/login" in str(getattr(response, "url", "")).lower()
             )
-            if needs_login and attempt == 0:
+            if needs_login and attempt < max_attempts - 1:
                 cookie = relogin()
+                time.sleep(0.25 * (attempt + 1))
                 continue
             if response.status_code != 200:
                 raise RuntimeError(
                     f"Vinamilk DMS trả về HTTP {response.status_code} khi xuất đơn hàng."
                 )
             if response.content.startswith(b"PK\x03\x04"):
-                config.session_cookie = cookie
+                config.session_cookie = encrypt_supplier_secret(cookie)
                 return parse_workbook(response.content)
 
             try:
                 export_result = response.json()
             except ValueError as exc:
-                if attempt == 0:
+                if attempt < max_attempts - 1:
                     cookie = relogin()
+                    time.sleep(0.25 * (attempt + 1))
                     continue
-                preview = " ".join(response.text[:160].split())
+                response_text = getattr(response, "text", "")
+                preview = " ".join(response_text[:160].split())
                 raise RuntimeError(
                     "Vinamilk DMS không trả về JSON hoặc file Excel hợp lệ "
                     f"(Content-Type: {content_type or 'không xác định'}, "
-                    f"preview: {preview or 'rỗng'})."
+                    f"preview: {preview or 'rỗng'}) sau {max_attempts} lần thử."
                 ) from exc
             if not isinstance(export_result, dict):
                 raise RuntimeError("Vinamilk DMS trả về cấu trúc phản hồi không hợp lệ.")
             if export_result.get("hasData") is False and not export_result.get("path"):
-                config.session_cookie = cookie
+                config.session_cookie = encrypt_supplier_secret(cookie)
                 return []
             file_path = export_result.get("path")
             if not file_path:
@@ -476,7 +485,7 @@ def fetch_vinamilk_orders(
                     "Không thể tải file đơn hàng từ Vinamilk DMS "
                     f"(HTTP {download_response.status_code})."
                 )
-            config.session_cookie = cookie
+            config.session_cookie = encrypt_supplier_secret(cookie)
             return parse_workbook(download_response.content)
 
     raise RuntimeError("Không thể tạo phiên đăng nhập hợp lệ với Vinamilk DMS.")
@@ -941,15 +950,17 @@ def fetch_nazzy_orders(
             dist_code = parts[0].strip()
         clean_user = parts[1].strip()
 
-    secret = (config.encrypted_secret or "").strip()
-    cookie_str = (config.session_cookie or "").strip()
+    secret = decrypt_supplier_secret(config.encrypted_secret)
+    cookie_str = decrypt_supplier_secret(config.session_cookie)
+    config.encrypted_secret = encrypt_supplier_secret(secret)
+    config.session_cookie = encrypt_supplier_secret(cookie_str)
 
     # Tự động đăng nhập qua HTTP nếu chưa có Cookie hoặc người dùng cập nhật mật khẩu mới
     if dist_code and clean_user and secret:
         try:
             new_cookie = nazzy_login_and_get_cookie(dist_code, clean_user, secret, base_url)
             cookie_str = new_cookie
-            config.session_cookie = new_cookie
+            config.session_cookie = encrypt_supplier_secret(new_cookie)
         except Exception:
             # Nếu login bằng user/pass không thành công nhưng đã có cookie_str cũ, tiếp tục thử với cookie_str cũ
             pass
@@ -1188,17 +1199,20 @@ class RestApiSupplierConnector(BaseSupplierConnector):
                 strict=not allow_sample_fallback,
             )
         headers: dict[str, str] = {"Accept": "application/json"}
-        secret = (config.encrypted_secret or "").strip()
+        secret = decrypt_supplier_secret(config.encrypted_secret)
+        session_cookie = decrypt_supplier_secret(config.session_cookie)
+        config.encrypted_secret = encrypt_supplier_secret(secret)
+        config.session_cookie = encrypt_supplier_secret(session_cookie)
         clean_token = secret.replace("Bearer ", "").strip()
 
         if config.auth_type == "BEARER_TOKEN" and clean_token:
             headers["Authorization"] = f"Bearer {clean_token}"
         elif config.auth_type == "API_KEY" and secret:
             headers["X-API-Key"] = secret
-        elif config.auth_type == "COOKIE" and (config.session_cookie or secret):
+        elif config.auth_type == "COOKIE" and (session_cookie or secret):
             if clean_token.startswith("eyJ"):
                 headers["Authorization"] = f"Bearer {clean_token}"
-            headers["Cookie"] = config.session_cookie or secret
+            headers["Cookie"] = session_cookie or secret
 
         # Tự động tối ưu riêng cho KiotViet (Web API)
         is_kiotviet = config.supplier_code.upper() == "KIOTVIET" or "kiotviet" in (config.api_endpoint_url or "").lower()
@@ -1217,10 +1231,10 @@ class RestApiSupplierConnector(BaseSupplierConnector):
             headers["Referer"] = f"https://{retailer}.kiotviet.vn/"
             headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-            if config.auth_type == "COOKIE" and not config.session_cookie and clean_user and secret and not secret.startswith("eyJ"):
+            if config.auth_type == "COOKIE" and not session_cookie and clean_user and secret and not secret.startswith("eyJ"):
                 try:
                     cookie = kiotviet_login_and_get_cookie(retailer, clean_user, secret)
-                    config.session_cookie = cookie
+                    config.session_cookie = encrypt_supplier_secret(cookie)
                     headers["Cookie"] = cookie
                 except Exception:
                     pass

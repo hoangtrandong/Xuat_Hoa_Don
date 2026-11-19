@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.vinamilk import VinamilkCredential
+from app.services.supplier_secrets import decrypt_supplier_secret, encrypt_supplier_secret
 
 _ENV_LOCAL = Path(__file__).resolve().parents[2] / ".env.local"
 
@@ -64,7 +65,7 @@ def load_db_credentials(db: Session | None = None) -> tuple[str, str] | None:
 def load_db_session_cookie(db: Session | None = None) -> str:
     record = get_db_credential(db)
     if record and record.session_cookie:
-        return record.session_cookie.strip()
+        return decrypt_supplier_secret(record.session_cookie)
     return ""
 
 
@@ -74,17 +75,14 @@ def save_db_session_cookie(cookie: str, db: Session | None = None) -> None:
     if db is not None:
         record = db.get(VinamilkCredential, 1)
         if record is not None:
-            record.session_cookie = cookie
+            record.session_cookie = encrypt_supplier_secret(cookie)
             db.commit()
         return
-    try:
-        with SessionLocal() as session:
-            record = session.get(VinamilkCredential, 1)
-            if record is not None:
-                record.session_cookie = cookie
-                session.commit()
-    except Exception:
-        pass
+    with SessionLocal() as session:
+        record = session.get(VinamilkCredential, 1)
+        if record is not None:
+            record.session_cookie = encrypt_supplier_secret(cookie)
+            session.commit()
 
 
 def upsert_db_credentials(
@@ -108,7 +106,7 @@ def upsert_db_credentials(
             id=1,
             username=clean_username,
             encrypted_password=encrypt_vinamilk_password(password),
-            session_cookie=session_cookie,
+            session_cookie=encrypt_supplier_secret(session_cookie),
             updated_by=updated_by,
             updated_at=now,
         )
@@ -119,7 +117,7 @@ def upsert_db_credentials(
         if password:
             record.encrypted_password = encrypt_vinamilk_password(password)
         if session_cookie is not None:
-            record.session_cookie = session_cookie
+            record.session_cookie = encrypt_supplier_secret(session_cookie)
         elif password or username_changed:
             # Xóa cookie cũ khi đổi mật khẩu hoặc đổi username mà chưa lấy cookie mới
             record.session_cookie = None

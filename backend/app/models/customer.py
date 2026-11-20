@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Float, Text
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Float, Index, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import List
 
@@ -8,9 +8,17 @@ from app.core.database import Base
 
 class Customer(Base):
     __tablename__ = "customers"
+    __table_args__ = (
+        UniqueConstraint("distributor_id", "code", name="uq_customers_distributor_code"),
+        Index("ix_customers_dist_company", "distributor_id", "company_id"),
+        Index("ix_customers_dist_status", "distributor_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    distributor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    code: Mapped[str] = mapped_column(String(20), index=True)
     name: Mapped[str] = mapped_column(String(160), index=True)
     type: Mapped[str] = mapped_column(String(20))  # DISTRIBUTOR | WHOLESALE | RETAIL | HORECA
     tier: Mapped[str] = mapped_column(String(5), default="B")  # A | B | C
@@ -31,12 +39,21 @@ class Customer(Base):
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    distributor: Mapped["Distributor | None"] = relationship("Distributor")
     addresses: Mapped[List["CustomerAddress"]] = relationship(back_populates="customer", cascade="all, delete-orphan")
     contacts: Mapped[List["CustomerContact"]] = relationship(back_populates="customer", cascade="all, delete-orphan")
     territory: Mapped["SalesTerritory | None"] = relationship(back_populates="customers")
     sales_orders: Mapped[List["SalesOrder"]] = relationship(back_populates="customer")
     store: Mapped["Store | None"] = relationship(back_populates="customers")
     company: Mapped["Company | None"] = relationship(back_populates="customers")
+
+    @property
+    def distributor_code(self) -> str | None:
+        return self.distributor.code if self.distributor else None
+
+    @property
+    def distributor_name(self) -> str | None:
+        return self.distributor.name if self.distributor else None
 
     @property
     def store_code(self) -> str | None:
@@ -74,9 +91,15 @@ class Store(Base):
     """Cửa hàng / điểm bán vật lý."""
 
     __tablename__ = "stores"
+    __table_args__ = (
+        UniqueConstraint("distributor_id", "code", name="uq_stores_distributor_code"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    distributor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    code: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(200), index=True)
     phone: Mapped[str | None] = mapped_column(String(20))
     owner_name: Mapped[str | None] = mapped_column(String(120))
@@ -89,16 +112,32 @@ class Store(Base):
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    distributor: Mapped["Distributor | None"] = relationship("Distributor")
     customers: Mapped[List["Customer"]] = relationship(back_populates="store")
+
+    @property
+    def distributor_code(self) -> str | None:
+        return self.distributor.code if self.distributor else None
+
+    @property
+    def distributor_name(self) -> str | None:
+        return self.distributor.name if self.distributor else None
 
 
 class Company(Base):
     """Công ty quản lý / công ty xuất hóa đơn (công ty con của đơn vị phân phối)."""
 
     __tablename__ = "companies"
+    __table_args__ = (
+        UniqueConstraint("distributor_id", "code", name="uq_companies_distributor_code"),
+        Index("ix_companies_dist_status", "distributor_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    distributor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    code: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(200), index=True)
     tax_code: Mapped[str | None] = mapped_column(String(30), index=True)  # MST — KHÔNG unique
     phone: Mapped[str | None] = mapped_column(String(20))
@@ -106,12 +145,24 @@ class Company(Base):
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    distributor: Mapped["Distributor | None"] = relationship("Distributor")
     customers: Mapped[List["Customer"]] = relationship(back_populates="company")
     product_links: Mapped[List["ProductCompany"]] = relationship(back_populates="company")
     product_group_links: Mapped[List["ProductGroupCompany"]] = relationship(back_populates="company")
 
     @property
+    def distributor_code(self) -> str | None:
+        return self.distributor.code if self.distributor else None
+
+    @property
+    def distributor_name(self) -> str | None:
+        return self.distributor.name if self.distributor else None
+
+    @property
     def customer_count(self) -> int:
+        precomputed = getattr(self, "_customer_count", None)
+        if precomputed is not None:
+            return int(precomputed)
         return len(self.customers)
 
 

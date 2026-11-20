@@ -21,8 +21,10 @@ import StatCard from "@/components/ui/StatCard";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import ExportViettelSinvoiceModal from "@/components/sales/ExportViettelSinvoiceModal";
+import DmsInvoiceConsolidationPanel from "@/components/sales/DmsInvoiceConsolidationPanel";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
+import { useDistributorContext } from "@/lib/distributor-context";
 import { formatVND } from "@/lib/format";
 
 interface DistributorOption {
@@ -159,11 +161,18 @@ interface IssuedInvoiceRecord {
 
 export default function EInvoiceGatewayPage() {
   const authSession = useAuthSession();
-  const [activeTab, setActiveTab] = useState<"issue" | "history">("issue");
+  const { effectiveDistributorId } = useDistributorContext();
+  const [activeTab, setActiveTab] = useState<"consolidate" | "issue" | "history">("consolidate");
   const [distributors, setDistributors] = useState<DistributorOption[]>([]);
   const [selectedDistId, setSelectedDistId] = useState<number | null>(
-    authSession.distributorId ?? null
+    effectiveDistributorId ?? authSession.distributorId ?? null
   );
+
+  useEffect(() => {
+    if (effectiveDistributorId !== null && effectiveDistributorId !== selectedDistId) {
+      setSelectedDistId(effectiveDistributorId);
+    }
+  }, [effectiveDistributorId, selectedDistId]);
   const [invoiceConfigs, setInvoiceConfigs] = useState<InvoiceConfigOption[]>([]);
   const [selectedConfigId, setSelectedConfigId] = useState<number | null>(null);
   const [supplierFilter, setSupplierFilter] = useState<string>("");
@@ -487,7 +496,17 @@ export default function EInvoiceGatewayPage() {
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-200 flex gap-2">
+      <div className="border-b border-gray-200 flex flex-wrap gap-2">
+        <button
+          onClick={() => setActiveTab("consolidate")}
+          className={`px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
+            activeTab === "consolidate"
+              ? "border-sky-500 text-sky-600"
+              : "border-transparent text-gray-500 hover:text-gray-800"
+          }`}
+        >
+          <FileSpreadsheet size={16} /> Tổng Hợp DMS Theo Ngày & Xuất File HĐĐT
+        </button>
         <button
           onClick={() => setActiveTab("issue")}
           className={`px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
@@ -509,6 +528,17 @@ export default function EInvoiceGatewayPage() {
           <FileCheck2 size={16} /> Lịch Sử Hóa Đơn Đã Phát Hành ({issuedList.length})
         </button>
       </div>
+
+      {activeTab === "consolidate" && (
+        <DmsInvoiceConsolidationPanel
+          distributorId={selectedDistId}
+          distributorLabel={
+            distributors.find((d) => d.id === selectedDistId)
+              ? `[${distributors.find((d) => d.id === selectedDistId)!.code}] ${distributors.find((d) => d.id === selectedDistId)!.name}`
+              : undefined
+          }
+        />
+      )}
 
       {activeTab === "issue" && (
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">

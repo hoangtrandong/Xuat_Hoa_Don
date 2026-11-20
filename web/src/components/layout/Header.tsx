@@ -1,6 +1,7 @@
 "use client";
 
 import { Bell, Search, Menu as MenuIcon, LogOut, Building2, ShieldCheck } from "lucide-react";
+import { useDistributorContext } from "@/lib/distributor-context";
 
 interface HeaderProps {
   onMobileMenuOpen: () => void;
@@ -23,9 +24,15 @@ export default function Header({
   distributorTaxCode,
   isSuperAdmin,
 }: HeaderProps) {
+  const {
+    distributors,
+    effectiveDistributorId,
+    setSelectedDistributorId,
+  } = useDistributorContext();
+
   return (
     <header className="sticky top-0 z-30 h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 lg:px-6 gap-3">
-      {/* Left: Mobile menu + Active NPP Badge + Search */}
+      {/* Left: Mobile menu + Active NPP Badge / Switcher + Search */}
       <div className="flex items-center gap-3 min-w-0">
         <button
           onClick={onMobileMenuOpen}
@@ -52,9 +59,27 @@ export default function Header({
             </div>
           </div>
         ) : isSuperAdmin ? (
-          <div className="flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-800">
+          <div className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50/80 px-2.5 py-1.5 min-w-0">
             <ShieldCheck size={15} className="text-indigo-600 shrink-0" />
-            <span>Quản trị hệ thống (Toàn bộ NPP)</span>
+            <span className="hidden md:inline text-[11px] font-bold text-indigo-800 whitespace-nowrap">
+              Phạm vi NPP:
+            </span>
+            <select
+              aria-label="Chọn Nhà phân phối làm việc"
+              value={effectiveDistributorId === null ? "ALL" : String(effectiveDistributorId)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setSelectedDistributorId(v === "ALL" ? null : Number(v));
+              }}
+              className="max-w-[260px] rounded border border-indigo-300 bg-white px-2 py-1 text-xs font-semibold text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            >
+              <option value="ALL">Tất cả Nhà phân phối ({distributors.length})</option>
+              {distributors.map((d) => (
+                <option key={d.id} value={String(d.id)}>
+                  [{d.code}] {d.name}
+                </option>
+              ))}
+            </select>
           </div>
         ) : null}
 

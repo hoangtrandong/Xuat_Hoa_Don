@@ -24,6 +24,10 @@ export interface Customer {
   staffName?: string;
   managerCode?: string;
   managerName?: string;
+  // Multi-tenant: Nhà phân phối sở hữu mã KH
+  distributorId?: string;
+  distributorCode?: string;
+  distributorName?: string;
   // Phase 2: cửa hàng & công ty quản lý
   storeId?: string;
   companyId?: string;

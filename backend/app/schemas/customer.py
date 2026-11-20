@@ -4,6 +4,7 @@ from typing import List, Optional
 
 
 class CustomerBase(BaseModel):
+    distributor_id: Optional[int] = None
     code: str
     name: str
     type: str = "RETAIL"
@@ -28,6 +29,7 @@ class CustomerCreate(CustomerBase):
 
 
 class CustomerUpdate(BaseModel):
+    distributor_id: Optional[int] = None
     name: Optional[str] = None
     type: Optional[str] = None
     tier: Optional[str] = None
@@ -49,7 +51,9 @@ class Customer(CustomerBase):
     id: int
     current_debt: float = 0
     created_at: datetime
-    # Chỉ đọc: điền từ quan hệ store / company để giao diện hiển thị nhanh.
+    # Chỉ đọc: điền từ quan hệ distributor / store / company để giao diện hiển thị nhanh.
+    distributor_code: Optional[str] = None
+    distributor_name: Optional[str] = None
     store_code: Optional[str] = None
     store_name: Optional[str] = None
     store_route: Optional[str] = None

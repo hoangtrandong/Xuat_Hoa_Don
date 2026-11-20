@@ -1,8 +1,8 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from typing import Any, List, Optional
 
-from app.models.customer import Customer, CustomerAddress, Store
+from app.models.customer import Company, Customer, CustomerAddress, Store
 from app.models.employee import Employee
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.schemas.customer import CustomerCreate, CustomerUpdate
@@ -34,6 +34,19 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
     if not missing_snapshots:
         return 0
 
+    from app.models.multi_tenant_invoice import Distributor
+
+    default_mg_id = db.scalar(
+        select(Distributor.id)
+        .where(
+            or_(
+                func.upper(Distributor.code) == "NPP-MAIGOLD",
+                func.lower(Distributor.name).like("%mai gold%"),
+            )
+        )
+        .order_by(Distributor.id)
+    )
+
     existing_upper = {
         (code or "").strip().upper()
         for code in db.scalars(select(Customer.code)).all()
@@ -64,6 +77,7 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
         staff_name = _extract_raw_str(raw, ("Tên NVBH", "staffName", "salesStaffName"))[:160] or None
 
         new_cust = Customer(
+            distributor_id=default_mg_id,
             code=clean_code,
             name=name,
             type="RETAIL",
@@ -96,32 +110,95 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
 
 
 def get(db: Session, customer_id: int) -> Optional[Customer]:
-    return db.get(Customer, customer_id)
-
-
-def get_by_code(db: Session, code: str) -> Optional[Customer]:
-    return db.query(Customer).filter(Customer.code == code).first()
-
-
-def list_(db: Session, skip: int = 0, limit: int = 100, status: Optional[str] = None) -> List[Customer]:
-    try:
-        sync_customers_from_snapshots(db, commit=True)
-    except Exception:
-        db.rollback()
-    stmt = (
+    return db.scalar(
         select(Customer)
         .options(
+            selectinload(Customer.distributor),
             selectinload(Customer.store),
             selectinload(Customer.company),
             selectinload(Customer.addresses),
         )
-        .order_by(Customer.code)
+        .where(Customer.id == customer_id)
+    )
+
+
+def get_by_code(
+    db: Session,
+    code: str,
+    distributor_id: Optional[int] = None,
+) -> Optional[Customer]:
+    stmt = select(Customer).where(Customer.code == code)
+    if distributor_id is not None:
+        stmt = stmt.where(Customer.distributor_id == distributor_id)
+    else:
+        stmt = stmt.where(Customer.distributor_id.is_(None))
+    return db.scalar(stmt)
+
+
+def list_(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+    distributor_id: Optional[int] = None,
+    company_id: Optional[int] = None,
+    q: Optional[str] = None,
+) -> List[Customer]:
+    if distributor_id is None:
+        try:
+            sync_customers_from_snapshots(db, commit=True)
+        except Exception:
+            db.rollback()
+    stmt = (
+        select(Customer)
+        .options(
+            selectinload(Customer.distributor),
+            selectinload(Customer.store),
+            selectinload(Customer.company),
+            selectinload(Customer.addresses),
+        )
+        .order_by(Customer.distributor_id, Customer.code)
         .offset(skip)
         .limit(limit)
     )
+    if distributor_id is not None:
+        stmt = stmt.where(Customer.distributor_id == distributor_id)
+    if company_id is not None:
+        stmt = stmt.where(Customer.company_id == company_id)
     if status:
         stmt = stmt.where(Customer.status == status)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Customer.code.ilike(like),
+                Customer.name.ilike(like),
+                Customer.tax_code.ilike(like),
+                Customer.phone.ilike(like),
+            )
+        )
     return list(db.execute(stmt).scalars().all())
+
+
+def validate_customer_links(
+    db: Session,
+    distributor_id: Optional[int],
+    company_id: Optional[int],
+    store_id: Optional[int],
+) -> None:
+    """Ngăn chặn liên kết chéo Tenant (KH thuộc NPP A gắn Công ty/Cửa hàng của NPP B)."""
+    if company_id is not None:
+        comp = db.get(Company, company_id)
+        if comp is None:
+            raise ValueError("Công ty quản lý không tồn tại.")
+        if distributor_id is not None and comp.distributor_id is not None and comp.distributor_id != distributor_id:
+            raise ValueError("Công ty quản lý được chọn không thuộc cùng Nhà phân phối với khách hàng.")
+    if store_id is not None:
+        store = db.get(Store, store_id)
+        if store is None:
+            raise ValueError("Cửa hàng không tồn tại.")
+        if distributor_id is not None and store.distributor_id is not None and store.distributor_id != distributor_id:
+            raise ValueError("Cửa hàng được chọn không thuộc cùng Nhà phân phối với khách hàng.")
 
 
 def resolve_manager_assignment(db: Session, manager_code: str | None) -> tuple[str | None, str | None]:
@@ -139,6 +216,7 @@ def resolve_manager_assignment(db: Session, manager_code: str | None) -> tuple[s
 def create(db: Session, obj_in: CustomerCreate) -> Customer:
     data = obj_in.model_dump()
     store_route = data.pop("store_route", None)
+    validate_customer_links(db, data.get("distributor_id"), data.get("company_id"), data.get("store_id"))
     manager_code, manager_name = resolve_manager_assignment(db, data.get("manager_code"))
     data["manager_code"] = manager_code
     data["manager_name"] = manager_name
@@ -150,12 +228,16 @@ def create(db: Session, obj_in: CustomerCreate) -> Customer:
             store.route = store_route.strip() or None
     db.commit()
     db.refresh(customer)
-    return customer
+    return get(db, customer.id) or customer
 
 
 def update(db: Session, customer: Customer, obj_in: CustomerUpdate) -> Customer:
     data = obj_in.model_dump(exclude_unset=True)
     store_route = data.pop("store_route", None)
+    next_dist_id = data.get("distributor_id", customer.distributor_id)
+    next_company_id = data.get("company_id", customer.company_id)
+    next_store_id = data.get("store_id", customer.store_id)
+    validate_customer_links(db, next_dist_id, next_company_id, next_store_id)
     if "manager_code" in data:
         data["manager_code"], data["manager_name"] = resolve_manager_assignment(db, data["manager_code"])
     for field, value in data.items():
@@ -166,7 +248,7 @@ def update(db: Session, customer: Customer, obj_in: CustomerUpdate) -> Customer:
             store.route = store_route.strip() or None
     db.commit()
     db.refresh(customer)
-    return customer
+    return get(db, customer.id) or customer
 
 
 def delete(db: Session, customer: Customer) -> None:

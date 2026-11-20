@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Response
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -7,10 +7,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from typing import List
 
+from app.core.auth import (
+    ensure_entity_in_distributor_scope,
+    get_current_user,
+    resolve_distributor_scope,
+)
 from app.core.database import get_db
 from app.schemas.company import Company, CompanyCreate, CompanyUpdate
 from app.crud import company as company_crud
 from app.models.customer import Company as CompanyModel
+from app.models.user import User
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 
@@ -73,7 +79,13 @@ def download_company_template():
 
 
 @router.post("/upload")
-def upload_companies(file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_companies(
+    file: UploadFile = File(...),
+    distributor_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    effective_dist_id = resolve_distributor_scope(current_user, distributor_id, require_for_write=True)
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel .xlsx hoặc .xlsm.")
     try:
@@ -87,7 +99,11 @@ def upload_companies(file: UploadFile = File(...), db: Session = Depends(get_db)
         if "code" not in headers or "name" not in headers:
             raise HTTPException(status_code=400, detail="Thiếu cột bắt buộc: Mã công ty / Tên công ty.")
 
-        existing_codes = set(db.execute(select(CompanyModel.code)).scalars().all())
+        existing_codes = set(
+            db.execute(
+                select(CompanyModel.code).where(CompanyModel.distributor_id == effective_dist_id)
+            ).scalars().all()
+        )
         file_codes: set[str] = set()
         imported = 0
         for row_number, values in enumerate(rows[1:], start=2):
@@ -105,7 +121,14 @@ def upload_companies(file: UploadFile = File(...), db: Session = Depends(get_db)
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: tên công ty không được để trống.")
 
             if code in existing_codes:
-                company = db.query(CompanyModel).filter(CompanyModel.code == code).first()
+                company = (
+                    db.query(CompanyModel)
+                    .filter(
+                        CompanyModel.distributor_id == effective_dist_id,
+                        CompanyModel.code == code,
+                    )
+                    .first()
+                )
                 if company:
                     for field in ("name", "tax_code", "phone", "address", "status"):
                         value = str(data.get(field) or "").strip()
@@ -115,6 +138,7 @@ def upload_companies(file: UploadFile = File(...), db: Session = Depends(get_db)
                 if code in file_codes:
                     raise HTTPException(status_code=409, detail=f"Dòng {row_number}: mã công ty {code} lặp trong file.")
                 company = CompanyModel(
+                    distributor_id=effective_dist_id,
                     code=code,
                     name=name,
                     tax_code=str(data.get("tax_code") or "").strip() or None,
@@ -127,7 +151,7 @@ def upload_companies(file: UploadFile = File(...), db: Session = Depends(get_db)
             imported += 1
         existing_codes = existing_codes | file_codes
         db.commit()
-        return {"imported": imported}
+        return {"imported": imported, "distributor_id": effective_dist_id}
     except HTTPException:
         db.rollback()
         raise
@@ -144,39 +168,77 @@ def list_companies(
     skip: int = 0,
     limit: int = 1000,
     status: str | None = None,
+    distributor_id: int | None = Query(None),
+    q: str | None = Query(None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    return company_crud.list_(db, skip=skip, limit=limit, status=status)
+    effective_dist_id = resolve_distributor_scope(current_user, distributor_id, require_for_write=False)
+    return company_crud.list_(
+        db,
+        skip=skip,
+        limit=limit,
+        status=status,
+        distributor_id=effective_dist_id,
+        q=q,
+    )
 
 
 @router.post("/", response_model=Company, status_code=201)
-def create_company(payload: CompanyCreate, db: Session = Depends(get_db)):
-    existing = company_crud.get_by_code(db, payload.code)
+def create_company(
+    payload: CompanyCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    effective_dist_id = resolve_distributor_scope(
+        current_user, payload.distributor_id, require_for_write=True
+    )
+    scoped_payload = payload.model_copy(update={"distributor_id": effective_dist_id})
+    existing = company_crud.get_by_code(db, scoped_payload.code, distributor_id=effective_dist_id)
     if existing:
-        raise HTTPException(status_code=409, detail="Mã công ty đã tồn tại.")
-    return company_crud.create(db, payload)
+        raise HTTPException(status_code=409, detail="Mã công ty đã tồn tại trong Nhà phân phối này.")
+    return company_crud.create(db, scoped_payload)
 
 
 @router.get("/{company_id}", response_model=Company)
-def get_company(company_id: int, db: Session = Depends(get_db)):
+def get_company(
+    company_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     obj = company_crud.get(db, company_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Công ty không tồn tại.")
+    ensure_entity_in_distributor_scope(current_user, obj.distributor_id)
     return obj
 
 
 @router.patch("/{company_id}", response_model=Company)
-def update_company(company_id: int, payload: CompanyUpdate, db: Session = Depends(get_db)):
+def update_company(
+    company_id: int,
+    payload: CompanyUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     obj = company_crud.get(db, company_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Công ty không tồn tại.")
+    ensure_entity_in_distributor_scope(current_user, obj.distributor_id)
+    if current_user.distributor_id is not None and payload.distributor_id is not None:
+        if payload.distributor_id != current_user.distributor_id:
+            raise HTTPException(status_code=403, detail="Không thể chuyển công ty sang Nhà phân phối khác.")
     return company_crud.update(db, obj, payload)
 
 
 @router.delete("/{company_id}", status_code=204)
-def delete_company(company_id: int, db: Session = Depends(get_db)):
+def delete_company(
+    company_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     obj = company_crud.get(db, company_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Công ty không tồn tại.")
+    ensure_entity_in_distributor_scope(current_user, obj.distributor_id)
     company_crud.delete(db, obj)
     return Response(status_code=204)

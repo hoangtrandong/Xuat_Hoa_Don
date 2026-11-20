@@ -58,6 +58,67 @@ async def lifespan(_: FastAPI):
             conn.execute(text("ALTER TABLE employees ADD COLUMN IF NOT EXISTS nickname VARCHAR(100)"))
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS distributor_id INTEGER REFERENCES distributors(id) ON DELETE SET NULL"))
             conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"))
+            # Multi-tenant isolation cho Công ty quản lý, Khách hàng, Cửa hàng
+            conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS distributor_id INTEGER REFERENCES distributors(id) ON DELETE SET NULL"))
+            conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS distributor_id INTEGER REFERENCES distributors(id) ON DELETE SET NULL"))
+            conn.execute(text("ALTER TABLE stores ADD COLUMN IF NOT EXISTS distributor_id INTEGER REFERENCES distributors(id) ON DELETE SET NULL"))
+            # Chuyển unique(code) toàn cục sang composite unique (distributor_id, code) trên PostgreSQL
+            if engine.dialect.name == "postgresql":
+                conn.execute(text("ALTER TABLE companies DROP CONSTRAINT IF EXISTS companies_code_key"))
+                conn.execute(text("DROP INDEX IF EXISTS ix_companies_code"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_code ON companies (code)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_distributor_id ON companies (distributor_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_dist_status ON companies (distributor_id, status)"))
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_companies_distributor_code_idx ON companies (distributor_id, code) WHERE distributor_id IS NOT NULL"))
+
+                conn.execute(text("ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_code_key"))
+                conn.execute(text("DROP INDEX IF EXISTS ix_customers_code"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customers_code ON customers (code)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customers_distributor_id ON customers (distributor_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customers_dist_company ON customers (distributor_id, company_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customers_dist_status ON customers (distributor_id, status)"))
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_distributor_code_idx ON customers (distributor_id, code) WHERE distributor_id IS NOT NULL"))
+
+                conn.execute(text("ALTER TABLE stores DROP CONSTRAINT IF EXISTS stores_code_key"))
+                conn.execute(text("DROP INDEX IF EXISTS ix_stores_code"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_stores_code ON stores (code)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_stores_distributor_id ON stores (distributor_id)"))
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_stores_distributor_code_idx ON stores (distributor_id, code) WHERE distributor_id IS NOT NULL"))
+
+            # Backfill dữ liệu cũ (chưa gán NPP) về Nhà Phân Phối Mai Gold (NPP-MAIGOLD)
+            mg_id = conn.execute(
+                text(
+                    "SELECT id FROM distributors "
+                    "WHERE UPPER(code) = 'NPP-MAIGOLD' OR LOWER(name) LIKE '%mai gold%' "
+                    "ORDER BY CASE WHEN UPPER(code) = 'NPP-MAIGOLD' THEN 0 ELSE 1 END, id "
+                    "LIMIT 1"
+                )
+            ).scalar()
+            if mg_id is not None:
+                conn.execute(
+                    text(
+                        "UPDATE companies SET distributor_id = :mg_id "
+                        "WHERE distributor_id IS NULL "
+                        "AND code NOT IN (SELECT code FROM companies WHERE distributor_id = :mg_id)"
+                    ),
+                    {"mg_id": mg_id},
+                )
+                conn.execute(
+                    text(
+                        "UPDATE customers SET distributor_id = :mg_id "
+                        "WHERE distributor_id IS NULL "
+                        "AND code NOT IN (SELECT code FROM customers WHERE distributor_id = :mg_id)"
+                    ),
+                    {"mg_id": mg_id},
+                )
+                conn.execute(
+                    text(
+                        "UPDATE stores SET distributor_id = :mg_id "
+                        "WHERE distributor_id IS NULL "
+                        "AND code NOT IN (SELECT code FROM stores WHERE distributor_id = :mg_id)"
+                    ),
+                    {"mg_id": mg_id},
+                )
             conn.commit()
     except Exception as exc:
         logger.warning("Could not auto-create tables: %s", exc)

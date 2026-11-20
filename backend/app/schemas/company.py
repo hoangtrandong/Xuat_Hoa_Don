@@ -4,6 +4,7 @@ from typing import Optional
 
 
 class CompanyBase(BaseModel):
+    distributor_id: Optional[int] = None
     code: str
     name: str
     tax_code: Optional[str] = None
@@ -17,6 +18,7 @@ class CompanyCreate(CompanyBase):
 
 
 class CompanyUpdate(BaseModel):
+    distributor_id: Optional[int] = None
     name: Optional[str] = None
     tax_code: Optional[str] = None
     phone: Optional[str] = None
@@ -29,3 +31,5 @@ class Company(CompanyBase):
     id: int
     created_at: datetime
     customer_count: int = 0
+    distributor_code: Optional[str] = None
+    distributor_name: Optional[str] = None

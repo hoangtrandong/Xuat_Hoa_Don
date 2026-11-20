@@ -5,6 +5,7 @@ import { CheckCircle2, Loader2, LockKeyhole } from "lucide-react";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
 import GlobalTaskProgressBar from "@/components/layout/GlobalTaskProgressBar";
+import { DistributorProvider } from "@/lib/distributor-context";
 import { API_URL, apiFetch } from "@/lib/api";
 import {
   AUTH_EXPIRED_EVENT,
@@ -232,22 +233,24 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-100">
-      <Sidebar mobileOpen={mobileOpen} onMobileClose={() => setMobileOpen(false)} />
-      <div className="flex flex-col flex-1 overflow-hidden">
-        <Header
-          onMobileMenuOpen={() => setMobileOpen(true)}
-          onLogout={handleLogout}
-          username={session.username}
-          fullName={session.fullName}
-          distributorCode={session.distributorCode}
-          distributorName={session.distributorName}
-          distributorTaxCode={session.distributorTaxCode}
-          isSuperAdmin={session.isSuperAdmin}
-        />
-        <GlobalTaskProgressBar />
-        <main className="flex-1 overflow-y-auto p-4 lg:p-6">{children}</main>
+    <DistributorProvider>
+      <div className="flex h-screen overflow-hidden bg-gray-100">
+        <Sidebar mobileOpen={mobileOpen} onMobileClose={() => setMobileOpen(false)} />
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <Header
+            onMobileMenuOpen={() => setMobileOpen(true)}
+            onLogout={handleLogout}
+            username={session.username}
+            fullName={session.fullName}
+            distributorCode={session.distributorCode}
+            distributorName={session.distributorName}
+            distributorTaxCode={session.distributorTaxCode}
+            isSuperAdmin={session.isSuperAdmin}
+          />
+          <GlobalTaskProgressBar />
+          <main className="flex-1 overflow-y-auto p-4 lg:p-6">{children}</main>
+        </div>
       </div>
-    </div>
+    </DistributorProvider>
   );
 }

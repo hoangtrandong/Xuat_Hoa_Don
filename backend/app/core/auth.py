@@ -182,6 +182,55 @@ def is_super_admin_user(user: User | None) -> bool:
     return "admin" in role_names
 
 
+def resolve_distributor_scope(
+    user: User,
+    requested_distributor_id: int | None = None,
+    *,
+    require_for_write: bool = False,
+) -> int | None:
+    """Xác định phạm vi Nhà phân phối (Tenant) hiệu lực cho request.
+
+    - Tài khoản gắn với 1 NPP (`user.distributor_id` != None): luôn ép cứng về `user.distributor_id`,
+      từ chối 403 nếu cố truy cập NPP khác.
+    - Tài khoản Super Admin: cho phép lọc theo `requested_distributor_id` hoặc xem toàn hệ thống (None).
+      Khi `require_for_write=True`, Super Admin bắt buộc phải chỉ định `distributor_id`.
+    - Tài khoản nhân viên nội bộ cũ chưa gắn NPP (`user.distributor_id` is None):
+      vẫn cho phép xem/lọc bình thường để tương thích ngược, nhưng bắt buộc chọn NPP khi ghi nếu có yêu cầu.
+    """
+    if user.distributor_id is not None:
+        if requested_distributor_id is not None and requested_distributor_id != user.distributor_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Bạn không có quyền truy cập dữ liệu của Nhà phân phối khác.",
+            )
+        return user.distributor_id
+    if is_super_admin_user(user):
+        if require_for_write and requested_distributor_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Vui lòng chọn Nhà phân phối cho thao tác này.",
+            )
+        return requested_distributor_id
+    if require_for_write and requested_distributor_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Vui lòng chọn Nhà phân phối cho thao tác này.",
+        )
+    return requested_distributor_id
+
+
+def ensure_entity_in_distributor_scope(
+    user: User,
+    entity_distributor_id: int | None,
+) -> None:
+    """Đảm bảo tài khoản NPP chỉ thao tác trên bản ghi thuộc đúng NPP của mình."""
+    if user.distributor_id is not None and entity_distributor_id != user.distributor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bạn không có quyền thao tác trên dữ liệu của Nhà phân phối khác.",
+        )
+
+
 def require_endpoint_permission(
     request: Request,
     user: User = Depends(get_current_user),

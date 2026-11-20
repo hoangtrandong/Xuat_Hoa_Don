@@ -3208,3 +3208,114 @@ def delete_purchase_invoice(
     db.delete(inv)
     db.commit()
     return {"deleted": True, "id": invoice_id}
+
+
+class DmsConsolidationExportRequest(BaseModel):
+    from_date: date
+    to_date: date
+    date_field: str = "order_created_date"  # order_created_date | delivery_date
+    distributor_id: int | None = None
+    company_id: int | None = None
+    supplier_code: str | None = None
+    default_vat_rate: float = 8.0
+    exclude_invoiced: bool = True
+    group_keys: list[str] = Field(min_length=1)
+    provider: str = "VIETTEL"  # VIETTEL | MISA | VNPT | EASYINVOICE
+    custom_note: str = ""
+    split_by_company: bool = True
+
+
+@router.get("/dms-consolidation")
+def preview_dms_invoice_consolidation(
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    date_field: str = Query(default="order_created_date"),
+    distributor_id: int | None = Query(default=None),
+    company_id: int | None = Query(default=None),
+    supplier_code: str | None = Query(default=None),
+    default_vat_rate: float = Query(default=8.0, ge=0, le=20),
+    exclude_invoiced: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Tổng hợp đơn hàng DMS theo khoảng ngày, tự động gom các mã KH cùng MST/CCCD & cùng Công ty quản lý."""
+    from app.services.invoice_consolidation import (
+        SUPPORTED_PROVIDERS,
+        consolidate_dms_orders_for_invoicing,
+    )
+
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail="Từ ngày không được lớn hơn Đến ngày.")
+
+    _ensure_default_distributors_seeded(db)
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    data = consolidate_dms_orders_for_invoicing(
+        db,
+        from_date=from_date,
+        to_date=to_date,
+        date_field=date_field,
+        distributor_id=effective_dist_id,
+        company_id=company_id,
+        supplier_code=supplier_code,
+        default_vat_rate=default_vat_rate,
+        exclude_invoiced=exclude_invoiced,
+    )
+    data["supported_providers"] = list(SUPPORTED_PROVIDERS.values())
+    return data
+
+
+@router.post("/dms-consolidation/export")
+def export_dms_consolidated_invoices(
+    payload: DmsConsolidationExportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Xuất file theo mẫu từng nhà cung cấp HĐĐT từ các nhóm hóa đơn DMS đã tổng hợp (chỉ cho phép nhóm hợp lệ)."""
+    from app.services.invoice_consolidation import (
+        consolidate_dms_orders_for_invoicing,
+        export_consolidated_groups,
+    )
+
+    if payload.from_date > payload.to_date:
+        raise HTTPException(status_code=400, detail="Từ ngày không được lớn hơn Đến ngày.")
+
+    _ensure_default_distributors_seeded(db)
+    effective_dist_id = _enforce_user_distributor_scope(current_user, payload.distributor_id)
+
+    data = consolidate_dms_orders_for_invoicing(
+        db,
+        from_date=payload.from_date,
+        to_date=payload.to_date,
+        date_field=payload.date_field,
+        distributor_id=effective_dist_id,
+        company_id=payload.company_id,
+        supplier_code=payload.supplier_code,
+        default_vat_rate=payload.default_vat_rate,
+        exclude_invoiced=payload.exclude_invoiced,
+    )
+    wanted_keys = set(payload.group_keys)
+    selected_groups = [g for g in data["groups"] if g["group_key"] in wanted_keys]
+    if not selected_groups:
+        raise HTTPException(
+            status_code=400,
+            detail="Không tìm thấy nhóm hóa đơn hợp lệ khớp với lựa chọn.",
+        )
+
+    try:
+        buf, filename, media_type = export_consolidated_groups(
+            selected_groups,
+            provider=payload.provider,
+            custom_note=payload.custom_note,
+            split_by_company=payload.split_by_company,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return Response(
+        content=buf.getvalue(),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )

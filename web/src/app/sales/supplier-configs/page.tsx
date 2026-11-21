@@ -29,6 +29,7 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
+import { useDistributorContext } from "@/lib/distributor-context";
 
 interface DistributorItem {
   id: number;
@@ -315,10 +316,22 @@ function FieldMappingCombobox({
 
 export default function MultiTenantSupplierConfigsPage() {
   const authSession = useAuthSession();
+  const {
+    effectiveDistributorId,
+    refreshDistributors,
+  } = useDistributorContext();
   const isNppScoped = Boolean(authSession.distributorId);
   const [activeTab, setActiveTab] = useState<"suppliers" | "invoices" | "distributors">("suppliers");
   const [distributors, setDistributors] = useState<DistributorItem[]>([]);
-  const [selectedDistributorId, setSelectedDistributorId] = useState<number | null>(null);
+  const [selectedDistributorId, setSelectedDistributorId] = useState<number | null>(
+    effectiveDistributorId ?? authSession.distributorId ?? null
+  );
+
+  useEffect(() => {
+    if (effectiveDistributorId !== null && effectiveDistributorId !== selectedDistributorId) {
+      setSelectedDistributorId(effectiveDistributorId);
+    }
+  }, [effectiveDistributorId, selectedDistributorId]);
   const [supplierConfigs, setSupplierConfigs] = useState<SupplierConfigItem[]>([]);
   const [invoiceConfigs, setInvoiceConfigs] = useState<InvoiceConfigItem[]>([]);
   const [presets, setPresets] = useState<Record<string, Record<string, unknown>>>({});
@@ -521,7 +534,11 @@ export default function MultiTenantSupplierConfigsPage() {
       setPresets(presetMap);
 
       const effectiveDistId =
-        authSession.distributorId ?? distId ?? selectedDistributorId ?? (distList[0]?.id ?? null);
+        authSession.distributorId ??
+        effectiveDistributorId ??
+        distId ??
+        selectedDistributorId ??
+        (distList[0]?.id ?? null);
       if (effectiveDistId && effectiveDistId !== selectedDistributorId) {
         setSelectedDistributorId(effectiveDistId);
       }
@@ -538,7 +555,7 @@ export default function MultiTenantSupplierConfigsPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedDistributorId]);
+  }, [authSession.distributorId, effectiveDistributorId, selectedDistributorId]);
 
   useEffect(() => {
     loadAll();
@@ -938,32 +955,24 @@ export default function MultiTenantSupplierConfigsPage() {
         </div>
       )}
 
-      {/* Bộ chọn Nhà phân phối (Tenant Context Bar) */}
+      {/* Thông tin Nhà phân phối đang làm việc (đồng bộ trực tiếp từ thanh Phạm vi NPP trên Header) */}
       <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-sky-500 text-white flex items-center justify-center font-bold">
+          <div className="w-10 h-10 rounded-xl bg-sky-500 text-white flex items-center justify-center font-bold shrink-0">
             NPP
           </div>
-          <div>
-            <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Nhà phân phối đang làm việc (Active Tenant)
+          <div className="min-w-0">
+            <p className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">
+              Nhà phân phối đang làm việc (đồng bộ từ thanh Phạm vi NPP)
             </p>
-            <div className="flex items-center gap-2 mt-0.5">
-              <select
-                value={selectedDistributorId ?? ""}
-                onChange={(e) => {
-                  const id = Number(e.target.value);
-                  setSelectedDistributorId(id);
-                  loadAll(id);
-                }}
-                className="text-base font-bold text-gray-900 bg-gray-50 border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-sky-500"
-              >
-                {distributors.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    [{d.code}] {d.name} — MST: {d.tax_code || "Chưa cập nhật"}
-                  </option>
-                ))}
-              </select>
+            <div className="mt-0.5 flex flex-wrap items-center gap-2">
+              {currentDistributor ? (
+                <span className="text-base font-bold text-gray-900">
+                  [{currentDistributor.code}] {currentDistributor.name}
+                </span>
+              ) : (
+                <span className="text-sm italic text-gray-500">Chưa chọn Nhà phân phối</span>
+              )}
             </div>
           </div>
         </div>

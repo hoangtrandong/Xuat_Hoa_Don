@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
+import { useDistributorContext } from "@/lib/distributor-context";
 import { formatNumber } from "@/lib/format";
 import { downloadExcel } from "@/lib/excel";
 
@@ -227,11 +228,18 @@ function getDefaultMonthRange() {
 
 export default function PurchaseInvoicesPage() {
   const authSession = useAuthSession();
+  const { effectiveDistributorId } = useDistributorContext();
   const defaultDates = getDefaultMonthRange();
   const [distributors, setDistributors] = useState<DistributorOption[]>([]);
   const [selectedDistId, setSelectedDistId] = useState<number>(
-    authSession.distributorId ?? 1
+    effectiveDistributorId ?? authSession.distributorId ?? 1
   );
+
+  useEffect(() => {
+    if (effectiveDistributorId !== null && effectiveDistributorId !== selectedDistId) {
+      setSelectedDistId(effectiveDistributorId);
+    }
+  }, [effectiveDistributorId, selectedDistId]);
 
   // Các trường bộ lọc chuẩn Cổng Thuế (hoadondientu.gdt.gov.vn)
   const [sellerTaxOrName, setSellerTaxOrName] = useState<string>("");
@@ -324,7 +332,9 @@ export default function PurchaseInvoicesPage() {
       .then((r) => (r.ok ? r.json() : []))
       .then((list: DistributorOption[]) => {
         setDistributors(list);
-        if (authSession.distributorId && list.some((d) => d.id === authSession.distributorId)) {
+        if (effectiveDistributorId && list.some((d) => d.id === effectiveDistributorId)) {
+          setSelectedDistId(effectiveDistributorId);
+        } else if (authSession.distributorId && list.some((d) => d.id === authSession.distributorId)) {
           setSelectedDistId(authSession.distributorId);
         } else if (list.length > 0) {
           setSelectedDistId(list[0].id);
@@ -1367,18 +1377,17 @@ export default function PurchaseInvoicesPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {/* Chọn Nhà phân phối */}
-            <select
-              value={selectedDistId}
-              onChange={(e) => setSelectedDistId(Number(e.target.value))}
-              className="rounded border border-slate-500 bg-[#1e3554] px-2 py-1 text-[11px] font-semibold text-white focus:border-sky-400 focus:outline-none"
-            >
-              {distributors.map((d) => (
-                <option key={d.id} value={d.id}>
-                  NPP: {d.code} - {d.name} (MST: {d.tax_code || "N/A"})
-                </option>
-              ))}
-            </select>
+            {/* Hiển thị Nhà phân phối đang active theo thanh Phạm vi NPP trên Header */}
+            {(() => {
+              const activeDist = distributors.find((d) => d.id === selectedDistId);
+              return (
+                <span className="inline-flex items-center rounded border border-slate-500 bg-[#1e3554] px-2.5 py-1 text-[11px] font-semibold text-white">
+                  {activeDist
+                    ? `NPP: ${activeDist.code} - ${activeDist.name}`
+                    : "Đang tải NPP..."}
+                </span>
+              );
+            })()}
 
             {credStatus?.has_bearer_token ? (
               <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 border border-emerald-400/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">

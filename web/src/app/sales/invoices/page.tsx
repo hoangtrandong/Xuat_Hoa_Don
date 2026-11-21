@@ -431,27 +431,20 @@ export default function EInvoiceGatewayPage() {
         </div>
       )}
 
-      {/* Thanh chọn Nhà Phân Phối & Mẫu Form Hóa Đơn */}
+      {/* Thanh thông tin Nhà Phân Phối & Chọn Mẫu Form Hóa Đơn */}
       <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div>
           <label className="text-xs font-bold text-gray-500 uppercase flex items-center gap-1.5">
-            <Building2 size={14} className="text-sky-600" /> 1. Chọn Nhà Phân Phối phát hành hóa đơn
+            <Building2 size={14} className="text-sky-600" /> 1. Nhà Phân Phối phát hành hóa đơn (theo Phạm vi NPP)
           </label>
-          <select
-            value={selectedDistId ?? ""}
-            onChange={(e) => {
-              const id = Number(e.target.value);
-              setSelectedDistId(id);
-              loadData(id);
-            }}
-            className="mt-1.5 w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
-          >
-            {distributors.map((d) => (
-              <option key={d.id} value={d.id}>
-                [{d.code}] {d.name} (MST: {d.tax_code || "—"})
-              </option>
-            ))}
-          </select>
+          <div className="mt-1.5 w-full rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2 text-sm font-bold text-slate-900">
+            {(() => {
+              const activeDist = distributors.find((d) => d.id === selectedDistId);
+              return activeDist
+                ? `[${activeDist.code}] ${activeDist.name} (MST: ${activeDist.tax_code || "—"})`
+                : "Đang tải Nhà phân phối...";
+            })()}
+          </div>
         </div>
 
         <div>

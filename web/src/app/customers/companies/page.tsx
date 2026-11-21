@@ -339,13 +339,13 @@ export default function CompaniesPage() {
       },
       {
         key: "invoice_item_mode",
-        title: "Quy tắc xuất HĐ",
+        title: "Mã / Tên hàng in trên HĐ",
         sortable: true,
         render: (_, row) =>
           row.invoice_item_mode === "INTERNAL" ? (
-            <Badge variant="info">Theo Mã nội bộ</Badge>
+            <Badge variant="info">Mã nội bộ</Badge>
           ) : (
-            <Badge variant="default">Theo Mã đầu vào CQT</Badge>
+            <Badge variant="default">Mã đầu vào CQT</Badge>
           ),
       },
       {
@@ -790,8 +790,8 @@ export default function CompaniesPage() {
               <InfoRow icon={<Hash size={14} />} label="Mã số thuế" value={selected.tax_code || "—"} extra={selected.shared ? <Badge variant="warning">Dùng chung</Badge> : undefined} />
               <InfoRow
                 icon={<FileText size={14} />}
-                label="Quy tắc xuất HĐ"
-                value={selected.invoice_item_mode === "INTERNAL" ? "Theo Mã & Tên nội bộ" : "Theo Mã & Tên đầu vào CQT"}
+                label="Mã/Tên in trên HĐ"
+                value={selected.invoice_item_mode === "INTERNAL" ? "Mã & Tên nội bộ" : "Mã & Tên đầu vào CQT"}
               />
               <InfoRow icon={<Phone size={14} />} label="Điện thoại" value={selected.phone || "—"} />
               <InfoRow icon={<MapPin size={14} />} label="Địa chỉ" value={selected.address || "—"} />

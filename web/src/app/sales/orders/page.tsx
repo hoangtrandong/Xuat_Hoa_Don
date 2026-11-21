@@ -493,7 +493,8 @@ function SplitQuantityInput({ quantity, boxesPerCarton, label, onChange }: {
 export default function SalesOrdersPage() {
   const router = useRouter();
   const authSession = useAuthSession();
-  const { effectiveDistributorId } = useDistributorContext();
+  const { effectiveDistributorId, effectiveDistributor } = useDistributorContext();
+  const activeDistributorCode = effectiveDistributor?.code || authSession.distributorCode || "";
   const { username: sessionUsername } = authSession;
   const [isAdminUser, setIsAdminUser] = useState(false);
   const effectiveIsAdmin = isAdminUser || sessionUsername.trim().toLowerCase() === "admin";
@@ -692,6 +693,9 @@ export default function SalesOrdersPage() {
       processing_status: statusFilter === "Tất cả" ? "" : statusFilter,
       delivery_status: deliveryStatusFilter === "Tất cả" ? "" : deliveryStatusFilter,
     });
+    if (activeDistributorCode) {
+      params.set("distributor_code", activeDistributorCode);
+    }
     try {
       const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/grouped?${params}`);
       const payload = await response.json() as {
@@ -716,7 +720,7 @@ export default function SalesOrdersPage() {
       if (version === listRequestVersion.current) setListLoading(false);
     }
     void loadSplitApprovalRequests();
-  }, [fromDate, toDate, listPage, pageSize, orderFilter, customerFilter, staffFilter, productFilter, statusFilter, deliveryStatusFilter, loadSplitApprovalRequests]);
+  }, [fromDate, toDate, listPage, pageSize, orderFilter, customerFilter, staffFilter, productFilter, statusFilter, deliveryStatusFilter, activeDistributorCode, loadSplitApprovalRequests]);
 
   useEffect(() => {
     const requestVersion = listRequestVersion;

@@ -1971,22 +1971,25 @@ def list_local_vinamilk_orders(
         if current_user and getattr(current_user, "distributor", None)
         else None
     )
-    if user_dist_id is not None and user_dist_code:
+    req_dist_code = (distributor_code or "").strip().upper() or None
+    effective_dist_code = user_dist_code if (user_dist_id is not None and user_dist_code) else req_dist_code
+    if effective_dist_code:
         payload_dist_code = VinamilkOrderSnapshot.raw_payload["Mã NPP"].as_string()
-        filters.append(
-            or_(
-                func.upper(VinamilkOrderSnapshot.performed_by) == user_dist_code,
-                func.upper(payload_dist_code) == user_dist_code,
+        dist_conditions = [
+            func.upper(VinamilkOrderSnapshot.performed_by) == effective_dist_code,
+            func.upper(payload_dist_code) == effective_dist_code,
+        ]
+        if user_dist_id == 1:
+            dist_conditions.append(
                 and_(
-                    user_dist_id == 1,
                     or_(
                         VinamilkOrderSnapshot.performed_by.is_(None),
                         VinamilkOrderSnapshot.performed_by == "",
                     ),
                     or_(payload_dist_code.is_(None), payload_dist_code == ""),
-                ),
+                )
             )
-        )
+        filters.append(or_(*dist_conditions))
     snapshot_total = db.scalar(select(func.count()).select_from(VinamilkOrderSnapshot).where(*filters)) or 0
     rows = db.scalars(
         select(VinamilkOrderSnapshot)
@@ -2426,6 +2429,7 @@ def list_grouped_vinamilk_orders(
     product: str = "",
     processing_status: str = "",
     delivery_status: str = "",
+    distributor_code: str | None = None,
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -2441,6 +2445,7 @@ def list_grouped_vinamilk_orders(
         page = list_local_vinamilk_orders(
             from_date=from_date, to_date=to_date, source="sync", search=None,
             status=None, skip=offset, limit=10_000, db=db, current_user=current_user,
+            distributor_code=distributor_code,
         )
         last_synced_at = page["last_synced_at"]
         for row in page["rows"]:

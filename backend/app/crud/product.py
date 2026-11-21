@@ -411,6 +411,30 @@ def _is_name_match(dms_name: str, product_name: str) -> bool:
     return overlap >= 0.5 and len(inter) >= 2
 
 
+def _parse_cqt_vat_rate(raw_vat: str | None) -> float | None:
+    """Chuẩn hóa thẻ <TSuat> từ XML Hóa đơn mua vào CQT thành số thực.
+    - '8%', '8' -> 8.0
+    - '10%', '10' -> 10.0
+    - '5%', '0%' -> 5.0, 0.0
+    - 'KCT', 'KKKNT' (Không chịu thuế / Không kê khai nộp thuế) -> -1.0
+    """
+    if raw_vat is None:
+        return None
+    text = str(raw_vat).strip().upper()
+    if not text:
+        return None
+    if "KCT" in text or "KKKNT" in text or "KHONG CHIU THUE" in text:
+        return -1.0
+    cleaned = text.replace("%", "").replace(",", ".").strip()
+    try:
+        val = float(cleaned)
+        if 0.0 <= val <= 100.0:
+            return val
+    except ValueError:
+        pass
+    return None
+
+
 def sync_products_from_system_data(
     db: Session,
     invoice_ids: list[int] | None = None,
@@ -461,6 +485,7 @@ def sync_products_from_system_data(
                 cost_price = round(float(item.amount_before_tax) / float(item.quantity), 4)
             supplier = _normalize_supplier_name(seller_name, fallback="Nhà cung cấp CQT")
             boxes_per_carton = _infer_boxes_per_carton(sku, name)
+            parsed_vat = _parse_cqt_vat_rate(item.vat_rate)
 
             purchase_skus.add(sku)
             if sku not in candidates:
@@ -470,6 +495,7 @@ def sync_products_from_system_data(
                     "unit_raw": unit_raw,
                     "base_price": cost_price,
                     "cost_price": cost_price,
+                    "vat_rate": parsed_vat,
                     "supplier": supplier,
                     "boxes_per_carton": boxes_per_carton,
                     "sync_source": "PURCHASE_INVOICE",
@@ -480,6 +506,8 @@ def sync_products_from_system_data(
                     cand["cost_price"] = cost_price
                     if cand["base_price"] <= 0:
                         cand["base_price"] = cost_price
+                if parsed_vat is not None:
+                    cand["vat_rate"] = parsed_vat
                 if boxes_per_carton > 1 and cand.get("boxes_per_carton", 1) <= 1:
                     cand["boxes_per_carton"] = boxes_per_carton
     except Exception:
@@ -550,6 +578,8 @@ def sync_products_from_system_data(
                     supplier=cand.get("supplier") or "Vinamilk",
                     base_price=round(float(cand.get("base_price") or 0.0), 4),
                     cost_price=round(float(cand.get("cost_price") or 0.0), 4),
+                    vat_rate=cand.get("vat_rate"),
+                    vat_rate_source="PURCHASE_INVOICE" if cand.get("vat_rate") is not None else "MANUAL",
                     reorder_level=20,
                     boxes_per_carton=max(1, int(cand.get("boxes_per_carton") or 1)),
                     status="active",
@@ -578,6 +608,13 @@ def sync_products_from_system_data(
                 if existing.sync_source != cand.get("sync_source") and cand.get("sync_source"):
                     existing.sync_source = cand["sync_source"]
                     row_changed = True
+                if cand.get("vat_rate") is not None and (
+                    existing.vat_rate is None or (existing.vat_rate_source or "") == "PURCHASE_INVOICE"
+                ):
+                    if existing.vat_rate != cand["vat_rate"]:
+                        existing.vat_rate = cand["vat_rate"]
+                        existing.vat_rate_source = "PURCHASE_INVOICE"
+                        row_changed = True
                 if row_changed:
                     updated += 1
 
@@ -656,6 +693,18 @@ def sync_products_from_system_data(
             )
         ).all()
         all_companies = db.scalars(select(Company)).all()
+        existing_group_by_prod_id: dict[int, ProductGroup] = {}
+        for p in all_current_products:
+            if p.group_items and p.group_items[0].group is not None:
+                existing_group_by_prod_id[p.id] = p.group_items[0].group
+        # Nạp thêm từ DB để chắc chắn 100% không bỏ sót product_id nào đã tồn tại trong product_group_items
+        for pgi in db.scalars(
+            select(ProductGroupItem).options(
+                selectinload(ProductGroupItem.group).selectinload(ProductGroup.company_links)
+            )
+        ).all():
+            if pgi.product_id not in existing_group_by_prod_id and pgi.group is not None:
+                existing_group_by_prod_id[pgi.product_id] = pgi.group
 
         dms_mapped_count = 0
         for dms_code, dms_info in dms_items.items():
@@ -697,9 +746,9 @@ def sync_products_from_system_data(
                     prod_changed = True
 
                 # Đồng bộ vào Quản lý mã NPP nội bộ (ProductGroup & ProductGroupCompany)
-                if matched_prod.group_items:
-                    group = matched_prod.group_items[0].group
-                    for link in group.company_links:
+                existing_group = existing_group_by_prod_id.get(matched_prod.id)
+                if existing_group is not None:
+                    for link in existing_group.company_links:
                         if link.distributor_sku != dms_code:
                             link.distributor_sku = dms_code
                             link.distributor_name = dms_info["name"]
@@ -708,7 +757,8 @@ def sync_products_from_system_data(
                     new_group = ProductGroup(name=matched_prod.name, representative_product_id=matched_prod.id)
                     db.add(new_group)
                     db.flush()
-                    db.add(ProductGroupItem(product_group_id=new_group.id, product_id=matched_prod.id))
+                    new_pgi = ProductGroupItem(product_group_id=new_group.id, product_id=matched_prod.id)
+                    db.add(new_pgi)
                     for comp in all_companies:
                         db.add(ProductGroupCompany(
                             product_group_id=new_group.id,
@@ -717,15 +767,31 @@ def sync_products_from_system_data(
                             distributor_sku=dms_code,
                             distributor_name=dms_info["name"],
                         ))
+                    db.flush()
+                    existing_group_by_prod_id[matched_prod.id] = new_group
                     prod_changed = True
 
                 if prod_changed:
                     dms_mapped_count += 1
                     updated += 1
 
-    if (added > 0 or updated > 0) and commit:
+    if added > 0 or updated > 0:
+        db.flush()
+
+    # Tự động đồng bộ Công ty quản lý & liên kết SKU–Công ty từ Hóa đơn mua vào CQT
+    company_sync_stats = {"companies_created": 0, "companies_updated": 0, "sku_links_upserted": 0}
+    try:
+        from app.crud.company import sync_companies_from_purchase_invoices
+
+        company_sync_stats = sync_companies_from_purchase_invoices(
+            db, invoice_ids=invoice_ids, commit=False
+        )
+    except Exception:
+        pass
+
+    if commit:
         db.commit()
-    elif added > 0 or updated > 0:
+    else:
         db.flush()
 
     return {
@@ -736,6 +802,7 @@ def sync_products_from_system_data(
         "from_orders": len(order_skus),
         "from_purchase_invoices": len(purchase_skus),
         "from_issued_invoices": len(issued_skus),
+        **company_sync_stats,
     }
 
 
@@ -909,9 +976,15 @@ def list_paged(
     unit: Optional[str] = None,
     status: Optional[str] = None,
     distributor_code: Optional[str] = None,
+    company_id: Optional[int] = None,
+    company_tax_code: Optional[str] = None,
+    has_internal_code: Optional[bool] = None,
     sort_field: str = "code",
     sort_order: str = "asc",
 ) -> tuple[List[Product], int, dict[str, Any]]:
+    from app.models.customer import Company as CompanyModel
+    from app.models.product import ProductCompany as ProductCompanyModel
+
     conditions = [Product.sku.is_not(None), Product.sku != ""]
 
     if category_id:
@@ -922,6 +995,27 @@ def list_paged(
 
     if unit and unit != "ALL":
         conditions.append(Product.unit.has(ProductUnit.name == unit))
+
+    if company_id is not None:
+        if company_id == 0:
+            conditions.append(~Product.company_links.any())
+        else:
+            conditions.append(
+                Product.company_links.any(ProductCompanyModel.company_id == company_id)
+            )
+
+    if company_tax_code and company_tax_code.strip():
+        clean_mst = company_tax_code.strip()
+        conditions.append(
+            Product.company_links.any(
+                ProductCompanyModel.company.has(CompanyModel.tax_code == clean_mst)
+            )
+        )
+
+    if has_internal_code is True:
+        conditions.append(and_(Product._npp_code.is_not(None), Product._npp_code != ""))
+    elif has_internal_code is False:
+        conditions.append(or_(Product._npp_code.is_(None), Product._npp_code == ""))
 
     if status and status != "ALL":
         if status == "active":
@@ -945,7 +1039,17 @@ def list_paged(
                 func.lower(Product.sku).like(term),
                 func.lower(Product.name).like(term),
                 func.lower(Product._npp_code).like(term),
+                func.lower(Product.internal_name).like(term),
                 func.lower(Product.supplier).like(term),
+                Product.company_links.any(
+                    ProductCompanyModel.company.has(
+                        or_(
+                            func.lower(CompanyModel.tax_code).like(term),
+                            func.lower(CompanyModel.name).like(term),
+                            func.lower(CompanyModel.short_name).like(term),
+                        )
+                    )
+                ),
             )
         )
 

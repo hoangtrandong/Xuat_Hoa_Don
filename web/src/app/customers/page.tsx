@@ -68,6 +68,8 @@ export default function CustomersPage() {
   const [typeFilter, setTypeFilter] = useState("Tất cả");
   const [statusFilter, setStatusFilter] = useState("Tất cả");
   const [companyFilter, setCompanyFilter] = useState("ALL");
+  const [bulkCompanyId, setBulkCompanyId] = useState("");
+  const [bulkAssigning, setBulkAssigning] = useState(false);
   const [selected, setSelected] = useState<Customer | null>(null);
   const [customerRows, setCustomerRows] = useState<Customer[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
@@ -435,7 +437,11 @@ export default function CustomersPage() {
       customerRows.filter((c) => {
         if (typeFilter !== "Tất cả" && c.type !== typeFilter) return false;
         if (statusFilter !== "Tất cả" && c.status !== statusFilter) return false;
-        if (companyFilter !== "ALL" && c.companyId !== companyFilter) return false;
+        if (companyFilter === "UNASSIGNED") {
+          if (c.companyId) return false;
+        } else if (companyFilter !== "ALL" && c.companyId !== companyFilter) {
+          return false;
+        }
         return true;
       }),
     [customerRows, typeFilter, statusFilter, companyFilter],
@@ -691,15 +697,72 @@ export default function CustomersPage() {
             <select
               value={companyFilter}
               onChange={(e) => setCompanyFilter(e.target.value)}
-              className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-xs font-medium focus:outline-none focus:ring-2 focus:ring-sky-500 max-w-[220px]"
+              className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-xs font-medium focus:outline-none focus:ring-2 focus:ring-sky-500 max-w-[230px]"
             >
               <option value="ALL">Tất cả công ty quản lý ({companyOptions.length})</option>
+              <option value="UNASSIGNED">Chưa gán công ty quản lý</option>
               {companyOptions.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.code} · {c.name}
                 </option>
               ))}
             </select>
+            {companyOptions.length > 0 && filtered.length > 0 && (
+              <div className="flex items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50/70 px-2 py-1">
+                <select
+                  value={bulkCompanyId}
+                  onChange={(e) => setBulkCompanyId(e.target.value)}
+                  className="bg-white border border-sky-200 rounded px-2 py-1 text-xs font-medium text-slate-700 max-w-[180px] focus:outline-none focus:ring-1 focus:ring-sky-500"
+                >
+                  <option value="">Gán nhanh công ty...</option>
+                  {companyOptions.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.code} · {c.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={!bulkCompanyId || bulkAssigning}
+                  onClick={async () => {
+                    if (!bulkCompanyId) return;
+                    const comp = companyOptions.find((c) => c.id === bulkCompanyId);
+                    if (
+                      !window.confirm(
+                        `Gán Công ty quản lý "${comp?.name || bulkCompanyId}" cho ${filtered.length} khách hàng đang hiển thị?`,
+                      )
+                    ) {
+                      return;
+                    }
+                    setBulkAssigning(true);
+                    setCreateError("");
+                    setCreateMessage("");
+                    try {
+                      const resp = await apiFetch(`${API_URL}/customers/bulk-assign-company`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          customer_ids: filtered.map((c) => Number(c.id)),
+                          company_id: Number(bulkCompanyId),
+                        }),
+                      });
+                      const data = (await resp.json().catch(() => ({}))) as { updated?: number; detail?: string };
+                      if (!resp.ok) throw new Error(data.detail || "Không thể gán công ty hàng loạt.");
+                      setCreateMessage(`Đã gán công ty quản lý cho ${data.updated ?? filtered.length} khách hàng.`);
+                      setBulkCompanyId("");
+                      loadCustomersAndCompanies();
+                    } catch (e) {
+                      setCreateError(e instanceof Error ? e.message : "Lỗi khi gán công ty hàng loạt.");
+                    } finally {
+                      setBulkAssigning(false);
+                    }
+                  }}
+                  className="rounded bg-sky-600 hover:bg-sky-700 disabled:bg-slate-300 px-2.5 py-1 text-xs font-semibold text-white whitespace-nowrap transition-colors"
+                >
+                  {bulkAssigning ? "Đang gán..." : `Gán (${filtered.length} KH)`}
+                </button>
+              </div>
+            )}
             <select
               value={typeFilter}
               onChange={(e) => setTypeFilter(e.target.value)}

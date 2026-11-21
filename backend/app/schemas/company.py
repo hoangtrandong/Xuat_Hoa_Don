@@ -7,9 +7,12 @@ class CompanyBase(BaseModel):
     distributor_id: Optional[int] = None
     code: str
     name: str
+    short_name: Optional[str] = None
     tax_code: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
+    invoice_item_mode: str = "TAX_INPUT"  # TAX_INPUT | INTERNAL
+    sync_source: str = "MANUAL"  # MANUAL | GDT_CQT
     status: str = "active"
 
 
@@ -20,9 +23,11 @@ class CompanyCreate(CompanyBase):
 class CompanyUpdate(BaseModel):
     distributor_id: Optional[int] = None
     name: Optional[str] = None
+    short_name: Optional[str] = None
     tax_code: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
+    invoice_item_mode: Optional[str] = None
     status: Optional[str] = None
 
 

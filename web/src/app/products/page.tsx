@@ -66,10 +66,14 @@ type ApiProductItem = {
   supplier?: string | null;
   base_price: number;
   cost_price: number;
+  vat_rate?: number | null;
+  vat_rate_source?: string | null;
   boxes_per_carton: number;
   reorder_level?: number;
   status: string;
   npp_code?: string | null;
+  internal_name?: string | null;
+  internal_unit?: string | null;
   representative_sku?: string | null;
   representative_name?: string | null;
   order_count?: number;
@@ -78,6 +82,7 @@ type ApiProductItem = {
   total_purchased_qty?: number;
   sync_source?: string;
   distributors?: ProductDistributor[];
+  managed_companies?: ProductManagedCompany[];
 };
 
 type ProductDistributor = {
@@ -85,10 +90,39 @@ type ProductDistributor = {
   name: string;
 };
 
+type ProductManagedCompany = {
+  company_id: number;
+  company_code: string;
+  company_name: string;
+  short_name?: string | null;
+  tax_code?: string | null;
+  invoice_item_mode?: string;
+  source?: string;
+  is_primary: boolean;
+  company_product_code?: string | null;
+  invoice_name_override?: string | null;
+  invoice_unit_name?: string | null;
+  conversion_num: number;
+  conversion_den: number;
+  total_purchased_qty?: number;
+  last_purchased_at?: string | null;
+};
+
+type CompanyOption = {
+  id: number;
+  code: string;
+  name: string;
+  short_name?: string | null;
+  tax_code?: string | null;
+  invoice_item_mode?: string;
+};
+
 type ProductRow = {
   id: number;
   code: string;
   nppCode: string;
+  internal_name: string;
+  internal_unit: string;
   name: string;
   category_id: number;
   categoryCode: string;
@@ -99,6 +133,8 @@ type ProductRow = {
   supplier: string;
   price: number;
   cost_price: number;
+  vat_rate: number | null;
+  vat_rate_source: string;
   boxes_per_carton: number;
   reorder_level: number;
   status: string;
@@ -110,6 +146,7 @@ type ProductRow = {
   total_purchased_qty: number;
   sync_source: "ORDER_SYNC" | "PURCHASE_INVOICE" | "DMS_AND_CQT" | "MANUAL";
   distributors: ProductDistributor[];
+  managed_companies: ProductManagedCompany[];
   _searchKey?: string;
 };
 
@@ -257,6 +294,7 @@ export default function ProductsPage() {
     supplier: "Vinamilk",
     base_price: "0",
     cost_price: "0",
+    vat_rate: "",
     boxes_per_carton: "1",
     reorder_level: "20",
     status: "active",
@@ -265,16 +303,37 @@ export default function ProductsPage() {
   const [editForm, setEditForm] = useState({
     sku: "",
     npp_code: "",
+    internal_name: "",
+    internal_unit: "",
     name: "",
     category_id: "",
     unit_id: "",
     supplier: "",
     base_price: "0",
     cost_price: "0",
+    vat_rate: "",
     boxes_per_carton: "1",
     reorder_level: "20",
     status: "active",
   });
+
+  // Danh mục Công ty quản lý & cấu hình riêng theo từng Công ty cho SKU đang sửa
+  const [companyOptions, setCompanyOptions] = useState<CompanyOption[]>([]);
+  const [companyFilter, setCompanyFilter] = useState<string>("ALL");
+  const [internalCodeFilter, setInternalCodeFilter] = useState<"ALL" | "MAPPED" | "UNMAPPED">("ALL");
+  const [editCompanyConfigs, setEditCompanyConfigs] = useState<
+    Array<{
+      company_id: number;
+      is_primary: boolean;
+      company_product_code: string;
+      invoice_name_override: string;
+      invoice_unit_name: string;
+      conversion_num: number;
+      conversion_den: number;
+      source?: string;
+      total_purchased_qty?: number;
+    }>
+  >([]);
 
   const [bannerMsg, setBannerMsg] = useState<{
     type: "success" | "error" | "info";
@@ -306,11 +365,18 @@ export default function ProductsPage() {
 
   const loadMetadata = useCallback(async () => {
     try {
-      const [categoryResponse, unitResponse, companyLinksResponse] = await Promise.all([
+      const [categoryResponse, unitResponse, companyLinksResponse, companiesResponse] = await Promise.all([
         apiFetch(`${API_URL}/products/categories/`),
         apiFetch(`${API_URL}/products/units/`),
         apiFetch(`${API_URL}/product-groups/products/company-links`).catch(() => null),
+        apiFetch(`${API_URL}/companies/?limit=5000`).catch(() => null),
       ]);
+      if (companiesResponse && companiesResponse.ok) {
+        const loadedCompanies = (await companiesResponse.json().catch(() => [])) as CompanyOption[];
+        if (Array.isArray(loadedCompanies)) {
+          setCompanyOptions(loadedCompanies);
+        }
+      }
       if (categoryResponse.ok) {
         const loadedCategories = (await categoryResponse.json()) as CategoryOption[];
         setCategories(loadedCategories);
@@ -383,6 +449,16 @@ export default function ProductsPage() {
       if (supplierFilter !== "ALL") params.set("supplier", supplierFilter);
       if (unitFilter !== "ALL") params.set("unit", unitFilter);
       if (statusFilter !== "ALL") params.set("status", statusFilter);
+      if (companyFilter === "UNASSIGNED") {
+        params.set("company_id", "0");
+      } else if (companyFilter !== "ALL") {
+        params.set("company_id", companyFilter);
+      }
+      if (internalCodeFilter === "MAPPED") {
+        params.set("has_internal_code", "true");
+      } else if (internalCodeFilter === "UNMAPPED") {
+        params.set("has_internal_code", "false");
+      }
       if (!isSuperAdmin && authSession.distributorCode) {
         params.set("distributor_code", authSession.distributorCode);
       } else if (distributorFilter !== "ALL") {
@@ -409,6 +485,8 @@ export default function ProductsPage() {
           id: product.id,
           code: product.sku,
           nppCode: product.npp_code || "",
+          internal_name: product.internal_name || "",
+          internal_unit: product.internal_unit || "",
           name: product.name,
           category_id: product.category_id,
           categoryCode: product.category_code || catObj?.code || "",
@@ -419,6 +497,8 @@ export default function ProductsPage() {
           supplier: (product.supplier || "Vinamilk").trim(),
           price: Number(product.base_price ?? 0),
           cost_price: Number(product.cost_price ?? 0),
+          vat_rate: product.vat_rate != null ? Number(product.vat_rate) : null,
+          vat_rate_source: product.vat_rate_source || "MANUAL",
           boxes_per_carton: Math.max(1, Number(product.boxes_per_carton ?? 1)),
           reorder_level: Number(product.reorder_level ?? 20),
           status: product.status || "active",
@@ -430,6 +510,7 @@ export default function ProductsPage() {
           total_purchased_qty: Number(product.total_purchased_qty ?? 0),
           sync_source: syncSource,
           distributors: product.distributors ?? [],
+          managed_companies: product.managed_companies ?? [],
         };
         row._searchKey = buildProductSearchKey(row);
         return row;
@@ -467,6 +548,8 @@ export default function ProductsPage() {
     supplierFilter,
     unitFilter,
     statusFilter,
+    companyFilter,
+    internalCodeFilter,
     distributorFilter,
     isSuperAdmin,
     authSession.distributorCode,
@@ -589,6 +672,8 @@ export default function ProductsPage() {
         id: result.id,
         code: form.sku.trim().toUpperCase(),
         nppCode: form.npp_code.trim().toUpperCase() || "",
+        internal_name: "",
+        internal_unit: "",
         name: form.name.trim(),
         category_id: Number(form.category_id || 1),
         categoryCode: catObj?.code || "",
@@ -599,6 +684,8 @@ export default function ProductsPage() {
         supplier: form.supplier.trim() || "Vinamilk",
         price: Number(form.base_price) || 0,
         cost_price: Number(form.cost_price) || 0,
+        vat_rate: null,
+        vat_rate_source: "MANUAL",
         boxes_per_carton: Math.max(1, Number(form.boxes_per_carton) || 1),
         reorder_level: Math.max(0, Number(form.reorder_level) || 20),
         status: form.status || "active",
@@ -610,6 +697,7 @@ export default function ProductsPage() {
         total_purchased_qty: 0,
         sync_source: "MANUAL",
         distributors: [],
+        managed_companies: [],
       };
       newRow._searchKey = buildProductSearchKey(newRow);
       setProducts((prev) => [newRow, ...prev]);
@@ -641,19 +729,47 @@ export default function ProductsPage() {
         body: JSON.stringify({
           sku: editForm.sku.trim().toUpperCase(),
           npp_code: editForm.npp_code.trim().toUpperCase() || null,
+          internal_name: editForm.internal_name.trim() || null,
+          internal_unit: editForm.internal_unit.trim() || null,
           name: editForm.name.trim(),
           category_id: Number(editForm.category_id),
           unit_id: Number(editForm.unit_id),
           supplier: editForm.supplier.trim() || null,
           base_price: Number(editForm.base_price) || 0,
           cost_price: Number(editForm.cost_price) || 0,
+          vat_rate: editForm.vat_rate === "" ? null : Number(editForm.vat_rate),
+          vat_rate_source: editForm.vat_rate === "" ? "MANUAL" : "MANUAL",
           boxes_per_carton: Math.max(1, Number(editForm.boxes_per_carton) || 1),
           reorder_level: Math.max(0, Number(editForm.reorder_level) || 20),
           status: editForm.status,
         }),
       });
-      const result = (await response.json()) as { detail?: string };
+      const result = (await response.json()) as { detail?: string; managed_companies?: ProductManagedCompany[] };
       if (!response.ok) throw new Error(result.detail ?? "Không thể cập nhật SKU.");
+
+      // Lưu cấu hình Công ty quản lý & Đổi quy cách xuất HĐ
+      let latestManagedCompanies: ProductManagedCompany[] = result.managed_companies ?? editingProduct.managed_companies;
+      const cfgResp = await apiFetch(`${API_URL}/products/${editingProduct.id}/company-configs`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          configs: editCompanyConfigs.map((c) => ({
+            company_id: c.company_id,
+            is_primary: c.is_primary,
+            company_product_code: c.company_product_code.trim() || null,
+            invoice_name_override: c.invoice_name_override.trim() || null,
+            invoice_unit_name: c.invoice_unit_name.trim() || null,
+            conversion_num: Math.max(1, Number(c.conversion_num) || 1),
+            conversion_den: Math.max(1, Number(c.conversion_den) || 1),
+          })),
+        }),
+      });
+      if (cfgResp.ok) {
+        const cfgData = (await cfgResp.json()) as { managed_companies?: ProductManagedCompany[] };
+        if (Array.isArray(cfgData.managed_companies)) {
+          latestManagedCompanies = cfgData.managed_companies;
+        }
+      }
 
       const updatedSku = editForm.sku.trim().toUpperCase();
       const updatedNppCode = editForm.npp_code.trim().toUpperCase();
@@ -669,6 +785,8 @@ export default function ProductsPage() {
             ...p,
             code: updatedSku,
             nppCode: updatedNppCode,
+            internal_name: editForm.internal_name.trim(),
+            internal_unit: editForm.internal_unit.trim(),
             name: editForm.name.trim(),
             category_id: targetCatId,
             categoryCode: catObj?.code || p.categoryCode,
@@ -679,9 +797,12 @@ export default function ProductsPage() {
             supplier: editForm.supplier.trim() || p.supplier,
             price: Number(editForm.base_price) || 0,
             cost_price: Number(editForm.cost_price) || 0,
+            vat_rate: editForm.vat_rate === "" ? null : Number(editForm.vat_rate),
+            vat_rate_source: "MANUAL",
             boxes_per_carton: Math.max(1, Number(editForm.boxes_per_carton) || 1),
             reorder_level: Math.max(0, Number(editForm.reorder_level) || 20),
             status: editForm.status,
+            managed_companies: latestManagedCompanies,
           };
           updated._searchKey = buildProductSearchKey(updated);
           return updated;
@@ -820,6 +941,7 @@ export default function ProductsPage() {
       supplier: supplierOptions[0]?.name || "Vinamilk",
       base_price: "0",
       cost_price: "0",
+      vat_rate: "",
       boxes_per_carton: "1",
       reorder_level: "20",
       status: "active",
@@ -835,16 +957,32 @@ export default function ProductsPage() {
     setEditForm({
       sku: product.code,
       npp_code: product.nppCode || "",
+      internal_name: product.internal_name || "",
+      internal_unit: product.internal_unit || "",
       name: product.name,
       category_id: String(product.category_id),
       unit_id: String(product.unit_id),
       supplier: product.supplier,
       base_price: String(product.price),
       cost_price: String(product.cost_price),
+      vat_rate: product.vat_rate != null ? String(product.vat_rate) : "",
       boxes_per_carton: String(product.boxes_per_carton),
       reorder_level: String(product.reorder_level),
       status: product.status,
     });
+    setEditCompanyConfigs(
+      (product.managed_companies || []).map((mc) => ({
+        company_id: mc.company_id,
+        is_primary: mc.is_primary,
+        company_product_code: mc.company_product_code || "",
+        invoice_name_override: mc.invoice_name_override || "",
+        invoice_unit_name: mc.invoice_unit_name || "",
+        conversion_num: mc.conversion_num || 1,
+        conversion_den: mc.conversion_den || 1,
+        source: mc.source,
+        total_purchased_qty: mc.total_purchased_qty,
+      })),
+    );
     setEditOpen(true);
   }
 
@@ -1048,6 +1186,16 @@ export default function ProductsPage() {
       if (supplierFilter !== "ALL") params.set("supplier", supplierFilter);
       if (unitFilter !== "ALL") params.set("unit", unitFilter);
       if (statusFilter !== "ALL") params.set("status", statusFilter);
+      if (companyFilter === "UNASSIGNED") {
+        params.set("company_id", "0");
+      } else if (companyFilter !== "ALL") {
+        params.set("company_id", companyFilter);
+      }
+      if (internalCodeFilter === "MAPPED") {
+        params.set("has_internal_code", "true");
+      } else if (internalCodeFilter === "UNMAPPED") {
+        params.set("has_internal_code", "false");
+      }
       if (!isSuperAdmin && authSession.distributorCode) {
         params.set("distributor_code", authSession.distributorCode);
       } else if (distributorFilter !== "ALL") {
@@ -1417,6 +1565,47 @@ export default function ProductsPage() {
 
             <div>
               <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                Công ty quản lý / MST (CQT)
+              </label>
+              <select
+                value={companyFilter}
+                onChange={(e) => {
+                  setCompanyFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className={inputCls}
+              >
+                <option value="ALL">Tất cả Công ty ({companyOptions.length})</option>
+                <option value="UNASSIGNED">Chưa có Công ty quản lý</option>
+                {companyOptions.map((comp) => (
+                  <option key={comp.id} value={String(comp.id)}>
+                    {comp.tax_code ? `[${comp.tax_code}] ` : ""}
+                    {comp.short_name || comp.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                Trạng thái Mã nội bộ
+              </label>
+              <select
+                value={internalCodeFilter}
+                onChange={(e) => {
+                  setInternalCodeFilter(e.target.value as "ALL" | "MAPPED" | "UNMAPPED");
+                  setCurrentPage(1);
+                }}
+                className={inputCls}
+              >
+                <option value="ALL">Tất cả SKU</option>
+                <option value="MAPPED">Đã gán Mã nội bộ</option>
+                <option value="UNMAPPED">Chưa gán Mã nội bộ</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                 Danh mục ngành hàng
               </label>
               <select
@@ -1561,6 +1750,9 @@ export default function ProductsPage() {
                 </th>
                 <th className="w-10 px-2 py-2 text-center">STT</th>
                 <th className="px-2.5 py-2">Nhà phân phối</th>
+                <th className="px-2.5 py-2" title="Pháp nhân & Mã số thuế đứng tên mua vào trên Hóa đơn CQT hoặc được gán quản lý SKU">
+                  Công ty quản lý / MST
+                </th>
                 <th className="px-2.5 py-2">
                   <button
                     type="button"
@@ -1643,7 +1835,7 @@ export default function ProductsPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={13} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={14} className="px-4 py-10 text-center text-xs text-slate-500">
                     <span className="inline-flex items-center gap-2">
                       <Loader2 size={15} className="animate-spin text-sky-600" />
                       Đang đồng bộ và tải danh sách mã sản phẩm (SKU) từ hệ thống...
@@ -1652,7 +1844,7 @@ export default function ProductsPage() {
                 </tr>
               ) : pagedProducts.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={14} className="px-4 py-10 text-center text-xs text-slate-500">
                     Không tìm thấy mã sản phẩm (SKU) nào khớp với điều kiện lọc hiện tại.
                   </td>
                 </tr>
@@ -1704,6 +1896,58 @@ export default function ProductsPage() {
                             </span>
                           ) : (
                             <span className="text-[10px] italic text-slate-400">Chưa xác định</span>
+                          );
+                        })()}
+                      </td>
+
+                      {/* CỘT CÔNG TY QUẢN LÝ / MST (TỪ HÓA ĐƠN CQT & GÁN QUẢN LÝ) */}
+                      <td className="px-2.5 py-1.5 max-w-[210px]">
+                        {(() => {
+                          const comps = row.managed_companies || [];
+                          if (comps.length === 0) {
+                            return <span className="text-[10px] italic text-slate-400">—</span>;
+                          }
+                          const primary = comps.find((c) => c.is_primary) || comps[0];
+                          const extraCount = comps.length - 1;
+                          const hasConversion = comps.some(
+                            (c) =>
+                              (c.conversion_num && c.conversion_num !== 1) ||
+                              (c.conversion_den && c.conversion_den !== 1) ||
+                              Boolean(c.invoice_unit_name) ||
+                              Boolean(c.invoice_name_override),
+                          );
+                          const fullTooltip = comps
+                            .map(
+                              (c) =>
+                                `${c.tax_code || c.company_code} - ${c.company_name}${
+                                  c.total_purchased_qty ? ` (Nhập CQT: ${formatNumber(c.total_purchased_qty)})` : ""
+                                }`,
+                            )
+                            .join("\n");
+                          return (
+                            <div className="min-w-0" title={fullTooltip}>
+                              <div className="flex items-center gap-1">
+                                <span className="font-mono text-[11px] font-bold text-slate-800">
+                                  {primary.tax_code || primary.company_code}
+                                </span>
+                                {extraCount > 0 && (
+                                  <span className="rounded bg-sky-100 border border-sky-200 px-1 py-0 text-[9px] font-bold text-sky-800">
+                                    +{extraCount}
+                                  </span>
+                                )}
+                                {hasConversion && (
+                                  <span
+                                    className="rounded bg-amber-100 border border-amber-300 px-1 py-0 text-[9px] font-bold text-amber-800"
+                                    title="SKU có cấu hình đổi quy cách / tên riêng khi xuất HĐ"
+                                  >
+                                    QĐ
+                                  </span>
+                                )}
+                              </div>
+                              <div className="truncate text-[10px] text-slate-500">
+                                {primary.short_name || primary.company_name}
+                              </div>
+                            </div>
                           );
                         })()}
                       </td>
@@ -1849,6 +2093,14 @@ export default function ProductsPage() {
                             <span className="text-[10px] font-medium text-slate-500">
                               / {row.unit}
                             </span>
+                            {row.vat_rate !== null && (
+                              <span
+                                title={`Thuế suất VAT (${row.vat_rate_source === "PURCHASE_INVOICE" ? "Tự học từ CQT" : "Thủ công"})`}
+                                className="rounded border border-violet-200 bg-violet-50 px-1 py-0 text-[9px] font-bold text-violet-700"
+                              >
+                                {row.vat_rate < 0 ? "KCT" : `VAT ${row.vat_rate}%`}
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <div className="flex items-center justify-end gap-1">
@@ -2462,6 +2714,22 @@ export default function ProductsPage() {
                   </label>
 
                   <label className="text-[10px] font-semibold text-slate-600 block">
+                    Thuế suất VAT (Học từ CQT / Xuất HĐ)
+                    <select
+                      value={editForm.vat_rate}
+                      onChange={(e) => setEditForm({ ...editForm, vat_rate: e.target.value })}
+                      className={cn(inputCls, "mt-1")}
+                    >
+                      <option value="">Mặc định theo hóa đơn (8%)</option>
+                      <option value="0">0% (Thuế suất 0%)</option>
+                      <option value="5">5%</option>
+                      <option value="8">8%</option>
+                      <option value="10">10%</option>
+                      <option value="-1">KCT (Không chịu thuế)</option>
+                    </select>
+                  </label>
+
+                  <label className="text-[10px] font-semibold text-slate-600 block">
                     Trạng thái kinh doanh
                     <select
                       value={form.status}
@@ -2877,13 +3145,37 @@ export default function ProductsPage() {
                   {/* Tên sản phẩm đầy đủ */}
                   <div className="col-span-12">
                     <label className="text-[10px] font-semibold text-slate-600 block mb-1">
-                      Tên sản phẩm đầy đủ (Tên hiển thị) <span className="text-red-600">*</span>
+                      Tên sản phẩm gốc (Theo hóa đơn đầu vào CQT) <span className="text-red-600">*</span>
                     </label>
                     <input
                       required
                       value={editForm.name}
                       onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
                       className={cn(inputCls, "text-xs font-medium")}
+                    />
+                  </div>
+
+                  {/* Tên nội bộ & ĐVT nội bộ */}
+                  <div className="col-span-12 md:col-span-9">
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-1">
+                      Tên sản phẩm nội bộ (Dùng khi Công ty chọn xuất HĐ theo Mã nội bộ)
+                    </label>
+                    <input
+                      value={editForm.internal_name}
+                      onChange={(e) => setEditForm({ ...editForm, internal_name: e.target.value })}
+                      placeholder="Để trống sẽ dùng Tên sản phẩm gốc phía trên..."
+                      className={cn(inputCls, "text-xs")}
+                    />
+                  </div>
+                  <div className="col-span-12 md:col-span-3">
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-1">
+                      ĐVT nội bộ (tuỳ chọn)
+                    </label>
+                    <input
+                      value={editForm.internal_unit}
+                      onChange={(e) => setEditForm({ ...editForm, internal_unit: e.target.value })}
+                      placeholder="VD: Hộp, Lốc, Thùng..."
+                      className={cn(inputCls, "text-xs")}
                     />
                   </div>
                 </div>
@@ -3011,6 +3303,22 @@ export default function ProductsPage() {
                   </label>
 
                   <label className="text-[10px] font-semibold text-slate-600 block">
+                    Thuế suất VAT (Học từ CQT / Xuất HĐ)
+                    <select
+                      value={editForm.vat_rate}
+                      onChange={(e) => setEditForm({ ...editForm, vat_rate: e.target.value })}
+                      className={cn(inputCls, "mt-1")}
+                    >
+                      <option value="">Mặc định theo hóa đơn (8%)</option>
+                      <option value="0">0% (Thuế suất 0%)</option>
+                      <option value="5">5%</option>
+                      <option value="8">8%</option>
+                      <option value="10">10%</option>
+                      <option value="-1">KCT (Không chịu thuế)</option>
+                    </select>
+                  </label>
+
+                  <label className="text-[10px] font-semibold text-slate-600 block">
                     Trạng thái kinh doanh
                     <select
                       value={editForm.status}
@@ -3024,7 +3332,187 @@ export default function ProductsPage() {
                 </div>
               </section>
 
-              {/* KHỐI 4: THỐNG KÊ PHÁT SINH THỰC TẾ CỦA SKU */}
+              {/* KHỐI 4: CÔNG TY QUẢN LÝ & QUY TẮC XUẤT HÓA ĐƠN / ĐỔI QUY CÁCH */}
+              <section className="border-b border-slate-200 p-4 bg-slate-50/50">
+                <div className="flex items-center justify-between gap-2 mb-2.5">
+                  <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5">
+                    <Building2 size={13} className="text-sky-600" />
+                    <span>4. Công ty quản lý (MST) &amp; Quy đổi quy cách khi xuất Hóa đơn</span>
+                  </div>
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const compId = Number(e.target.value);
+                      if (!compId) return;
+                      if (editCompanyConfigs.some((c) => c.company_id === compId)) return;
+                      setEditCompanyConfigs((prev) => [
+                        ...prev,
+                        {
+                          company_id: compId,
+                          is_primary: prev.length === 0,
+                          company_product_code: "",
+                          invoice_name_override: "",
+                          invoice_unit_name: "",
+                          conversion_num: 1,
+                          conversion_den: 1,
+                          source: "MANUAL",
+                        },
+                      ]);
+                    }}
+                    className="rounded border border-sky-300 bg-white px-2 py-1 text-[11px] font-semibold text-sky-800 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  >
+                    <option value="">+ Gắn thêm Công ty quản lý...</option>
+                    {companyOptions
+                      .filter((c) => !editCompanyConfigs.some((ec) => ec.company_id === c.id))
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.tax_code ? `[${c.tax_code}] ` : ""}
+                          {c.short_name || c.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                {editCompanyConfigs.length === 0 ? (
+                  <div className="rounded border border-dashed border-slate-300 bg-white px-3 py-2.5 text-[11px] text-slate-500">
+                    Chưa có Công ty quản lý nào được liên kết. Hệ thống sẽ tự động gắn khi đồng bộ Hóa đơn mua vào CQT hoặc bạn có thể chọn gắn thủ công ở góc phải.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto border border-slate-200 bg-white">
+                    <table className="w-full border-collapse text-left">
+                      <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase">
+                        <tr className="border-b border-slate-200">
+                          <th className="px-2 py-1.5 text-center w-12">Chính</th>
+                          <th className="px-2 py-1.5">Công ty / MST</th>
+                          <th className="px-2 py-1.5 w-32">Mã xuất HĐ riêng</th>
+                          <th className="px-2 py-1.5">Tên xuất HĐ riêng (tuỳ chọn)</th>
+                          <th className="px-2 py-1.5 w-24">ĐVT xuất HĐ</th>
+                          <th className="px-2 py-1.5 w-36 text-center" title="SL xuất HĐ = SL gốc × (Tử / Mẫu). VD: 1 Thùng = 48 Hộp -> nhập 48 / 1">
+                            Quy đổi (Tử / Mẫu)
+                          </th>
+                          <th className="px-2 py-1.5 w-10 text-center">Xóa</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {editCompanyConfigs.map((cfg, idx) => {
+                          const compObj = companyOptions.find((c) => c.id === cfg.company_id);
+                          return (
+                            <tr key={cfg.company_id} className="border-b border-slate-100 text-[11px]">
+                              <td className="px-2 py-1.5 text-center">
+                                <input
+                                  type="radio"
+                                  name="primary_company_cfg"
+                                  checked={cfg.is_primary}
+                                  onChange={() =>
+                                    setEditCompanyConfigs((prev) =>
+                                      prev.map((item, i) => ({ ...item, is_primary: i === idx })),
+                                    )
+                                  }
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <div className="font-mono font-bold text-slate-800">
+                                  {compObj?.tax_code || compObj?.code || `#${cfg.company_id}`}
+                                </div>
+                                <div className="text-[10px] text-slate-500 truncate max-w-[200px]">
+                                  {compObj?.short_name || compObj?.name || ""}
+                                </div>
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  value={cfg.company_product_code}
+                                  onChange={(e) =>
+                                    setEditCompanyConfigs((prev) =>
+                                      prev.map((item, i) =>
+                                        i === idx ? { ...item, company_product_code: e.target.value.toUpperCase() } : item,
+                                      ),
+                                    )
+                                  }
+                                  placeholder="Mặc định Cty"
+                                  className={cn(inputCls, "font-mono text-[11px]")}
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  value={cfg.invoice_name_override}
+                                  onChange={(e) =>
+                                    setEditCompanyConfigs((prev) =>
+                                      prev.map((item, i) =>
+                                        i === idx ? { ...item, invoice_name_override: e.target.value } : item,
+                                      ),
+                                    )
+                                  }
+                                  placeholder="Để trống = theo quy tắc Cty"
+                                  className={cn(inputCls, "text-[11px]")}
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  value={cfg.invoice_unit_name}
+                                  onChange={(e) =>
+                                    setEditCompanyConfigs((prev) =>
+                                      prev.map((item, i) =>
+                                        i === idx ? { ...item, invoice_unit_name: e.target.value } : item,
+                                      ),
+                                    )
+                                  }
+                                  placeholder="Hộp / Lốc"
+                                  className={cn(inputCls, "text-[11px] text-center")}
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <div className="flex items-center justify-center gap-1">
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    value={cfg.conversion_num}
+                                    onChange={(e) =>
+                                      setEditCompanyConfigs((prev) =>
+                                        prev.map((item, i) =>
+                                          i === idx ? { ...item, conversion_num: Math.max(1, Number(e.target.value) || 1) } : item,
+                                        ),
+                                      )
+                                    }
+                                    className="w-12 rounded border border-slate-300 px-1 py-0.5 text-center text-[11px] font-semibold"
+                                  />
+                                  <span className="text-slate-400 font-bold">/</span>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    value={cfg.conversion_den}
+                                    onChange={(e) =>
+                                      setEditCompanyConfigs((prev) =>
+                                        prev.map((item, i) =>
+                                          i === idx ? { ...item, conversion_den: Math.max(1, Number(e.target.value) || 1) } : item,
+                                        ),
+                                      )
+                                    }
+                                    className="w-12 rounded border border-slate-300 px-1 py-0.5 text-center text-[11px] font-semibold"
+                                  />
+                                </div>
+                              </td>
+                              <td className="px-2 py-1.5 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setEditCompanyConfigs((prev) => prev.filter((_, i) => i !== idx))
+                                  }
+                                  className="rounded p-1 text-red-600 hover:bg-red-50"
+                                  title="Gỡ liên kết công ty này"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              {/* KHỐI 5: THỐNG KÊ PHÁT SINH THỰC TẾ CỦA SKU */}
               <section className="px-4 py-3 bg-sky-50/40">
                 <div className="rounded border border-sky-200 bg-white p-3 text-[11px] text-slate-700 flex flex-wrap items-center justify-between gap-3 shadow-sm">
                   <div className="flex items-center gap-4">

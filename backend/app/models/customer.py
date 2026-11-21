@@ -139,9 +139,14 @@ class Company(Base):
     )
     code: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(200), index=True)
+    short_name: Mapped[str | None] = mapped_column(String(120))
     tax_code: Mapped[str | None] = mapped_column(String(30), index=True)  # MST — KHÔNG unique
     phone: Mapped[str | None] = mapped_column(String(20))
     address: Mapped[str | None] = mapped_column(String(255))
+    invoice_item_mode: Mapped[str] = mapped_column(
+        String(20), default="TAX_INPUT"
+    )  # TAX_INPUT | INTERNAL
+    sync_source: Mapped[str] = mapped_column(String(20), default="MANUAL")  # MANUAL | GDT_CQT
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

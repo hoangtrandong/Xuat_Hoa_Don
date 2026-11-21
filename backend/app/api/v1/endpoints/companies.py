@@ -16,6 +16,7 @@ from app.core.database import get_db
 from app.schemas.company import Company, CompanyCreate, CompanyUpdate
 from app.crud import company as company_crud
 from app.models.customer import Company as CompanyModel
+from app.models.product import ProductCompany as ProductCompanyModel
 from app.models.user import User
 
 router = APIRouter(prefix="/companies", tags=["companies"])
@@ -163,6 +164,22 @@ def upload_companies(
         raise HTTPException(status_code=400, detail=f"Không thể đọc file Excel: {exc}") from exc
 
 
+@router.post("/sync-from-cqt")
+def sync_companies_from_cqt(
+    distributor_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Đồng bộ tự động danh mục Công ty quản lý và liên kết SKU–Công ty từ Hóa đơn mua vào CQT."""
+    effective_dist_id = resolve_distributor_scope(
+        current_user, distributor_id, require_for_write=False
+    )
+    result = company_crud.sync_companies_from_purchase_invoices(
+        db, distributor_id=effective_dist_id, commit=True
+    )
+    return {"ok": True, **result}
+
+
 @router.get("/", response_model=List[Company])
 def list_companies(
     skip: int = 0,
@@ -193,7 +210,15 @@ def create_company(
     effective_dist_id = resolve_distributor_scope(
         current_user, payload.distributor_id, require_for_write=True
     )
-    scoped_payload = payload.model_copy(update={"distributor_id": effective_dist_id})
+    clean_tax_code = (payload.tax_code or "").strip()
+    if not clean_tax_code:
+        raise HTTPException(
+            status_code=400,
+            detail="Mã số thuế (MST) là bắt buộc khi đăng ký công ty quản lý để đảm bảo khớp dữ liệu CQT.",
+        )
+    scoped_payload = payload.model_copy(
+        update={"distributor_id": effective_dist_id, "tax_code": clean_tax_code}
+    )
     existing = company_crud.get_by_code(db, scoped_payload.code, distributor_id=effective_dist_id)
     if existing:
         raise HTTPException(status_code=409, detail="Mã công ty đã tồn tại trong Nhà phân phối này.")
@@ -227,6 +252,14 @@ def update_company(
     if current_user.distributor_id is not None and payload.distributor_id is not None:
         if payload.distributor_id != current_user.distributor_id:
             raise HTTPException(status_code=403, detail="Không thể chuyển công ty sang Nhà phân phối khác.")
+
+    # Bảo vệ lớp pháp lý: Công ty đã đồng bộ từ CQT không cho sửa tay Tên pháp nhân và MST
+    if (obj.sync_source or "").upper() == "GDT_CQT":
+        updates = payload.model_dump(exclude_unset=True)
+        updates.pop("name", None)
+        updates.pop("tax_code", None)
+        payload = CompanyUpdate(**updates)
+
     return company_crud.update(db, obj, payload)
 
 
@@ -240,5 +273,18 @@ def delete_company(
     if not obj:
         raise HTTPException(status_code=404, detail="Công ty không tồn tại.")
     ensure_entity_in_distributor_scope(current_user, obj.distributor_id)
+
+    cust_cnt = company_crud.customer_count(db, obj)
+    sku_link = db.scalar(
+        select(ProductCompanyModel.id).where(ProductCompanyModel.company_id == obj.id).limit(1)
+    )
+    if cust_cnt > 0 or sku_link is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Không thể xóa cứng công ty đã gắn với Khách hàng hoặc Sản phẩm (SKU). "
+                "Vui lòng chuyển trạng thái sang 'Ngưng giao (Inactive)' để bảo toàn lịch sử thuế."
+            ),
+        )
     company_crud.delete(db, obj)
     return Response(status_code=204)

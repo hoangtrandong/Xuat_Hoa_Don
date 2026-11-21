@@ -39,6 +39,8 @@ class Product(Base):
     barcode: Mapped[str | None] = mapped_column(String(50))
     base_price: Mapped[float] = mapped_column(Float, default=0)
     cost_price: Mapped[float] = mapped_column(Float, default=0)
+    vat_rate: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0, 5, 8, 10; -1 = KCT; None = default
+    vat_rate_source: Mapped[str | None] = mapped_column(String(20), default="MANUAL", nullable=True)  # PURCHASE_INVOICE | MANUAL
     reorder_level: Mapped[int] = mapped_column(Integer, default=20)
     # Number of boxes represented by one carton; quantities are stored in boxes.
     boxes_per_carton: Mapped[int] = mapped_column(Integer, default=1)
@@ -46,6 +48,8 @@ class Product(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     sync_source: Mapped[str | None] = mapped_column(String(30), default="MANUAL", index=True, nullable=True)
     _npp_code: Mapped[str | None] = mapped_column("npp_code", String(50), nullable=True)
+    internal_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    internal_unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     category: Mapped["ProductCategory"] = relationship(back_populates="products")
     unit: Mapped["ProductUnit"] = relationship(back_populates="products")
@@ -138,6 +142,14 @@ class ProductCompany(Base):
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(String(20), default="MANAGER")
     company_product_code: Mapped[str | None] = mapped_column(String(50))
+    invoice_name_override: Mapped[str | None] = mapped_column(String(255))
+    invoice_unit_name: Mapped[str | None] = mapped_column(String(50))
+    conversion_num: Mapped[int] = mapped_column(Integer, default=1)
+    conversion_den: Mapped[int] = mapped_column(Integer, default=1)
+    source: Mapped[str] = mapped_column(String(25), default="MANUAL")  # PURCHASE_INVOICE | MANUAL
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_purchased_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    total_purchased_qty: Mapped[float] = mapped_column(Float, default=0)
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

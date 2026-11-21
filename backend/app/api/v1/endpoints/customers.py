@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Response
+from pydantic import BaseModel
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -259,6 +260,56 @@ def upload_customers(
     except (InvalidFileException, BadZipFile, OSError) as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Không thể đọc file Excel: {exc}") from exc
+
+
+class BulkAssignCompanyPayload(BaseModel):
+    customer_ids: List[int]
+    company_id: int | None = None
+
+
+@router.post("/bulk-assign-company")
+def bulk_assign_company(
+    payload: BulkAssignCompanyPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Gán hàng loạt Công ty quản lý cho danh sách mã Khách hàng (có kiểm tra phạm vi NPP)."""
+    if not payload.customer_ids:
+        raise HTTPException(status_code=400, detail="Danh sách khách hàng trống.")
+
+    target_company: CompanyModel | None = None
+    if payload.company_id is not None:
+        target_company = db.get(CompanyModel, payload.company_id)
+        if not target_company:
+            raise HTTPException(status_code=404, detail="Không tìm thấy Công ty quản lý.")
+        ensure_entity_in_distributor_scope(current_user, target_company.distributor_id)
+
+    customers = db.scalars(
+        select(CustomerModel).where(CustomerModel.id.in_(payload.customer_ids))
+    ).all()
+    updated_count = 0
+    for cust in customers:
+        ensure_entity_in_distributor_scope(current_user, cust.distributor_id)
+        if (
+            target_company is not None
+            and target_company.distributor_id is not None
+            and cust.distributor_id is not None
+            and target_company.distributor_id != cust.distributor_id
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Khách hàng {cust.code} không thuộc cùng Nhà phân phối với Công ty {target_company.code}.",
+            )
+        cust.company_id = target_company.id if target_company else None
+        updated_count += 1
+
+    db.commit()
+    return {
+        "ok": True,
+        "updated": updated_count,
+        "company_id": target_company.id if target_company else None,
+        "company_name": target_company.name if target_company else None,
+    }
 
 
 @router.get("/", response_model=List[Customer])

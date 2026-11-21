@@ -19,6 +19,9 @@ class Distributor(Base):
     email: Mapped[str | None] = mapped_column(String(120))
     address: Mapped[str | None] = mapped_column(String(255))
     representative_name: Mapped[str | None] = mapped_column(String(120))
+    company_allocation_mode: Mapped[str] = mapped_column(
+        String(30), default="BY_CUSTOMER"
+    )  # BY_CUSTOMER | BY_PRODUCT | HYBRID_CUSTOMER_FIRST | HYBRID_PRODUCT_FIRST
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -132,7 +135,19 @@ class IssuedInvoice(Base):
     transaction_id: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(
         String(25), default="DRAFT", index=True
-    )  # DRAFT | ISSUED | SIGNED | CANCELLED
+    )  # DRAFT | ISSUED | SIGNED | CANCELLED | ADJUSTED | REPLACED
+    seller_company_id: Mapped[int | None] = mapped_column(
+        ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    seller_tax_code: Mapped[str | None] = mapped_column(String(40), index=True, nullable=True)
+    invoice_type: Mapped[str] = mapped_column(
+        String(20), default="ORIGINAL", index=True
+    )  # ORIGINAL | ADJUSTMENT | REPLACEMENT
+    parent_invoice_id: Mapped[int | None] = mapped_column(
+        ForeignKey("issued_invoices.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    adjustment_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    return_reference: Mapped[str | None] = mapped_column(String(120), nullable=True)
     supplier_code: Mapped[str | None] = mapped_column(String(50), index=True)
     source_order_numbers: Mapped[list[str]] = mapped_column(JSON, default=list)
     buyer_code: Mapped[str | None] = mapped_column(String(80), index=True)
@@ -184,6 +199,10 @@ class IssuedInvoiceItem(Base):
     vat_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
     total_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
     source_order_number: Mapped[str | None] = mapped_column(String(120))
+    source_sku: Mapped[str | None] = mapped_column(String(80))
+    source_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_unit: Mapped[str | None] = mapped_column(String(50))
+    conversion_ratio: Mapped[str | None] = mapped_column(String(30))
 
     invoice: Mapped["IssuedInvoice"] = relationship(back_populates="items")
 

@@ -2089,6 +2089,12 @@ def list_issued_invoices(
             "tax_authority_code": r.tax_authority_code or "",
             "transaction_id": r.transaction_id or "",
             "status": r.status,
+            "seller_company_id": r.seller_company_id,
+            "seller_tax_code": r.seller_tax_code or "",
+            "invoice_type": r.invoice_type or "ORIGINAL",
+            "parent_invoice_id": r.parent_invoice_id,
+            "adjustment_reason": r.adjustment_reason or "",
+            "return_reference": r.return_reference or "",
             "supplier_code": r.supplier_code or "VINAMILK",
             "source_order_numbers": r.source_order_numbers or [],
             "buyer_code": r.buyer_code or "",
@@ -2125,12 +2131,106 @@ def list_issued_invoices(
                     "vat_amount": float(it.vat_amount or 0),
                     "total_amount": float(it.total_amount or 0),
                     "source_order_number": it.source_order_number,
+                    "source_sku": it.source_sku,
+                    "source_quantity": it.source_quantity,
+                    "source_unit": it.source_unit,
+                    "conversion_ratio": it.conversion_ratio,
                 }
                 for it in r.items
             ],
         }
         for r in rows
     ]
+
+
+class AdjustOrReplaceItemIn(BaseModel):
+    parent_item_id: int | None = None
+    product_code: str
+    product_name: str | None = None
+    unit_name: str | None = None
+    quantity: float
+    unit_price: float | None = None
+    vat_rate: float | None = None
+    amount_before_tax: float | None = None
+
+
+class AdjustOrReplaceInvoiceRequest(BaseModel):
+    mode: str = Field(default="ADJUSTMENT")  # ADJUSTMENT | REPLACEMENT
+    reason: str
+    return_reference: str | None = None
+    items: list[AdjustOrReplaceItemIn]
+
+
+@router.get("/tax-inventory")
+def get_tax_inventory_by_mst(
+    distributor_id: int | None = Query(default=None),
+    company_tax_code: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    only_negative: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Sổ Nhập – Xuất – Tồn Thuế theo từng MST & SKU đầu vào CQT (kèm cảnh báo âm kho)."""
+    from app.services.tax_inventory_service import compute_tax_inventory_by_mst
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    data = compute_tax_inventory_by_mst(
+        db,
+        distributor_id=effective_dist_id,
+        company_tax_code=company_tax_code,
+        search=search,
+        only_negative=only_negative,
+    )
+    return {
+        "summary": data["summary"],
+        "available_msts": data["available_msts"],
+        "items": data["items"],
+    }
+
+
+@router.post("/issued/{invoice_id}/adjust-or-replace")
+def adjust_or_replace_issued_invoice(
+    invoice_id: int,
+    payload: AdjustOrReplaceInvoiceRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Lập Hóa đơn Điều chỉnh giảm (ADJUSTMENT) hoặc Thay thế (REPLACEMENT) khi có trả hàng theo NĐ 123."""
+    from app.services.tax_inventory_service import create_adjustment_or_replacement_invoice
+
+    parent = db.scalar(
+        select(IssuedInvoice)
+        .options(selectinload(IssuedInvoice.items))
+        .where(IssuedInvoice.id == invoice_id)
+    )
+    if not parent:
+        raise HTTPException(status_code=404, detail="Không tìm thấy hóa đơn gốc.")
+    _enforce_user_distributor_scope(current_user, parent.distributor_id)
+
+    try:
+        new_inv = create_adjustment_or_replacement_invoice(
+            db,
+            parent_invoice=parent,
+            mode=payload.mode,
+            reason=payload.reason,
+            items_payload=[it.model_dump() for it in payload.items],
+            return_reference=payload.return_reference,
+            issued_by=getattr(current_user, "username", None) or getattr(current_user, "email", None) or "ADMIN",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "id": new_inv.id,
+        "invoice_type": new_inv.invoice_type,
+        "parent_invoice_id": new_inv.parent_invoice_id,
+        "parent_status": parent.status,
+        "subtotal_before_tax": float(new_inv.subtotal_before_tax or 0),
+        "vat_amount": float(new_inv.vat_amount or 0),
+        "total_payment": float(new_inv.total_payment or 0),
+        "note": new_inv.note or "",
+    }
 
 
 # ==============================================================================

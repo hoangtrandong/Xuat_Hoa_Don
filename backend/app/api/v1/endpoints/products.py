@@ -19,8 +19,10 @@ from app.schemas.product import (
     ProductUnitOption,
     ProductPagination,
     ProductStats,
+    ProductCompanyConfigsUpdate,
 )
-from app.models.product import ProductCategory, ProductUnit, ProductGroup, ProductGroupItem
+from app.models.customer import Company as CompanyModel
+from app.models.product import ProductCategory, ProductCompany, ProductUnit, ProductGroup, ProductGroupItem
 from app.models.product import Product as ProductModel
 from app.models.multi_tenant_invoice import (
     Distributor,
@@ -360,6 +362,43 @@ def get_product_filter_options(db: Session = Depends(get_db)):
     return product_crud.get_filter_options(db)
 
 
+def _product_managed_companies(db: Session, product_ids: list[int]) -> dict[int, list[dict]]:
+    if not product_ids:
+        return {}
+    rows = db.execute(
+        select(ProductCompany, CompanyModel)
+        .join(CompanyModel, CompanyModel.id == ProductCompany.company_id)
+        .where(ProductCompany.product_id.in_(product_ids))
+        .order_by(
+            ProductCompany.is_primary.desc(),
+            ProductCompany.last_purchased_at.desc().nullslast(),
+            ProductCompany.id.asc(),
+        )
+    ).all()
+    result: dict[int, list[dict]] = {}
+    for link, comp in rows:
+        result.setdefault(link.product_id, []).append(
+            {
+                "company_id": comp.id,
+                "company_code": comp.code,
+                "company_name": comp.name,
+                "short_name": comp.short_name,
+                "tax_code": comp.tax_code,
+                "invoice_item_mode": comp.invoice_item_mode or "TAX_INPUT",
+                "source": link.source or "MANUAL",
+                "is_primary": bool(link.is_primary),
+                "company_product_code": link.company_product_code,
+                "invoice_name_override": link.invoice_name_override,
+                "invoice_unit_name": link.invoice_unit_name,
+                "conversion_num": int(link.conversion_num or 1),
+                "conversion_den": int(link.conversion_den or 1),
+                "total_purchased_qty": float(link.total_purchased_qty or 0.0),
+                "last_purchased_at": link.last_purchased_at,
+            }
+        )
+    return result
+
+
 @router.get("/paged", response_model=ProductPagination)
 def list_products_paged(
     page: int = 1,
@@ -370,6 +409,9 @@ def list_products_paged(
     unit: str | None = None,
     status: str | None = None,
     distributor_code: str | None = None,
+    company_id: int | None = None,
+    company_tax_code: str | None = None,
+    has_internal_code: bool | None = None,
     sort_field: str = "code",
     sort_order: str = "asc",
     db: Session = Depends(get_db),
@@ -384,10 +426,14 @@ def list_products_paged(
         unit=unit,
         status=status,
         distributor_code=distributor_code,
+        company_id=company_id,
+        company_tax_code=company_tax_code,
+        has_internal_code=has_internal_code,
         sort_field=sort_field,
         sort_order=sort_order,
     )
     distributor_map = _product_distributors(db, {product.sku.strip().upper() for product in items if product.sku})
+    managed_companies_map = _product_managed_companies(db, [product.id for product in items])
     total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
 
     return {
@@ -395,6 +441,7 @@ def list_products_paged(
             {
                 **Product.model_validate(product).model_dump(),
                 "distributors": distributor_map.get(product.sku.strip().upper(), []),
+                "managed_companies": managed_companies_map.get(product.id, []),
             }
             for product in items
         ],
@@ -410,10 +457,12 @@ def list_products_paged(
 def list_products(skip: int = 0, limit: int = 100, category_id: int | None = None, db: Session = Depends(get_db)):
     products = product_crud.list_(db, skip=skip, limit=limit, category_id=category_id)
     distributor_map = _product_distributors(db, {product.sku.strip().upper() for product in products if product.sku})
+    managed_companies_map = _product_managed_companies(db, [product.id for product in products])
     return [
         {
             **Product.model_validate(product).model_dump(),
             "distributors": distributor_map.get(product.sku.strip().upper(), []),
+            "managed_companies": managed_companies_map.get(product.id, []),
         }
         for product in products
     ]
@@ -432,7 +481,11 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
     obj = product_crud.get(db, product_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Product not found")
-    return obj
+    managed_companies_map = _product_managed_companies(db, [obj.id])
+    return {
+        **Product.model_validate(obj).model_dump(),
+        "managed_companies": managed_companies_map.get(obj.id, []),
+    }
 
 
 @router.patch("/{product_id}", response_model=Product)
@@ -441,9 +494,81 @@ def update_product(product_id: int, payload: ProductUpdate, db: Session = Depend
         obj = product_crud.update(db, product_id, payload)
         if not obj:
             raise HTTPException(status_code=404, detail="Product not found")
-        return obj
+        managed_companies_map = _product_managed_companies(db, [obj.id])
+        return {
+            **Product.model_validate(obj).model_dump(),
+            "managed_companies": managed_companies_map.get(obj.id, []),
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/{product_id}/company-configs")
+def update_product_company_configs(
+    product_id: int,
+    payload: ProductCompanyConfigsUpdate,
+    db: Session = Depends(get_db),
+):
+    """Cập nhật danh sách Công ty quản lý, Mã/Tên xuất HĐ ghi đè và Quy đổi quy cách cho 1 SKU."""
+    product = product_crud.get(db, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Không tìm thấy sản phẩm.")
+
+    existing_links = db.scalars(
+        select(ProductCompany).where(ProductCompany.product_id == product_id)
+    ).all()
+    existing_by_company = {link.company_id: link for link in existing_links}
+    incoming_company_ids = {item.company_id for item in payload.configs}
+
+    # Xóa các link thủ công không còn trong danh sách gửi lên (giữ lại link CQT nếu người dùng không bỏ)
+    for comp_id, link in list(existing_by_company.items()):
+        if comp_id not in incoming_company_ids:
+            db.delete(link)
+
+    # Đảm bảo chỉ có tối đa 1 is_primary = True
+    primary_assigned = False
+    for item in payload.configs:
+        is_prim = bool(item.is_primary) and not primary_assigned
+        if is_prim:
+            primary_assigned = True
+        link = existing_by_company.get(item.company_id)
+        if link is None:
+            link = ProductCompany(
+                product_id=product_id,
+                company_id=item.company_id,
+                role="MANAGER",
+                source="MANUAL",
+                is_primary=is_prim,
+                company_product_code=(item.company_product_code or "").strip() or None,
+                invoice_name_override=(item.invoice_name_override or "").strip() or None,
+                invoice_unit_name=(item.invoice_unit_name or "").strip() or None,
+                conversion_num=max(1, int(item.conversion_num or 1)),
+                conversion_den=max(1, int(item.conversion_den or 1)),
+                status="active",
+            )
+            db.add(link)
+        else:
+            link.is_primary = is_prim
+            link.company_product_code = (item.company_product_code or "").strip() or None
+            link.invoice_name_override = (item.invoice_name_override or "").strip() or None
+            link.invoice_unit_name = (item.invoice_unit_name or "").strip() or None
+            link.conversion_num = max(1, int(item.conversion_num or 1))
+            link.conversion_den = max(1, int(item.conversion_den or 1))
+            if (
+                link.company_product_code
+                or link.invoice_name_override
+                or link.invoice_unit_name
+                or link.conversion_num != 1
+                or link.conversion_den != 1
+            ):
+                link.source = "MANUAL"
+
+    db.commit()
+    return {
+        "ok": True,
+        "product_id": product_id,
+        "managed_companies": _product_managed_companies(db, [product_id]).get(product_id, []),
+    }
 
 
 @router.delete("/{product_id}")

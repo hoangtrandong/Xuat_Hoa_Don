@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -41,15 +41,25 @@ interface ConsolidatedItem {
   discount_amount: number;
   amount_before_tax: number;
   vat_rate: number;
+  vat_label?: string;
   vat_amount: number;
   total_amount: number;
+  source_unit?: string;
+  source_quantity?: number;
+  conversion_ratio?: string | null;
+  is_converted?: boolean;
+  tax_balance_qty?: number | null;
+  is_tax_stock_negative?: boolean;
 }
 
 interface ConsolidatedGroup {
   group_key: string;
   is_valid: boolean;
   validation_errors: string[];
+  warnings?: string[];
   missing_flags: string[];
+  require_bank_transfer?: boolean;
+  company_invoice_item_mode?: string;
   company_id: number | null;
   company_code: string;
   company_name: string;
@@ -124,15 +134,14 @@ export default function DmsInvoiceConsolidationPanel({
   distributorId,
   distributorLabel,
 }: DmsInvoiceConsolidationPanelProps) {
-  const todayStr = useMemo(() => formatDateInput(new Date()), []);
-  const weekAgoStr = useMemo(() => {
+  const dMinus2Str = useMemo(() => {
     const d = new Date();
-    d.setDate(d.getDate() - 6);
+    d.setDate(d.getDate() - 2);
     return formatDateInput(d);
   }, []);
 
-  const [fromDate, setFromDate] = useState<string>(weekAgoStr);
-  const [toDate, setToDate] = useState<string>(todayStr);
+  const [fromDate, setFromDate] = useState<string>(dMinus2Str);
+  const [toDate, setToDate] = useState<string>(dMinus2Str);
   const [dateField, setDateField] = useState<"order_created_date" | "delivery_date">(
     "order_created_date",
   );
@@ -214,9 +223,15 @@ export default function DmsInvoiceConsolidationPanel({
     void fetchConsolidation();
   }, [fetchConsolidation]);
 
-  function applyQuickRange(kind: "today" | "yesterday" | "7days" | "month") {
+  function applyQuickRange(kind: "d2" | "today" | "yesterday" | "7days" | "month") {
     const now = new Date();
-    if (kind === "today") {
+    if (kind === "d2") {
+      const d2 = new Date(now);
+      d2.setDate(d2.getDate() - 2);
+      const s = formatDateInput(d2);
+      setFromDate(s);
+      setToDate(s);
+    } else if (kind === "today") {
       const s = formatDateInput(now);
       setFromDate(s);
       setToDate(s);
@@ -364,6 +379,7 @@ export default function DmsInvoiceConsolidationPanel({
           <div className="flex items-center gap-1.5">
             {(
               [
+                ["d2", "D-2"],
                 ["today", "Hôm nay"],
                 ["yesterday", "Hôm qua"],
                 ["7days", "7 ngày"],
@@ -667,9 +683,8 @@ export default function DmsInvoiceConsolidationPanel({
                   const isExpanded = Boolean(expandedKeys[grp.group_key]);
                   const isChecked = selectedKeys.includes(grp.group_key);
                   return (
-                    <>
+                    <Fragment key={grp.group_key}>
                       <tr
-                        key={grp.group_key}
                         onClick={() => toggleExpand(grp.group_key)}
                         className={`border-b border-slate-100 text-[11px] cursor-pointer transition-colors ${
                           !grp.is_valid
@@ -748,18 +763,36 @@ export default function DmsInvoiceConsolidationPanel({
                           {formatVND(grp.total_payment)}
                         </td>
                         <td className="px-2.5 py-2">
-                          {grp.is_valid ? (
-                            <Badge variant="success">Đủ điều kiện xuất</Badge>
-                          ) : (
-                            <Badge variant="danger">
-                              Thiếu {grp.validation_errors.length} mục
-                            </Badge>
-                          )}
+                          <div className="flex flex-wrap items-center gap-1">
+                            {grp.is_valid ? (
+                              <Badge variant="success">Đủ điều kiện xuất</Badge>
+                            ) : (
+                              <Badge variant="danger">
+                                Thiếu {grp.validation_errors.length} mục
+                              </Badge>
+                            )}
+                            {grp.warnings && grp.warnings.length > 0 && (
+                              <span
+                                title={grp.warnings.join("\n")}
+                                className="inline-flex items-center gap-0.5 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-800"
+                              >
+                                <AlertTriangle size={10} /> {grp.warnings.length} lưu ý
+                              </span>
+                            )}
+                            {grp.require_bank_transfer && (
+                              <span
+                                title="Hóa đơn >= 20 triệu đồng: bắt buộc thanh toán chuyển khoản (CK)"
+                                className="rounded border border-sky-300 bg-sky-50 px-1 py-0.5 text-[9px] font-bold text-sky-800"
+                              >
+                                CK ≥ 20tr
+                              </span>
+                            )}
+                          </div>
                         </td>
                       </tr>
 
                       {isExpanded && (
-                        <tr key={`${grp.group_key}-detail`} className="bg-slate-50/90 border-b border-slate-200">
+                        <tr className="bg-slate-50/90 border-b border-slate-200">
                           <td colSpan={10} className="px-4 py-3 space-y-2.5">
                             {!grp.is_valid && (
                               <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-800 space-y-1">
@@ -769,6 +802,19 @@ export default function DmsInvoiceConsolidationPanel({
                                 <ul className="list-disc pl-5 space-y-0.5">
                                   {grp.validation_errors.map((errText, idx) => (
                                     <li key={idx}>{errText}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {grp.warnings && grp.warnings.length > 0 && (
+                              <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900 space-y-1">
+                                <p className="font-bold flex items-center gap-1.5">
+                                  <ShieldAlert size={13} className="text-amber-700" /> Cảnh báo nghiệp vụ &amp; Tồn kho thuế:
+                                </p>
+                                <ul className="list-disc pl-5 space-y-0.5">
+                                  {grp.warnings.map((wText, idx) => (
+                                    <li key={idx}>{wText}</li>
                                   ))}
                                 </ul>
                               </div>
@@ -825,15 +871,32 @@ export default function DmsInvoiceConsolidationPanel({
                                             Chưa đăng ký
                                           </span>
                                         )}
+                                        {it.is_tax_stock_negative && (
+                                          <span
+                                            title={`Tồn kho thuế MST ${grp.company_tax_code}: ${it.tax_balance_qty ?? 0}`}
+                                            className="ml-1.5 rounded border border-red-300 bg-red-100 px-1 text-[9px] font-bold text-red-800"
+                                          >
+                                            Âm kho thuế
+                                          </span>
+                                        )}
                                       </td>
-                                      <td className="px-2 py-1">{it.product_name}</td>
+                                      <td className="px-2 py-1">
+                                        <div>{it.product_name}</div>
+                                        {it.is_converted && (
+                                          <div className="text-[10px] text-amber-700 font-medium">
+                                            Đổi quy cách ({it.conversion_ratio || "ĐVT"}): {it.source_quantity} {it.source_unit} → {it.quantity} {it.unit_name}
+                                          </div>
+                                        )}
+                                      </td>
                                       <td className="px-2 py-1 text-center">{it.unit_name}</td>
                                       <td className="px-2 py-1 text-center font-semibold">{it.quantity}</td>
                                       <td className="px-2 py-1 text-right">{formatVND(it.unit_price)}</td>
                                       <td className="px-2 py-1 text-right font-medium">
                                         {formatVND(it.amount_before_tax)}
                                       </td>
-                                      <td className="px-2 py-1 text-center">{it.vat_rate}%</td>
+                                      <td className="px-2 py-1 text-center">
+                                        {it.vat_label || `${it.vat_rate}%`}
+                                      </td>
                                       <td className="px-2 py-1 text-right font-semibold">
                                         {formatVND(it.total_amount)}
                                       </td>
@@ -845,7 +908,7 @@ export default function DmsInvoiceConsolidationPanel({
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })}
             </tbody>

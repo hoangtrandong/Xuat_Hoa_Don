@@ -16,7 +16,7 @@ from xlutils.copy import copy as xl_copy
 
 from app.models.customer import Company, Customer
 from app.models.multi_tenant_invoice import Distributor, IssuedInvoice
-from app.models.product import Product
+from app.models.product import Product, ProductCompany
 from app.models.vinamilk import VinamilkOrderSnapshot
 
 VIETTEL_TEMPLATE_PATH = (
@@ -71,6 +71,73 @@ def _clean_identifier(value: str | None) -> str:
     return "".join(ch for ch in str(value).strip() if ch.isalnum() or ch == "-").upper()
 
 
+def resolve_invoice_item_presentation(
+    *,
+    prod: Product | None,
+    comp: Company | None,
+    link: ProductCompany | None,
+    raw_code: str,
+    raw_name: str,
+    raw_unit: str,
+) -> dict[str, Any]:
+    """Phân giải Mã hàng, Tên hàng, ĐVT xuất hóa đơn và Tỷ lệ quy đổi quy cách.
+
+    Thứ tự ưu tiên:
+    1. Ghi đè riêng trên ProductCompany (mã/tên/ĐVT xuất HĐ & tỷ lệ conversion_num/conversion_den).
+    2. Chính sách của Công ty quản lý (Company.invoice_item_mode):
+       - INTERNAL : ưu tiên Mã nội bộ (npp_code), Tên nội bộ (internal_name), ĐVT nội bộ (internal_unit).
+       - TAX_INPUT: ưu tiên Mã & Tên đầu vào CQT (sku, name, unit).
+    """
+    warning: str | None = None
+    mode = (comp.invoice_item_mode or "TAX_INPUT").upper() if comp else "TAX_INPUT"
+
+    base_code = prod.sku if prod else raw_code
+    base_name = prod.name if prod else (raw_name or "Hàng hóa chưa đăng ký")
+    base_unit = (prod.unit.name if (prod and prod.unit) else None) or raw_unit or "THUNG"
+
+    if prod is not None and mode == "INTERNAL":
+        internal_code = (prod._npp_code or "").strip()
+        if internal_code:
+            resolved_code = internal_code
+        else:
+            resolved_code = base_code
+            warning = (
+                f"Công ty {comp.code if comp else ''} xuất theo Mã nội bộ nhưng SKU {prod.sku} chưa gán Mã nội bộ (tạm dùng mã đầu vào)."
+            )
+        resolved_name = (prod.internal_name or "").strip() or base_name
+        resolved_unit = (prod.internal_unit or "").strip() or base_unit
+    else:
+        resolved_code = base_code
+        resolved_name = base_name
+        resolved_unit = base_unit
+
+    conv_num = 1
+    conv_den = 1
+    if link is not None:
+        if (link.company_product_code or "").strip():
+            resolved_code = link.company_product_code.strip()
+        if (link.invoice_name_override or "").strip():
+            resolved_name = link.invoice_name_override.strip()
+        if (link.invoice_unit_name or "").strip():
+            resolved_unit = link.invoice_unit_name.strip()
+        conv_num = max(1, int(link.conversion_num or 1))
+        conv_den = max(1, int(link.conversion_den or 1))
+
+    is_converted = (conv_num != conv_den) or (resolved_unit.strip().lower() != base_unit.strip().lower())
+    return {
+        "product_code": resolved_code,
+        "product_name": resolved_name,
+        "unit_name": resolved_unit,
+        "source_unit": base_unit,
+        "conversion_num": conv_num,
+        "conversion_den": conv_den,
+        "conversion_ratio": f"{conv_num}/{conv_den}" if conv_num != conv_den else None,
+        "is_converted": is_converted,
+        "naming_mode": mode,
+        "warning": warning,
+    }
+
+
 def consolidate_dms_orders_for_invoicing(
     db: Session,
     *,
@@ -97,10 +164,12 @@ def consolidate_dms_orders_for_invoicing(
       và không cho phép xuất file cho đến khi đăng ký đầy đủ.
     """
     target_dist_code: str | None = None
+    allocation_mode = "BY_CUSTOMER"
     if distributor_id is not None:
         dist_obj = db.get(Distributor, distributor_id)
         if dist_obj:
             target_dist_code = (dist_obj.code or "").strip().upper()
+            allocation_mode = (dist_obj.company_allocation_mode or "BY_CUSTOMER").upper()
 
     # 1. Truy vấn đơn hàng DMS trong khoảng ngày đã chọn
     date_expr = (
@@ -171,6 +240,20 @@ def consolidate_dms_orders_for_invoicing(
         if p._npp_code:
             prod_map[p._npp_code.strip().upper()] = p
 
+    # Nạp sẵn bảng ProductCompany (kèm Company) 1 lần để phân giải Công ty quản lý & Quy đổi quy cách (zero N+1)
+    pc_links = db.scalars(
+        select(ProductCompany)
+        .options(selectinload(ProductCompany.company))
+        .order_by(ProductCompany.is_primary.desc(), ProductCompany.last_purchased_at.desc().nullslast())
+    ).all()
+    prod_company_map: dict[tuple[int, int], ProductCompany] = {}
+    prod_primary_company: dict[int, Company] = {}
+    for link in pc_links:
+        prod_company_map[(link.product_id, link.company_id)] = link
+        if link.company is not None and link.product_id not in prod_primary_company:
+            if distributor_id is None or link.company.distributor_id in (None, distributor_id):
+                prod_primary_company[link.product_id] = link.company
+
     # 4. Gom nhóm theo (company_id, identity_type, identity_value)
     groups_acc: dict[str, dict[str, Any]] = {}
     companies_seen: dict[int, dict[str, Any]] = {}
@@ -205,7 +288,20 @@ def consolidate_dms_orders_for_invoicing(
         ):
             continue
 
-        comp: Company | None = customer.company if customer else None
+        raw_prod_code = (snap.product_code or "").strip().upper()
+        prod = prod_map.get(raw_prod_code)
+
+        # Phân giải Công ty quản lý theo chiến lược của Nhà phân phối (BY_CUSTOMER | BY_PRODUCT | HYBRID)
+        cust_comp: Company | None = customer.company if customer else None
+        prod_comp: Company | None = prod_primary_company.get(prod.id) if prod else None
+        if allocation_mode == "BY_PRODUCT":
+            comp = prod_comp or cust_comp
+        elif allocation_mode == "HYBRID_PRODUCT_FIRST":
+            comp = prod_comp or cust_comp
+        elif allocation_mode == "HYBRID_CUSTOMER_FIRST":
+            comp = cust_comp or prod_comp
+        else:
+            comp = cust_comp
         comp_id = comp.id if comp else None
 
         if company_id is not None and comp_id != company_id:
@@ -271,6 +367,8 @@ def consolidate_dms_orders_for_invoicing(
                 "missing_companies": set(),
                 "missing_tax_or_cccd": set(),
                 "missing_products": {},  # raw_code -> product_name
+                "warnings": set(),
+                "company_invoice_item_mode": (comp.invoice_item_mode or "TAX_INPUT") if comp else "TAX_INPUT",
                 "items_acc": {},
             }
 
@@ -289,20 +387,29 @@ def consolidate_dms_orders_for_invoicing(
             if not tax_code and not citizen_id:
                 grp["missing_tax_or_cccd"].add(f"{customer.code} ({customer.name})")
 
-        # Kiểm tra đăng ký Sản phẩm & cộng gộp dòng hàng
-        raw_prod_code = (snap.product_code or "").strip().upper()
-        prod = prod_map.get(raw_prod_code)
+        # Kiểm tra đăng ký Sản phẩm & cộng gộp dòng hàng theo quy tắc xuất HĐ của Công ty
         if prod is None:
             grp["missing_products"][raw_prod_code or "(Trống)"] = (
                 snap.product_name or "Sản phẩm chưa đặt tên"
             )
 
-        cqt_sku = prod.sku if prod else raw_prod_code
-        cqt_name = prod.name if prod else (snap.product_name or "Hàng hóa chưa đăng ký")
-        cqt_unit = (
-            (prod.unit.name if (prod and prod.unit) else None)
-            or str(raw.get("ĐVT") or raw.get("unit") or "THUNG").strip()
+        pc_link = prod_company_map.get((prod.id, comp.id)) if (prod and comp) else None
+        pres = resolve_invoice_item_presentation(
+            prod=prod,
+            comp=comp,
+            link=pc_link,
+            raw_code=raw_prod_code,
+            raw_name=snap.product_name or "",
+            raw_unit=str(raw.get("ĐVT") or raw.get("unit") or "THUNG").strip(),
         )
+        if pres["warning"]:
+            grp["warnings"].add(pres["warning"])
+
+        cqt_sku = pres["product_code"]
+        cqt_name = pres["product_name"]
+        cqt_unit = pres["unit_name"]
+        conv_num = pres["conversion_num"]
+        conv_den = pres["conversion_den"]
 
         qty = _to_float(raw.get("Số lượng") or raw.get("quantity"), 0.0)
         promo_qty = _to_float(raw.get("Số lượng KM") or raw.get("promotionQuantity"), 0.0)
@@ -316,43 +423,68 @@ def consolidate_dms_orders_for_invoicing(
         if qty > 0 or raw_val > 0:
             line_amount = raw_val if raw_val > 0 else round(qty * price, 2)
             net_before_tax = max(0.0, round(line_amount - discount, 2))
-            item_key = f"{cqt_sku}::SALE"
+            # Lấy thuế suất VAT theo từng SKU (ưu tiên thuế suất đã học từ CQT / cấu hình trên SKU)
+            sku_vat = prod.vat_rate if (prod is not None and prod.vat_rate is not None) else None
+            is_vat_exempt = sku_vat is not None and float(sku_vat) < 0
+            line_vat_rate = 0.0 if is_vat_exempt else (float(sku_vat) if sku_vat is not None else float(default_vat_rate))
+            item_key = f"{cqt_sku}::{cqt_unit}::{line_vat_rate}::SALE"
             if item_key not in grp["items_acc"]:
                 grp["items_acc"][item_key] = {
                     "product_code": cqt_sku,
-                    "source_product_code": raw_prod_code,
+                    "source_product_code": prod.sku if prod else raw_prod_code,
                     "product_name": cqt_name,
                     "unit_name": cqt_unit,
+                    "source_unit": pres["source_unit"],
+                    "conversion_num": conv_num,
+                    "conversion_den": conv_den,
+                    "conversion_ratio": pres["conversion_ratio"],
+                    "is_converted": pres["is_converted"],
                     "is_promo": False,
                     "is_registered": prod is not None,
+                    "source_quantity": 0.0,
                     "quantity": 0.0,
                     "discount_amount": 0.0,
                     "amount_before_tax": 0.0,
-                    "vat_rate": float(default_vat_rate),
+                    "vat_rate": line_vat_rate,
+                    "vat_label": "KCT" if is_vat_exempt else f"{int(line_vat_rate) if line_vat_rate.is_integer() else line_vat_rate}%",
                 }
             it = grp["items_acc"][item_key]
-            it["quantity"] += qty
+            it["source_quantity"] += qty
+            it["quantity"] += (qty * conv_num) / conv_den
             it["discount_amount"] += discount
             it["amount_before_tax"] += net_before_tax
 
         if promo_qty > 0:
-            promo_key = f"{cqt_sku}::PROMO"
+            promo_key = f"{cqt_sku}::{cqt_unit}::PROMO"
             if promo_key not in grp["items_acc"]:
                 grp["items_acc"][promo_key] = {
                     "product_code": cqt_sku,
-                    "source_product_code": raw_prod_code,
+                    "source_product_code": prod.sku if prod else raw_prod_code,
                     "product_name": f"{cqt_name} (Hàng khuyến mại không thu tiền)",
                     "unit_name": cqt_unit,
+                    "source_unit": pres["source_unit"],
+                    "conversion_num": conv_num,
+                    "conversion_den": conv_den,
+                    "conversion_ratio": pres["conversion_ratio"],
+                    "is_converted": pres["is_converted"],
                     "is_promo": True,
                     "is_registered": prod is not None,
+                    "source_quantity": 0.0,
                     "quantity": 0.0,
                     "discount_amount": 0.0,
                     "amount_before_tax": 0.0,
                     "vat_rate": 0.0,
                 }
-            grp["items_acc"][promo_key]["quantity"] += promo_qty
+            grp["items_acc"][promo_key]["source_quantity"] += promo_qty
+            grp["items_acc"][promo_key]["quantity"] += (promo_qty * conv_num) / conv_den
 
-    # 5. Hoàn thiện danh sách nhóm, tính tổng và tổng hợp lỗi kiểm tra
+    # 5. Hoàn thiện danh sách nhóm, tính tổng và tổng hợp lỗi kiểm tra + Đối chiếu Tồn kho Thuế theo MST
+    from app.services.tax_inventory_service import compute_tax_inventory_by_mst
+
+    tax_inv_snapshot = compute_tax_inventory_by_mst(db, distributor_id=distributor_id)
+    tax_balance_lookup: dict[tuple[str, str], float] = tax_inv_snapshot["balance_lookup"]
+    sku_positive_by_mst: dict[str, list[dict[str, Any]]] = tax_inv_snapshot["sku_positive_by_mst"]
+
     result_groups: list[dict[str, Any]] = []
     valid_count = 0
     invalid_count = 0
@@ -405,11 +537,37 @@ def consolidate_dms_orders_for_invoicing(
             start=1,
         ):
             qty = round(float(it["quantity"]), 4)
+            src_qty = round(float(it.get("source_quantity", qty)), 4)
             amt = round(float(it["amount_before_tax"]), 2)
             unit_price = round(amt / qty, 2) if qty > 0 else 0.0
             vat_rate = float(it["vat_rate"])
             vat_amt = round(amt * vat_rate / 100.0, 2)
             total_amt = round(amt + vat_amt, 2)
+
+            if it.get("conversion_den", 1) > 1 and abs(qty - round(qty)) > 1e-4:
+                grp["warnings"].add(
+                    f"SKU {it['product_code']}: quy đổi {src_qty} {it.get('source_unit', '')} theo tỷ lệ {it.get('conversion_ratio')} ra số lẻ ({qty} {it['unit_name']})."
+                )
+
+            # Kiểm tra Tồn kho Thuế theo (MST Công ty xuất, SKU đầu vào CQT)
+            comp_mst = (grp.get("company_tax_code") or "").strip()
+            src_sku_upper = (it.get("source_product_code") or it["product_code"] or "").strip().upper()
+            tax_balance_qty: float | None = None
+            is_tax_negative = False
+            if comp_mst and src_sku_upper:
+                tax_balance_qty = tax_balance_lookup.get((comp_mst, src_sku_upper), 0.0)
+                projected_bal = round(tax_balance_qty - src_qty, 4)
+                if projected_bal < -1e-6:
+                    is_tax_negative = True
+                    others = [
+                        f"{x['tax_code']} (+{x['balance_qty']})"
+                        for x in sku_positive_by_mst.get(src_sku_upper, [])
+                        if x["tax_code"] != comp_mst
+                    ]
+                    other_hint = f" | MST khác đang tồn: {', '.join(others[:2])}" if others else ""
+                    grp["warnings"].add(
+                        f"Âm kho thuế MST {comp_mst} - SKU {src_sku_upper}: tồn {tax_balance_qty}, sắp xuất {src_qty} (thiếu {round(abs(projected_bal), 4)}){other_hint}."
+                    )
 
             items_list.append(
                 {
@@ -418,6 +576,10 @@ def consolidate_dms_orders_for_invoicing(
                     "source_product_code": it["source_product_code"],
                     "product_name": it["product_name"],
                     "unit_name": it["unit_name"],
+                    "source_unit": it.get("source_unit", it["unit_name"]),
+                    "source_quantity": src_qty,
+                    "conversion_ratio": it.get("conversion_ratio"),
+                    "is_converted": bool(it.get("is_converted")),
                     "is_promo": it["is_promo"],
                     "is_registered": it["is_registered"],
                     "quantity": qty,
@@ -425,8 +587,11 @@ def consolidate_dms_orders_for_invoicing(
                     "discount_amount": round(float(it["discount_amount"]), 2),
                     "amount_before_tax": amt,
                     "vat_rate": vat_rate,
+                    "vat_label": it.get("vat_label", f"{int(vat_rate) if float(vat_rate).is_integer() else vat_rate}%"),
                     "vat_amount": vat_amt,
                     "total_amount": total_amt,
+                    "tax_balance_qty": tax_balance_qty,
+                    "is_tax_stock_negative": is_tax_negative,
                 }
             )
             grp_before_tax += amt
@@ -450,14 +615,23 @@ def consolidate_dms_orders_for_invoicing(
         grand_vat += grp_vat
         grand_payment += grp_payment
 
+        require_bank_transfer = round(grp_payment, 2) >= 20_000_000.0
+        if require_bank_transfer:
+            grp["warnings"].add(
+                "Tổng thanh toán >= 20.000.000đ: Bắt buộc thanh toán không dùng tiền mặt (CK) để đủ điều kiện khấu trừ thuế GTGT."
+            )
+
         result_groups.append(
             {
                 "group_key": grp["group_key"],
                 "is_valid": is_valid,
                 "validation_errors": validation_errors,
+                "warnings": sorted(grp["warnings"]),
                 "missing_flags": missing_flags,
+                "require_bank_transfer": require_bank_transfer,
                 "company_id": grp["company_id"],
                 "company_code": grp["company_code"],
+                "company_invoice_item_mode": grp["company_invoice_item_mode"],
                 "company_name": grp["company_name"],
                 "company_tax_code": grp["company_tax_code"],
                 "identity_type": grp["identity_type"],

@@ -22,6 +22,8 @@ import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import ExportViettelSinvoiceModal from "@/components/sales/ExportViettelSinvoiceModal";
 import DmsInvoiceConsolidationPanel from "@/components/sales/DmsInvoiceConsolidationPanel";
+import TaxInventoryByMstPanel from "@/components/sales/TaxInventoryByMstPanel";
+import AdjustInvoiceModal from "@/components/sales/AdjustInvoiceModal";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
 import { useDistributorContext } from "@/lib/distributor-context";
@@ -162,7 +164,8 @@ interface IssuedInvoiceRecord {
 export default function EInvoiceGatewayPage() {
   const authSession = useAuthSession();
   const { effectiveDistributorId } = useDistributorContext();
-  const [activeTab, setActiveTab] = useState<"consolidate" | "issue" | "history">("consolidate");
+  const [activeTab, setActiveTab] = useState<"consolidate" | "issue" | "history" | "tax_inventory">("consolidate");
+  const [adjustingInvoice, setAdjustingInvoice] = useState<IssuedInvoiceRecord | null>(null);
   const [distributors, setDistributors] = useState<DistributorOption[]>([]);
   const [selectedDistId, setSelectedDistId] = useState<number | null>(
     effectiveDistributorId ?? authSession.distributorId ?? null
@@ -527,7 +530,21 @@ export default function EInvoiceGatewayPage() {
         >
           <FileCheck2 size={16} /> Lịch Sử Hóa Đơn Đã Phát Hành ({issuedList.length})
         </button>
+        <button
+          onClick={() => setActiveTab("tax_inventory")}
+          className={`px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
+            activeTab === "tax_inventory"
+              ? "border-sky-500 text-sky-600"
+              : "border-transparent text-gray-500 hover:text-gray-800"
+          }`}
+        >
+          <ShieldCheck size={16} /> Tồn Kho Thuế Theo MST
+        </button>
       </div>
+
+      {activeTab === "tax_inventory" && (
+        <TaxInventoryByMstPanel distributorId={selectedDistId} />
+      )}
 
       {activeTab === "consolidate" && (
         <DmsInvoiceConsolidationPanel
@@ -1002,17 +1019,43 @@ export default function EInvoiceGatewayPage() {
                       {formatVND(inv.total_payment)}
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <Badge variant={inv.status === "ISSUED" ? "success" : "warning"}>
-                        {inv.status === "ISSUED" ? "Đã phát hành" : "Nháp"}
+                      <Badge
+                        variant={
+                          inv.status === "ISSUED"
+                            ? "success"
+                            : inv.status === "REPLACED" || inv.status === "CANCELLED"
+                            ? "danger"
+                            : "warning"
+                        }
+                      >
+                        {inv.status === "ISSUED"
+                          ? "Đã phát hành"
+                          : inv.status === "ADJUSTED"
+                          ? "Đã điều chỉnh"
+                          : inv.status === "REPLACED"
+                          ? "Đã thay thế"
+                          : "Nháp"}
                       </Badge>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => setSelectedHistoryInvoice(inv)}
-                        className="inline-flex items-center gap-1 text-sky-600 hover:underline text-xs font-semibold"
-                      >
-                        <Eye size={14} /> Xem HĐ
-                      </button>
+                      <div className="inline-flex items-center gap-2.5">
+                        {inv.status !== "CANCELLED" && inv.status !== "REPLACED" && (
+                          <button
+                            type="button"
+                            onClick={() => setAdjustingInvoice(inv)}
+                            className="text-amber-700 hover:underline text-xs font-semibold"
+                            title="Lập hóa đơn điều chỉnh giảm (trả hàng) hoặc thay thế theo NĐ 123"
+                          >
+                            ĐC / Thay thế
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setSelectedHistoryInvoice(inv)}
+                          className="inline-flex items-center gap-1 text-sky-600 hover:underline text-xs font-semibold"
+                        >
+                          <Eye size={14} /> Xem HĐ
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -1020,6 +1063,18 @@ export default function EInvoiceGatewayPage() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {/* Modal Điều chỉnh giảm / Thay thế Hóa đơn (NĐ 123) */}
+      {adjustingInvoice && (
+        <AdjustInvoiceModal
+          invoice={adjustingInvoice}
+          onClose={() => setAdjustingInvoice(null)}
+          onSuccess={(msg) => {
+            setMessage(msg);
+            void loadData(selectedDistId);
+          }}
+        />
       )}
 
       {/* Drawer xem chi tiết Hóa Đơn đã phát hành */}

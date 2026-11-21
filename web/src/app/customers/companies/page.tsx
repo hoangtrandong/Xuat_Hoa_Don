@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Building2, CheckCircle2, Users, ShieldAlert, Plus, Download, Upload,
-  Phone, MapPin, Hash, CreditCard, Loader2, X, FileSpreadsheet,
+  Phone, MapPin, Hash, CreditCard, Loader2, X, FileSpreadsheet, RefreshCw, FileText,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
@@ -23,9 +23,12 @@ interface CompanyRow {
   distributor_name: string;
   code: string;
   name: string;
+  short_name: string;
   tax_code: string;
   phone: string;
   address: string;
+  invoice_item_mode: "TAX_INPUT" | "INTERNAL";
+  sync_source: "MANUAL" | "GDT_CQT";
   status: "active" | "inactive";
   customer_count: number;
   created_at: string;
@@ -36,9 +39,11 @@ const emptyForm = {
   distributor_id: "",
   code: "",
   name: "",
+  short_name: "",
   tax_code: "",
   phone: "",
   address: "",
+  invoice_item_mode: "TAX_INPUT" as "TAX_INPUT" | "INTERNAL",
   status: "active",
 };
 
@@ -59,8 +64,10 @@ export default function CompaniesPage() {
   const [selected, setSelected] = useState<CompanyRow | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingSyncSource, setEditingSyncSource] = useState<"MANUAL" | "GDT_CQT">("MANUAL");
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
+  const [syncingCqt, setSyncingCqt] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
@@ -88,9 +95,12 @@ export default function CompaniesPage() {
           distributor_name: String(row.distributor_name ?? ""),
           code: String(row.code ?? ""),
           name: String(row.name ?? ""),
+          short_name: String(row.short_name ?? ""),
           tax_code: String(row.tax_code ?? ""),
           phone: String(row.phone ?? ""),
           address: String(row.address ?? ""),
+          invoice_item_mode: (row.invoice_item_mode === "INTERNAL" ? "INTERNAL" : "TAX_INPUT") as CompanyRow["invoice_item_mode"],
+          sync_source: (row.sync_source === "GDT_CQT" ? "GDT_CQT" : "MANUAL") as CompanyRow["sync_source"],
           status: (row.status === "inactive" ? "inactive" : "active") as CompanyRow["status"],
           customer_count: Number(row.customer_count ?? 0),
           created_at: String(row.created_at ?? ""),
@@ -115,6 +125,33 @@ export default function CompaniesPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  async function syncFromCqt() {
+    setError("");
+    setMessage("");
+    setSyncingCqt(true);
+    try {
+      const qs = effectiveDistributorId !== null ? `?distributor_id=${effectiveDistributorId}` : "";
+      const response = await apiFetch(`${API_URL}/companies/sync-from-cqt${qs}`, {
+        method: "POST",
+      });
+      const result = (await response.json()) as {
+        companies_created?: number;
+        companies_updated?: number;
+        sku_links_upserted?: number;
+        detail?: string;
+      };
+      if (!response.ok) throw new Error(result.detail ?? "Không thể đồng bộ từ Hóa đơn CQT.");
+      setMessage(
+        `Đã đồng bộ từ HĐĐT CQT: +${result.companies_created ?? 0} công ty mới, cập nhật ${result.companies_updated ?? 0} công ty, liên kết ${result.sku_links_upserted ?? 0} SKU.`,
+      );
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Không thể đồng bộ từ Hóa đơn CQT.");
+    } finally {
+      setSyncingCqt(false);
+    }
+  }
 
   function openUploadModal() {
     setUploadError("");
@@ -207,6 +244,7 @@ export default function CompaniesPage() {
 
   function openCreate() {
     setEditingId(null);
+    setEditingSyncSource("MANUAL");
     setForm({
       ...emptyForm,
       distributor_id: effectiveDistributorId !== null ? String(effectiveDistributorId) : "",
@@ -217,6 +255,7 @@ export default function CompaniesPage() {
 
   function openEdit(company: CompanyRow) {
     setEditingId(company.id);
+    setEditingSyncSource(company.sync_source || "MANUAL");
     setForm({
       distributor_id: company.distributor_id != null
         ? String(company.distributor_id)
@@ -225,9 +264,11 @@ export default function CompaniesPage() {
           : "",
       code: company.code,
       name: company.name,
+      short_name: company.short_name || "",
       tax_code: company.tax_code,
       phone: company.phone,
       address: company.address,
+      invoice_item_mode: company.invoice_item_mode || "TAX_INPUT",
       status: company.status,
     });
     setError("");
@@ -265,7 +306,24 @@ export default function CompaniesPage() {
     }
     cols.push(
       { key: "code", title: "Mã công ty", sortable: true },
-      { key: "name", title: "Tên công ty", sortable: true },
+      {
+        key: "name",
+        title: "Tên công ty",
+        sortable: true,
+        render: (_, row) => (
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="truncate font-medium text-slate-800">{row.name}</span>
+            {row.sync_source === "GDT_CQT" && (
+              <span
+                title="Đã xác thực & đồng bộ từ Hóa đơn điện tử CQT"
+                className="shrink-0 rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700"
+              >
+                CQT
+              </span>
+            )}
+          </div>
+        ),
+      },
       {
         key: "tax_code",
         title: "Mã số thuế",
@@ -277,6 +335,17 @@ export default function CompaniesPage() {
             </span>
           ) : (
             <span className="text-gray-400">—</span>
+          ),
+      },
+      {
+        key: "invoice_item_mode",
+        title: "Quy tắc xuất HĐ",
+        sortable: true,
+        render: (_, row) =>
+          row.invoice_item_mode === "INTERNAL" ? (
+            <Badge variant="info">Theo Mã nội bộ</Badge>
+          ) : (
+            <Badge variant="default">Theo Mã đầu vào CQT</Badge>
           ),
       },
       {
@@ -323,7 +392,16 @@ export default function CompaniesPage() {
             : "Công ty xuất hóa đơn, công ty con phân tách theo từng Nhà phân phối — nhiều công ty có thể dùng chung một MST"
         }
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={syncingCqt}
+              onClick={() => void syncFromCqt()}
+              className="flex items-center gap-2 bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-60"
+            >
+              {syncingCqt ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+              Đồng bộ từ HĐĐT CQT
+            </button>
             <AuthenticatedDownloadLink
               href={`${API_URL}/companies/template`}
               className="flex items-center gap-2 border border-gray-200 bg-white text-gray-700 px-3 py-2 rounded-lg text-sm font-medium hover:bg-gray-50"
@@ -338,9 +416,9 @@ export default function CompaniesPage() {
             </button>
             <button
               onClick={openCreate}
-              className="flex items-center gap-2 bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              className="flex items-center gap-2 border border-sky-300 bg-sky-50 hover:bg-sky-100 text-sky-800 px-3.5 py-2 rounded-lg text-sm font-medium transition-colors"
             >
-              <Plus size={16} />Thêm công ty
+              <Plus size={16} />Thêm thủ công
             </button>
           </div>
         }
@@ -443,12 +521,19 @@ export default function CompaniesPage() {
             </span>
           </div>
 
+          {editingId && editingSyncSource === "GDT_CQT" && (
+            <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-800">
+              <strong>Đã xác thực CQT:</strong> Tên pháp nhân và Mã số thuế được khóa theo dữ liệu Cơ quan Thuế. Bạn vẫn có thể cấu hình Tên rút gọn, Quy tắc xuất HĐ và thông tin liên hệ.
+            </div>
+          )}
+
           <div>
             <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
               Tên công ty quản lý <span className="text-red-600">*</span>
             </label>
             <input
               required
+              disabled={Boolean(editingId) && editingSyncSource === "GDT_CQT"}
               placeholder="VD: Công ty TNHH Phân Phối Mai Gold"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -458,10 +543,12 @@ export default function CompaniesPage() {
 
           <div>
             <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-              Mã số thuế (MST)
+              Mã số thuế (MST) <span className="text-red-600">*</span>
             </label>
             <input
-              placeholder="VD: 2902292227 (có thể trùng MST với chi nhánh khác)"
+              required
+              disabled={Boolean(editingId) && editingSyncSource === "GDT_CQT"}
+              placeholder="VD: 2902292227 (bắt buộc để khớp dữ liệu CQT)"
               value={form.tax_code}
               onChange={(e) => setForm({ ...form, tax_code: e.target.value.trim() })}
               className={inputCls}
@@ -490,6 +577,40 @@ export default function CompaniesPage() {
               onChange={(e) => setForm({ ...form, address: e.target.value })}
               className={inputCls}
             />
+          </div>
+
+          <div>
+            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+              Tên rút gọn hiển thị (tuỳ chọn)
+            </label>
+            <input
+              placeholder="VD: TRUNG DONG VINAGOLD"
+              value={form.short_name}
+              onChange={(e) => setForm({ ...form, short_name: e.target.value })}
+              className={inputCls}
+            />
+          </div>
+
+          <div>
+            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+              Quy tắc Tên &amp; Mã hàng khi xuất Hóa đơn điện tử
+            </label>
+            <select
+              value={form.invoice_item_mode}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  invoice_item_mode: e.target.value === "INTERNAL" ? "INTERNAL" : "TAX_INPUT",
+                })
+              }
+              className={inputCls}
+            >
+              <option value="TAX_INPUT">Xuất theo Mã &amp; Tên đầu vào CQT (Mặc định)</option>
+              <option value="INTERNAL">Xuất theo Mã &amp; Tên nội bộ (SKU đã gán)</option>
+            </select>
+            <span className="text-[10px] text-slate-400 mt-0.5 block">
+              Có thể ghi đè riêng từng sản phẩm (kể cả đổi quy cách/ĐVT) trong Danh sách SKU.
+            </span>
           </div>
 
           <div>
@@ -667,6 +788,11 @@ export default function CompaniesPage() {
                 }
               />
               <InfoRow icon={<Hash size={14} />} label="Mã số thuế" value={selected.tax_code || "—"} extra={selected.shared ? <Badge variant="warning">Dùng chung</Badge> : undefined} />
+              <InfoRow
+                icon={<FileText size={14} />}
+                label="Quy tắc xuất HĐ"
+                value={selected.invoice_item_mode === "INTERNAL" ? "Theo Mã & Tên nội bộ" : "Theo Mã & Tên đầu vào CQT"}
+              />
               <InfoRow icon={<Phone size={14} />} label="Điện thoại" value={selected.phone || "—"} />
               <InfoRow icon={<MapPin size={14} />} label="Địa chỉ" value={selected.address || "—"} />
               <InfoRow icon={<CreditCard size={14} />} label="Mã KH quản lý" value={String(selected.customer_count)} />

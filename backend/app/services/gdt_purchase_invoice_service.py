@@ -911,6 +911,20 @@ def sync_gdt_purchase_invoices(
         except Exception as exc:
             warnings.append(f"Không đồng bộ được danh mục sản phẩm: {exc}")
 
+    # Tự động cập nhật Công ty quản lý & liên kết SKU–Công ty từ Hóa đơn mua vào CQT
+    if saved_invoice_ids:
+        try:
+            from app.crud.company import sync_companies_from_purchase_invoices
+            db.flush()
+            sync_companies_from_purchase_invoices(
+                db,
+                distributor_id=distributor_id,
+                invoice_ids=saved_invoice_ids,
+                commit=False,
+            )
+        except Exception as exc:
+            warnings.append(f"Không đồng bộ được Công ty quản lý từ CQT: {exc}")
+
     if progress_callback:
         progress_callback({
             "step": "saving_db",

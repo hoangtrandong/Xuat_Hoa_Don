@@ -2252,7 +2252,24 @@ def list_local_vinamilk_orders(
 
         prod_sku = (row.product_code or "").strip().upper()
         product = products_by_sku.get(prod_sku)
-        supplier = (product.supplier or "") if product else ""
+        raw_sync_src = (
+            _field(row.raw_payload, ("Nguồn đồng bộ", "_sync_source"))
+            or (
+                row.processing_status.split(":", 1)[1].strip()
+                if (row.processing_status or "").upper().startswith("NCC:")
+                else ""
+            )
+        ).strip().upper()
+        raw_supplier = (
+            _field(row.raw_payload, ("Nhà cung cấp", "supplier", "supplierName", "NCC")) or ""
+        ).strip()
+        if raw_supplier.upper() in ("NAZZY", "DMS NAZZY", "DMS NAZZY (NPP MAI GOLD)"):
+            raw_supplier = ""
+        prod_supplier = (product.supplier or "").strip() if product else ""
+        # Tránh gán nhầm mặc định "Vinamilk" cho đơn đến từ nguồn khác (VD: Nazzy - hàng KM / trưng bày)
+        if raw_sync_src and raw_sync_src != "VINAMILK" and prod_supplier.lower() == "vinamilk":
+            prod_supplier = ""
+        supplier = raw_supplier or prod_supplier
         order_status_label = proc_status or "Chưa xử lý"
         customer_code = (
             row.customer_code

@@ -575,7 +575,7 @@ def sync_products_from_system_data(
                     name=cand["name"],
                     category_id=cat_obj.id,
                     unit_id=unit_obj.id,
-                    supplier=cand.get("supplier") or "Vinamilk",
+                    supplier=cand.get("supplier") or None,
                     base_price=round(float(cand.get("base_price") or 0.0), 4),
                     cost_price=round(float(cand.get("cost_price") or 0.0), 4),
                     vat_rate=cand.get("vat_rate"),

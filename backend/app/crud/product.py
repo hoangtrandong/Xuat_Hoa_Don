@@ -996,6 +996,68 @@ def list_paged(
     if unit and unit != "ALL":
         conditions.append(Product.unit.has(ProductUnit.name == unit))
 
+    if distributor_code and distributor_code.strip() and distributor_code.strip().upper() != "ALL":
+        from app.models.multi_tenant_invoice import (
+            Distributor as DistributorModel,
+            IssuedInvoice as IssuedInvoiceModel,
+            IssuedInvoiceItem as IssuedInvoiceItemModel,
+            PurchaseInvoice as PurchaseInvoiceModel,
+            PurchaseInvoiceItem as PurchaseInvoiceItemModel,
+        )
+        from app.models.vinamilk import VinamilkOrderSnapshot as SnapshotModel
+
+        clean_dist_code = distributor_code.strip().upper()
+        dist_obj = db.scalar(
+            select(DistributorModel).where(func.upper(DistributorModel.code) == clean_dist_code)
+        )
+        dist_filter_clauses = []
+        if dist_obj is not None:
+            dist_filter_clauses.append(
+                Product.company_links.any(
+                    ProductCompanyModel.company.has(CompanyModel.distributor_id == dist_obj.id)
+                )
+            )
+            purch_subq = (
+                select(func.upper(func.trim(PurchaseInvoiceItemModel.product_code)))
+                .join(
+                    PurchaseInvoiceModel,
+                    PurchaseInvoiceModel.id == PurchaseInvoiceItemModel.purchase_invoice_id,
+                )
+                .where(
+                    PurchaseInvoiceModel.distributor_id == dist_obj.id,
+                    PurchaseInvoiceItemModel.product_code.is_not(None),
+                )
+            )
+            dist_filter_clauses.append(func.upper(Product.sku).in_(purch_subq))
+
+            issued_subq = (
+                select(func.upper(func.trim(IssuedInvoiceItemModel.product_code)))
+                .join(
+                    IssuedInvoiceModel,
+                    IssuedInvoiceModel.id == IssuedInvoiceItemModel.invoice_id,
+                )
+                .where(
+                    IssuedInvoiceModel.distributor_id == dist_obj.id,
+                    IssuedInvoiceItemModel.product_code.is_not(None),
+                )
+            )
+            dist_filter_clauses.append(func.upper(Product.sku).in_(issued_subq))
+
+        payload_dist_expr = SnapshotModel.raw_payload["Mã NPP"].as_string()
+        snap_subq = (
+            select(func.upper(func.trim(SnapshotModel.product_code)))
+            .where(
+                SnapshotModel.product_code.is_not(None),
+                or_(
+                    func.upper(SnapshotModel.performed_by) == clean_dist_code,
+                    func.upper(payload_dist_expr) == clean_dist_code,
+                ),
+            )
+        )
+        dist_filter_clauses.append(func.upper(Product.sku).in_(snap_subq))
+        dist_filter_clauses.append(func.upper(Product._npp_code).in_(snap_subq))
+        conditions.append(or_(*dist_filter_clauses))
+
     if company_id is not None:
         if company_id == 0:
             conditions.append(~Product.company_links.any())

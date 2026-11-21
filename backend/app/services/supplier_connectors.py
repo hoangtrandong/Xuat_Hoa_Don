@@ -707,10 +707,17 @@ def persist_canonical_orders_to_snapshots(
     db: Session,
     canonical_orders: list[CanonicalOrder],
     distributor_code: str | None = None,
-) -> int:
+    return_stats: bool = False,
+) -> int | dict[str, Any]:
     """Lưu danh sách CanonicalOrder vào bảng VinamilkOrderSnapshot với cấu trúc chuẩn hóa
     để toàn bộ màn hình Đơn Hàng DMS, Tách/Gộp đơn và Xuất Hóa Đơn hoạt động đồng nhất."""
     saved_rows = 0
+    new_orders: set[str] = set()
+    updated_orders: set[str] = set()
+    new_lines = 0
+    updated_lines = 0
+    unchanged_lines = 0
+    now_utc = datetime.utcnow()
     for order in canonical_orders:
         for line_idx, item in enumerate(order.items, start=1):
             key_seed = f"{distributor_code or 'DEFAULT'}|{order.supplier_code}|{order.order_number}|{item.product_code}|{line_idx}"
@@ -775,34 +782,66 @@ def persist_canonical_orders_to_snapshots(
                     delivery_date=order.delivery_date or order.order_date,
                     synced_from=order.order_date,
                     synced_to=order.order_date,
-                    synced_at=datetime.utcnow(),
+                    synced_at=now_utc,
                     raw_payload=normalized_payload,
                 )
                 db.add(snap)
+                new_orders.add(order.order_number)
+                new_lines += 1
+                saved_rows += 1
             else:
-                existing.customer_code = order.customer_code
-                existing.customer_name = order.customer_name
-                existing.product_code = item.product_code
-                existing.product_name = item.product_name
-                existing.order_created_date = order.order_date
-                existing.delivery_date = order.delivery_date or order.order_date
-                existing.processing_status = f"NCC:{order.supplier_code}"
-                existing.performed_by = distributor_code
-                existing.synced_at = datetime.utcnow()
-                existing.raw_payload = normalized_payload
-            saved_rows += 1
+                old_payload = existing.raw_payload if isinstance(existing.raw_payload, dict) else {}
+                new_delivery = order.delivery_date or order.order_date
+                changed = (
+                    (existing.customer_code or "") != (order.customer_code or "")
+                    or (existing.customer_name or "") != (order.customer_name or "")
+                    or (existing.product_code or "") != (item.product_code or "")
+                    or (existing.product_name or "") != (item.product_name or "")
+                    or (existing.status or "") != (order.status or "")
+                    or existing.order_created_date != order.order_date
+                    or existing.delivery_date != new_delivery
+                    or old_payload != normalized_payload
+                )
+                if changed:
+                    existing.customer_code = order.customer_code
+                    existing.customer_name = order.customer_name
+                    existing.product_code = item.product_code
+                    existing.product_name = item.product_name
+                    existing.status = order.status
+                    existing.order_created_date = order.order_date
+                    existing.delivery_date = new_delivery
+                    existing.processing_status = f"NCC:{order.supplier_code}"
+                    existing.performed_by = distributor_code
+                    existing.synced_at = now_utc
+                    existing.raw_payload = normalized_payload
+                    if order.order_number not in new_orders:
+                        updated_orders.add(order.order_number)
+                    updated_lines += 1
+                    saved_rows += 1
+                else:
+                    unchanged_lines += 1
 
     db.flush()
     db.commit()
 
-    try:
-        from app.crud.customer import sync_customers_from_snapshots
-        from app.crud.product import sync_products_from_system_data
-        sync_customers_from_snapshots(db, commit=True)
-        sync_products_from_system_data(db, commit=True)
-    except Exception:
-        db.rollback()
+    if new_lines > 0 or updated_lines > 0:
+        try:
+            from app.crud.customer import sync_customers_from_snapshots
+            from app.crud.product import sync_products_from_system_data
+            sync_customers_from_snapshots(db, commit=True)
+            sync_products_from_system_data(db, commit=True)
+        except Exception:
+            db.rollback()
 
+    if return_stats:
+        return {
+            "saved_rows": saved_rows,
+            "new_orders": len(new_orders),
+            "updated_orders": len(updated_orders),
+            "new_lines": new_lines,
+            "updated_lines": updated_lines,
+            "unchanged_lines": unchanged_lines,
+        }
     return saved_rows
 
 

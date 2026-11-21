@@ -1252,8 +1252,11 @@ async def _run_sync_supplier_configs_background(
         total_configs = len(configs)
         job_manager.start_job(job_id, f"Bắt đầu đồng bộ từ {total_configs} nguồn nhà cung cấp...")
         connector = RestApiSupplierConnector()
-        total_synced_orders = 0
-        total_saved_lines = 0
+        total_new_orders = 0
+        total_updated_orders = 0
+        total_new_lines = 0
+        total_updated_lines = 0
+        total_unchanged_lines = 0
 
         for idx, cfg in enumerate(configs, start=1):
             source_name = cfg.supplier_name or cfg.supplier_code
@@ -1271,19 +1274,37 @@ async def _run_sync_supplier_configs_background(
                     field_mapping=cfg.field_mapping or {},
                     distributor_code=dist_code,
                 )
-                saved_lines = persist_canonical_orders_to_snapshots(
+                stats = persist_canonical_orders_to_snapshots(
                     db=db,
                     canonical_orders=canonical_orders,
                     distributor_code=dist_code,
+                    return_stats=True,
                 )
                 cfg.last_synced_at = datetime.utcnow()
                 db.commit()
-                total_synced_orders += len(canonical_orders)
-                total_saved_lines += saved_lines
+                n_ord = int(stats["new_orders"])
+                u_ord = int(stats["updated_orders"])
+                n_ln = int(stats["new_lines"])
+                u_ln = int(stats["updated_lines"])
+                total_new_orders += n_ord
+                total_updated_orders += u_ord
+                total_new_lines += n_ln
+                total_updated_lines += u_ln
+                total_unchanged_lines += int(stats["unchanged_lines"])
+                parts: list[str] = []
+                if n_ord > 0:
+                    parts.append(f"+{n_ord} đơn mới ({n_ln} dòng)")
+                if u_ord > 0:
+                    parts.append(f"{u_ord} đơn cập nhật ({u_ln} dòng)")
+                src_msg = (
+                    f"{source_name}: {', '.join(parts)}"
+                    if parts
+                    else f"{source_name}: không có đơn mới hoặc thay đổi."
+                )
                 job_manager.update_progress(
                     job_id,
                     current_step=idx,
-                    message=f"Đã đồng bộ {source_name}: {len(canonical_orders)} đơn ({saved_lines} dòng hàng).",
+                    message=src_msg,
                 )
             except Exception as src_err:
                 db.rollback()
@@ -1293,10 +1314,28 @@ async def _run_sync_supplier_configs_background(
                     message=f"Nguồn {source_name} gặp lỗi: {src_err}",
                 )
 
+        summary_parts: list[str] = []
+        if total_new_orders > 0:
+            summary_parts.append(f"+{total_new_orders} đơn mới ({total_new_lines} dòng)")
+        if total_updated_orders > 0:
+            summary_parts.append(f"{total_updated_orders} đơn cập nhật ({total_updated_lines} dòng)")
+        final_message = (
+            f"Đồng bộ hoàn tất: {', '.join(summary_parts)}."
+            if summary_parts
+            else "Dữ liệu đã mới nhất — không có đơn hàng mới hoặc thay đổi."
+        )
+        synced_at_iso = datetime.utcnow().isoformat() + "Z"
         job_manager.set_success(
             job_id,
-            result_summary={"total_synced_orders": total_synced_orders, "total_saved_lines": total_saved_lines},
-            message=f"Đồng bộ hoàn tất! Đã lưu {total_synced_orders} đơn hàng ({total_saved_lines} dòng) từ {total_configs} nguồn.",
+            result_summary={
+                "new_orders": total_new_orders,
+                "updated_orders": total_updated_orders,
+                "new_lines": total_new_lines,
+                "updated_lines": total_updated_lines,
+                "unchanged_lines": total_unchanged_lines,
+                "synced_at": synced_at_iso,
+            },
+            message=final_message,
         )
     except Exception as exc:
         db.rollback()

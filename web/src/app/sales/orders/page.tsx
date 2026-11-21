@@ -2103,12 +2103,56 @@ return Array.from(map.values());
         throw new Error(asyncData.detail || "Không thể kích hoạt hàng đợi đồng bộ ngầm.");
       }
 
-      setToast("Đã đưa tác vụ đồng bộ vào hàng đợi ngầm! Theo dõi tiến độ % trên thanh thông báo.");
-      
-      // Hẹn giờ làm mới dữ liệu sau khi tiến trình ngầm hoàn tất
-      setTimeout(() => {
-        void loadLocalOrders();
-      }, 4000);
+      setToast("Đang đồng bộ dữ liệu đơn hàng từ nguồn NCC...");
+
+      // Theo dõi tiến trình đồng bộ để báo chính xác đơn mới thêm / cập nhật (bỏ qua đơn cũ không đổi)
+      if (asyncData.job_id) {
+        const jobId = asyncData.job_id;
+        let finished = false;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          const jobRes = await apiFetch(`${API_URL}/sync/jobs/${jobId}`);
+          if (!jobRes.ok) break;
+          const jobInfo = (await jobRes.json()) as {
+            status?: string;
+            message?: string;
+            error_detail?: string;
+            result_summary?: {
+              new_orders?: number;
+              updated_orders?: number;
+              synced_at?: string;
+            };
+          };
+          if (jobInfo.status === "SUCCESS") {
+            finished = true;
+            setLastSyncedAt(jobInfo.result_summary?.synced_at || new Date().toISOString());
+            const nOrd = Number(jobInfo.result_summary?.new_orders ?? 0);
+            const uOrd = Number(jobInfo.result_summary?.updated_orders ?? 0);
+            if (nOrd > 0 || uOrd > 0) {
+              setToast(jobInfo.message || `Đồng bộ hoàn tất: +${nOrd} đơn mới, ${uOrd} đơn cập nhật.`);
+              void loadLocalOrders();
+            } else {
+              // Đơn cũ không thay đổi -> chỉ cập nhật thời gian đồng bộ lần cuối, không hiện banner làm phiền
+              setToast("");
+            }
+            break;
+          }
+          if (jobInfo.status === "FAILED") {
+            finished = true;
+            throw new Error(jobInfo.error_detail || jobInfo.message || "Đồng bộ dữ liệu thất bại.");
+          }
+        }
+        if (!finished) {
+          setToast("Tác vụ đồng bộ vẫn đang chạy ngầm. Danh sách sẽ tự cập nhật khi hoàn tất.");
+          setTimeout(() => {
+            void loadLocalOrders();
+          }, 4000);
+        }
+      } else {
+        setTimeout(() => {
+          void loadLocalOrders();
+        }, 4000);
+      }
     } catch (error) {
       setRemoteError(error instanceof Error ? error.message : "Lỗi kết nối tới Server.");
       setToast("");
@@ -3019,8 +3063,26 @@ return Array.from(map.values());
 
       <section className="space-y-4">
         <div className="overflow-hidden border border-slate-400 bg-white shadow-lg">
-          <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 text-[11px] font-bold uppercase text-sky-800">
-            Khoảng ngày và thao tác
+          <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[11px] font-bold uppercase text-sky-800">
+              Khoảng ngày và thao tác
+            </span>
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-600">
+              <Clock3 size={13} className="text-sky-600" />
+              Đồng bộ lần cuối:{" "}
+              <strong className="font-mono text-slate-800">
+                {lastSyncedAt
+                  ? new Date(lastSyncedAt).toLocaleString("vi-VN", {
+                      day: "2-digit",
+                      month: "2-digit",
+                      year: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      second: "2-digit",
+                    })
+                  : "Chưa đồng bộ"}
+              </strong>
+            </span>
           </div>
           <div className="border-b border-slate-200 px-3 py-2.5">
             <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-4">

@@ -206,6 +206,7 @@ class DistributorProduct(Base):
     distributor_name: Mapped[str] = mapped_column(String(200), default="Nhà Phân Phối Mai Gold")
     distributor_sku: Mapped[str] = mapped_column(String(60), unique=True, index=True)
     distributor_product_name: Mapped[str] = mapped_column(String(255))
+    invoice_product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     supplier: Mapped[str] = mapped_column(String(100), default="Vinamilk")
     unit: Mapped[str | None] = mapped_column(String(30), default="HOP")
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)

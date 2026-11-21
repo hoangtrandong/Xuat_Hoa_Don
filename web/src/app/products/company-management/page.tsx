@@ -32,6 +32,7 @@ type DistributorProductRow = {
   distributor_name: string;
   distributor_sku: string;
   distributor_product_name: string;
+  invoice_product_name: string | null;
   supplier: string;
   unit: string;
   company_id: number | null;
@@ -51,6 +52,7 @@ type ExcelPreviewRow = {
   distributor_name: string;
   distributor_sku: string;
   distributor_product_name: string;
+  invoice_product_name: string;
   supplier: string;
   company_code: string;
   company_name: string;
@@ -74,6 +76,7 @@ export default function ProductCompanyManagementPage() {
   const [editingRow, setEditingRow] = useState<DistributorProductRow | null>(null);
   const [editSku, setEditSku] = useState<string>("");
   const [editName, setEditName] = useState<string>("");
+  const [editInvoiceName, setEditInvoiceName] = useState<string>("");
   const [editDistributor, setEditDistributor] = useState<string>("");
   const [editSupplier, setEditSupplier] = useState<string>("");
   const [editCompanyId, setEditCompanyId] = useState<string>("");
@@ -142,6 +145,7 @@ export default function ProductCompanyManagementPage() {
         const match =
           row.distributor_sku.toLowerCase().includes(q) ||
           row.distributor_product_name.toLowerCase().includes(q) ||
+          (row.invoice_product_name && row.invoice_product_name.toLowerCase().includes(q)) ||
           row.distributor_name.toLowerCase().includes(q) ||
           row.supplier.toLowerCase().includes(q) ||
           (row.company_code && row.company_code.toLowerCase().includes(q)) ||
@@ -197,6 +201,7 @@ export default function ProductCompanyManagementPage() {
     setEditingRow(row);
     setEditSku(row.distributor_sku);
     setEditName(row.distributor_product_name);
+    setEditInvoiceName(row.invoice_product_name || "");
     setEditDistributor(row.distributor_name);
     setEditSupplier(row.supplier);
     setEditCompanyId(row.company_id ? String(row.company_id) : "");
@@ -224,6 +229,7 @@ export default function ProductCompanyManagementPage() {
           original_code: editingRow.distributor_sku,
           distributor_sku: editSku.trim().toUpperCase(),
           distributor_product_name: editName.trim(),
+          invoice_product_name: editInvoiceName.trim() || null,
           distributor_name: editDistributor.trim() || "Nhà Phân Phối Mai Gold",
           supplier: editSupplier.trim() || "Vinamilk",
           company_id: editCompanyId ? Number(editCompanyId) : null,
@@ -241,6 +247,7 @@ export default function ProductCompanyManagementPage() {
                 ...r,
                 distributor_sku: editSku.trim().toUpperCase(),
                 distributor_product_name: editName.trim(),
+                invoice_product_name: editInvoiceName.trim() || null,
                 distributor_name: editDistributor.trim() || "Nhà Phân Phối Mai Gold",
                 supplier: editSupplier.trim() || "Vinamilk",
                 company_id: editCompanyId ? Number(editCompanyId) : null,
@@ -312,6 +319,7 @@ export default function ProductCompanyManagementPage() {
 
       let skuIdx = -1;
       let nameIdx = -1;
+      let invoiceNameIdx = -1;
       let distIdx = -1;
       let supplierIdx = -1;
       let compCodeIdx = -1;
@@ -319,6 +327,8 @@ export default function ProductCompanyManagementPage() {
       headers.forEach((h, idx) => {
         if (h.includes("mã sp npp") || h.includes("mã sp") || h.includes("distributor_sku") || h.includes("sku")) {
           skuIdx = idx;
+        } else if (h.includes("tên sản phẩm xuất hóa đơn") || h.includes("tên hóa đơn") || h.includes("invoice_product_name") || h.includes("invoice_name")) {
+          invoiceNameIdx = idx;
         } else if (h.includes("tên sản phẩm") || h.includes("tên sp") || h.includes("distributor_name") || h.includes("distributor_product_name")) {
           nameIdx = idx;
         } else if (h.includes("nhà phân phối") || h.includes("distributor") || h.includes("npp")) {
@@ -345,6 +355,9 @@ export default function ProductCompanyManagementPage() {
         if (!sku || sku.includes("BẮT BUỘC") || sku.includes("MÃ SP")) continue;
 
         const name = String(row[nameIdx] || "").trim() || `Sản phẩm ${sku}`;
+        const invoiceName = invoiceNameIdx !== -1 && row[invoiceNameIdx]
+          ? String(row[invoiceNameIdx]).trim()
+          : "";
         const dist = distIdx !== -1 && row[distIdx] ? String(row[distIdx]).trim() : "Nhà Phân Phối Mai Gold";
         const supplier = supplierIdx !== -1 && row[supplierIdx] ? String(row[supplierIdx]).trim() : "Vinamilk";
         const compCode = compCodeIdx !== -1 && row[compCodeIdx] ? String(row[compCodeIdx]).trim().toUpperCase() : "";
@@ -358,6 +371,7 @@ export default function ProductCompanyManagementPage() {
           distributor_name: dist || "Nhà Phân Phối Mai Gold",
           distributor_sku: sku,
           distributor_product_name: name,
+          invoice_product_name: invoiceName,
           supplier: supplier || "Vinamilk",
           company_code: compCode,
           company_name: compName,
@@ -408,7 +422,7 @@ export default function ProductCompanyManagementPage() {
     }
   }
 
-  // Tải file Excel mẫu 7 cột chuẩn
+  // Tải file Excel mẫu 8 cột chuẩn
   function handleDownloadTemplate() {
     const templateRows = [
       {
@@ -416,6 +430,7 @@ export default function ProductCompanyManagementPage() {
         "Nhà phân phối": "Nhà Phân Phối Mai Gold",
         "Mã SP NPP": "01TD03",
         "Tên Sản Phẩm NPP": "Sữa tươi tiệt trùng có đường 180ml",
+        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML",
         "Nhà cung cấp": "Vinamilk",
         "Mã Công ty QL": "CT01",
         "Tên Công ty QL": "Công ty TNHH Phân Phối Mai Gold",
@@ -425,6 +440,7 @@ export default function ProductCompanyManagementPage() {
         "Nhà phân phối": "Nhà Phân Phối Mai Gold",
         "Mã SP NPP": "07KD12",
         "Tên Sản Phẩm NPP": "Sữa chua ăn lựu đỏ 100g",
+        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA CHUA ĂN VINAMILK 100G",
         "Nhà cung cấp": "Vinamilk",
         "Mã Công ty QL": "",
         "Tên Công ty QL": "",
@@ -434,6 +450,7 @@ export default function ProductCompanyManagementPage() {
         "Nhà phân phối": "Nhà Phân Phối Mai Gold",
         "Mã SP NPP": "01SX11",
         "Tên Sản Phẩm NPP": "Sữa dinh dưỡng Optimum Gold 110ml",
+        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA DINH DƯỠNG OPTIMUM GOLD 110ML",
         "Nhà cung cấp": "Vinamilk",
         "Mã Công ty QL": "",
         "Tên Công ty QL": "",
@@ -450,6 +467,7 @@ export default function ProductCompanyManagementPage() {
       "Nhà phân phối": r.distributor_name || "Nhà Phân Phối Mai Gold",
       "Mã SP NPP": r.distributor_sku,
       "Tên Sản Phẩm NPP": r.distributor_product_name,
+      "Tên Sản Phẩm Xuất Hóa Đơn": r.invoice_product_name || "",
       "Nhà cung cấp": r.supplier || "Vinamilk",
       "Mã Công ty QL": r.company_code || "",
       "Tên Công ty QL": r.company_name || "",
@@ -496,7 +514,7 @@ export default function ProductCompanyManagementPage() {
               type="button"
               onClick={handleDownloadTemplate}
               className="inline-flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors"
-              title="Tải file Excel mẫu gồm 7 cột chuẩn để nhập dữ liệu"
+              title="Tải file Excel mẫu gồm 8 cột chuẩn để nhập dữ liệu"
             >
               <Download size={12} />
               Tải file mẫu
@@ -693,6 +711,7 @@ export default function ProductCompanyManagementPage() {
                 <th className="px-2.5 py-2">Nhà phân phối</th>
                 <th className="px-2.5 py-2">Mã SP NPP</th>
                 <th className="px-2.5 py-2">Tên Sản Phẩm NPP</th>
+                <th className="px-2.5 py-2">Tên Sản Phẩm Xuất Hóa Đơn</th>
                 <th className="px-2.5 py-2">Nhà cung cấp</th>
                 <th className="px-2.5 py-2">Mã Công ty QL</th>
                 <th className="px-2.5 py-2">Tên Công ty QL</th>
@@ -703,7 +722,7 @@ export default function ProductCompanyManagementPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={9} className="px-4 py-10 text-center text-xs text-slate-500">
                     <span className="inline-flex items-center gap-2">
                       <Loader2 size={15} className="animate-spin text-sky-600" />
                       Đang tải danh sách mã sản phẩm NPP nội bộ...
@@ -712,7 +731,7 @@ export default function ProductCompanyManagementPage() {
                 </tr>
               ) : pagedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={9} className="px-4 py-10 text-center text-xs text-slate-500">
                     {error || "Chưa có mã sản phẩm NPP nào. Hãy bấm 'Upload thêm & Sửa hàng loạt' hoặc tải file mẫu để tải lên."}
                   </td>
                 </tr>
@@ -742,6 +761,16 @@ export default function ProductCompanyManagementPage() {
 
                       <td className="px-2.5 py-1.5 font-medium text-slate-800">
                         {row.distributor_product_name}
+                      </td>
+
+                      <td className="px-2.5 py-1.5 max-w-[260px]">
+                        {row.invoice_product_name ? (
+                          <span className="block truncate font-semibold text-slate-800" title={row.invoice_product_name}>
+                            {row.invoice_product_name}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] italic text-slate-400">Chưa cấu hình</span>
+                        )}
                       </td>
 
                       <td className="px-2.5 py-1.5 whitespace-nowrap">
@@ -921,6 +950,22 @@ export default function ProductCompanyManagementPage() {
                     />
                   </div>
 
+                  <div className="sm:col-span-2">
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Tên Sản Phẩm Xuất Hóa Đơn
+                    </label>
+                    <input
+                      type="text"
+                      value={editInvoiceName}
+                      onChange={(e) => setEditInvoiceName(e.target.value)}
+                      placeholder="Tên sẽ hiển thị trên hóa đơn điện tử"
+                      className={inputCls}
+                    />
+                    <p className="mt-0.5 text-[9px] text-slate-400">
+                      Để trống nếu muốn hệ thống dùng tên Sản Phẩm NPP làm tên trên hóa đơn.
+                    </p>
+                  </div>
+
                   <div>
                     <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                       Nhà cung cấp
@@ -1019,7 +1064,7 @@ export default function ProductCompanyManagementPage() {
                 </div>
                 <ul className="list-disc list-inside space-y-0.5 text-[11px] text-slate-700">
                   <li>
-                    <strong>File Excel gồm 7 cột:</strong> STT, Nhà phân phối, Mã SP NPP, Tên Sản Phẩm NPP, Nhà cung cấp, Mã Công ty QL, Tên Công ty QL.
+                    <strong>File Excel gồm 8 cột:</strong> STT, Nhà phân phối, Mã SP NPP, Tên Sản Phẩm NPP, Tên Sản Phẩm Xuất Hóa Đơn, Nhà cung cấp, Mã Công ty QL, Tên Công ty QL.
                   </li>
                   <li>
                     <strong>Mã Công ty QL:</strong> Khớp theo mã của Công ty trong <em>Đăng ký quản lý</em>. Nếu để trống thì hệ thống sẽ <strong>để trống (chưa gán)</strong>.
@@ -1059,7 +1104,7 @@ export default function ProductCompanyManagementPage() {
                   className="inline-flex items-center gap-1 text-[11px] font-semibold text-sky-700 hover:text-sky-900 underline"
                 >
                   <Download size={13} />
-                  Tải file Excel mẫu 7 cột
+                  Tải file Excel mẫu 8 cột
                 </button>
               </div>
 
@@ -1082,6 +1127,7 @@ export default function ProductCompanyManagementPage() {
                           <th className="px-2 py-1.5">Nhà phân phối</th>
                           <th className="px-2 py-1.5">Mã SP NPP</th>
                           <th className="px-2 py-1.5">Tên Sản Phẩm NPP</th>
+                          <th className="px-2 py-1.5">Tên Sản Phẩm Xuất Hóa Đơn</th>
                           <th className="px-2 py-1.5">Nhà cung cấp</th>
                           <th className="px-2 py-1.5">Mã Công ty QL</th>
                           <th className="px-2 py-1.5">Tên Công ty QL</th>
@@ -1100,6 +1146,9 @@ export default function ProductCompanyManagementPage() {
                               {p.distributor_sku}
                             </td>
                             <td className="px-2 py-1">{p.distributor_product_name}</td>
+                            <td className="px-2 py-1 font-semibold text-slate-800">
+                              {p.invoice_product_name || <span className="text-slate-400 italic">Chưa cấu hình</span>}
+                            </td>
                             <td className="px-2 py-1 whitespace-nowrap">{p.supplier}</td>
                             <td className="px-2 py-1 font-mono whitespace-nowrap">
                               {p.company_code ? (

@@ -50,6 +50,7 @@ def init_db() -> None:
         conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS short_name VARCHAR(120);"))
         conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS invoice_item_mode VARCHAR(20) DEFAULT 'TAX_INPUT';"))
         conn.execute(text("ALTER TABLE companies ADD COLUMN IF NOT EXISTS sync_source VARCHAR(20) DEFAULT 'MANUAL';"))
+        conn.execute(text("ALTER TABLE distributor_products ADD COLUMN IF NOT EXISTS invoice_product_name VARCHAR(255);"))
         conn.execute(text("ALTER TABLE product_companies ADD COLUMN IF NOT EXISTS invoice_name_override VARCHAR(255);"))
         conn.execute(text("ALTER TABLE product_companies ADD COLUMN IF NOT EXISTS invoice_unit_name VARCHAR(50);"))
         conn.execute(text("ALTER TABLE product_companies ADD COLUMN IF NOT EXISTS conversion_num INTEGER DEFAULT 1;"))

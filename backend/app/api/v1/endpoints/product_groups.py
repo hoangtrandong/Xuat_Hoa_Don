@@ -395,6 +395,7 @@ def list_distributor_products(db: Session = Depends(get_db)):
             distributor_name=item.distributor_name or "Nhà Phân Phối Mai Gold",
             distributor_sku=item.distributor_sku,
             distributor_product_name=item.distributor_product_name,
+            invoice_product_name=item.invoice_product_name,
             supplier=item.supplier or "Vinamilk",
             unit=item.unit or "HOP",
             company_id=item.company_id,
@@ -528,6 +529,7 @@ def create_distributor_product(payload: DistributorProductCreate, db: Session = 
         distributor_name=payload.distributor_name or "Nhà Phân Phối Mai Gold",
         distributor_sku=clean_sku,
         distributor_product_name=payload.distributor_product_name.strip(),
+        invoice_product_name=(payload.invoice_product_name or "").strip() or None,
         supplier=payload.supplier or "Vinamilk",
         unit=payload.unit or "HOP",
         company_id=payload.company_id,
@@ -542,6 +544,7 @@ def create_distributor_product(payload: DistributorProductCreate, db: Session = 
         distributor_name=new_prod.distributor_name,
         distributor_sku=new_prod.distributor_sku,
         distributor_product_name=new_prod.distributor_product_name,
+        invoice_product_name=new_prod.invoice_product_name,
         supplier=new_prod.supplier,
         unit=new_prod.unit,
         company_id=new_prod.company_id,
@@ -577,6 +580,7 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
 
     if payload.distributor_product_name.strip():
         item.distributor_product_name = payload.distributor_product_name.strip()
+    item.invoice_product_name = (payload.invoice_product_name or "").strip() or None
     if payload.distributor_name:
         item.distributor_name = payload.distributor_name.strip()
     if payload.supplier:
@@ -609,6 +613,7 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
         "id": item.id,
         "distributor_sku": item.distributor_sku,
         "distributor_product_name": item.distributor_product_name,
+        "invoice_product_name": item.invoice_product_name,
         "company_id": item.company_id,
         "company_code": item.company.code if item.company else None,
         "company_name": item.company.name if item.company else None,
@@ -683,6 +688,7 @@ def download_distributor_product_template():
         "Nhà phân phối",
         "Mã SP NPP",
         "Tên Sản Phẩm NPP",
+        "Tên Sản Phẩm Xuất Hóa Đơn",
         "Nhà cung cấp",
         "Mã Công ty QL",
         "Tên Công ty QL",
@@ -690,10 +696,10 @@ def download_distributor_product_template():
     ws.append(headers)
 
     sample_rows = [
-        [1, "Nhà Phân Phối Mai Gold", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "Vinamilk", "CT01", "Công ty TNHH Phân Phối Mai Gold"],
-        [2, "Nhà Phân Phối Mai Gold", "07KD12", "Sữa chua ăn lựu đỏ 100g", "Vinamilk", "", ""],
-        [3, "Nhà Phân Phối Mai Gold", "01SX11", "Sữa dinh dưỡng Optimum Gold 110ml", "Vinamilk", "", ""],
-        [4, "Nhà Phân Phối Mai Gold", "02HD14", "Sữa chua ăn Có đường 100g", "Vinamilk", "CT02", "Công ty Cổ Phần Tiếp Vận Nam Việt"],
+        [1, "Nhà Phân Phối Mai Gold", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML", "Vinamilk", "CT01", "Công ty TNHH Phân Phối Mai Gold"],
+        [2, "Nhà Phân Phối Mai Gold", "07KD12", "Sữa chua ăn lựu đỏ 100g", "SỮA CHUA ĂN VINAMILK 100G", "Vinamilk", "", ""],
+        [3, "Nhà Phân Phối Mai Gold", "01SX11", "Sữa dinh dưỡng Optimum Gold 110ml", "SỮA DINH DƯỠNG OPTIMUM GOLD 110ML", "Vinamilk", "", ""],
+        [4, "Nhà Phân Phối Mai Gold", "02HD14", "Sữa chua ăn Có đường 100g", "SỮA CHUA ĂN CÓ ĐƯỜNG 100G", "Vinamilk", "CT02", "Công ty Cổ Phần Tiếp Vận Nam Việt"],
     ]
     for row in sample_rows:
         ws.append(row)
@@ -703,9 +709,10 @@ def download_distributor_product_template():
     ws.column_dimensions["B"].width = 28
     ws.column_dimensions["C"].width = 16
     ws.column_dimensions["D"].width = 44
-    ws.column_dimensions["E"].width = 18
+    ws.column_dimensions["E"].width = 44
     ws.column_dimensions["F"].width = 18
-    ws.column_dimensions["G"].width = 36
+    ws.column_dimensions["G"].width = 18
+    ws.column_dimensions["H"].width = 36
 
     output = BytesIO()
     wb.save(output)
@@ -744,6 +751,7 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
         # Tìm index các cột
         sku_idx = -1
         name_idx = -1
+        invoice_name_idx = -1
         dist_idx = -1
         supplier_idx = -1
         company_code_idx = -1
@@ -751,6 +759,8 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
         for idx, h in enumerate(raw_headers):
             if any(k in h for k in ["mã sp npp", "mã sp", "distributor_sku", "sku", "ma_sp", "mã sản phẩm"]):
                 sku_idx = idx
+            elif any(k in h for k in ["tên sản phẩm xuất hóa đơn", "tên hóa đơn", "invoice_product_name", "invoice_name"]):
+                invoice_name_idx = idx
             elif any(k in h for k in ["tên sản phẩm npp", "tên sản phẩm", "tên sp", "distributor_name", "distributor_product_name", "ten_sp"]):
                 name_idx = idx
             elif any(k in h for k in ["nhà phân phối", "distributor", "npp"]):
@@ -793,6 +803,12 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
             if not name_val:
                 name_val = f"Sản phẩm {sku_val}"
 
+            invoice_name_val = (
+                str(row[invoice_name_idx] or "").strip()
+                if invoice_name_idx != -1 and invoice_name_idx < len(row) and row[invoice_name_idx] is not None
+                else ""
+            )
+
             dist_val = (
                 str(row[dist_idx] or "").strip()
                 if dist_idx != -1 and dist_idx < len(row) and row[dist_idx] is not None
@@ -820,6 +836,7 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
             if sku_val in existing_products:
                 item = existing_products[sku_val]
                 item.distributor_product_name = name_val
+                item.invoice_product_name = invoice_name_val or None
                 item.distributor_name = dist_val
                 item.supplier = supplier_val
                 item.company_id = company_id
@@ -830,6 +847,7 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
                     distributor_name=dist_val,
                     distributor_sku=sku_val,
                     distributor_product_name=name_val,
+                    invoice_product_name=invoice_name_val or None,
                     supplier=supplier_val,
                     unit="HOP",
                     company_id=company_id,

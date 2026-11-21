@@ -99,6 +99,7 @@ class DistributorProductItem(BaseModel):
     distributor_name: str
     distributor_sku: str
     distributor_product_name: str
+    invoice_product_name: Optional[str] = None
     supplier: str
     unit: Optional[str] = "HOP"
     company_id: Optional[int] = None
@@ -111,6 +112,7 @@ class DistributorProductCreate(BaseModel):
     distributor_name: Optional[str] = "Nhà Phân Phối Mai Gold"
     distributor_sku: str
     distributor_product_name: str
+    invoice_product_name: Optional[str] = None
     supplier: Optional[str] = "Vinamilk"
     unit: Optional[str] = "HOP"
     company_id: Optional[int] = None
@@ -121,6 +123,7 @@ class DistributorProductUpdate(BaseModel):
     original_code: Optional[str] = None
     distributor_sku: str
     distributor_product_name: str
+    invoice_product_name: Optional[str] = None
     distributor_name: Optional[str] = "Nhà Phân Phối Mai Gold"
     supplier: Optional[str] = "Vinamilk"
     unit: Optional[str] = "HOP"

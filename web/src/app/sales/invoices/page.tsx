@@ -17,7 +17,6 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
-import StatCard from "@/components/ui/StatCard";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import ExportViettelSinvoiceModal from "@/components/sales/ExportViettelSinvoiceModal";
@@ -431,104 +430,124 @@ export default function EInvoiceGatewayPage() {
         </div>
       )}
 
-      {/* Thanh thông tin Nhà Phân Phối & Chọn Mẫu Form Hóa Đơn */}
-      <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div>
-          <label className="text-xs font-bold text-gray-500 uppercase flex items-center gap-1.5">
-            <Building2 size={14} className="text-sky-600" /> 1. Nhà Phân Phối phát hành hóa đơn (theo Phạm vi NPP)
-          </label>
-          <div className="mt-1.5 w-full rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2 text-sm font-bold text-slate-900">
-            {(() => {
-              const activeDist = distributors.find((d) => d.id === selectedDistId);
-              return activeDist
-                ? `[${activeDist.code}] ${activeDist.name} (MST: ${activeDist.tax_code || "—"})`
-                : "Đang tải Nhà phân phối...";
-            })()}
-          </div>
+      {/* Thanh thông tin Nhà Phân Phối & Cấu hình hóa đơn */}
+      <section className="border border-slate-400 bg-white shadow-lg">
+        <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 text-[11px] font-bold uppercase text-sky-800">
+          Thông tin phát hành
         </div>
+        <div className="grid grid-cols-1 gap-x-3 gap-y-2 px-3 py-2.5 lg:grid-cols-2">
+          <label className="block text-[10px] font-semibold text-slate-600">
+            <span className="mb-0.5 flex items-center gap-1.5">
+              <Building2 size={12} className="text-sky-600" /> Nhà phân phối phát hành
+            </span>
+            <div className="w-full rounded border border-sky-200 bg-sky-50/60 px-2 py-1.5 text-xs font-bold text-slate-800">
+              {(() => {
+                const activeDist = distributors.find((d) => d.id === selectedDistId);
+                return activeDist
+                  ? `[${activeDist.code}] ${activeDist.name} (MST: ${activeDist.tax_code || "—"})`
+                  : "Đang tải Nhà phân phối...";
+              })()}
+            </div>
+          </label>
 
-        <div>
-          <label className="text-xs font-bold text-gray-500 uppercase flex items-center gap-1.5">
-            <Receipt size={14} className="text-amber-600" /> 2. Chọn Mẫu Form & Cổng HĐĐT của NPP
+          <label className="block text-[10px] font-semibold text-slate-600">
+            <span className="mb-0.5 flex items-center gap-1.5">
+              <Receipt size={12} className="text-amber-600" /> Mẫu form & cổng HĐĐT
+            </span>
+            <select
+              value={selectedConfigId ?? ""}
+              onChange={(e) => setSelectedConfigId(Number(e.target.value))}
+              className="w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs font-bold text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            >
+              {invoiceConfigs.map((c) => (
+                <option key={c.id} value={c.id}>
+                  [{c.provider}] {c.config_name} — Mẫu: {c.invoice_template_code} | Ký hiệu: {c.invoice_series}
+                </option>
+              ))}
+            </select>
           </label>
-          <select
-            value={selectedConfigId ?? ""}
-            onChange={(e) => setSelectedConfigId(Number(e.target.value))}
-            className="mt-1.5 w-full rounded-lg border border-amber-300 bg-amber-50/50 px-3 py-2 text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
-          >
-            {invoiceConfigs.map((c) => (
-              <option key={c.id} value={c.id}>
-                [{c.provider}] {c.config_name} — Mẫu: {c.invoice_template_code} | Ký hiệu:{" "}
-                {c.invoice_series}
-              </option>
-            ))}
-          </select>
         </div>
-      </div>
+      </section>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <StatCard
-          label="Đơn hàng chờ xuất HĐ"
-          value={candidateOrders.filter((o) => !o.invoice_info).length}
-          sub={`Tổng ${candidateOrders.length} đơn đã đồng bộ`}
-          icon={<Layers size={20} />}
-          color="bg-sky-50 text-sky-600"
-        />
-        <StatCard
-          label="Đơn đang chọn để phát hành"
-          value={selectedOrders.length}
-          sub={`Sinh ra ${previewDocs.length} tờ Hóa đơn`}
-          icon={<Receipt size={20} />}
-          color="bg-amber-50 text-amber-600"
-        />
-        <StatCard
-          label="Hóa đơn đã phát hành"
-          value={issuedList.length}
-          sub={`Nhà mạng hiện tại: ${currentConfig?.provider || "MISA"}`}
-          icon={<ShieldCheck size={20} />}
-          color="bg-emerald-50 text-emerald-600"
-        />
+      <div className="grid grid-cols-2 overflow-hidden border border-slate-300 bg-white shadow-sm lg:grid-cols-3">
+        {[
+          {
+            label: "Đơn chờ xuất",
+            value: candidateOrders.filter((o) => !o.invoice_info).length,
+            sub: `${candidateOrders.length} đơn đã đồng bộ`,
+            icon: Layers,
+            tone: "text-sky-700",
+          },
+          {
+            label: "Đơn đang chọn",
+            value: selectedOrders.length,
+            sub: `${previewDocs.length} tờ hóa đơn`,
+            icon: Receipt,
+            tone: "text-amber-700",
+          },
+          {
+            label: "Đã phát hành",
+            value: issuedList.length,
+            sub: `Nhà mạng: ${currentConfig?.provider || "MISA"}`,
+            icon: ShieldCheck,
+            tone: "text-emerald-700",
+          },
+        ].map((stat) => {
+          const StatIcon = stat.icon;
+          return (
+            <div key={stat.label} className="flex items-center gap-2 border-b border-r border-slate-200 px-3 py-2.5 last:border-r-0">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-slate-200 bg-slate-50">
+                <StatIcon size={15} className={stat.tone} />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-[10px] font-semibold text-slate-500">{stat.label}</p>
+                <p className={`text-sm font-bold tabular-nums ${stat.tone}`}>{stat.value}</p>
+                <p className="truncate text-[9px] text-slate-400">{stat.sub}</p>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-200 flex flex-wrap gap-2">
+      <div className="flex flex-wrap border-b border-slate-300">
         <button
           onClick={() => setActiveTab("consolidate")}
-          className={`px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold transition-colors ${
             activeTab === "consolidate"
-              ? "border-sky-500 text-sky-600"
-              : "border-transparent text-gray-500 hover:text-gray-800"
+              ? "border-sky-500 bg-sky-50/50 text-sky-700"
+              : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-800"
           }`}
         >
           <FileSpreadsheet size={16} /> Tổng Hợp DMS Theo Ngày & Xuất File HĐĐT
         </button>
         <button
           onClick={() => setActiveTab("issue")}
-          className={`px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold transition-colors ${
             activeTab === "issue"
-              ? "border-sky-500 text-sky-600"
-              : "border-transparent text-gray-500 hover:text-gray-800"
+              ? "border-sky-500 bg-sky-50/50 text-sky-700"
+              : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-800"
           }`}
         >
           <Receipt size={16} /> Chọn Đơn Hàng & Xem Trước Form Hóa Đơn Động
         </button>
         <button
           onClick={() => setActiveTab("history")}
-          className={`px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold transition-colors ${
             activeTab === "history"
-              ? "border-sky-500 text-sky-600"
-              : "border-transparent text-gray-500 hover:text-gray-800"
+              ? "border-sky-500 bg-sky-50/50 text-sky-700"
+              : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-800"
           }`}
         >
           <FileCheck2 size={16} /> Lịch Sử Hóa Đơn Đã Phát Hành ({issuedList.length})
         </button>
         <button
           onClick={() => setActiveTab("tax_inventory")}
-          className={`px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors flex items-center gap-2 ${
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold transition-colors ${
             activeTab === "tax_inventory"
-              ? "border-sky-500 text-sky-600"
-              : "border-transparent text-gray-500 hover:text-gray-800"
+              ? "border-sky-500 bg-sky-50/50 text-sky-700"
+              : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-800"
           }`}
         >
           <ShieldCheck size={16} /> Tồn Kho Thuế Theo MST
@@ -551,16 +570,16 @@ export default function EInvoiceGatewayPage() {
       )}
 
       {activeTab === "issue" && (
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+        <div className="grid grid-cols-1 items-start gap-3 xl:grid-cols-12">
           {/* Cột trái: Danh sách đơn hàng từ các NCC */}
-          <div className="xl:col-span-5 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="p-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
+          <div className="overflow-hidden border border-slate-400 bg-white shadow-lg xl:col-span-5">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-100 bg-sky-50/60 px-3 py-2">
               <div>
-                <h3 className="text-sm font-bold text-gray-900">
-                  Danh sách Đơn Hàng Chuẩn Hóa (Đa NCC)
+                <h3 className="text-[11px] font-bold uppercase text-sky-800">
+                  Danh sách đơn hàng
                 </h3>
-                <p className="text-xs text-gray-500">
-                  Tích chọn 1 hoặc nhiều đơn hàng để sinh Form Hóa Đơn ở cột bên phải
+                <p className="mt-0.5 text-[9px] text-slate-500">
+                  Chọn đơn để xem trước form hóa đơn
                 </p>
               </div>
               <select
@@ -570,7 +589,7 @@ export default function EInvoiceGatewayPage() {
                   setSupplierFilter(val);
                   loadData(selectedDistId, val);
                 }}
-                className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-gray-50 font-medium"
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-[10px] font-medium text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
               >
                 <option value="">Tất cả Nhà cung cấp</option>
                 <option value="VINAMILK">VINAMILK</option>
@@ -582,12 +601,12 @@ export default function EInvoiceGatewayPage() {
 
             {/* Quick Action Toolbar for Candidates */}
             {candidateOrders.length > 0 && (
-              <div className="bg-slate-50 px-3.5 py-2 border-b border-gray-200 flex items-center justify-between text-xs">
+              <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-3 py-2 text-[10px]">
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={toggleSelectAllCandidateOrders}
-                    className="font-medium text-sky-700 hover:text-sky-900 hover:underline"
+                    className="font-semibold text-sky-700 hover:text-sky-900"
                   >
                     {selectedOrders.length === candidateOrders.length
                       ? "Bỏ chọn tất cả"
@@ -627,7 +646,7 @@ export default function EInvoiceGatewayPage() {
                   return (
                     <label
                       key={ord.order_number}
-                      className={`flex items-start gap-3 p-3.5 cursor-pointer transition-colors ${
+                      className={`flex cursor-pointer items-start gap-2.5 border-b border-slate-100 px-3 py-2 transition-colors ${
                         checked ? "bg-sky-50/70" : "hover:bg-gray-50"
                       }`}
                     >
@@ -635,15 +654,15 @@ export default function EInvoiceGatewayPage() {
                         type="checkbox"
                         checked={checked}
                         onChange={() => toggleOrderSelection(ord.order_number)}
-                        className="mt-1 h-4 w-4 rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                        className="mt-0.5 h-4 w-4 rounded border-gray-300 text-sky-600 focus:ring-sky-500"
                       />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-1.5">
-                            <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-bold text-[10px]">
+                            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold text-slate-700">
                               {ord.supplier_code}
                             </span>
-                            <span className="font-mono font-bold text-sm text-gray-900">
+                            <span className="font-mono text-[11px] font-bold text-slate-800">
                               {ord.order_number}
                             </span>
                           </div>
@@ -683,25 +702,24 @@ export default function EInvoiceGatewayPage() {
           </div>
 
           {/* Cột phải: Bản Xem Trước Form Hóa Đơn Động (Dynamic Form Preview) */}
-          <div className="xl:col-span-7 space-y-4">
+          <div className="space-y-3 xl:col-span-7">
             {previewDocs.length === 0 ? (
-              <div className="bg-white rounded-xl border border-dashed border-gray-300 p-12 text-center space-y-2">
-                <Receipt size={36} className="mx-auto text-gray-300" />
-                <h3 className="text-base font-bold text-gray-800">
-                  Xem trước Form Hóa Đơn Điện Tử Động
+              <div className="min-h-72 border border-dashed border-slate-300 bg-white px-6 py-12 text-center">
+                <Receipt size={32} className="mx-auto text-slate-300" />
+                <h3 className="mt-2 text-sm font-bold text-slate-800">
+                  Xem trước hóa đơn điện tử
                 </h3>
-                <p className="text-xs text-gray-500 max-w-md mx-auto">
-                  Hãy tích chọn ít nhất 1 đơn hàng ở danh sách bên trái. Hệ thống sẽ tự động áp dụng mẫu Form của{" "}
-                  <strong>{currentConfig?.provider || "NPP"}</strong> (gộp/tách đơn, xử lý hàng KM, thuế suất) để hiển thị bản xem trước.
+                <p className="mx-auto mt-1 max-w-md text-[11px] leading-relaxed text-slate-500">
+                  Chọn ít nhất một đơn ở danh sách bên trái để áp dụng mẫu <strong>{currentConfig?.provider || "NPP"}</strong> và xem trước thông tin bán hàng, thuế và người mua.
                 </p>
               </div>
             ) : (
               <>
                 {/* Khung tùy biến nhanh thông tin người mua */}
-                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-gray-700 uppercase">
-                      Tùy chỉnh nhanh thông tin Người Mua trên Form (Nếu khách yêu cầu đổi MST/Địa chỉ)
+                <div className="space-y-2 border border-slate-300 bg-white p-3 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-sky-100 pb-2">
+                    <span className="text-[10px] font-bold uppercase text-sky-800">
+                      Thông tin người mua
                     </span>
                     <button
                       onClick={() => setShowPayloadJson(!showPayloadJson)}
@@ -718,7 +736,7 @@ export default function EInvoiceGatewayPage() {
                         setBuyerOverride({ ...buyerOverride, buyer_name: e.target.value })
                       }
                       placeholder="Đổi tên người mua..."
-                      className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs"
+                      className="rounded border border-slate-300 px-2 py-1 text-xs focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
                     />
                     <input
                       value={buyerOverride.buyer_tax_code}
@@ -726,7 +744,7 @@ export default function EInvoiceGatewayPage() {
                         setBuyerOverride({ ...buyerOverride, buyer_tax_code: e.target.value })
                       }
                       placeholder="Đổi Mã số thuế..."
-                      className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-mono"
+                      className="rounded border border-slate-300 px-2 py-1 text-xs font-mono focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
                     />
                     <input
                       value={buyerOverride.buyer_address}
@@ -734,14 +752,14 @@ export default function EInvoiceGatewayPage() {
                         setBuyerOverride({ ...buyerOverride, buyer_address: e.target.value })
                       }
                       placeholder="Đổi địa chỉ xuất HĐ..."
-                      className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs"
+                      className="rounded border border-slate-300 px-2 py-1 text-xs focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
                     />
                     <select
                       value={buyerOverride.payment_method}
                       onChange={(e) =>
                         setBuyerOverride({ ...buyerOverride, payment_method: e.target.value })
                       }
-                      className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs bg-white"
+                      className="rounded border border-slate-300 px-2 py-1 text-xs bg-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
                     >
                       <option value="">HTTT theo cấu hình ({currentConfig?.default_payment_method})</option>
                       <option value="TM/CK">TM/CK</option>
@@ -757,12 +775,12 @@ export default function EInvoiceGatewayPage() {
                   return (
                     <div
                       key={idx}
-                      className="bg-white rounded-2xl border-2 shadow-md overflow-hidden"
+                      className="overflow-hidden border border-slate-400 bg-white shadow-md"
                       style={{ borderColor: themeColor }}
                     >
                       {/* Header Tờ Hóa Đơn */}
                       <div
-                        className="px-6 py-4 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                        className="flex flex-col justify-between gap-2 px-3 py-2.5 text-white sm:flex-row sm:items-center"
                         style={{ backgroundColor: themeColor }}
                       >
                         <div>
@@ -785,8 +803,8 @@ export default function EInvoiceGatewayPage() {
                       </div>
 
                       {/* Thông tin Đơn vị bán (NPP) & Người mua */}
-                      <div className="p-6 space-y-4 text-xs">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                      <div className="space-y-3 p-3 text-xs">
+                        <div className="grid grid-cols-1 gap-3 border border-slate-200 bg-slate-50 p-3 md:grid-cols-2">
                           <div className="space-y-1">
                             <p className="text-[10px] font-bold uppercase text-slate-400">
                               Đơn vị bán hàng (Nhà Phân Phối)

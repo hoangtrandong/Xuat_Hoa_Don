@@ -60,6 +60,7 @@ class DistributorCreateRequest(BaseModel):
     email: str | None = None
     address: str | None = None
     representative_name: str | None = None
+    company_allocation_mode: str = "BY_CUSTOMER"  # BY_CUSTOMER | BY_PRODUCT | HYBRID_CUSTOMER_FIRST | HYBRID_PRODUCT_FIRST
     status: str = "active"
     login_username: str | None = None
     login_password: str | None = None
@@ -473,6 +474,7 @@ def list_distributors(
             "email": d.email or "",
             "address": d.address or "",
             "representative_name": d.representative_name or "",
+            "company_allocation_mode": d.company_allocation_mode or "BY_CUSTOMER",
             "status": d.status,
             "login_username": user_by_dist[d.id].username if d.id in user_by_dist else d.code.lower().replace("-", "_"),
             "supplier_config_count": len(d.supplier_configs),
@@ -508,6 +510,7 @@ def create_distributor(
         email=(payload.email or "").strip() or None,
         address=(payload.address or "").strip() or None,
         representative_name=(payload.representative_name or "").strip() or None,
+        company_allocation_mode=(payload.company_allocation_mode or "BY_CUSTOMER").strip().upper(),
         status=payload.status or "active",
     )
     db.add(dist)
@@ -587,6 +590,7 @@ def update_distributor(
     dist.email = (payload.email or "").strip() or None
     dist.address = (payload.address or "").strip() or None
     dist.representative_name = (payload.representative_name or "").strip() or None
+    dist.company_allocation_mode = (payload.company_allocation_mode or "BY_CUSTOMER").strip().upper()
     dist.status = payload.status or "active"
     dist_user = _ensure_distributor_account(
         db,

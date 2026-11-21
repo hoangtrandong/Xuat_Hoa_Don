@@ -40,6 +40,7 @@ interface DistributorItem {
   email: string;
   address: string;
   representative_name: string;
+  company_allocation_mode?: string;
   status: string;
   login_username?: string;
   supplier_config_count: number;
@@ -351,6 +352,7 @@ export default function MultiTenantSupplierConfigsPage() {
     email: "",
     address: "",
     representative_name: "",
+    company_allocation_mode: "BY_CUSTOMER",
     status: "active",
     login_username: "",
     login_password: "",
@@ -960,6 +962,7 @@ export default function MultiTenantSupplierConfigsPage() {
                     email: "",
                     address: "",
                     representative_name: "",
+                    company_allocation_mode: "BY_CUSTOMER",
                     status: "active",
                     login_username: "",
                     login_password: "",
@@ -1477,6 +1480,7 @@ export default function MultiTenantSupplierConfigsPage() {
                           email: d.email,
                           address: d.address,
                           representative_name: d.representative_name,
+                          company_allocation_mode: d.company_allocation_mode || "BY_CUSTOMER",
                           status: d.status,
                           login_username: d.login_username || "",
                           login_password: "",
@@ -2223,6 +2227,27 @@ export default function MultiTenantSupplierConfigsPage() {
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
               />
             </div>
+          </div>
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3 space-y-1.5">
+            <label className="text-xs font-bold uppercase text-amber-900 block">
+              Cách phân bổ Công ty quản lý khi xuất Hóa đơn
+            </label>
+            <select
+              value={distForm.company_allocation_mode}
+              onChange={(e) =>
+                setDistForm({ ...distForm, company_allocation_mode: e.target.value })
+              }
+              className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
+            >
+              <option value="BY_CUSTOMER">Theo Mã Khách hàng (mặc định — KH thuộc Cty nào xuất Cty đó)</option>
+              <option value="BY_PRODUCT">Theo Mã Sản phẩm (tự tách đơn theo Cty quản lý của từng SKU)</option>
+              <option value="HYBRID_CUSTOMER_FIRST">Kết hợp: Ưu tiên Mã Khách hàng → Fallback theo Mã Sản phẩm</option>
+              <option value="HYBRID_PRODUCT_FIRST">Kết hợp: Ưu tiên Mã Sản phẩm → Fallback theo Mã Khách hàng</option>
+            </select>
+            <p className="text-[11px] text-amber-800">
+              Quy định cách hệ thống tự động chọn pháp nhân xuất hóa đơn &amp; tách đơn trong màn Tổng hợp DMS.
+            </p>
           </div>
 
           <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3.5 space-y-3">

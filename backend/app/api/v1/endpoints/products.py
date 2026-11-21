@@ -1,5 +1,6 @@
 import unicodedata
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
+from pydantic import BaseModel
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -577,6 +578,64 @@ def delete_product(product_id: int, db: Session = Depends(get_db)):
     if not success:
         raise HTTPException(status_code=404, detail="Product not found")
     return {"success": True, "message": "Product deleted"}
+
+
+class BulkAssignProductCompanyPayload(BaseModel):
+    product_ids: List[int]
+    company_id: int
+    set_as_primary: bool = True
+
+
+@router.post("/bulk-assign-company")
+def bulk_assign_product_company(
+    payload: BulkAssignProductCompanyPayload,
+    db: Session = Depends(get_db),
+):
+    """Gán hàng loạt Công ty quản lý chính cho danh sách SKU (phục vụ NPP quản lý theo Sản phẩm)."""
+    if not payload.product_ids:
+        raise HTTPException(status_code=400, detail="Chưa chọn sản phẩm nào.")
+    comp = db.get(CompanyModel, payload.company_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Công ty quản lý.")
+
+    existing_links = db.scalars(
+        select(ProductCompany).where(ProductCompany.product_id.in_(payload.product_ids))
+    ).all()
+    links_by_prod: dict[int, list[ProductCompany]] = {}
+    for link in existing_links:
+        links_by_prod.setdefault(link.product_id, []).append(link)
+
+    updated = 0
+    for pid in set(payload.product_ids):
+        prod_links = links_by_prod.get(pid, [])
+        if payload.set_as_primary:
+            for l in prod_links:
+                l.is_primary = False
+        matched = next((l for l in prod_links if l.company_id == comp.id), None)
+        if matched is None:
+            db.add(
+                ProductCompany(
+                    product_id=pid,
+                    company_id=comp.id,
+                    role="MANAGER",
+                    source="MANUAL",
+                    is_primary=payload.set_as_primary,
+                    status="active",
+                )
+            )
+        else:
+            if payload.set_as_primary:
+                matched.is_primary = True
+            matched.status = "active"
+        updated += 1
+
+    db.commit()
+    return {
+        "ok": True,
+        "updated": updated,
+        "company_id": comp.id,
+        "company_name": comp.short_name or comp.name,
+    }
 
 
 @router.post("/bulk-delete")

@@ -16,7 +16,7 @@ from xlutils.copy import copy as xl_copy
 
 from app.models.customer import Company, Customer
 from app.models.multi_tenant_invoice import Distributor, IssuedInvoice
-from app.models.product import Product, ProductCompany
+from app.models.product import DistributorProduct, Product, ProductCompany
 from app.models.vinamilk import VinamilkOrderSnapshot
 
 VIETTEL_TEMPLATE_PATH = (
@@ -79,6 +79,7 @@ def resolve_invoice_item_presentation(
     raw_code: str,
     raw_name: str,
     raw_unit: str,
+    distributor_invoice_name: str | None = None,
 ) -> dict[str, Any]:
     """Phân giải Mã hàng, Tên hàng, ĐVT xuất hóa đơn và Tỷ lệ quy đổi quy cách.
 
@@ -122,6 +123,10 @@ def resolve_invoice_item_presentation(
             resolved_unit = link.invoice_unit_name.strip()
         conv_num = max(1, int(link.conversion_num or 1))
         conv_den = max(1, int(link.conversion_den or 1))
+
+    manual_invoice_name = (distributor_invoice_name or "").strip()
+    if manual_invoice_name:
+        resolved_name = manual_invoice_name
 
     is_converted = (conv_num != conv_den) or (resolved_unit.strip().lower() != base_unit.strip().lower())
     return {
@@ -239,6 +244,14 @@ def consolidate_dms_orders_for_invoicing(
             prod_map[p.sku.strip().upper()] = p
         if p._npp_code:
             prod_map[p._npp_code.strip().upper()] = p
+
+    distributor_invoice_name_map: dict[str, str] = {}
+    distributor_products = db.scalars(select(DistributorProduct)).all()
+    for distributor_product in distributor_products:
+        sku = (distributor_product.distributor_sku or "").strip().upper()
+        invoice_name = (distributor_product.invoice_product_name or "").strip()
+        if sku:
+            distributor_invoice_name_map[sku] = invoice_name
 
     # Nạp sẵn bảng ProductCompany (kèm Company) 1 lần để phân giải Công ty quản lý & Quy đổi quy cách (zero N+1)
     pc_links = db.scalars(
@@ -378,14 +391,20 @@ def consolidate_dms_orders_for_invoicing(
         grp["order_numbers"].add(order_num)
         grp["suppliers"].add(sup)
 
-        # Kiểm tra điều kiện đăng ký Khách hàng & Công ty quản lý
+        # Kiểm tra điều kiện đăng ký Khách hàng & Công ty quản lý (theo chế độ phân bổ của NPP)
         if customer is None:
             grp["missing_customers"].add(cust_code_raw or f"(Đơn {order_num})")
         else:
-            if comp is None:
-                grp["missing_companies"].add(f"{customer.code} ({customer.name})")
             if not tax_code and not citizen_id:
                 grp["missing_tax_or_cccd"].add(f"{customer.code} ({customer.name})")
+
+        if comp is None:
+            if allocation_mode in ("BY_PRODUCT", "HYBRID_PRODUCT_FIRST"):
+                grp["missing_companies"].add(
+                    f"SKU {raw_prod_code or '(Trống)'} ({prod.name if prod else (snap.product_name or 'Chưa đặt tên')})"
+                )
+            elif customer is not None:
+                grp["missing_companies"].add(f"{customer.code} ({customer.name})")
 
         # Kiểm tra đăng ký Sản phẩm & cộng gộp dòng hàng theo quy tắc xuất HĐ của Công ty
         if prod is None:
@@ -401,6 +420,7 @@ def consolidate_dms_orders_for_invoicing(
             raw_code=raw_prod_code,
             raw_name=snap.product_name or "",
             raw_unit=str(raw.get("ĐVT") or raw.get("unit") or "THUNG").strip(),
+            distributor_invoice_name=distributor_invoice_name_map.get(raw_prod_code),
         )
         if pres["warning"]:
             grp["warnings"].add(pres["warning"])
@@ -507,8 +527,13 @@ def consolidate_dms_orders_for_invoicing(
         if grp["missing_companies"]:
             missing_flags.append("COMPANY")
             codes_str = ", ".join(sorted(grp["missing_companies"]))
+            mode_label = (
+                "theo Mã Sản phẩm"
+                if allocation_mode in ("BY_PRODUCT", "HYBRID_PRODUCT_FIRST")
+                else "theo Mã Khách hàng"
+            )
             validation_errors.append(
-                f"Chưa đăng ký / gán Công ty quản lý cho: {codes_str}"
+                f"Chưa gán Công ty quản lý ({mode_label}) cho: {codes_str}"
             )
         if grp["missing_tax_or_cccd"]:
             missing_flags.append("TAX_OR_CCCD")

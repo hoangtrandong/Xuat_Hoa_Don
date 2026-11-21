@@ -321,6 +321,8 @@ export default function ProductsPage() {
   const [companyOptions, setCompanyOptions] = useState<CompanyOption[]>([]);
   const [companyFilter, setCompanyFilter] = useState<string>("ALL");
   const [internalCodeFilter, setInternalCodeFilter] = useState<"ALL" | "MAPPED" | "UNMAPPED">("ALL");
+  const [bulkCompanyId, setBulkCompanyId] = useState<string>("");
+  const [bulkAssigningCompany, setBulkAssigningCompany] = useState(false);
   const [editCompanyConfigs, setEditCompanyConfigs] = useState<
     Array<{
       company_id: number;
@@ -1697,14 +1699,76 @@ export default function ProductsPage() {
 
             <div className="flex items-center gap-2">
               {selectedIds.size > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setBulkDeleteConfirm(true)}
-                  className="inline-flex items-center gap-1 rounded bg-red-700 hover:bg-red-800 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors"
-                >
-                  <Trash2 size={12} />
-                  Xóa đã chọn ({selectedIds.size})
-                </button>
+                <>
+                  {companyOptions.length > 0 && (
+                    <div className="inline-flex items-center gap-1 rounded border border-sky-300 bg-sky-50 px-1.5 py-0.5">
+                      <select
+                        value={bulkCompanyId}
+                        onChange={(e) => setBulkCompanyId(e.target.value)}
+                        className="rounded border border-sky-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-700 max-w-[170px] focus:outline-none"
+                      >
+                        <option value="">Gán Cty quản lý...</option>
+                        {companyOptions.map((c) => (
+                          <option key={c.id} value={String(c.id)}>
+                            {c.tax_code ? `[${c.tax_code}] ` : ""}
+                            {c.short_name || c.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={!bulkCompanyId || bulkAssigningCompany}
+                        onClick={async () => {
+                          if (!bulkCompanyId || selectedIds.size === 0) return;
+                          setBulkAssigningCompany(true);
+                          try {
+                            const resp = await apiFetch(`${API_URL}/products/bulk-assign-company`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                product_ids: Array.from(selectedIds),
+                                company_id: Number(bulkCompanyId),
+                                set_as_primary: true,
+                              }),
+                            });
+                            const data = (await resp.json().catch(() => ({}))) as {
+                              updated?: number;
+                              company_name?: string;
+                              detail?: string;
+                            };
+                            if (!resp.ok) throw new Error(data.detail || "Không thể gán công ty hàng loạt.");
+                            setBannerMsg({
+                              type: "success",
+                              text: `Đã gán Công ty quản lý "${data.company_name || ""}" cho ${data.updated ?? selectedIds.size} SKU.`,
+                            });
+                            setBulkCompanyId("");
+                            setSelectedIds(new Set());
+                            void loadCatalog(false);
+                          } catch (e) {
+                            setBannerMsg({
+                              type: "error",
+                              text: e instanceof Error ? e.message : "Lỗi khi gán công ty quản lý hàng loạt.",
+                            });
+                          } finally {
+                            setBulkAssigningCompany(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 rounded bg-sky-600 hover:bg-sky-700 disabled:bg-slate-300 px-2 py-0.5 text-[11px] font-semibold text-white transition-colors"
+                      >
+                        {bulkAssigningCompany ? <Loader2 size={11} className="animate-spin" /> : <Building2 size={11} />}
+                        Gán ({selectedIds.size})
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setBulkDeleteConfirm(true)}
+                    className="inline-flex items-center gap-1 rounded bg-red-700 hover:bg-red-800 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors"
+                  >
+                    <Trash2 size={12} />
+                    Xóa đã chọn ({selectedIds.size})
+                  </button>
+                </>
               )}
 
               {(searchQuery ||

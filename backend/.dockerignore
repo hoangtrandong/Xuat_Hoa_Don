@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.gdt_browser_profile/
+.env
+.env.local
+tests/
+_bench.py
+_check.py
+_indent_fix.py
+_schema_patch.py

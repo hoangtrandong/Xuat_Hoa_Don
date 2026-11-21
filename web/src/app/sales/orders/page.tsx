@@ -31,6 +31,7 @@ import CreateOrderForm from "@/components/sales/CreateOrderForm";
 import { formatCustomerCode, formatNumber, formatVND, formatVNDFull } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
+import { useDistributorContext } from "@/lib/distributor-context";
 import * as XLSX from "xlsx";
 
 function toInputDate(date: Date) {
@@ -492,6 +493,7 @@ function SplitQuantityInput({ quantity, boxesPerCarton, label, onChange }: {
 export default function SalesOrdersPage() {
   const router = useRouter();
   const authSession = useAuthSession();
+  const { effectiveDistributorId } = useDistributorContext();
   const { username: sessionUsername } = authSession;
   const [isAdminUser, setIsAdminUser] = useState(false);
   const effectiveIsAdmin = isAdminUser || sessionUsername.trim().toLowerCase() === "admin";
@@ -2054,7 +2056,8 @@ return Array.from(map.values());
       if (!distributorsResponse.ok) {
         throw new Error("Không thể tải danh sách Nhà phân phối để xác định nguồn dữ liệu.");
       }
-      const distributorId = authSession.distributorId ?? distributorList[0]?.id;
+      const distributorId =
+        effectiveDistributorId ?? authSession.distributorId ?? distributorList[0]?.id;
       if (!distributorId) {
         throw new Error("Không tìm thấy Nhà phân phối để tải cấu hình nguồn dữ liệu.");
       }

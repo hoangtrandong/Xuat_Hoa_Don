@@ -12,7 +12,7 @@ interface StatCardProps {
 
 export default function StatCard({ label, value, sub, color = "bg-sky-50 text-sky-600", icon }: StatCardProps) {
   return (
-    <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 flex items-center gap-4">
+    <div className="bg-white dark:bg-[#151d2b] rounded-xl border border-gray-100 dark:border-[#2a3547] shadow-sm p-4 flex items-center gap-4">
       {icon && (
         <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0", color)}>
           {icon}

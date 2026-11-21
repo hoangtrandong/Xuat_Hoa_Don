@@ -131,7 +131,7 @@ export default function DataTable<T>({
   };
 
   return (
-    <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+    <div className="bg-white dark:bg-[#151d2b] rounded-xl border border-gray-100 dark:border-[#2a3547] shadow-sm overflow-hidden">
       {(searchable || toolbar) && (
         <div className="flex items-center gap-3 p-4 border-b border-gray-100">
           {searchable && (

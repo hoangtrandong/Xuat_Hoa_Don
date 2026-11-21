@@ -40,7 +40,7 @@ export default function Drawer({
       <div className="fixed inset-0 z-50">
         <div className="absolute inset-0 bg-black/40" onClick={onClose} />
         <div
-          className={`absolute right-0 top-0 h-full w-full ${widthClass} bg-white shadow-xl flex flex-col`}
+          className={`absolute right-0 top-0 h-full w-full ${widthClass} bg-white dark:bg-[#151d2b] shadow-xl flex flex-col`}
           style={{ animation: "slideInRight 0.25s ease-out" }}
         >
           <header className="flex items-center justify-between bg-[#14263d] px-4 py-2.5 text-white flex-shrink-0">
@@ -75,7 +75,7 @@ export default function Drawer({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`relative z-10 flex flex-col w-full ${widthClass} max-h-[94vh] overflow-hidden rounded-lg bg-white shadow-2xl border border-slate-400`}
+        className={`relative z-10 flex flex-col w-full ${widthClass} max-h-[94vh] overflow-hidden rounded-lg bg-white dark:bg-[#151d2b] shadow-2xl border border-slate-400 dark:border-[#36445a]`}
       >
         <header className="flex items-center justify-between bg-[#14263d] px-3.5 py-2.5 text-white flex-shrink-0">
           <div className="flex items-center gap-2 min-w-0">

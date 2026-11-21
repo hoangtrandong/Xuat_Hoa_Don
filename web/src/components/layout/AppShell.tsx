@@ -1,11 +1,12 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { CheckCircle2, Loader2, LockKeyhole } from "lucide-react";
+import { CheckCircle2, Loader2, LockKeyhole, Moon, Sun } from "lucide-react";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
 import GlobalTaskProgressBar from "@/components/layout/GlobalTaskProgressBar";
 import { DistributorProvider } from "@/lib/distributor-context";
+import { useTheme } from "@/lib/theme";
 import { API_URL, apiFetch } from "@/lib/api";
 import {
   AUTH_EXPIRED_EVENT,
@@ -19,6 +20,7 @@ const inputCls =
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const session = useAuthSession();
+  const { resolvedTheme, toggleTheme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [companyCode, setCompanyCode] = useState("");
   const [loginUsername, setLoginUsername] = useState("");
@@ -143,6 +145,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                 Đăng Nhập Hệ Thống
               </span>
             </div>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="rounded p-1.5 text-slate-300 hover:bg-white/10 hover:text-white"
+              aria-label={resolvedTheme === "dark" ? "Chuyển sang giao diện sáng" : "Chuyển sang giao diện tối"}
+              title={resolvedTheme === "dark" ? "Giao diện sáng" : "Giao diện tối"}
+            >
+              {resolvedTheme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
           </div>
 
           <form onSubmit={handleLogin}>
@@ -234,7 +245,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <DistributorProvider>
-      <div className="flex h-screen overflow-hidden bg-gray-100">
+      <div className="flex h-screen overflow-hidden bg-gray-100 dark:bg-[#0b1020]">
         <Sidebar mobileOpen={mobileOpen} onMobileClose={() => setMobileOpen(false)} />
         <div className="flex flex-col flex-1 overflow-hidden">
           <Header

@@ -115,7 +115,7 @@ export default function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   const sidebarContent = (
     <div
       className={cn(
-        "flex flex-col h-full bg-white border-r border-gray-200 transition-all duration-300",
+        "flex flex-col h-full bg-white dark:bg-[#101725] border-r border-gray-200 dark:border-[#2a3547] transition-all duration-300",
         collapsed ? "w-16" : "w-60"
       )}
     >

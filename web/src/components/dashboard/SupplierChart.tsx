@@ -72,7 +72,7 @@ export default function SupplierChart({ data }: SupplierChartProps) {
   const drillData = drilldownSupplier ? drilldownData[drilldownSupplier] : null;
 
   return (
-    <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
+    <div className="bg-white dark:bg-[#151d2b] rounded-xl border border-gray-100 dark:border-[#2a3547] shadow-sm p-5">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           {drilldownSupplier && (

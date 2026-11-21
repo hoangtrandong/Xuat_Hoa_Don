@@ -10,6 +10,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { formatVND } from "@/lib/format";
+import { useTheme } from "@/lib/theme";
 
 interface RevenuePoint {
   label: string;
@@ -38,8 +39,12 @@ function CustomTooltip({ active, payload, label }: {
 }
 
 export default function RevenueChart({ data, title }: RevenueChartProps) {
+  const { resolvedTheme } = useTheme();
+  const chartText = resolvedTheme === "dark" ? "#94a3b8" : "#9ca3af";
+  const gridColor = resolvedTheme === "dark" ? "#334155" : "#f3f4f6";
+
   return (
-    <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
+    <div className="bg-white dark:bg-[#151d2b] rounded-xl border border-gray-100 dark:border-[#2a3547] shadow-sm p-5">
       <h3 className="text-sm font-semibold text-gray-700 mb-4">{title}</h3>
       <ResponsiveContainer width="100%" height={200}>
         <AreaChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
@@ -49,16 +54,16 @@ export default function RevenueChart({ data, title }: RevenueChartProps) {
               <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+          <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
           <XAxis
             dataKey="label"
-            tick={{ fontSize: 12, fill: "#9ca3af" }}
+            tick={{ fontSize: 12, fill: chartText }}
             axisLine={false}
             tickLine={false}
           />
           <YAxis
             tickFormatter={(v) => formatVND(v)}
-            tick={{ fontSize: 11, fill: "#9ca3af" }}
+            tick={{ fontSize: 11, fill: chartText }}
             axisLine={false}
             tickLine={false}
             width={70}

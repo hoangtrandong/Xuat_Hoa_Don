@@ -1,7 +1,8 @@
 "use client";
 
-import { Bell, Search, Menu as MenuIcon, LogOut, Building2, ShieldCheck } from "lucide-react";
+import { Bell, Search, Menu as MenuIcon, LogOut, Building2, ShieldCheck, Moon, Sun } from "lucide-react";
 import { useDistributorContext } from "@/lib/distributor-context";
+import { useTheme } from "@/lib/theme";
 
 interface HeaderProps {
   onMobileMenuOpen: () => void;
@@ -29,9 +30,10 @@ export default function Header({
     effectiveDistributorId,
     setSelectedDistributorId,
   } = useDistributorContext();
+  const { resolvedTheme, toggleTheme } = useTheme();
 
   return (
-    <header className="sticky top-0 z-30 h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 lg:px-6 gap-3">
+    <header className="sticky top-0 z-30 h-16 bg-white dark:bg-[#101725] border-b border-gray-200 dark:border-[#2a3547] flex items-center justify-between px-4 lg:px-6 gap-3">
       {/* Left: Mobile menu + Active NPP Badge / Switcher + Search */}
       <div className="flex items-center gap-3 min-w-0">
         <button
@@ -98,6 +100,15 @@ export default function Header({
 
       {/* Right: Notifications + User */}
       <div className="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className="p-2 rounded-lg hover:bg-gray-100 text-gray-500"
+          aria-label={resolvedTheme === "dark" ? "Chuyển sang giao diện sáng" : "Chuyển sang giao diện tối"}
+          title={resolvedTheme === "dark" ? "Giao diện sáng" : "Giao diện tối"}
+        >
+          {resolvedTheme === "dark" ? <Sun size={19} /> : <Moon size={19} />}
+        </button>
         <button className="relative p-2 rounded-lg hover:bg-gray-100 text-gray-500">
           <Bell size={19} />
           <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />

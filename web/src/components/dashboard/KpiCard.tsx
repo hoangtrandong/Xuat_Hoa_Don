@@ -29,7 +29,7 @@ export default function KpiCard({
     unit === "VND" ? formatVND(value) : value.toLocaleString("vi-VN");
 
   return (
-    <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
+    <div className="bg-white dark:bg-[#151d2b] rounded-xl p-5 border border-gray-100 dark:border-[#2a3547] shadow-sm hover:shadow-md transition-shadow">
       <div className="flex items-start justify-between">
         <div>
           <p className="text-sm text-gray-500 mb-1">{label}</p>

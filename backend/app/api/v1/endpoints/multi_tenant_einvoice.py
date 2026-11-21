@@ -707,9 +707,18 @@ def delete_distributor(
     dist = db.get(Distributor, distributor_id)
     if dist is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy Nhà phân phối.")
+    # Xóa luôn các tài khoản đăng nhập gắn riêng với Nhà phân phối này (không xóa tài khoản đang đăng nhập / Super Admin)
+    scoped_users = db.scalars(
+        select(User).where(User.distributor_id == distributor_id, User.id != current_user.id)
+    ).all()
+    deleted_users = 0
+    for u in scoped_users:
+        if not is_super_admin_user(u):
+            db.delete(u)
+            deleted_users += 1
     db.delete(dist)
     db.commit()
-    return {"deleted": True, "id": distributor_id}
+    return {"deleted": True, "id": distributor_id, "deleted_users": deleted_users}
 
 
 @router.get("/supplier-configs")

@@ -318,6 +318,7 @@ export default function MultiTenantSupplierConfigsPage() {
   const authSession = useAuthSession();
   const {
     effectiveDistributorId,
+    setSelectedDistributorId: setGlobalDistributorId,
     refreshDistributors,
   } = useDistributorContext();
   const isNppScoped = Boolean(authSession.distributorId);
@@ -519,6 +520,7 @@ export default function MultiTenantSupplierConfigsPage() {
   const excelInputRef = useRef<HTMLInputElement>(null);
   const [uploadingSupId, setUploadingSupId] = useState<number | null>(null);
   const [deletingSupId, setDeletingSupId] = useState<number | null>(null);
+  const [deletingDistId, setDeletingDistId] = useState<number | null>(null);
 
   const loadAll = useCallback(async (distId?: number | null) => {
     setLoading(true);
@@ -585,6 +587,41 @@ export default function MultiTenantSupplierConfigsPage() {
           : prev.distributor_code,
       field_mapping: { ...((preset.field_mapping as Record<string, string>) || {}) },
     }));
+  }
+
+  async function deleteDistributor(dist: DistributorItem) {
+    const accountHint = dist.login_username ? ` và tài khoản đăng nhập @${dist.login_username}` : "";
+    if (
+      !window.confirm(
+        `Bạn có chắc muốn xóa Nhà phân phối [${dist.code}] ${dist.name}${accountHint}?\n\nLưu ý: Các cấu hình nguồn NCC, mẫu HĐĐT và tài khoản CQT thuộc NPP này cũng sẽ bị xóa.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingDistId(dist.id);
+    setError("");
+    setMessage("");
+    try {
+      const res = await apiFetch(`${API_URL}/einvoice/distributors/${dist.id}`, {
+        method: "DELETE",
+      });
+      const data = (await res.json().catch(() => ({}))) as { detail?: string; deleted_users?: number };
+      if (!res.ok) throw new Error(data.detail || "Không thể xóa Nhà phân phối.");
+      if (effectiveDistributorId === dist.id) {
+        setGlobalDistributorId(null);
+      }
+      refreshDistributors();
+      setMessage(
+        `Đã xóa Nhà phân phối [${dist.code}] ${dist.name}${
+          data.deleted_users ? ` (kèm ${data.deleted_users} tài khoản đăng nhập)` : ""
+        }.`,
+      );
+      await loadAll(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Lỗi khi xóa Nhà phân phối.");
+    } finally {
+      setDeletingDistId(null);
+    }
   }
 
   async function saveDistributor() {
@@ -1450,6 +1487,16 @@ export default function MultiTenantSupplierConfigsPage() {
                     >
                       Sửa / Tài khoản
                     </button>
+                    {!isNppScoped && (
+                      <button
+                        type="button"
+                        disabled={deletingDistId === d.id}
+                        onClick={() => void deleteDistributor(d)}
+                        className="text-red-600 hover:underline text-xs font-semibold disabled:opacity-50"
+                      >
+                        {deletingDistId === d.id ? "Đang xóa..." : "Xóa"}
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

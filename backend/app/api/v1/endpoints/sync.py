@@ -1979,12 +1979,43 @@ def list_local_vinamilk_orders(
             func.upper(VinamilkOrderSnapshot.performed_by) == effective_dist_code,
             func.upper(payload_dist_code) == effective_dist_code,
         ]
-        if user_dist_id == 1:
+        # Bao gồm các đơn có processing_status = 'NCC:<SUPPLIER>' thuộc duy nhất NPP này (VD: NCC:NAZZY -> NPP-MAIGOLD)
+        all_dist_rows = db.scalars(select(Distributor)).all()
+        dist_code_by_id = {
+            d.id: (d.code or "").strip().upper()
+            for d in all_dist_rows
+            if (d.code or "").strip()
+        }
+        target_dist_obj = next(
+            (d for d in all_dist_rows if (d.code or "").strip().upper() == effective_dist_code),
+            None,
+        )
+        sup_to_dists: dict[str, set[str]] = defaultdict(set)
+        for cfg in db.scalars(select(DistributorSupplierConfig)).all():
+            d_code = dist_code_by_id.get(cfg.distributor_id)
+            if d_code and cfg.supplier_code:
+                sup_to_dists[cfg.supplier_code.strip().upper()].add(d_code)
+        exclusive_ncc_statuses = [
+            f"NCC:{sup_code}"
+            for sup_code, d_codes in sup_to_dists.items()
+            if d_codes == {effective_dist_code}
+        ]
+        if exclusive_ncc_statuses:
+            dist_conditions.append(
+                func.upper(VinamilkOrderSnapshot.processing_status).in_(exclusive_ncc_statuses)
+            )
+        is_default_legacy_dist = (
+            user_dist_id == 1
+            or effective_dist_code == "NPP-MAIGOLD"
+            or (target_dist_obj is not None and target_dist_obj.id == 1)
+        )
+        if is_default_legacy_dist:
             dist_conditions.append(
                 and_(
                     or_(
                         VinamilkOrderSnapshot.performed_by.is_(None),
                         VinamilkOrderSnapshot.performed_by == "",
+                        func.lower(VinamilkOrderSnapshot.performed_by) == "hệ thống",
                     ),
                     or_(payload_dist_code.is_(None), payload_dist_code == ""),
                 )

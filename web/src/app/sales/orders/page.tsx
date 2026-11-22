@@ -3130,7 +3130,7 @@ return Array.from(map.values());
 
   async function downloadExcel() {
     try {
-    const lines = (await loadOrderLines()).filter(matchesFilters);
+    const lines = (await loadOrderLines(undefined, activeDistributorCode || undefined)).filter(matchesFilters);
     if (lines.length === 0) {
       setRemoteError("Không có dòng sản phẩm phù hợp để xuất Excel.");
       return;

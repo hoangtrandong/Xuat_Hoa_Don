@@ -259,6 +259,32 @@
   background-color: rgba(56, 189, 248, 0.055);
 }
 
+.dark .invoice-consolidation-table thead {
+  background-color: #1a2434;
+  color: #c1cbd8;
+}
+
+.dark .invoice-consolidation-table .invoice-consolidation-group-row {
+  background-color: #151d2b;
+  color: #d5deea;
+}
+
+.dark .invoice-consolidation-table .invoice-consolidation-group-row.invoice-row-valid:nth-child(even) {
+  background-color: rgba(255, 255, 255, 0.025);
+}
+
+.dark .invoice-consolidation-table .invoice-consolidation-group-row.invoice-row-invalid {
+  background-color: rgba(248, 113, 113, 0.075);
+}
+
+.dark .invoice-consolidation-table .invoice-consolidation-group-row.invoice-row-valid:hover {
+  background-color: rgba(56, 189, 248, 0.075);
+}
+
+.dark .invoice-consolidation-table .invoice-consolidation-group-row.invoice-row-invalid:hover {
+  background-color: rgba(248, 113, 113, 0.13);
+}
+
 .dark tfoot {
   background-color: var(--dms-surface-raised);
   border-color: var(--dms-border);

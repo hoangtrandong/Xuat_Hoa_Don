@@ -445,21 +445,23 @@ def compute_tax_inventory_by_mst(
                 dmap = daily_deltas.setdefault((mst, sku), {})
                 dmap[tx_date] = dmap.get(tx_date, ZERO) - qty_dec
 
-    # 4. Chuẩn hóa tên sản phẩm & ánh xạ Mã sản phẩm nội bộ NPP (npp_code) từ bảng products + distributor_products
+    # 4. Chuẩn hóa tên sản phẩm & ánh xạ Mã sản phẩm nội bộ NPP (npp_code) + Hệ số quy đổi ĐVT (conversion_factor)
     all_skus = list({sku for _, sku in ledger.keys()})
-    # prod_info[sku] = (name, vat_rate, npp_code, npp_name, npp_unit, has_explicit_npp)
-    prod_info: dict[str, tuple[str, float | None, str, str, str, bool]] = {}
+    # prod_info[sku] = (name, vat_rate, npp_code, npp_name, npp_unit, has_explicit_npp, conv_factor)
+    prod_info: dict[str, tuple[str, float | None, str, str, str, bool, int]] = {}
     if all_skus:
-        dist_prod_by_sku: dict[str, tuple[str, str]] = {}
-        for d_sku, d_name, d_unit in db.execute(
+        dist_prod_by_sku: dict[str, tuple[str, str, str]] = {}
+        for d_sku, d_name, d_inv_name, d_unit in db.execute(
             select(
                 DistributorProduct.distributor_sku,
                 DistributorProduct.distributor_product_name,
+                DistributorProduct.invoice_product_name,
                 DistributorProduct.unit,
             )
         ).all():
             if d_sku:
                 dist_prod_by_sku[d_sku.strip().upper()] = (
+                    (d_inv_name or d_name or "").strip(),
                     (d_name or "").strip(),
                     (d_unit or "").strip(),
                 )
@@ -486,10 +488,15 @@ def compute_tax_inventory_by_mst(
                 p_sku_u = (p.sku or "").strip().upper()
                 resolved_npp = (p.npp_code or p_sku_u).strip().upper()
                 has_explicit = bool((p._npp_code or "").strip()) or (resolved_npp != p_sku_u)
-                dp_name, dp_unit = dist_prod_by_sku.get(resolved_npp, ("", ""))
-                npp_name = (p.internal_name or "").strip() or dp_name or p.npp_name or p.name
+                dp_inv_name, dp_name, dp_unit = dist_prod_by_sku.get(resolved_npp, ("", "", ""))
+                npp_name = dp_inv_name or (p.internal_name or "").strip() or dp_name or p.npp_name or p.name
                 npp_unit = (p.internal_unit or "").strip() or dp_unit or (p.unit.name if p.unit else "")
-                info_tuple = (p.name, p.vat_rate, resolved_npp, npp_name, npp_unit, has_explicit)
+                conv_factor = 1
+                if p.group_items:
+                    raw_cf = p.group_items[0].conversion_factor
+                    if raw_cf and int(raw_cf) > 0:
+                        conv_factor = int(raw_cf)
+                info_tuple = (p.name, p.vat_rate, resolved_npp, npp_name, npp_unit, has_explicit, conv_factor)
                 if p_sku_u:
                     prod_info[p_sku_u] = info_tuple
                 if resolved_npp and resolved_npp not in prod_info:
@@ -587,7 +594,7 @@ def compute_tax_inventory_by_mst(
     )
 
     if norm_group_by == "NPP_SKU":
-        # Gom toàn bộ tồn kho thuế theo Mã sản phẩm nội bộ NPP (không tách dòng theo từng MST ở bảng chính)
+        # Gom toàn bộ tồn kho thuế theo Mã sản phẩm nội bộ NPP (quy đổi theo conversion_factor về ĐVT chuẩn)
         npp_groups: dict[str, dict[str, Any]] = {}
         for (mst, sku), rec in ledger.items():
             if mst_filter and mst != mst_filter:
@@ -599,6 +606,8 @@ def compute_tax_inventory_by_mst(
             npp_name = (p_meta[3] if p_meta else "") or pname
             npp_unit = (p_meta[4] if p_meta else "") or rec["unit_name"]
             has_explicit_npp = p_meta[5] if p_meta else False
+            conv_factor = p_meta[6] if p_meta else 1
+            cf_dec = Decimal(str(conv_factor))
 
             m = computed_metrics[(mst, sku)]
             bal_dec = m["bal_dec"]
@@ -614,6 +623,9 @@ def compute_tax_inventory_by_mst(
                     "has_npp_code": has_explicit_npp,
                     "cqt_skus": set(),
                     "msts": set(),
+                    "vat_rates_seen": set(),
+                    "raw_units_seen": set(),
+                    "has_conversion": False,
                     "opening_qty": ZERO,
                     "opening_amount": ZERO,
                     "input_qty": ZERO,
@@ -632,6 +644,12 @@ def compute_tax_inventory_by_mst(
 
             grp["cqt_skus"].add(sku)
             grp["msts"].add(mst)
+            if pvat is not None:
+                grp["vat_rates_seen"].add(float(pvat))
+            if (rec["unit_name"] or "").strip():
+                grp["raw_units_seen"].add(rec["unit_name"].strip().lower())
+            if conv_factor > 1:
+                grp["has_conversion"] = True
             if grp["vat_rate"] is None and pvat is not None:
                 grp["vat_rate"] = pvat
             if not grp["product_name"] and npp_name:
@@ -639,19 +657,21 @@ def compute_tax_inventory_by_mst(
             if not grp["unit_name"] and npp_unit:
                 grp["unit_name"] = npp_unit
 
-            grp["opening_qty"] += m["opening_qty_dec"]
+            # Quy đổi số lượng về ĐVT chuẩn (Base UOM) bằng conversion_factor
+            grp["opening_qty"] += m["opening_qty_dec"] * cf_dec
             grp["opening_amount"] += m["opening_amt_dec"]
-            grp["input_qty"] += rec["input_qty"]
+            grp["input_qty"] += rec["input_qty"] * cf_dec
             grp["input_amount"] += rec["input_amount"]
-            grp["output_qty"] += rec["output_qty"]
+            grp["output_qty"] += rec["output_qty"] * cf_dec
             grp["output_amount"] += rec["output_amount"]
-            grp["official_output_qty"] += rec["official_output_qty"]
-            grp["draft_output_qty"] += rec["draft_output_qty"]
-            grp["adjustment_qty"] += rec["adjustment_qty"]
+            grp["official_output_qty"] += rec["official_output_qty"] * cf_dec
+            grp["draft_output_qty"] += rec["draft_output_qty"] * cf_dec
+            grp["adjustment_qty"] += rec["adjustment_qty"] * cf_dec
             if m["has_chrono_neg"]:
                 grp["has_chrono_neg"] = True
-            if grp["min_running_bal"] is None or m["min_running_bal"] < grp["min_running_bal"]:
-                grp["min_running_bal"] = m["min_running_bal"]
+            scaled_min = float(_to_dec(m["min_running_bal"]) * cf_dec)
+            if grp["min_running_bal"] is None or scaled_min < grp["min_running_bal"]:
+                grp["min_running_bal"] = scaled_min
             if child_status == "NEGATIVE":
                 grp["negative_mst_count"] += 1
 
@@ -662,6 +682,7 @@ def compute_tax_inventory_by_mst(
                     "sku": sku,
                     "product_name": pname,
                     "unit_name": rec["unit_name"],
+                    "conversion_factor": conv_factor,
                     "vat_rate": pvat,
                     "opening_as_of_date": rec["opening_as_of_date"].isoformat() if rec["opening_as_of_date"] else None,
                     "opening_qty": _q_qty(m["opening_qty_dec"]),
@@ -674,6 +695,7 @@ def compute_tax_inventory_by_mst(
                     "draft_output_qty": _q_qty(rec["draft_output_qty"]),
                     "adjustment_qty": _q_qty(rec["adjustment_qty"]),
                     "balance_qty": balance_lookup[(mst, sku)],
+                    "base_balance_qty": _q_qty(bal_dec * cf_dec),
                     "avg_unit_cost": _q_amt(m["avg_unit_cost_dec"]),
                     "avg_sale_price": _q_amt(m["avg_sale_price_dec"]),
                     "cogs_amount": _q_amt(m["cogs_amt_dec"]),
@@ -769,6 +791,8 @@ def compute_tax_inventory_by_mst(
             grp["mst_breakdown"].sort(
                 key=lambda b: (0 if b["status"] == "NEGATIVE" else 1, b["tax_code"], b["sku"])
             )
+            has_vat_mismatch = len(grp["vat_rates_seen"]) > 1
+            has_unit_mismatch = len(grp["raw_units_seen"]) > 1 and not grp["has_conversion"]
             rows.append(
                 {
                     "tax_code": "ALL",
@@ -779,6 +803,8 @@ def compute_tax_inventory_by_mst(
                     "cqt_skus": cqt_skus_sorted,
                     "mst_count": len(grp["msts"]),
                     "negative_mst_count": grp["negative_mst_count"],
+                    "has_vat_mismatch": has_vat_mismatch,
+                    "has_unit_mismatch": has_unit_mismatch,
                     "product_name": grp["product_name"],
                     "unit_name": grp["unit_name"],
                     "vat_rate": grp["vat_rate"],
@@ -1684,6 +1710,161 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
     widths = [6, 16, 26, 15, 34, 9, 8, 13, 18, 13, 18, 13, 18, 15, 18, 13, 20, 14, 30]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
+def export_sku_mapping_explanation_excel(
+    db: Session,
+    *,
+    distributor_id: int | None = None,
+    company_tax_code: str | None = None,
+) -> BytesIO:
+    """Xuất Bảng Giải Trình Ánh Xạ & Quy Đổi Mã Hàng, Tên Hàng Đầu Vào – Đầu Ra (.xlsx) phục vụ quyết toán thuế."""
+    data = compute_tax_inventory_by_mst(
+        db,
+        distributor_id=distributor_id,
+        company_tax_code=company_tax_code,
+        group_by="NPP_SKU",
+        page=1,
+        page_size=0,
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Giai_Trinh_Ma_Hang"
+
+    title_font = Font(bold=True, size=13, color="14263D")
+    sub_font = Font(italic=True, size=10, color="475569")
+    header_fill = PatternFill("solid", fgColor="14263D")
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    warn_font = Font(bold=True, color="B91C1C", size=10)
+    ok_font = Font(color="047857", size=10)
+    thin_border = Border(
+        left=Side(style="thin", color="CBD5E1"),
+        right=Side(style="thin", color="CBD5E1"),
+        top=Side(style="thin", color="CBD5E1"),
+        bottom=Side(style="thin", color="CBD5E1"),
+    )
+
+    ws.merge_cells("A1:L1")
+    ws["A1"] = "BẢNG GIẢI TRÌNH ÁNH XẠ & QUY ĐỔI MÃ HÀNG, TÊN HÀNG ĐẦU VÀO – ĐẦU RA PHỤC VỤ QUYẾT TOÁN THUẾ"
+    ws["A1"].font = title_font
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 24
+
+    ws.merge_cells("A2:L2")
+    ws["A2"] = (
+        f"Căn cứ NĐ 123/2020/NĐ-CP & TT 78/2021/TT-BTC | Ngày lập: {datetime.utcnow().strftime('%d/%m/%Y')}"
+        + (f" | MST lọc: {company_tax_code}" if company_tax_code else " | Toàn bộ MST trực thuộc NPP")
+    )
+    ws["A2"].font = sub_font
+    ws["A2"].alignment = Alignment(horizontal="center")
+
+    headers = [
+        "STT",
+        "Mã SP nội bộ NPP (Master SKU)",
+        "Tên xuất hóa đơn chuẩn (Đầu ra)",
+        "ĐVT chuẩn",
+        "Mã SKU gốc (HĐ mua CQT)",
+        "Tên hàng gốc (HĐ mua CQT)",
+        "ĐVT đầu vào CQT",
+        "Hệ số quy đổi",
+        "Thuế suất VAT",
+        "Các MST phát sinh",
+        "Kiểm tra tuân thủ",
+        "Lý do quy đổi / Ghi chú giải trình",
+    ]
+    ws.append([])  # row 3 blank
+    ws.append(headers)  # row 4
+    for col_idx in range(1, len(headers) + 1):
+        c = ws.cell(row=4, column=col_idx)
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = thin_border
+    ws.row_dimensions[4].height = 26
+
+    stt = 0
+    for grp in data.get("items", []):
+        npp_code = grp.get("npp_code") or grp["sku"]
+        npp_name = grp.get("product_name") or ""
+        npp_unit = grp.get("unit_name") or ""
+        has_vat_warn = bool(grp.get("has_vat_mismatch"))
+        has_unit_warn = bool(grp.get("has_unit_mismatch"))
+
+        # Gom breakdown theo từng mã SKU CQT gốc (tránh lặp nhiều dòng cùng SKU ở nhiều MST)
+        by_cqt_sku: dict[str, dict[str, Any]] = {}
+        for b in grp.get("mst_breakdown", []):
+            c_sku = b["sku"]
+            entry = by_cqt_sku.get(c_sku)
+            if entry is None:
+                entry = {
+                    "sku": c_sku,
+                    "product_name": b["product_name"],
+                    "unit_name": b["unit_name"],
+                    "conversion_factor": b.get("conversion_factor", 1),
+                    "vat_rate": b.get("vat_rate"),
+                    "msts": set(),
+                }
+                by_cqt_sku[c_sku] = entry
+            entry["msts"].add(b["tax_code"])
+
+        for c_sku, info in sorted(by_cqt_sku.items()):
+            stt += 1
+            cf = info["conversion_factor"]
+            vat_v = info["vat_rate"]
+            vat_str = "" if vat_v is None else ("KCT" if vat_v < 0 else f"{vat_v:g}%")
+            checks: list[str] = []
+            if has_vat_warn:
+                checks.append("CẢNH BÁO: Lệch thuế suất VAT trong nhóm!")
+            if has_unit_warn:
+                checks.append("CẢNH BÁO: Khác ĐVT nhưng chưa cài hệ số quy đổi!")
+            check_str = " | ".join(checks) if checks else "Hợp lệ"
+
+            if c_sku == npp_code and cf == 1:
+                reason = "Khớp trực tiếp mã & quy cách đầu vào CQT"
+            elif cf > 1:
+                reason = f"Cùng bản chất hàng hóa, quy đổi 1 {info['unit_name'] or 'ĐVT nhập'} = {cf} {npp_unit or 'ĐVT chuẩn'}"
+            else:
+                reason = "Cùng bản chất hàng hóa (khác mã NCC/phiên bản bao bì), quy về mã chuẩn NPP"
+
+            row_vals = [
+                stt,
+                npp_code,
+                npp_name,
+                npp_unit,
+                c_sku,
+                info["product_name"],
+                info["unit_name"],
+                cf,
+                vat_str,
+                ", ".join(sorted(info["msts"])),
+                check_str,
+                reason,
+            ]
+            ws.append(row_vals)
+            row_num = stt + 4
+            for c_i in range(1, len(headers) + 1):
+                cell = ws.cell(row=row_num, column=c_i)
+                cell.border = thin_border
+                if c_i in (1, 4, 7, 8, 9):
+                    cell.alignment = Alignment(horizontal="center")
+                if c_i == 11:
+                    cell.font = warn_font if checks else ok_font
+
+    # Phần chữ ký cuối bảng
+    sig_row = stt + 7
+    ws.cell(row=sig_row, column=2, value="NGƯỜI LẬP BIỂU").font = Font(bold=True, size=10)
+    ws.cell(row=sig_row, column=6, value="KẾ TOÁN TRƯỞNG").font = Font(bold=True, size=10)
+    ws.cell(row=sig_row, column=10, value="GIÁM ĐỐC (Ký, đóng dấu)").font = Font(bold=True, size=10)
+
+    widths = [6, 18, 34, 12, 18, 34, 14, 14, 13, 24, 28, 38]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=4, column=i).column_letter].width = w
 
     out = BytesIO()
     wb.save(out)

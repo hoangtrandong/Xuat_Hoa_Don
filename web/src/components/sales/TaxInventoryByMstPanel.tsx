@@ -32,6 +32,7 @@ interface MstBreakdownItem {
   sku: string;
   product_name: string;
   unit_name: string;
+  conversion_factor?: number;
   vat_rate: number | null;
   opening_as_of_date: string | null;
   opening_qty: number;
@@ -63,6 +64,8 @@ interface TaxInventoryRow {
   cqt_skus?: string[];
   mst_count?: number;
   negative_mst_count?: number;
+  has_vat_mismatch?: boolean;
+  has_unit_mismatch?: boolean;
   product_name: string;
   unit_name: string;
   vat_rate: number | null;
@@ -179,6 +182,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
   const [data, setData] = useState<TaxInventoryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportingMapping, setExportingMapping] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -328,6 +332,36 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
       setError(e instanceof Error ? e.message : "Lỗi xuất Excel.");
     } finally {
       setExporting(false);
+    }
+  }
+
+  async function handleExportSkuMapping() {
+    setExportingMapping(true);
+    setError("");
+    try {
+      const params = new URLSearchParams();
+      if (distributorId !== null) params.set("distributor_id", String(distributorId));
+      if (selectedMst) params.set("company_tax_code", selectedMst);
+      const res = await apiFetch(
+        `${API_URL}/einvoice/tax-inventory/sku-mapping-explanation/export?${params.toString()}`,
+      );
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(err.detail || "Không thể xuất Bảng giải trình ánh xạ mã hàng.");
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "Bang_Giai_Trinh_Anh_Xa_Ma_Hang_Thue.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Lỗi xuất Bảng giải trình mã hàng.");
+    } finally {
+      setExportingMapping(false);
     }
   }
 
@@ -594,6 +628,16 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
           >
             <Database size={12} />
             Tồn đầu kỳ (TK 156)
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleExportSkuMapping()}
+            disabled={exportingMapping || loading}
+            title="Xuất Excel Bảng Giải Trình Ánh Xạ & Quy Đổi Mã Hàng Đầu Vào – Đầu Ra phục vụ quyết toán thuế"
+            className="inline-flex items-center gap-1.5 rounded bg-violet-600 hover:bg-violet-700 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors disabled:opacity-60"
+          >
+            {exportingMapping ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+            Bảng giải trình mã hàng
           </button>
           <button
             type="button"
@@ -1003,6 +1047,20 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                           </span>
                         </div>
                       )}
+                      {groupBy === "NPP_SKU" && r.has_vat_mismatch && (
+                        <div>
+                          <span className="inline-flex items-center gap-1 rounded bg-red-100 border border-red-300 px-1.5 py-0.5 text-[9px] font-bold text-red-800">
+                            <AlertTriangle size={10} /> Lệch VAT trong nhóm!
+                          </span>
+                        </div>
+                      )}
+                      {groupBy === "NPP_SKU" && r.has_unit_mismatch && (
+                        <div>
+                          <span className="inline-flex items-center gap-1 rounded bg-amber-100 border border-amber-300 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">
+                            <AlertTriangle size={10} /> Khác ĐVT chưa quy đổi
+                          </span>
+                        </div>
+                      )}
                       {r.is_below_cost && (
                         <div>
                           <span
@@ -1182,7 +1240,12 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                           </div>
                         </td>
                         <td className="px-2.5 py-1.5 font-mono font-bold text-sky-800 whitespace-nowrap">
-                          {b.sku}
+                          <div>{b.sku}</div>
+                          {(b.conversion_factor ?? 1) > 1 && (
+                            <div className="text-[9px] font-semibold text-violet-700">
+                              Quy đổi: ×{b.conversion_factor} ({b.unit_name})
+                            </div>
+                          )}
                         </td>
                         <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
                           {formatNumber(b.opening_qty)}

@@ -2423,6 +2423,30 @@ def export_tax_inventory_by_mst(
     )
 
 
+@router.get("/tax-inventory/sku-mapping-explanation/export")
+def export_tax_sku_mapping_explanation(
+    distributor_id: int | None = Query(default=None),
+    company_tax_code: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Xuất file Excel Bảng Giải Trình Ánh Xạ & Quy Đổi Mã Hàng, Tên Hàng Đầu Vào – Đầu Ra phục vụ quyết toán thuế."""
+    from app.services.tax_inventory_service import export_sku_mapping_explanation_excel
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    buf = export_sku_mapping_explanation_excel(
+        db,
+        distributor_id=effective_dist_id,
+        company_tax_code=company_tax_code,
+    )
+    filename = f"Bang_Giai_Trinh_Anh_Xa_Ma_Hang_Thue_{datetime.utcnow().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 class OpeningBalanceUpsertIn(BaseModel):
     distributor_id: int | None = None
     tax_code: str

@@ -17,6 +17,7 @@ from app.services.tax_inventory_service import (
     build_opening_balance_template_excel,
     compute_tax_inventory_by_mst,
     create_adjustment_or_replacement_invoice,
+    export_sku_mapping_explanation_excel,
     export_tax_inventory_excel,
     get_tax_inventory_card_detail,
     import_opening_balances_excel,
@@ -713,4 +714,80 @@ def test_group_by_npp_sku_consolidates_across_msts_and_returns_mst_breakdown(db_
     # Kiểm tra xuất Excel ở chế độ NPP_SKU không lỗi
     excel_buf = export_tax_inventory_excel(res)
     assert len(excel_buf.getvalue()) > 1000
+
+
+def test_conversion_factor_uom_rollup_vat_mismatch_and_explanation_excel(db_session):
+    """Kiểm tra quy đổi ĐVT bằng ProductGroupItem.conversion_factor khi gom NPP_SKU, cảnh báo lệch VAT, và xuất Excel giải trình."""
+    from app.models.product import Product, ProductCategory, ProductGroup, ProductGroupItem, ProductUnit
+
+    dist, _, _ = _seed_distributor_and_companies(db_session)
+    cat = ProductCategory(code="SUA2", name="Sua 2")
+    u_hop = ProductUnit(code="HOP", name="Hộp")
+    u_thung = ProductUnit(code="THUNG2", name="Thùng")
+    db_session.add_all([cat, u_hop, u_thung])
+    db_session.flush()
+
+    p_hop = Product(sku="OT_HOP", name="Sua Ong Tho 380g Hop", category_id=cat.id, unit_id=u_hop.id, vat_rate=8.0)
+    p_hop.npp_code = "NPP-OT380"
+    p_thung = Product(sku="OT_THUNG", name="Sua Ong Tho 380g Thung 48", category_id=cat.id, unit_id=u_thung.id, vat_rate=10.0)
+    p_thung.npp_code = "NPP-OT380"
+    db_session.add_all([p_hop, p_thung])
+    db_session.flush()
+
+    grp = ProductGroup(name="Sua Ong Tho 380g", representative_product_id=p_hop.id)
+    db_session.add(grp)
+    db_session.flush()
+    db_session.add_all([
+        ProductGroupItem(product_group_id=grp.id, product_id=p_hop.id, conversion_factor=1),
+        ProductGroupItem(product_group_id=grp.id, product_id=p_thung.id, conversion_factor=48),
+    ])
+
+    # Nhập 2 Thùng (OT_THUNG, factor=48 -> 96 Hộp) + Nhập 4 Hộp (OT_HOP, factor=1 -> 4 Hộp) => Tổng = 100 Hộp!
+    db_session.add(
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0003001",
+            invoice_date=datetime(2026, 11, 5),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code="2900000001",
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="OT_THUNG",
+                    product_name="Sua Ong Tho 380g Thung 48",
+                    unit_name="Thùng",
+                    quantity=2,
+                    unit_price=960000,
+                    amount_before_tax=1_920_000,
+                ),
+                PurchaseInvoiceItem(
+                    line_number=2,
+                    item_nature=1,
+                    product_code="OT_HOP",
+                    product_name="Sua Ong Tho 380g Hop",
+                    unit_name="Hộp",
+                    quantity=4,
+                    unit_price=20000,
+                    amount_before_tax=80_000,
+                ),
+            ],
+        )
+    )
+    db_session.commit()
+
+    res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id, group_by="NPP_SKU")
+    assert len(res["items"]) == 1
+    row = res["items"][0]
+    assert row["npp_code"] == "NPP-OT380"
+    assert row["input_qty"] == 100.0  # 2*48 + 4*1 = 100 Hộp
+    assert row["avg_unit_cost"] == 20_000.0  # 2,000,000 / 100 Hộp
+    assert row["has_vat_mismatch"] is True  # 8% vs 10%
+
+    exp_buf = export_sku_mapping_explanation_excel(db_session, distributor_id=dist.id)
+    assert len(exp_buf.getvalue()) > 2000
 

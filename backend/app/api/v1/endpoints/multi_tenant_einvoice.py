@@ -1344,12 +1344,29 @@ def _run_sync_supplier_configs_worker(
                         message=f"[{idx}/{total_configs}] {source_name}: {stage_text}",
                     )
 
+                existing_order_numbers: set[str] | None = None
+                if (cfg.supplier_code or "").upper() == "NAZZY" or "nazzy" in (cfg.api_endpoint_url or "").lower():
+                    existing_order_numbers = {
+                        str(code).strip()
+                        for code in db.scalars(
+                            select(VinamilkOrderSnapshot.order_number)
+                            .where(
+                                VinamilkOrderSnapshot.processing_status == f"NCC:{cfg.supplier_code}",
+                                VinamilkOrderSnapshot.order_created_date >= target_from,
+                                VinamilkOrderSnapshot.order_created_date <= target_to,
+                            )
+                            .distinct()
+                        ).all()
+                        if code
+                    }
+
                 raw_rows = connector.fetch_raw_orders(
                     cfg,
                     target_from,
                     target_to,
                     allow_sample_fallback=False,
                     progress_cb=_on_source_progress,
+                    skip_existing_order_numbers=existing_order_numbers,
                 )
                 job_manager.update_item(
                     job_id,

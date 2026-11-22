@@ -998,6 +998,7 @@ def fetch_nazzy_orders(
     *,
     strict: bool = False,
     progress_cb: Any = None,
+    skip_existing_order_numbers: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Tự động đồng bộ đơn hàng từ DMS Nazzy (http://dms21.nazzy.vn) của NPP Mai Gold.
     Hỗ trợ tự động đăng nhập HTTP bằng Mã DN + Mã NV + Mật khẩu, phân trang, đa luồng
@@ -1066,7 +1067,8 @@ def fetch_nazzy_orders(
     )
     type_val = req_cfg.get("type", 4)
     status_val = req_cfg.get("status", 2)
-    page_size = int(req_cfg.get("pageSize", 50))
+    # Tối ưu pageSize tối thiểu 500 để giảm số vòng gọi phân trang (mỗi trang Nazzy mất ~15s)
+    page_size = max(500, int(req_cfg.get("pageSize") or 500))
 
     from_str = from_date.strftime("%Y/%m/%d")
     to_str = to_date.strftime("%Y/%m/%d")
@@ -1074,7 +1076,7 @@ def fetch_nazzy_orders(
     all_order_summaries: list[dict[str, Any]] = []
 
     http_limits = httpx.Limits(max_connections=16, max_keepalive_connections=16)
-    list_timeout = httpx.Timeout(20.0, connect=10.0)
+    list_timeout = httpx.Timeout(30.0, connect=10.0)
     detail_timeout = httpx.Timeout(12.0, connect=8.0)
 
     with httpx.Client(
@@ -1085,7 +1087,7 @@ def fetch_nazzy_orders(
     ) as client:
         current_page = 1
         while True:
-            _report(f"Đang tải danh sách đơn Nazzy trang {current_page}...", len(all_order_summaries))
+            _report(f"Đang tải danh sách đơn Nazzy trang {current_page} (tối đa {page_size} đơn/trang)...", len(all_order_summaries))
             params = {
                 "t": "GetBillsOrderGetListV5",
                 "type": str(type_val),
@@ -1127,7 +1129,7 @@ def fetch_nazzy_orders(
                 if strict:
                     raise RuntimeError("Dữ liệu trả về từ Nazzy không có danh sách đơn hàng hợp lệ.")
                 break
-            total_records = items_block.get("TotalRecord", 0)
+            total_records = int(items_block.get("TotalRecord") or 0)
             page_items = items_block.get("Items") or []
             if not page_items:
                 break
@@ -1137,7 +1139,9 @@ def fetch_nazzy_orders(
                 f"Đã tải danh sách {len(all_order_summaries)}/{total_records or len(all_order_summaries)} đơn Nazzy...",
                 len(all_order_summaries),
             )
-            if current_page * page_size >= total_records or len(page_items) < page_size:
+            if total_records > 0 and len(all_order_summaries) >= total_records:
+                break
+            if total_records == 0 and len(page_items) < page_size:
                 break
             current_page += 1
             if current_page > 30:
@@ -1146,7 +1150,35 @@ def fetch_nazzy_orders(
         if not all_order_summaries:
             return []
 
-        total_orders = len(all_order_summaries)
+        # Lọc bỏ các đơn lịch sử (trước ngày to_date) đã có sẵn trong CSDL để không tải lại chi tiết
+        summaries_to_fetch = all_order_summaries
+        if skip_existing_order_numbers:
+            filtered: list[dict[str, Any]] = []
+            skipped_count = 0
+            for ord_sum in all_order_summaries:
+                ord_code = str(ord_sum.get("Code") or "").strip()
+                raw_dt = ord_sum.get("BillsDate") or ord_sum.get("CreateDate")
+                ord_date = _to_date(raw_dt, fallback=to_date) if raw_dt else None
+                if (
+                    ord_code
+                    and ord_code in skip_existing_order_numbers
+                    and ord_date is not None
+                    and ord_date < to_date
+                ):
+                    skipped_count += 1
+                    continue
+                filtered.append(ord_sum)
+            summaries_to_fetch = filtered
+            if skipped_count > 0:
+                _report(
+                    f"Bỏ qua {skipped_count}/{len(all_order_summaries)} đơn lịch sử đã có — chỉ tải chi tiết {len(summaries_to_fetch)} đơn mới/gần nhất...",
+                    0,
+                )
+
+        if not summaries_to_fetch:
+            return []
+
+        total_orders = len(summaries_to_fetch)
         _report(f"Đang tải chi tiết 0/{total_orders} đơn Nazzy...", 0)
 
         # Dùng chung 1 httpx.Client Keep-Alive để bỏ TCP handshake lặp lại
@@ -1248,7 +1280,7 @@ def fetch_nazzy_orders(
         flat_results: list[dict[str, Any]] = []
         completed_orders = 0
         with ThreadPoolExecutor(max_workers=12) as executor:
-            futures = [executor.submit(_fetch_order_detail, item) for item in all_order_summaries]
+            futures = [executor.submit(_fetch_order_detail, item) for item in summaries_to_fetch]
             for f in as_completed(futures):
                 completed_orders += 1
                 res = f.result()
@@ -1274,6 +1306,7 @@ class RestApiSupplierConnector(BaseSupplierConnector):
         *,
         allow_sample_fallback: bool = True,
         progress_cb: Any = None,
+        skip_existing_order_numbers: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         is_vinamilk = (
             config.supplier_code.upper() == "VINAMILK"
@@ -1295,6 +1328,7 @@ class RestApiSupplierConnector(BaseSupplierConnector):
                 to_date,
                 strict=not allow_sample_fallback,
                 progress_cb=progress_cb,
+                skip_existing_order_numbers=skip_existing_order_numbers,
             )
         headers: dict[str, str] = {"Accept": "application/json"}
         secret = decrypt_supplier_secret(config.encrypted_secret)

@@ -251,7 +251,15 @@ def consolidate_dms_orders_for_invoicing(
             prod_map[p._npp_code.strip().upper()] = p
 
     distributor_invoice_profile_map: dict[tuple[str, int | None], tuple[str, str]] = {}
-    distributor_products = db.scalars(select(DistributorProduct)).all()
+    dp_stmt = select(DistributorProduct)
+    if distributor_id is not None:
+        dp_stmt = dp_stmt.where(
+            (DistributorProduct.distributor_id == distributor_id)
+            | (DistributorProduct.distributor_id.is_(None))
+        )
+    distributor_products = db.scalars(dp_stmt).all()
+    # Ưu tiên bản ghi khớp chính xác distributor_id hơn bản ghi legacy (distributor_id=None)
+    distributor_products.sort(key=lambda dp: 0 if dp.distributor_id is None else 1)
     for distributor_product in distributor_products:
         sku = (distributor_product.distributor_sku or "").strip().upper()
         invoice_code = (distributor_product.invoice_product_code or "").strip().upper()

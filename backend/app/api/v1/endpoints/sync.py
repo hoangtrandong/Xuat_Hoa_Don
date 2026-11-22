@@ -1983,6 +1983,7 @@ def list_local_vinamilk_orders(
     all_supplier_configs = db.scalars(select(DistributorSupplierConfig)).all()
     active_supplier_distributor_codes: dict[str, set[str]] = defaultdict(set)
     all_supplier_distributor_codes: dict[str, set[str]] = defaultdict(set)
+    latest_supplier_sync: datetime | None = None
     for config in all_supplier_configs:
         distributor = distributors_by_id.get(config.distributor_id)
         if distributor and config.supplier_code:
@@ -1991,6 +1992,12 @@ def list_local_vinamilk_orders(
             all_supplier_distributor_codes[sup_key].add(d_code_upper)
             if (config.status or "active").strip().lower() == "active":
                 active_supplier_distributor_codes[sup_key].add(d_code_upper)
+            if (
+                config.last_synced_at is not None
+                and (effective_dist_code is None or d_code_upper == effective_dist_code)
+                and (latest_supplier_sync is None or config.last_synced_at > latest_supplier_sync)
+            ):
+                latest_supplier_sync = config.last_synced_at
     supplier_distributor_codes: dict[str, set[str]] = {
         sup_key: (active_supplier_distributor_codes.get(sup_key) or d_codes)
         for sup_key, d_codes in all_supplier_distributor_codes.items()
@@ -2052,6 +2059,17 @@ def list_local_vinamilk_orders(
         VinamilkSyncRun.to_date >= from_date,
         VinamilkSyncRun.status.in_(("SUCCESS", "PARTIAL")),
     ).order_by(VinamilkSyncRun.finished_at.desc()))
+    last_synced_at = max(
+        (
+            timestamp
+            for timestamp in (
+                latest.finished_at if latest else None,
+                latest_supplier_sync,
+            )
+            if timestamp is not None
+        ),
+        default=None,
+    )
     allocations_by_snapshot: dict[int, list[VinamilkOrderAllocation]] = defaultdict(list)
     if source != "sync" and rows:
         allocations = db.scalars(
@@ -2475,7 +2493,7 @@ def list_local_vinamilk_orders(
         "skip": skip,
         "limit": limit,
         "source": source,
-        "last_synced_at": _iso_utc(latest.finished_at) if latest else None,
+        "last_synced_at": _iso_utc(last_synced_at),
     }
 
 

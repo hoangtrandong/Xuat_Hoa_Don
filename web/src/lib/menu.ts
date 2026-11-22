@@ -10,6 +10,28 @@ export interface MenuItem {
 export const menuItems: MenuItem[] = [
   { key: "dashboard", label: "Dashboard", icon: "LayoutDashboard", href: "/" },
   {
+    key: "tax-einvoice",
+    label: "Hóa đơn & Thuế",
+    icon: "ShieldCheck",
+    href: "/sales/daily-cockpit",
+    children: [
+      { key: "daily-cockpit", label: "Trạm Xuất HĐ Hàng Ngày", icon: "ClipboardCheck", href: "/sales/daily-cockpit" },
+      { key: "sales-invoices", label: "Xuất Hóa Đơn ĐT", icon: "Receipt", href: "/sales/invoices" },
+      { key: "sales-purchase-invoices", label: "Hóa Đơn Mua Vào (CQT)", icon: "PackagePlus", href: "/sales/purchase-invoices" },
+    ],
+  },
+  {
+    key: "sales",
+    label: "Đơn Hàng DMS",
+    icon: "ShoppingCart",
+    href: "/sales/orders",
+    children: [
+      { key: "sales-orders", label: "Đơn hàng DMS", icon: "FileText", href: "/sales/orders" },
+      { key: "sales-summary", label: "Tổng hợp đơn hàng", icon: "BarChart2", href: "/sales/summary" },
+      { key: "sales-returns", label: "Trả hàng", icon: "RotateCcw", href: "/sales/returns" },
+    ],
+  },
+  {
     key: "products",
     label: "Sản phẩm",
     icon: "Package",
@@ -34,17 +56,9 @@ export const menuItems: MenuItem[] = [
     ],
   },
   {
-    key: "sales",
-    label: "Đơn Hàng DMS",
-    icon: "ShoppingCart",
-    href: "/sales/orders",
-    children: [
-      { key: "sales-orders", label: "Đơn hàng DMS", icon: "FileText", href: "/sales/orders" },
-      { key: "sales-invoices", label: "Xuất Hóa Đơn ĐT", icon: "Receipt", href: "/sales/invoices" },
-      { key: "sales-purchase-invoices", label: "Hóa Đơn Mua Vào (CQT)", icon: "PackagePlus", href: "/sales/purchase-invoices" },
-      { key: "sales-supplier-configs", label: "Đa NPP & Nguồn NCC", icon: "Settings", href: "/sales/supplier-configs" },
-      { key: "sales-summary", label: "Tổng hợp đơn hàng", icon: "BarChart2", href: "/sales/summary" },
-      { key: "sales-returns", label: "Trả hàng", icon: "RotateCcw", href: "/sales/returns" },
-    ],
+    key: "system-config",
+    label: "Đa NPP & Nguồn NCC",
+    icon: "Settings",
+    href: "/sales/supplier-configs",
   },
 ];

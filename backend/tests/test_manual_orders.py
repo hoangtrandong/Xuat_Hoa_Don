@@ -102,6 +102,42 @@ def test_manual_order_shows_in_order_list_with_supplier(db):
     assert rows[0]["Tên NVQL"] == "Nguyễn An"
 
 
+def test_order_list_uses_supplier_sync_timestamp_without_legacy_sync_run(db):
+    distributor = Distributor(code="NPP-SYNC", name="NPP Sync")
+    other_distributor = Distributor(code="NPP-OTHER", name="NPP Other")
+    db.add_all([distributor, other_distributor])
+    db.flush()
+    db.add_all([
+        DistributorSupplierConfig(
+            distributor_id=distributor.id,
+            supplier_code="NAZZY",
+            supplier_name="Nazzy",
+            last_synced_at=datetime(2026, 11, 22, 12, 0),
+        ),
+        DistributorSupplierConfig(
+            distributor_id=other_distributor.id,
+            supplier_code="MASAN",
+            supplier_name="Masan",
+            last_synced_at=datetime(2026, 11, 22, 15, 0),
+        ),
+    ])
+    db.commit()
+
+    result = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4),
+        to_date=date(2026, 11, 4),
+        source="sync",
+        search=None,
+        status=None,
+        skip=0,
+        limit=100,
+        db=db,
+        distributor_code="NPP-SYNC",
+    )
+
+    assert result["last_synced_at"] == "2026-11-22T12:00:00+00:00"
+
+
 def test_supplier_synced_orders_are_visible_to_their_distributor(db):
     order_date = date(2026, 11, 4)
     db.add(VinamilkOrderSnapshot(

@@ -16,17 +16,18 @@ def _extract_raw_str(raw: dict[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
-def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
+def sync_customers_from_snapshots(
+    db: Session,
+    commit: bool = True,
+    distributor_id: int | None = None,
+) -> int:
     """Tự động khởi tạo Khách hàng trong bảng customers từ các đơn hàng đã đồng bộ (vinamilk_order_snapshots)
-    nếu mã khách hàng đó chưa tồn tại trong danh mục."""
+    nếu mã khách hàng đó chưa tồn tại trong danh mục của NPP tương ứng."""
     missing_snapshots = db.scalars(
         select(VinamilkOrderSnapshot)
         .where(
             VinamilkOrderSnapshot.customer_code.is_not(None),
             func.trim(VinamilkOrderSnapshot.customer_code) != "",
-            ~func.upper(func.trim(VinamilkOrderSnapshot.customer_code)).in_(
-                select(func.upper(func.trim(Customer.code))).where(Customer.code.is_not(None))
-            ),
         )
         .order_by(VinamilkOrderSnapshot.id.desc())
     ).all()
@@ -36,20 +37,15 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
 
     from app.models.multi_tenant_invoice import Distributor
 
-    default_mg_id = db.scalar(
-        select(Distributor.id)
-        .where(
-            or_(
-                func.upper(Distributor.code) == "NPP-MAIGOLD",
-                func.lower(Distributor.name).like("%mai gold%"),
-            )
-        )
-        .order_by(Distributor.id)
-    )
+    dist_id_by_code = {
+        (d.code or "").strip().upper(): d.id
+        for d in db.scalars(select(Distributor)).all()
+        if d.code
+    }
 
-    existing_upper = {
-        (code or "").strip().upper()
-        for code in db.scalars(select(Customer.code)).all()
+    existing_keys = {
+        (c_dist_id, (code or "").strip().upper())
+        for c_dist_id, code in db.execute(select(Customer.distributor_id, Customer.code)).all()
         if code
     }
     created_count = 0
@@ -59,12 +55,14 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
             continue
         clean_code = raw_code[:20]
         upper_code = clean_code.upper()
-        if upper_code in existing_upper:
-            continue
         if upper_code.startswith(("NVGH-", "NVBH-")) or upper_code == "NVBH":
             continue
 
         raw = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+        row_dist_code = _extract_raw_str(raw, ("Mã NPP", "distributorCode")).upper()
+        resolved_dist_id = distributor_id or dist_id_by_code.get(row_dist_code)
+        if (resolved_dist_id, upper_code) in existing_keys:
+            continue
         name = (
             (snap.customer_name or "").strip()
             or _extract_raw_str(raw, ("Tên KH", "customerName", "shopName"))
@@ -77,7 +75,7 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
         staff_name = _extract_raw_str(raw, ("Tên NVBH", "staffName", "salesStaffName"))[:160] or None
 
         new_cust = Customer(
-            distributor_id=default_mg_id,
+            distributor_id=resolved_dist_id,
             code=clean_code,
             name=name,
             type="RETAIL",
@@ -88,6 +86,7 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
             staff_code=staff_code,
             staff_name=staff_name,
         )
+        existing_keys.add((resolved_dist_id, upper_code))
         db.add(new_cust)
         if address:
             db.flush()
@@ -101,7 +100,6 @@ def sync_customers_from_snapshots(db: Session, commit: bool = True) -> int:
                     is_default=True,
                 )
             )
-        existing_upper.add(upper_code)
         created_count += 1
 
     if created_count > 0 and commit:

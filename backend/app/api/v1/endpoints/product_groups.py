@@ -8,8 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, joinedload
 
+from app.core.auth import (
+    ensure_entity_in_distributor_scope,
+    get_current_user,
+    resolve_distributor_scope,
+)
 from app.core.database import get_db
 from app.models.customer import Company
+from app.models.multi_tenant_invoice import Distributor
+from app.models.user import User
 from app.models.product import (
     Product, ProductCompany, ProductGroup, ProductGroupCompany, ProductGroupItem,
     DistributorProduct,
@@ -380,24 +387,34 @@ def list_product_companies(product_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/distributor-products", response_model=list[DistributorProductItem])
-def list_distributor_products(db: Session = Depends(get_db)):
-    """Danh sách mã sản phẩm NPP nội bộ (do người dùng upload / quản lý thủ công)."""
-    items = (
-        db.scalars(
-            select(DistributorProduct)
-            .options(joinedload(DistributorProduct.company))
-            .order_by(DistributorProduct.id.desc())
-        ).all()
+def list_distributor_products(
+    distributor_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Danh sách mã sản phẩm NPP nội bộ (cô lập theo Nhà phân phối)."""
+    scoped_dist_id = resolve_distributor_scope(current_user, distributor_id)
+    stmt = (
+        select(DistributorProduct)
+        .options(joinedload(DistributorProduct.company))
+        .order_by(DistributorProduct.id.desc())
     )
+    if scoped_dist_id is not None:
+        stmt = stmt.where(
+            (DistributorProduct.distributor_id == scoped_dist_id)
+            | (DistributorProduct.distributor_id.is_(None))
+        )
+    items = db.scalars(stmt).all()
     return [
         DistributorProductItem(
             id=item.id,
-            distributor_name=item.distributor_name or "Nhà Phân Phối Mai Gold",
+            distributor_id=item.distributor_id,
+            distributor_name=item.distributor_name or "",
             distributor_sku=item.distributor_sku,
             distributor_product_name=item.distributor_product_name,
             invoice_product_code=item.invoice_product_code,
             invoice_product_name=item.invoice_product_name,
-            supplier=item.supplier or "Vinamilk",
+            supplier=item.supplier or "",
             unit=item.unit or "HOP",
             company_id=item.company_id,
             company_code=item.company.code if item.company else None,
@@ -409,15 +426,24 @@ def list_distributor_products(db: Session = Depends(get_db)):
 
 
 @router.get("/products/company-links", response_model=list[ProductCompanyManagementView])
-def list_product_company_links(db: Session = Depends(get_db)):
-    """Lấy danh sách mã sản phẩm NPP nội bộ để hiển thị và chọn SKU trong dropdown."""
-    items = (
-        db.scalars(
-            select(DistributorProduct)
-            .options(joinedload(DistributorProduct.company))
-            .order_by(DistributorProduct.id.desc())
-        ).all()
+def list_product_company_links(
+    distributor_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Lấy danh sách mã sản phẩm NPP nội bộ (cô lập theo NPP) để hiển thị và chọn SKU trong dropdown."""
+    scoped_dist_id = resolve_distributor_scope(current_user, distributor_id)
+    stmt = (
+        select(DistributorProduct)
+        .options(joinedload(DistributorProduct.company))
+        .order_by(DistributorProduct.id.desc())
     )
+    if scoped_dist_id is not None:
+        stmt = stmt.where(
+            (DistributorProduct.distributor_id == scoped_dist_id)
+            | (DistributorProduct.distributor_id.is_(None))
+        )
+    items = db.scalars(stmt).all()
     all_products = db.scalars(select(Product)).all()
     prod_by_npp = {p.npp_code.strip().upper(): p for p in all_products if p.npp_code}
 
@@ -510,16 +536,34 @@ def map_distributor_sku(payload: DistributorSkuMappingPayload, db: Session = Dep
 
 
 @router.post("/distributor-products", response_model=DistributorProductItem)
-def create_distributor_product(payload: DistributorProductCreate, db: Session = Depends(get_db)):
-    """Thêm mới 1 dòng mã sản phẩm NPP nội bộ (cho phép cùng Mã SP NPP cho nhiều Công ty quản lý khác nhau)."""
+def create_distributor_product(
+    payload: DistributorProductCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Thêm mới 1 dòng mã sản phẩm NPP nội bộ (cô lập theo distributor_id và hỗ trợ nhiều Công ty QL)."""
+    scoped_dist_id = resolve_distributor_scope(current_user, payload.distributor_id)
     clean_sku = payload.distributor_sku.strip().upper()
     if not clean_sku or not payload.distributor_product_name.strip():
         raise HTTPException(status_code=400, detail="Mã SP NPP và Tên sản phẩm không được để trống.")
 
     target_company_id = payload.company_id if (payload.company_id and payload.company_id > 0) else None
 
-    # Kiểm tra trùng theo cặp (distributor_sku, company_id)
+    # Kiểm tra company_id nếu có (đồng thời kiểm tra quyền tenant và suy ra distributor_id)
+    if target_company_id is not None:
+        comp = db.get(Company, target_company_id)
+        if not comp:
+            raise HTTPException(status_code=400, detail="Công ty quản lý không tồn tại.")
+        ensure_entity_in_distributor_scope(current_user, comp.distributor_id)
+        if scoped_dist_id is None and comp.distributor_id is not None:
+            scoped_dist_id = comp.distributor_id
+
+    # Kiểm tra trùng theo bộ (distributor_id, distributor_sku, company_id)
     dup_stmt = select(DistributorProduct).where(DistributorProduct.distributor_sku == clean_sku)
+    if scoped_dist_id is not None:
+        dup_stmt = dup_stmt.where(DistributorProduct.distributor_id == scoped_dist_id)
+    else:
+        dup_stmt = dup_stmt.where(DistributorProduct.distributor_id.is_(None))
     if target_company_id is not None:
         dup_stmt = dup_stmt.where(DistributorProduct.company_id == target_company_id)
     else:
@@ -536,21 +580,22 @@ def create_distributor_product(payload: DistributorProductCreate, db: Session = 
             detail=f"Mã SP NPP '{clean_sku}' (chưa gán Công ty QL) đã tồn tại trong hệ thống.",
         )
 
-    # Kiểm tra company_id nếu có
-    if target_company_id is not None:
-        comp = db.get(Company, target_company_id)
-        if not comp:
-            raise HTTPException(status_code=400, detail="Công ty quản lý không tồn tại.")
+    resolved_dist_name = (payload.distributor_name or "").strip()
+    if not resolved_dist_name and scoped_dist_id is not None:
+        dist_obj = db.get(Distributor, scoped_dist_id)
+        if dist_obj:
+            resolved_dist_name = dist_obj.name
 
     clean_inv_code = (payload.invoice_product_code or "").strip().upper() or None
 
     new_prod = DistributorProduct(
-        distributor_name=payload.distributor_name or "Nhà Phân Phối Mai Gold",
+        distributor_id=scoped_dist_id,
+        distributor_name=resolved_dist_name,
         distributor_sku=clean_sku,
         distributor_product_name=payload.distributor_product_name.strip(),
         invoice_product_code=clean_inv_code,
         invoice_product_name=(payload.invoice_product_name or "").strip() or None,
-        supplier=payload.supplier or "Vinamilk",
+        supplier=(payload.supplier or "").strip(),
         unit=(payload.unit or "HOP").strip().upper(),
         company_id=target_company_id,
         status="active",
@@ -561,6 +606,7 @@ def create_distributor_product(payload: DistributorProductCreate, db: Session = 
 
     return DistributorProductItem(
         id=new_prod.id,
+        distributor_id=new_prod.distributor_id,
         distributor_name=new_prod.distributor_name,
         distributor_sku=new_prod.distributor_sku,
         distributor_product_name=new_prod.distributor_product_name,
@@ -576,7 +622,11 @@ def create_distributor_product(payload: DistributorProductCreate, db: Session = 
 
 
 @router.put("/distributor-products")
-def update_distributor_product(payload: DistributorProductUpdate, db: Session = Depends(get_db)):
+def update_distributor_product(
+    payload: DistributorProductUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Chỉnh sửa thông tin mã sản phẩm NPP nội bộ, Mã/Tên SP xuất hóa đơn & gán/gỡ công ty quản lý."""
     orig_sku = (payload.original_code or payload.distributor_sku).strip().upper()
     target_sku = payload.distributor_sku.strip().upper()
@@ -585,24 +635,41 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
     if payload.id:
         item = db.get(DistributorProduct, payload.id)
     if not item and orig_sku:
-        item = db.scalar(select(DistributorProduct).where(DistributorProduct.distributor_sku == orig_sku))
+        q = select(DistributorProduct).where(DistributorProduct.distributor_sku == orig_sku)
+        if current_user.distributor_id is not None:
+            q = q.where(DistributorProduct.distributor_id == current_user.distributor_id)
+        item = db.scalar(q)
     if not item and target_sku:
-        item = db.scalar(select(DistributorProduct).where(DistributorProduct.distributor_sku == target_sku))
+        q = select(DistributorProduct).where(DistributorProduct.distributor_sku == target_sku)
+        if current_user.distributor_id is not None:
+            q = q.where(DistributorProduct.distributor_id == current_user.distributor_id)
+        item = db.scalar(q)
 
     if not item:
         raise HTTPException(status_code=404, detail="Không tìm thấy mã sản phẩm NPP để cập nhật.")
 
-    # Xác định company_id đích trước khi kiểm tra trùng cặp (distributor_sku, company_id)
+    ensure_entity_in_distributor_scope(current_user, item.distributor_id)
+
+    # Xác định company_id đích trước khi kiểm tra trùng
     target_company_id: int | None = None
     if payload.company_id and payload.company_id > 0:
         comp = db.get(Company, payload.company_id)
         if comp:
+            ensure_entity_in_distributor_scope(current_user, comp.distributor_id)
             target_company_id = comp.id
+
+    target_dist_id = item.distributor_id
+    if target_dist_id is None and current_user.distributor_id is not None:
+        target_dist_id = current_user.distributor_id
 
     dup_stmt = select(DistributorProduct).where(
         DistributorProduct.distributor_sku == target_sku,
         DistributorProduct.id != item.id,
     )
+    if target_dist_id is not None:
+        dup_stmt = dup_stmt.where(DistributorProduct.distributor_id == target_dist_id)
+    else:
+        dup_stmt = dup_stmt.where(DistributorProduct.distributor_id.is_(None))
     if target_company_id is not None:
         dup_stmt = dup_stmt.where(DistributorProduct.company_id == target_company_id)
     else:
@@ -615,6 +682,7 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
         )
 
     old_sku = item.distributor_sku
+    item.distributor_id = target_dist_id
     item.distributor_sku = target_sku
 
     if payload.distributor_product_name.strip():
@@ -649,6 +717,7 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
         "success": True,
         "message": f"Đã cập nhật mã sản phẩm NPP '{item.distributor_sku}' thành công.",
         "id": item.id,
+        "distributor_id": item.distributor_id,
         "distributor_sku": item.distributor_sku,
         "distributor_product_name": item.distributor_product_name,
         "invoice_product_code": item.invoice_product_code,
@@ -660,8 +729,12 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
 
 
 @router.delete("/distributor-products/{id_or_code}")
-def delete_distributor_product(id_or_code: str, db: Session = Depends(get_db)):
-    """Xóa mã sản phẩm NPP nội bộ khỏi danh mục."""
+def delete_distributor_product(
+    id_or_code: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Xóa mã sản phẩm NPP nội bộ khỏi danh mục (có kiểm tra quyền tenant)."""
     clean_val = id_or_code.strip()
     if not clean_val:
         raise HTTPException(status_code=400, detail="Mã sản phẩm không hợp lệ.")
@@ -670,10 +743,15 @@ def delete_distributor_product(id_or_code: str, db: Session = Depends(get_db)):
     if clean_val.isdigit():
         item = db.get(DistributorProduct, int(clean_val))
     if not item:
-        item = db.scalar(select(DistributorProduct).where(DistributorProduct.distributor_sku == clean_val.upper()))
+        q = select(DistributorProduct).where(DistributorProduct.distributor_sku == clean_val.upper())
+        if current_user.distributor_id is not None:
+            q = q.where(DistributorProduct.distributor_id == current_user.distributor_id)
+        item = db.scalar(q)
 
     if not item:
         raise HTTPException(status_code=404, detail="Không tìm thấy mã sản phẩm NPP cần xóa.")
+
+    ensure_entity_in_distributor_scope(current_user, item.distributor_id)
 
     sku_to_remove = item.distributor_sku
     item_id = item.id
@@ -701,17 +779,27 @@ def delete_distributor_product(id_or_code: str, db: Session = Depends(get_db)):
 
 
 @router.post("/distributor-products/bulk-delete")
-def bulk_delete_distributor_products(payload: DistributorProductBulkDelete, db: Session = Depends(get_db)):
-    """Xóa hàng loạt nhiều mã SP NPP theo IDs hoặc Codes."""
+def bulk_delete_distributor_products(
+    payload: DistributorProductBulkDelete,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Xóa hàng loạt nhiều mã SP NPP theo IDs hoặc Codes (cô lập theo tenant)."""
     deleted_count = 0
     if payload.ids:
-        items = db.scalars(select(DistributorProduct).where(DistributorProduct.id.in_(payload.ids))).all()
+        stmt = select(DistributorProduct).where(DistributorProduct.id.in_(payload.ids))
+        if current_user.distributor_id is not None:
+            stmt = stmt.where(DistributorProduct.distributor_id == current_user.distributor_id)
+        items = db.scalars(stmt).all()
         for it in items:
             db.delete(it)
             deleted_count += 1
     elif payload.codes:
         clean_codes = [c.strip().upper() for c in payload.codes if c.strip()]
-        items = db.scalars(select(DistributorProduct).where(DistributorProduct.distributor_sku.in_(clean_codes))).all()
+        stmt = select(DistributorProduct).where(DistributorProduct.distributor_sku.in_(clean_codes))
+        if current_user.distributor_id is not None:
+            stmt = stmt.where(DistributorProduct.distributor_id == current_user.distributor_id)
+        items = db.scalars(stmt).all()
         for it in items:
             db.delete(it)
             deleted_count += 1
@@ -745,10 +833,10 @@ def download_distributor_product_template():
     ws.append(headers)
 
     sample_rows = [
-        [1, "Nhà Phân Phối Mai Gold", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "01TD03", "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML (CT01)", "Vinamilk", "CT01", "Công ty TNHH Phân Phối Mai Gold"],
-        [2, "Nhà Phân Phối Mai Gold", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "01TD03-B", "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML (CT02)", "Vinamilk", "CT02", "Công ty Cổ Phần Tiếp Vận Nam Việt"],
-        [3, "Nhà Phân Phối Mai Gold", "07KD12", "Sữa chua ăn lựu đỏ 100g", "07KD12", "SỮA CHUA ĂN VINAMILK 100G", "Vinamilk", "", ""],
-        [4, "Nhà Phân Phối Mai Gold", "01SX11", "Sữa dinh dưỡng Optimum Gold 110ml", "01SX11", "SỮA DINH DƯỠNG OPTIMUM GOLD 110ML", "Vinamilk", "", ""],
+        [1, "Nhà Phân Phối ABC", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "01TD03", "SỮA TƯƠI TIỆT TRÙNG 180ML (CT01)", "Vinamilk", "CT01", "Công ty TNHH Phân Phối A"],
+        [2, "Nhà Phân Phối ABC", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "01TD03-B", "SỮA TƯƠI TIỆT TRÙNG 180ML (CT02)", "Vinamilk", "CT02", "Công ty Cổ Phần Thương Mại B"],
+        [3, "Nhà Phân Phối ABC", "07KD12", "Sữa chua ăn lựu đỏ 100g", "07KD12", "SỮA CHUA ĂN 100G", "Vinamilk", "", ""],
+        [4, "Nhà Phân Phối ABC", "01SX11", "Sữa dinh dưỡng 110ml", "01SX11", "SỮA DINH DƯỠNG 110ML", "Vinamilk", "", ""],
     ]
     for row in sample_rows:
         ws.append(row)

@@ -18,8 +18,29 @@ class Settings(BaseSettings):
     DATABASE_URL: str | None = None
 
     SECRET_KEY: str = "change-me-in-production"
+    DATA_ENCRYPTION_KEY: str | None = None
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
     VINAMILK_SESSION_COOKIE: str = ""
+    ALLOWED_ORIGINS: str = (
+        "http://localhost:3000,http://localhost:3001,"
+        "http://127.0.0.1:3000,http://127.0.0.1:3001"
+    )
+    ALLOW_MOCK_EINVOICE: bool = False
+    ALLOW_MIGRATION_STAMP_FALLBACK: bool = False
+
+    @property
+    def cors_origins(self) -> list[str]:
+        origins = [
+            origin.strip().rstrip("/")
+            for origin in (self.ALLOWED_ORIGINS or "").split(",")
+            if origin.strip()
+        ]
+        return origins or [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+        ]
 
     @property
     def sqlalchemy_database_uri(self) -> str:

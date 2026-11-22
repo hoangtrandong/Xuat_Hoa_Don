@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.models.customer import Customer
 from app.models.multi_tenant_invoice import (
     Distributor,
@@ -138,6 +139,10 @@ class PreviewInvoiceDocument(BaseModel):
     provider_payload_preview: dict[str, Any] = Field(default_factory=dict)
 
 
+class MockEInvoiceBlockedError(RuntimeError):
+    """Chặn phát hành Hóa đơn điện tử giả lập khi chưa kết nối API chính thức của nhà mạng HĐĐT."""
+
+
 class BaseEInvoiceProvider(ABC):
     """Strategy Interface cho các Nhà cung cấp Hóa đơn điện tử (MISA, Viettel, VNPT, EasyInvoice...)."""
 
@@ -158,22 +163,53 @@ class BaseEInvoiceProvider(ABC):
         config: DistributorInvoiceConfig,
         publish_immediately: bool = True,
     ) -> dict[str, Any]:
-        """Gửi yêu cầu tạo nháp hoặc ký số phát hành hóa đơn và trả về Số HĐ + Mã CQT."""
+        """Tạo nháp hoặc gửi yêu cầu ký số phát hành hóa đơn.
+
+        An toàn pháp lý thuế:
+        - Khi `publish_immediately=False`: luôn cho phép tạo bản NHÁP (DRAFT) không cấp số HĐ / mã CQT.
+        - Khi `publish_immediately=True`: BỊ KHÓA mặc định nếu chưa có tích hợp API thật
+          (chỉ cho phép mô phỏng khi cấu hình `ALLOW_MOCK_EINVOICE=true` ở môi trường sandbox/test).
+        """
         payload = self.build_provider_payload(doc, config)
         seed = f"{doc.distributor_code}|{config.provider}|{config.invoice_series}|{','.join(doc.source_order_numbers)}|{datetime.utcnow().isoformat()}"
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest().upper()
+        tx_id = f"{config.provider}-{digest[:12]}"
+
+        if not publish_immediately:
+            return {
+                "success": True,
+                "is_simulated": False,
+                "provider": config.provider,
+                "status": "DRAFT",
+                "invoice_number": None,
+                "invoice_series": config.invoice_series,
+                "invoice_template_code": config.invoice_template_code,
+                "tax_authority_code": None,
+                "transaction_id": tx_id,
+                "issued_at": None,
+                "lookup_url": None,
+                "provider_payload": payload,
+            }
+
+        if not settings.ALLOW_MOCK_EINVOICE:
+            raise MockEInvoiceBlockedError(
+                f"Phát hành trực tiếp qua {config.provider} đang bị khóa để đảm bảo an toàn pháp lý thuế "
+                "(chưa kết nối API ký số chính thức). Vui lòng xuất file Excel mẫu để ký số trên cổng chính thức "
+                "(Viettel/MISA), sau đó đồng bộ ngược Hóa đơn bán ra từ Cổng CQT để tự động đối chiếu."
+            )
+
         inv_no = str(int(digest[:7], 16) % 9000000 + 1000000).zfill(8)
         tax_auth_code = f"M1-26-{digest[7:12]}-{digest[12:23]}"
-        tx_id = f"{config.provider}-{digest[:12]}"
 
         return {
             "success": True,
+            "is_simulated": True,
             "provider": config.provider,
-            "status": "ISSUED" if publish_immediately else "DRAFT",
-            "invoice_number": inv_no if publish_immediately else None,
+            "status": "ISSUED",
+            "invoice_number": inv_no,
             "invoice_series": config.invoice_series,
             "invoice_template_code": config.invoice_template_code,
-            "tax_authority_code": tax_auth_code if publish_immediately else None,
+            "tax_authority_code": tax_auth_code,
             "transaction_id": tx_id,
             "issued_at": datetime.utcnow().isoformat(),
             "lookup_url": f"https://tracuuhoadon.{config.provider.lower()}.vn/search?code={tx_id}",

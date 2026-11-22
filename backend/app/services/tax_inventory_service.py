@@ -18,6 +18,7 @@ from app.models.multi_tenant_invoice import (
     PurchaseInvoice,
     PurchaseInvoiceItem,
     TaxAuthorityCredential,
+    TaxInventoryMonthlySnapshot,
     TaxInventoryOpeningBalance,
 )
 from app.models.product import DistributorProduct, Product, ProductCompany, ProductGroup, ProductGroupItem
@@ -240,6 +241,7 @@ def compute_tax_inventory_by_mst(
 
     ledger: dict[tuple[str, str], dict[str, Any]] = {}
     daily_deltas: dict[tuple[str, str], dict[date, Decimal]] = {}
+    monthly_buckets: dict[tuple[str, str], dict[tuple[int, int], dict[str, Decimal]]] = {}
     unmapped_sku_items_count = 0
 
     def _get_or_init_rec(mst: str, sku: str, pname: str, uname: str) -> dict[str, Any]:
@@ -263,6 +265,8 @@ def compute_tax_inventory_by_mst(
                 "input_amount": ZERO,
                 "output_qty": ZERO,
                 "output_amount": ZERO,
+                "promo_in_qty": ZERO,
+                "promo_out_qty": ZERO,
                 "official_output_qty": ZERO,
                 "draft_output_qty": ZERO,
                 "adjustment_qty": ZERO,
@@ -374,6 +378,12 @@ def compute_tax_inventory_by_mst(
                 amt_dec = _to_dec(amt_raw)
                 rec = _get_or_init_rec(mst, sku, (p_name or "").strip(), (u_name or "").strip())
 
+                # Tách riêng Hàng khuyến mãi (TChat = 2 theo NĐ 123) để KHÔNG làm loãng đơn giá BQGQ TK 156
+                if item_nature == 2:
+                    if not (from_date is not None and inv_date is not None and inv_date < from_date):
+                        rec["promo_in_qty"] += qty_dec
+                    continue
+
                 if from_date is not None and inv_date is not None and inv_date < from_date:
                     rec["pre_in_qty"] += qty_dec
                     rec["pre_in_amount"] += amt_dec
@@ -383,6 +393,12 @@ def compute_tax_inventory_by_mst(
                     if inv_date is not None:
                         dmap = daily_deltas.setdefault((mst, sku), {})
                         dmap[inv_date] = dmap.get(inv_date, ZERO) + qty_dec
+                        ym = (inv_date.year, inv_date.month)
+                        mb = monthly_buckets.setdefault((mst, sku), {}).setdefault(
+                            ym, {"in_qty": ZERO, "in_amt": ZERO, "out_qty": ZERO}
+                        )
+                        mb["in_qty"] += qty_dec
+                        mb["in_amt"] += amt_dec
 
     # 3. Quét Hóa đơn bán ra đã phát hành / nháp (chỉ đọc cột nhẹ)
     issued_stmt = (
@@ -460,11 +476,19 @@ def compute_tax_inventory_by_mst(
         )
 
         if is_draft:
-            rec["draft_output_qty"] += qty_dec
+            if (item_type or "NORMAL").upper() != "PROMOTION":
+                rec["draft_output_qty"] += qty_dec
             if not include_draft:
                 continue
         else:
-            rec["official_output_qty"] += qty_dec
+            if (item_type or "NORMAL").upper() != "PROMOTION":
+                rec["official_output_qty"] += qty_dec
+
+        # Tách riêng Hàng khuyến mãi đầu ra (PROMOTION) để không gây cảnh báo giả bán dưới giá vốn
+        if (item_type or "NORMAL").upper() == "PROMOTION":
+            if not (from_date is not None and tx_date is not None and tx_date < from_date):
+                rec["promo_out_qty"] += qty_dec
+            continue
 
         if from_date is not None and tx_date is not None and tx_date < from_date:
             rec["pre_out_qty"] += qty_dec
@@ -476,6 +500,11 @@ def compute_tax_inventory_by_mst(
             if tx_date is not None:
                 dmap = daily_deltas.setdefault((mst, sku), {})
                 dmap[tx_date] = dmap.get(tx_date, ZERO) - qty_dec
+                ym = (tx_date.year, tx_date.month)
+                mb = monthly_buckets.setdefault((mst, sku), {}).setdefault(
+                    ym, {"in_qty": ZERO, "in_amt": ZERO, "out_qty": ZERO}
+                )
+                mb["out_qty"] += qty_dec
 
     # 4. Chuẩn hóa tên sản phẩm (ưu tiên Tên sản phẩm xuất hóa đơn) & ánh xạ Mã sản phẩm nội bộ NPP (npp_code) + Hệ số quy đổi ĐVT (conversion_factor)
     all_skus = list({sku for _, sku in ledger.keys()})
@@ -490,16 +519,23 @@ def compute_tax_inventory_by_mst(
         dist_prod_by_sku: dict[str, tuple[str, str, str, str]] = {}
         inv_code_to_npp: dict[tuple[str, str], str] = {}
         inv_code_to_npp_default: dict[str, str] = {}
-        for d_sku, d_name, d_inv_code, d_inv_name, d_unit, d_comp_mst in db.execute(
-            select(
-                DistributorProduct.distributor_sku,
-                DistributorProduct.distributor_product_name,
-                DistributorProduct.invoice_product_code,
-                DistributorProduct.invoice_product_name,
-                DistributorProduct.unit,
-                Company.tax_code,
-            ).outerjoin(Company, DistributorProduct.company_id == Company.id)
-        ).all():
+        dp_stmt = select(
+            DistributorProduct.distributor_sku,
+            DistributorProduct.distributor_product_name,
+            DistributorProduct.invoice_product_code,
+            DistributorProduct.invoice_product_name,
+            DistributorProduct.unit,
+            Company.tax_code,
+            DistributorProduct.distributor_id,
+        ).outerjoin(Company, DistributorProduct.company_id == Company.id)
+        if distributor_id is not None:
+            dp_stmt = dp_stmt.where(
+                (DistributorProduct.distributor_id == distributor_id)
+                | (DistributorProduct.distributor_id.is_(None))
+            )
+        dp_rows = list(db.execute(dp_stmt).all())
+        dp_rows.sort(key=lambda r: 0 if r[6] is None else 1)
+        for d_sku, d_name, d_inv_code, d_inv_name, d_unit, d_comp_mst, _d_dist_id in dp_rows:
             if not d_sku:
                 continue
             sku_u = d_sku.strip().upper()
@@ -659,20 +695,52 @@ def compute_tax_inventory_by_mst(
         else:
             opening_amt_dec = ZERO
 
-        # Tính Bình quân gia quyền cả kỳ (TT 200 / TT 133)
+        # Tính Bình quân gia quyền CHUẨN THEO TỪNG THÁNG dương lịch (TT 200 / TT 133):
+        # Tồn cuối tháng T kết chuyển thành tồn đầu tháng T+1, tránh giá nhập tháng sau bóp méo giá vốn tháng trước.
         avail_qty = opening_qty_dec + rec["input_qty"]
         avail_amt = opening_amt_dec + rec["input_amount"]
-        avg_unit_cost_dec = (avail_amt / avail_qty) if (avail_qty > EPSILON and avail_amt > ZERO) else ZERO
-
         bal_dec = avail_qty - rec["output_qty"]
-        bal = _q_qty(bal_dec)
-        balance_lookup[(mst, sku)] = bal
+        balance_lookup[(mst, sku)] = _q_qty(bal_dec)
 
-        cogs_amt_dec = (rec["output_qty"] * avg_unit_cost_dec).quantize(AMT_QUANT, rounding=ROUND_HALF_UP)
-        if bal_dec > EPSILON:
-            ending_val_dec = max(ZERO, (avail_amt - cogs_amt_dec).quantize(AMT_QUANT, rounding=ROUND_HALF_UP))
+        sku_months = monthly_buckets.get((mst, sku))
+        if sku_months and len(sku_months) > 1:
+            run_qty = opening_qty_dec
+            run_amt = opening_amt_dec
+            cogs_amt_dec = ZERO
+            last_unit_cost = ZERO
+            for _ym, mb in sorted(sku_months.items()):
+                m_avail_qty = run_qty + mb["in_qty"]
+                m_avail_amt = run_amt + mb["in_amt"]
+                m_unit_cost = (
+                    (m_avail_amt / m_avail_qty)
+                    if (m_avail_qty > EPSILON and m_avail_amt > ZERO)
+                    else ZERO
+                )
+                if m_unit_cost > ZERO:
+                    last_unit_cost = m_unit_cost
+                m_cogs = (mb["out_qty"] * m_unit_cost).quantize(AMT_QUANT, rounding=ROUND_HALF_UP)
+                cogs_amt_dec += m_cogs
+                run_qty = m_avail_qty - mb["out_qty"]
+                run_amt = (
+                    max(ZERO, (m_avail_amt - m_cogs).quantize(AMT_QUANT, rounding=ROUND_HALF_UP))
+                    if run_qty > EPSILON
+                    else ZERO
+                )
+            ending_val_dec = run_amt
+            if rec["output_qty"] > EPSILON and cogs_amt_dec > ZERO:
+                avg_unit_cost_dec = cogs_amt_dec / rec["output_qty"]
+            elif run_qty > EPSILON and run_amt > ZERO:
+                avg_unit_cost_dec = run_amt / run_qty
+            else:
+                avg_unit_cost_dec = last_unit_cost
         else:
-            ending_val_dec = ZERO
+            avg_unit_cost_dec = (avail_amt / avail_qty) if (avail_qty > EPSILON and avail_amt > ZERO) else ZERO
+            cogs_amt_dec = (rec["output_qty"] * avg_unit_cost_dec).quantize(AMT_QUANT, rounding=ROUND_HALF_UP)
+            if bal_dec > EPSILON:
+                ending_val_dec = max(ZERO, (avail_amt - cogs_amt_dec).quantize(AMT_QUANT, rounding=ROUND_HALF_UP))
+            else:
+                ending_val_dec = ZERO
+        bal = balance_lookup[(mst, sku)]
 
         avg_sale_price_dec = (
             (rec["output_amount"] / rec["output_qty"]) if rec["output_qty"] > EPSILON else ZERO
@@ -791,6 +859,8 @@ def compute_tax_inventory_by_mst(
                     "input_amount": ZERO,
                     "output_qty": ZERO,
                     "output_amount": ZERO,
+                    "promo_in_qty": ZERO,
+                    "promo_out_qty": ZERO,
                     "official_output_qty": ZERO,
                     "draft_output_qty": ZERO,
                     "adjustment_qty": ZERO,
@@ -825,6 +895,8 @@ def compute_tax_inventory_by_mst(
             grp["input_amount"] += rec["input_amount"]
             grp["output_qty"] += rec["output_qty"] * cf_dec
             grp["output_amount"] += rec["output_amount"]
+            grp["promo_in_qty"] += rec["promo_in_qty"] * cf_dec
+            grp["promo_out_qty"] += rec["promo_out_qty"] * cf_dec
             grp["official_output_qty"] += rec["official_output_qty"] * cf_dec
             grp["draft_output_qty"] += rec["draft_output_qty"] * cf_dec
             grp["adjustment_qty"] += rec["adjustment_qty"] * cf_dec
@@ -853,6 +925,9 @@ def compute_tax_inventory_by_mst(
                     "input_amount": _q_amt(rec["input_amount"]),
                     "output_qty": _q_qty(rec["output_qty"]),
                     "output_amount": _q_amt(rec["output_amount"]),
+                    "promo_in_qty": _q_qty(rec["promo_in_qty"]),
+                    "promo_out_qty": _q_qty(rec["promo_out_qty"]),
+                    "promo_balance_qty": _q_qty(rec["promo_in_qty"] - rec["promo_out_qty"]),
                     "official_output_qty": _q_qty(rec["official_output_qty"]),
                     "draft_output_qty": _q_qty(rec["draft_output_qty"]),
                     "adjustment_qty": _q_qty(rec["adjustment_qty"]),
@@ -981,6 +1056,9 @@ def compute_tax_inventory_by_mst(
                     "input_amount": _q_amt(grp["input_amount"]),
                     "output_qty": _q_qty(grp["output_qty"]),
                     "output_amount": _q_amt(grp["output_amount"]),
+                    "promo_in_qty": _q_qty(grp["promo_in_qty"]),
+                    "promo_out_qty": _q_qty(grp["promo_out_qty"]),
+                    "promo_balance_qty": _q_qty(grp["promo_in_qty"] - grp["promo_out_qty"]),
                     "official_output_qty": _q_qty(grp["official_output_qty"]),
                     "draft_output_qty": _q_qty(grp["draft_output_qty"]),
                     "adjustment_qty": _q_qty(grp["adjustment_qty"]),
@@ -1120,6 +1198,9 @@ def compute_tax_inventory_by_mst(
                     "input_amount": _q_amt(rec["input_amount"]),
                     "output_qty": _q_qty(rec["output_qty"]),
                     "output_amount": _q_amt(rec["output_amount"]),
+                    "promo_in_qty": _q_qty(rec["promo_in_qty"]),
+                    "promo_out_qty": _q_qty(rec["promo_out_qty"]),
+                    "promo_balance_qty": _q_qty(rec["promo_in_qty"] - rec["promo_out_qty"]),
                     "official_output_qty": _q_qty(rec["official_output_qty"]),
                     "draft_output_qty": _q_qty(rec["draft_output_qty"]),
                     "adjustment_qty": _q_qty(rec["adjustment_qty"]),
@@ -2706,3 +2787,191 @@ def create_adjustment_or_replacement_invoice(
     db.commit()
     db.refresh(new_inv)
     return new_inv
+
+
+def _parse_year_month(year_month: str) -> tuple[int, int, date, date]:
+    import calendar as _cal
+
+    clean = (year_month or "").strip()
+    parts = clean.split("-")
+    if len(parts) != 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        raise ValueError("Định dạng tháng không hợp lệ. Vui lòng dùng YYYY-MM (VD: 2026-11).")
+    year, month = int(parts[0]), int(parts[1])
+    if not (2000 <= year <= 2100 and 1 <= month <= 12):
+        raise ValueError("Tháng hoặc năm ngoài phạm vi hợp lệ.")
+    _, last_day = _cal.monthrange(year, month)
+    return year, month, date(year, month, 1), date(year, month, last_day)
+
+
+def rebuild_monthly_tax_inventory_snapshots(
+    db: Session,
+    *,
+    distributor_id: int | None,
+    year_month: str,
+    company_tax_code: str | None = None,
+    include_draft: bool = True,
+) -> dict[str, Any]:
+    """Tính toán & lưu sẵn Snapshot Tồn kho Thuế theo tháng (YYYY-MM) vào bảng `tax_inventory_monthly_snapshots`
+    để truy vấn tức thì không cần quét toàn bộ lịch sử XML mỗi lần mở trang."""
+    _y, _m, start_d, end_d = _parse_year_month(year_month)
+    computed = compute_tax_inventory_by_mst(
+        db,
+        distributor_id=distributor_id,
+        company_tax_code=company_tax_code,
+        from_date=start_d,
+        to_date=end_d,
+        include_draft=include_draft,
+        group_by="MST_SKU",
+    )
+
+    existing_stmt = select(TaxInventoryMonthlySnapshot).where(
+        TaxInventoryMonthlySnapshot.year_month == year_month
+    )
+    if distributor_id is not None:
+        existing_stmt = existing_stmt.where(TaxInventoryMonthlySnapshot.distributor_id == distributor_id)
+    else:
+        existing_stmt = existing_stmt.where(TaxInventoryMonthlySnapshot.distributor_id.is_(None))
+    if company_tax_code:
+        existing_stmt = existing_stmt.where(TaxInventoryMonthlySnapshot.tax_code == company_tax_code.strip())
+
+    existing_map = {
+        (row.tax_code, row.sku): row for row in db.scalars(existing_stmt).all()
+    }
+    now = datetime.utcnow()
+    upserted = 0
+    seen_keys: set[tuple[str, str]] = set()
+
+    for item in computed["items"]:
+        mst = item["tax_code"]
+        sku = item["sku"]
+        seen_keys.add((mst, sku))
+        row = existing_map.get((mst, sku))
+        if row is None:
+            row = TaxInventoryMonthlySnapshot(
+                distributor_id=distributor_id,
+                tax_code=mst,
+                sku=sku,
+                year_month=year_month,
+            )
+            db.add(row)
+        row.company_name = item.get("company_name") or ""
+        row.product_name = item.get("product_name") or ""
+        row.unit_name = item.get("unit_name") or ""
+        row.opening_qty = float(item.get("opening_qty") or 0.0)
+        row.opening_amount = float(item.get("opening_amount") or 0.0)
+        row.input_qty = float(item.get("input_qty") or 0.0)
+        row.input_amount = float(item.get("input_amount") or 0.0)
+        row.output_qty = float(item.get("output_qty") or 0.0)
+        row.output_amount = float(item.get("output_amount") or 0.0)
+        row.promo_in_qty = float(item.get("promo_in_qty") or 0.0)
+        row.promo_out_qty = float(item.get("promo_out_qty") or 0.0)
+        row.avg_unit_cost = float(item.get("avg_unit_cost") or 0.0)
+        row.cogs_amount = float(item.get("cogs_amount") or 0.0)
+        row.closing_qty = float(item.get("balance_qty") or 0.0)
+        row.closing_amount = float(item.get("ending_inventory_value") or 0.0)
+        row.computed_at = now
+        upserted += 1
+
+    # Xóa các dòng snapshot cũ không còn tồn tại trong kỳ tính lại
+    for key, old_row in existing_map.items():
+        if key not in seen_keys:
+            db.delete(old_row)
+
+    db.commit()
+    return {
+        "year_month": year_month,
+        "distributor_id": distributor_id,
+        "upserted_rows": upserted,
+        "computed_at": now.isoformat(),
+        "summary": computed["summary"],
+    }
+
+
+def list_monthly_tax_inventory_snapshots(
+    db: Session,
+    *,
+    distributor_id: int | None,
+    year_month: str,
+    company_tax_code: str | None = None,
+    search: str | None = None,
+) -> dict[str, Any]:
+    """Đọc tức thì bảng Snapshot Tồn kho Thuế theo tháng (O(1) SQL, không quét XML)."""
+    _parse_year_month(year_month)
+    stmt = (
+        select(TaxInventoryMonthlySnapshot)
+        .where(TaxInventoryMonthlySnapshot.year_month == year_month)
+        .order_by(TaxInventoryMonthlySnapshot.tax_code.asc(), TaxInventoryMonthlySnapshot.sku.asc())
+    )
+    if distributor_id is not None:
+        stmt = stmt.where(TaxInventoryMonthlySnapshot.distributor_id == distributor_id)
+    if company_tax_code:
+        stmt = stmt.where(TaxInventoryMonthlySnapshot.tax_code == company_tax_code.strip())
+
+    rows = db.scalars(stmt).all()
+    q = (search or "").strip().lower()
+    items: list[dict[str, Any]] = []
+    total_opening_amt = 0.0
+    total_input_amt = 0.0
+    total_output_amt = 0.0
+    total_cogs_amt = 0.0
+    total_closing_amt = 0.0
+    negative_count = 0
+    latest_computed: datetime | None = None
+
+    for r in rows:
+        if q and not (
+            q in (r.sku or "").lower()
+            or q in (r.product_name or "").lower()
+            or q in (r.tax_code or "").lower()
+            or q in (r.company_name or "").lower()
+        ):
+            continue
+        if latest_computed is None or (r.computed_at and r.computed_at > latest_computed):
+            latest_computed = r.computed_at
+        if r.closing_qty < -1e-6:
+            negative_count += 1
+        total_opening_amt += float(r.opening_amount or 0)
+        total_input_amt += float(r.input_amount or 0)
+        total_output_amt += float(r.output_amount or 0)
+        total_cogs_amt += float(r.cogs_amount or 0)
+        total_closing_amt += float(r.closing_amount or 0)
+        items.append(
+            {
+                "id": r.id,
+                "tax_code": r.tax_code,
+                "company_name": r.company_name,
+                "sku": r.sku,
+                "product_name": r.product_name,
+                "unit_name": r.unit_name,
+                "year_month": r.year_month,
+                "opening_qty": r.opening_qty,
+                "opening_amount": float(r.opening_amount or 0),
+                "input_qty": r.input_qty,
+                "input_amount": float(r.input_amount or 0),
+                "output_qty": r.output_qty,
+                "output_amount": float(r.output_amount or 0),
+                "promo_in_qty": r.promo_in_qty,
+                "promo_out_qty": r.promo_out_qty,
+                "promo_balance_qty": round(r.promo_in_qty - r.promo_out_qty, 4),
+                "avg_unit_cost": float(r.avg_unit_cost or 0),
+                "cogs_amount": float(r.cogs_amount or 0),
+                "closing_qty": r.closing_qty,
+                "closing_amount": float(r.closing_amount or 0),
+                "computed_at": r.computed_at.isoformat() if r.computed_at else None,
+            }
+        )
+
+    return {
+        "year_month": year_month,
+        "computed_at": latest_computed.isoformat() if latest_computed else None,
+        "summary": {
+            "total_skus": len(items),
+            "negative_count": negative_count,
+            "total_opening_amount": round(total_opening_amt, 2),
+            "total_input_amount": round(total_input_amt, 2),
+            "total_output_amount": round(total_output_amt, 2),
+            "total_cogs_amount": round(total_cogs_amt, 2),
+            "total_closing_amount": round(total_closing_amt, 2),
+        },
+        "items": items,
+    }

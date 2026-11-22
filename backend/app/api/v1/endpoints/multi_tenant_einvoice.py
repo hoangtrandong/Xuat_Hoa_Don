@@ -37,6 +37,7 @@ from app.models.user import Role, User
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.services.einvoice_gateway import (
     InvoiceFormEngine,
+    MockEInvoiceBlockedError,
     get_einvoice_provider,
 )
 from app.services.supplier_connectors import (
@@ -2095,7 +2096,12 @@ def issue_einvoices(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Thực hiện tạo nháp hoặc ký số phát hành Hóa đơn điện tử qua cổng Provider của NPP."""
-    dist, cfg = _resolve_distributor_and_invoice_config(db, payload.distributor_id, payload.invoice_config_id)
+    effective_dist_id = resolve_distributor_scope(
+        current_user,
+        payload.distributor_id,
+        require_for_write=True,
+    )
+    dist, cfg = _resolve_distributor_and_invoice_config(db, effective_dist_id, payload.invoice_config_id)
     docs = InvoiceFormEngine.build_invoice_previews(
         db=db,
         distributor=dist,
@@ -2110,11 +2116,14 @@ def issue_einvoices(
     created_invoices: list[dict[str, Any]] = []
 
     for doc in docs:
-        issue_res = provider_impl.issue_invoice(
-            doc=doc,
-            config=cfg,
-            publish_immediately=payload.publish_immediately,
-        )
+        try:
+            issue_res = provider_impl.issue_invoice(
+                doc=doc,
+                config=cfg,
+                publish_immediately=payload.publish_immediately,
+            )
+        except MockEInvoiceBlockedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         inv = IssuedInvoice(
             distributor_id=dist.id,
             invoice_config_id=cfg.id,
@@ -3914,3 +3923,136 @@ def export_dms_consolidated_invoices(
             "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
+
+
+class GdtSoldInvoiceSyncRequest(BaseModel):
+    distributor_id: int | None = None
+    tax_credential_id: int
+    from_date: date
+    to_date: date
+    bearer_token: str | None = None
+
+
+@router.post("/gdt-sold-invoices/sync")
+def sync_gdt_sold_invoices_endpoint(
+    payload: GdtSoldInvoiceSyncRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Đồng bộ Hóa đơn BÁN RA từ Cổng Tổng cục Thuế & tự động đối chiếu với lô nháp/Excel Viettel."""
+    from app.services.gdt_sales_invoice_service import sync_gdt_sold_invoices
+
+    if payload.from_date > payload.to_date:
+        raise HTTPException(status_code=400, detail="Từ ngày không được lớn hơn Đến ngày.")
+
+    effective_dist_id = resolve_distributor_scope(
+        current_user,
+        payload.distributor_id,
+        require_for_write=True,
+    )
+    cred = db.get(TaxAuthorityCredential, payload.tax_credential_id)
+    if not cred or cred.distributor_id != effective_dist_id:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản CQT thuộc Nhà phân phối này.")
+
+    token = (payload.bearer_token or "").strip() or (cred.bearer_token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail="Tài khoản CQT chưa có Bearer Token hợp lệ. Vui lòng đăng nhập CQT trước khi đồng bộ.",
+        )
+
+    try:
+        result = sync_gdt_sold_invoices(
+            db,
+            distributor_id=effective_dist_id,
+            tax_credential_id=cred.id,
+            from_date=payload.from_date,
+            to_date=payload.to_date,
+            bearer_token=token,
+        )
+    except PermissionError:
+        raise HTTPException(
+            status_code=401,
+            detail="CQT_TOKEN_EXPIRED: Phiên đăng nhập Cổng Thuế đã hết hạn. Vui lòng đăng nhập lại.",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"success": True, **result}
+
+
+@router.get("/gdt-sold-invoices/reconciliation-report")
+def get_gdt_sold_reconciliation_report(
+    distributor_id: int | None = None,
+    seller_tax_code: str | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Báo cáo đối chiếu 3 chiều: Lô đã xuất Excel (DRAFT) <-> Hóa đơn bán ra thực tế trên Cổng CQT."""
+    from app.services.gdt_sales_invoice_service import get_sales_reconciliation_report
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    return get_sales_reconciliation_report(
+        db,
+        distributor_id=effective_dist_id,
+        seller_tax_code=seller_tax_code,
+        from_date=from_date,
+        to_date=to_date,
+    )
+
+
+class MonthlySnapshotRebuildRequest(BaseModel):
+    distributor_id: int | None = None
+    year_month: str  # YYYY-MM
+    company_tax_code: str | None = None
+    include_draft: bool = True
+
+
+@router.post("/tax-inventory/monthly-snapshots/rebuild")
+def rebuild_monthly_tax_snapshots_endpoint(
+    payload: MonthlySnapshotRebuildRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Tính lại & lưu Snapshot Tồn kho Thuế chốt tháng (TK 156 / TK 632) vào PostgreSQL."""
+    from app.services.tax_inventory_service import rebuild_monthly_tax_inventory_snapshots
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, payload.distributor_id)
+    try:
+        res = rebuild_monthly_tax_inventory_snapshots(
+            db,
+            distributor_id=effective_dist_id,
+            year_month=payload.year_month,
+            company_tax_code=payload.company_tax_code,
+            include_draft=payload.include_draft,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, **res}
+
+
+@router.get("/tax-inventory/monthly-snapshots")
+def list_monthly_tax_snapshots_endpoint(
+    year_month: str,
+    distributor_id: int | None = None,
+    company_tax_code: str | None = None,
+    search: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Đọc nhanh bảng Snapshot Tồn kho Thuế theo tháng (O(1) SQL)."""
+    from app.services.tax_inventory_service import list_monthly_tax_inventory_snapshots
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    try:
+        return list_monthly_tax_inventory_snapshots(
+            db,
+            distributor_id=effective_dist_id,
+            year_month=year_month,
+            company_tax_code=company_tax_code,
+            search=search,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

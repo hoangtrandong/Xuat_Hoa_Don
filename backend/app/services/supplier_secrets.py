@@ -5,19 +5,36 @@ from __future__ import annotations
 import base64
 import hashlib
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from app.core.config import settings
 
 _PREFIX = "enc:v1:"
 
 
-def _fernet() -> Fernet:
-    secret = (settings.SECRET_KEY or "").encode("utf-8")
-    if not secret or settings.SECRET_KEY == "change-me-in-production":
-        raise RuntimeError("SECRET_KEY phải được cấu hình trước khi lưu bí mật Nhà cung cấp.")
-    key = base64.urlsafe_b64encode(hashlib.sha256(secret).digest())
+def _derive_fernet(raw_secret: str) -> Fernet:
+    key = base64.urlsafe_b64encode(hashlib.sha256(raw_secret.encode("utf-8")).digest())
     return Fernet(key)
+
+
+def _fernet() -> MultiFernet:
+    """Ưu tiên dùng DATA_ENCRYPTION_KEY riêng cho mã hóa bí mật NCC/CQT;
+    giữ SECRET_KEY làm fallback giải mã ngược tương thích khi xoay vòng khóa."""
+    fernets: list[Fernet] = []
+    data_key = (settings.DATA_ENCRYPTION_KEY or "").strip()
+    if data_key and data_key != "change-me-in-production":
+        fernets.append(_derive_fernet(data_key))
+
+    secret = (settings.SECRET_KEY or "").strip()
+    if secret and secret != "change-me-in-production":
+        if secret != data_key:
+            fernets.append(_derive_fernet(secret))
+
+    if not fernets:
+        raise RuntimeError(
+            "DATA_ENCRYPTION_KEY hoặc SECRET_KEY phải được cấu hình trước khi lưu bí mật Nhà cung cấp."
+        )
+    return MultiFernet(fernets)
 
 
 def encrypt_supplier_secret(value: str | None) -> str | None:

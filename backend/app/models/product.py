@@ -199,19 +199,22 @@ class PriceListItem(Base):
 
 
 class DistributorProduct(Base):
-    """Mã sản phẩm Nhà Phân Phối nội bộ do người dùng quản lý / upload (hỗ trợ nhiều Công ty quản lý theo cặp distributor_sku + company_id)."""
+    """Mã sản phẩm Nhà Phân Phối nội bộ do người dùng quản lý / upload (cô lập theo distributor_id và hỗ trợ nhiều Công ty QL)."""
     __tablename__ = "distributor_products"
     __table_args__ = (
-        UniqueConstraint("distributor_sku", "company_id", name="uq_distributor_products_sku_company"),
+        UniqueConstraint("distributor_id", "distributor_sku", "company_id", name="uq_distributor_products_dist_sku_company"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    distributor_name: Mapped[str] = mapped_column(String(200), default="Nhà Phân Phối Mai Gold")
+    distributor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributors.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    distributor_name: Mapped[str] = mapped_column(String(200), default="")
     distributor_sku: Mapped[str] = mapped_column(String(60), index=True)
     distributor_product_name: Mapped[str] = mapped_column(String(255))
     invoice_product_code: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
     invoice_product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    supplier: Mapped[str] = mapped_column(String(100), default="Vinamilk")
+    supplier: Mapped[str] = mapped_column(String(100), default="")
     unit: Mapped[str | None] = mapped_column(String(30), default="HOP")
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active")

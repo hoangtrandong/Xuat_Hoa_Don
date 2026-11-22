@@ -347,3 +347,63 @@ class TaxInventoryOpeningBalance(Base):
     updated_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class BackgroundJob(Base):
+    """Lưu trạng thái tác vụ chạy ngầm trong PostgreSQL (an toàn khi restart container & đa worker)."""
+
+    __tablename__ = "background_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    job_type: Mapped[str] = mapped_column(String(60), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    current_step: Mapped[int] = mapped_column(Integer, default=0)
+    total_steps: Mapped[int] = mapped_column(Integer, default=100)
+    message: Mapped[str] = mapped_column(Text, default="")
+    items_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    logs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    result_summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+
+
+class TaxInventoryMonthlySnapshot(Base):
+    """Bảng tổng hợp Tồn kho Thuế chốt theo từng Tháng (YYYY-MM) để truy vấn tức thì & giảm tải RAM."""
+
+    __tablename__ = "tax_inventory_monthly_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "distributor_id",
+            "tax_code",
+            "sku",
+            "year_month",
+            name="uq_tax_inv_monthly_snapshot_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    distributor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributors.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    tax_code: Mapped[str] = mapped_column(String(40), index=True)
+    company_name: Mapped[str] = mapped_column(String(255), default="")
+    sku: Mapped[str] = mapped_column(String(100), index=True)
+    product_name: Mapped[str] = mapped_column(String(500), default="")
+    unit_name: Mapped[str] = mapped_column(String(60), default="")
+    year_month: Mapped[str] = mapped_column(String(7), index=True)  # YYYY-MM
+    opening_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    opening_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    input_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    input_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    output_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    output_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    promo_in_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    promo_out_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_unit_cost: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    cogs_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    closing_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    closing_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

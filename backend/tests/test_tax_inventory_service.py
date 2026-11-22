@@ -890,3 +890,173 @@ def test_daily_tax_inventory_ledger_tracks_day_by_day_opening_in_out_closing(db_
     buf = export_daily_tax_inventory_excel(daily)
     assert len(buf.getvalue()) > 1500
 
+
+def test_tax_inventory_displays_invoice_product_name_across_all_views(db_session):
+    """Cột Tên hàng hóa trong tồn kho thuế (NPP_SKU, MST_SKU, mst_breakdown, daily) luôn ưu tiên Tên sản phẩm xuất hóa đơn."""
+    from app.models.product import DistributorProduct, Product, ProductCategory, ProductUnit
+
+    dist, _, _ = _seed_distributor_and_companies(db_session)
+    cat = ProductCategory(code="SUA2", name="Sua")
+    unit = ProductUnit(code="HOP2", name="Hộp")
+    db_session.add_all([cat, unit])
+    db_session.flush()
+
+    p = Product(sku="CQT_INV_01", name="Ten Goc CQT", category_id=cat.id, unit_id=unit.id, internal_name="Ten Noi Bo")
+    p.npp_code = "05AN26"
+    dp = DistributorProduct(
+        distributor_sku="05AN26",
+        distributor_product_name="Ten Noi Bo NPP",
+        invoice_product_name="Sữa tươi tiệt trùng Vinamilk 100% Có Đường - Thùng 48 hộp 180ml (Xuất HĐ)",
+        unit="Thùng",
+    )
+    db_session.add_all([p, dp])
+    db_session.flush()
+
+    db_session.add(
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0009001",
+            invoice_date=datetime(2026, 11, 5),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code="2900000001",
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="CQT_INV_01",
+                    product_name="Ten Tren XML Hoa Don",
+                    unit_name="Thùng",
+                    quantity=10,
+                    unit_price=300000,
+                    amount_before_tax=3_000_000,
+                )
+            ],
+        )
+    )
+    db_session.commit()
+
+    expected_name = "Sữa tươi tiệt trùng Vinamilk 100% Có Đường - Thùng 48 hộp 180ml (Xuất HĐ)"
+
+    npp_res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id, group_by="NPP_SKU")
+    assert len(npp_res["items"]) == 1
+    assert npp_res["items"][0]["product_name"] == expected_name
+    assert npp_res["items"][0]["mst_breakdown"][0]["product_name"] == expected_name
+
+    mst_res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id, group_by="MST_SKU")
+    assert len(mst_res["items"]) == 1
+    assert mst_res["items"][0]["product_name"] == expected_name
+
+    daily_res = get_daily_tax_inventory_ledger(
+        db_session,
+        sku="05AN26",
+        from_date=date(2026, 11, 1),
+        to_date=date(2026, 11, 10),
+        distributor_id=dist.id,
+    )
+    assert daily_res["product_name"] == expected_name
+
+
+def test_mst_cutoff_date_excludes_old_invoices_even_for_zero_opening_skus(db_session):
+    """Khi MST chốt tồn đầu kỳ ngày mới (VD 23/11), mọi hóa đơn trước 23/11 kể cả của SKU tồn=0 (không upload) đều bị cắt bỏ."""
+    from app.models.multi_tenant_invoice import TaxInventoryOpeningBalance
+
+    dist, _, _ = _seed_distributor_and_companies(db_session)
+
+    # Chỉ upload tồn đầu kỳ ngày 2026-11-23 cho SKU_STOCK (SKU_ZERO tồn = 0 nên không upload)
+    db_session.add(
+        TaxInventoryOpeningBalance(
+            distributor_id=dist.id,
+            tax_code="2900000001",
+            sku="SKU_STOCK",
+            product_name="Hang co ton",
+            unit_name="Thùng",
+            as_of_date=date(2026, 11, 23),
+            opening_qty=20,
+            opening_amount=4_000_000,
+        )
+    )
+    # Hóa đơn cũ ngày 2026-11-10 (trước mốc 2026-11-23) cho SKU_ZERO -> phải bị cắt bỏ hoàn toàn!
+    db_session.add(
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0009100",
+            invoice_date=datetime(2026, 11, 10),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code="2900000001",
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="SKU_ZERO",
+                    product_name="Hang ton 0",
+                    unit_name="Thùng",
+                    quantity=99,
+                    unit_price=100000,
+                    amount_before_tax=9_900_000,
+                )
+            ],
+        )
+    )
+    # Hóa đơn mới ngày 2026-11-23 cho SKU_ZERO -> được tính bình thường
+    db_session.add(
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0009101",
+            invoice_date=datetime(2026, 11, 23),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code="2900000001",
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="SKU_ZERO",
+                    product_name="Hang ton 0",
+                    unit_name="Thùng",
+                    quantity=5,
+                    unit_price=100000,
+                    amount_before_tax=500_000,
+                )
+            ],
+        )
+    )
+    db_session.commit()
+
+    res = compute_tax_inventory_by_mst(
+        db_session,
+        distributor_id=dist.id,
+        from_date=date(2026, 11, 23),
+        to_date=date(2026, 11, 30),
+        group_by="MST_SKU",
+    )
+    by_sku = {item["sku"]: item for item in res["items"]}
+    assert by_sku["SKU_STOCK"]["opening_qty"] == 20.0
+    assert by_sku["SKU_ZERO"]["opening_qty"] == 0.0
+    assert by_sku["SKU_ZERO"]["input_qty"] == 5.0
+    assert by_sku["SKU_ZERO"]["balance_qty"] == 5.0
+
+    daily = get_daily_tax_inventory_ledger(
+        db_session,
+        sku="SKU_ZERO",
+        from_date=date(2026, 11, 23),
+        to_date=date(2026, 11, 24),
+        tax_code="2900000001",
+        distributor_id=dist.id,
+    )
+    assert daily["summary"]["period_opening_qty"] == 0.0
+    assert daily["summary"]["total_input_qty"] == 5.0
+    assert daily["summary"]["period_closing_qty"] == 5.0
+
+
+

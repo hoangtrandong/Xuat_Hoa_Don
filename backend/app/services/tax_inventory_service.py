@@ -20,7 +20,7 @@ from app.models.multi_tenant_invoice import (
     TaxAuthorityCredential,
     TaxInventoryOpeningBalance,
 )
-from app.models.product import DistributorProduct, Product, ProductGroup, ProductGroupItem
+from app.models.product import DistributorProduct, Product, ProductCompany, ProductGroup, ProductGroupItem
 
 ZERO = Decimal("0")
 QTY_QUANT = Decimal("0.0001")
@@ -124,7 +124,9 @@ def _load_effective_opening_balances(
     distributor_id: int | None = None,
     to_date: date | None = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """Nạp số dư tồn đầu kỳ hiệu lực mới nhất (as_of_date <= to_date) cho từng cặp (MST, SKU)."""
+    """Nạp số dư tồn đầu kỳ hiệu lực mới nhất (as_of_date <= to_date) cho từng cặp (MST, SKU).
+    Khi một MST đã chốt kỳ mới (as_of_date = D mới nhất), chỉ giữ số dư của kỳ D đó
+    (các SKU không có trong kỳ D coi như tồn đầu kỳ = 0 và không lấy lại số dư kỳ cũ)."""
     stmt = select(
         TaxInventoryOpeningBalance.tax_code,
         TaxInventoryOpeningBalance.sku,
@@ -142,11 +144,25 @@ def _load_effective_opening_balances(
     if to_date is not None:
         stmt = stmt.where(TaxInventoryOpeningBalance.as_of_date <= to_date)
 
+    rows = db.execute(stmt).all()
+    latest_as_of_by_mst: dict[str, date] = {}
+    for mst_raw, sku_raw, _p_name, _u_name, as_of, _o_qty, _o_amt in rows:
+        mst = (mst_raw or "").strip()
+        sku = (sku_raw or "").strip().upper()
+        if not mst or not sku or as_of is None:
+            continue
+        prev = latest_as_of_by_mst.get(mst)
+        if prev is None or as_of > prev:
+            latest_as_of_by_mst[mst] = as_of
+
     result: dict[tuple[str, str], dict[str, Any]] = {}
-    for mst_raw, sku_raw, p_name, u_name, as_of, o_qty, o_amt in db.execute(stmt).all():
+    for mst_raw, sku_raw, p_name, u_name, as_of, o_qty, o_amt in rows:
         mst = (mst_raw or "").strip()
         sku = (sku_raw or "").strip().upper()
         if not mst or not sku:
+            continue
+        latest_mst_date = latest_as_of_by_mst.get(mst)
+        if latest_mst_date is not None and as_of != latest_mst_date:
             continue
         key = (mst, sku)
         if key not in result:
@@ -158,6 +174,19 @@ def _load_effective_opening_balances(
                 "unit_name": (u_name or "").strip(),
             }
     return result
+
+
+def _build_mst_cutoff_dates(opening_map: dict[tuple[str, str], dict[str, Any]]) -> dict[str, date]:
+    """Mốc ngày bắt đầu kỳ (cutoff date) của từng MST = as_of_date mới nhất đã chốt tồn đầu kỳ.
+    Mọi hóa đơn trước ngày này của MST đó đều bị cắt bỏ (kể cả SKU tồn đầu kỳ = 0 không upload)."""
+    cutoffs: dict[str, date] = {}
+    for (mst, _sku), ob in opening_map.items():
+        as_of = ob.get("as_of_date")
+        if as_of is not None:
+            prev = cutoffs.get(mst)
+            if prev is None or as_of > prev:
+                cutoffs[mst] = as_of
+    return cutoffs
 
 
 def compute_tax_inventory_by_mst(
@@ -201,12 +230,13 @@ def compute_tax_inventory_by_mst(
         if d_mst:
             dist_mst_by_id[d_id] = d_mst.strip()
 
-    # 1b. Nạp Số dư Tồn đầu kỳ (TK 156)
+    # 1b. Nạp Số dư Tồn đầu kỳ (TK 156) & mốc cắt sổ (cutoff date) theo từng MST
     opening_map = _load_effective_opening_balances(
         db,
         distributor_id=distributor_id,
         to_date=to_date,
     )
+    mst_cutoffs = _build_mst_cutoff_dates(opening_map)
 
     ledger: dict[tuple[str, str], dict[str, Any]] = {}
     daily_deltas: dict[tuple[str, str], dict[date, Decimal]] = {}
@@ -335,8 +365,9 @@ def compute_tax_inventory_by_mst(
                     continue
                 mst, inv_date = purch_meta_by_id[p_inv_id]
                 ob = opening_map.get((mst, sku))
-                if ob is not None and inv_date is not None and inv_date < ob["as_of_date"]:
-                    # Đã nằm trong số dư chốt đầu kỳ -> bỏ qua không cộng lặp
+                cutoff_date = (ob["as_of_date"] if ob is not None else None) or mst_cutoffs.get(mst)
+                if cutoff_date is not None and inv_date is not None and inv_date < cutoff_date:
+                    # Đã nằm trước mốc chốt sổ đầu kỳ của MST -> bỏ qua không cộng dồn dữ liệu cũ
                     continue
 
                 qty_dec = _to_dec(qty_raw)
@@ -413,7 +444,8 @@ def compute_tax_inventory_by_mst(
             continue
 
         ob = opening_map.get((mst, sku))
-        if ob is not None and tx_date is not None and tx_date < ob["as_of_date"]:
+        cutoff_date = (ob["as_of_date"] if ob is not None else None) or mst_cutoffs.get(mst)
+        if cutoff_date is not None and tx_date is not None and tx_date < cutoff_date:
             continue
 
         qty_dec = _to_dec(src_qty_raw) if src_qty_raw is not None else _to_dec(qty_raw)
@@ -445,10 +477,12 @@ def compute_tax_inventory_by_mst(
                 dmap = daily_deltas.setdefault((mst, sku), {})
                 dmap[tx_date] = dmap.get(tx_date, ZERO) - qty_dec
 
-    # 4. Chuẩn hóa tên sản phẩm & ánh xạ Mã sản phẩm nội bộ NPP (npp_code) + Hệ số quy đổi ĐVT (conversion_factor)
+    # 4. Chuẩn hóa tên sản phẩm (ưu tiên Tên sản phẩm xuất hóa đơn) & ánh xạ Mã sản phẩm nội bộ NPP (npp_code) + Hệ số quy đổi ĐVT (conversion_factor)
     all_skus = list({sku for _, sku in ledger.keys()})
-    # prod_info[sku] = (name, vat_rate, npp_code, npp_name, npp_unit, has_explicit_npp, conv_factor)
-    prod_info: dict[str, tuple[str, float | None, str, str, str, bool, int]] = {}
+    # prod_info[sku] = (invoice_display_name, vat_rate, npp_code, npp_invoice_name, npp_unit, has_explicit_npp, conv_factor, product_id)
+    prod_info: dict[str, tuple[str, float | None, str, str, str, bool, int, int | None]] = {}
+    prod_mst_invoice_override: dict[tuple[int, str], str] = {}
+    prod_default_invoice_override: dict[int, str] = {}
     if all_skus:
         dist_prod_by_sku: dict[str, tuple[str, str, str]] = {}
         for d_sku, d_name, d_inv_name, d_unit in db.execute(
@@ -461,11 +495,13 @@ def compute_tax_inventory_by_mst(
         ).all():
             if d_sku:
                 dist_prod_by_sku[d_sku.strip().upper()] = (
-                    (d_inv_name or d_name or "").strip(),
+                    (d_inv_name or "").strip(),
                     (d_name or "").strip(),
                     (d_unit or "").strip(),
                 )
 
+        loaded_prod_ids: set[int] = set()
+        loaded_prods: list[Product] = []
         for i in range(0, len(all_skus), 500):
             batch_skus = all_skus[i : i + 500]
             prods = db.scalars(
@@ -485,22 +521,96 @@ def compute_tax_inventory_by_mst(
                 )
             ).all()
             for p in prods:
-                p_sku_u = (p.sku or "").strip().upper()
-                resolved_npp = (p.npp_code or p_sku_u).strip().upper()
-                has_explicit = bool((p._npp_code or "").strip()) or (resolved_npp != p_sku_u)
-                dp_inv_name, dp_name, dp_unit = dist_prod_by_sku.get(resolved_npp, ("", "", ""))
-                npp_name = dp_inv_name or (p.internal_name or "").strip() or dp_name or p.npp_name or p.name
-                npp_unit = (p.internal_unit or "").strip() or dp_unit or (p.unit.name if p.unit else "")
-                conv_factor = 1
-                if p.group_items:
-                    raw_cf = p.group_items[0].conversion_factor
-                    if raw_cf and int(raw_cf) > 0:
-                        conv_factor = int(raw_cf)
-                info_tuple = (p.name, p.vat_rate, resolved_npp, npp_name, npp_unit, has_explicit, conv_factor)
-                if p_sku_u:
-                    prod_info[p_sku_u] = info_tuple
-                if resolved_npp and resolved_npp not in prod_info:
-                    prod_info[resolved_npp] = info_tuple
+                if p.id not in loaded_prod_ids:
+                    loaded_prod_ids.add(p.id)
+                    loaded_prods.append(p)
+
+        if loaded_prod_ids:
+            pc_rows = db.execute(
+                select(
+                    ProductCompany.product_id,
+                    ProductCompany.invoice_name_override,
+                    Company.tax_code,
+                )
+                .outerjoin(Company, ProductCompany.company_id == Company.id)
+                .where(
+                    ProductCompany.product_id.in_(loaded_prod_ids),
+                    ProductCompany.invoice_name_override.is_not(None),
+                )
+                .order_by(
+                    ProductCompany.is_primary.desc(),
+                    ProductCompany.last_purchased_at.desc().nullslast(),
+                )
+            ).all()
+            for p_id, inv_ovr, c_mst in pc_rows:
+                clean_ovr = (inv_ovr or "").strip()
+                if not clean_ovr:
+                    continue
+                if p_id not in prod_default_invoice_override:
+                    prod_default_invoice_override[p_id] = clean_ovr
+                clean_mst = (c_mst or "").strip()
+                if clean_mst and (p_id, clean_mst) not in prod_mst_invoice_override:
+                    prod_mst_invoice_override[(p_id, clean_mst)] = clean_ovr
+
+        for p in loaded_prods:
+            p_sku_u = (p.sku or "").strip().upper()
+            resolved_npp = (p.npp_code or p_sku_u).strip().upper()
+            has_explicit = bool((p._npp_code or "").strip()) or (resolved_npp != p_sku_u)
+            dp_inv_name, dp_name, dp_unit = dist_prod_by_sku.get(resolved_npp, ("", "", ""))
+            if not dp_inv_name and p_sku_u and p_sku_u != resolved_npp:
+                sku_dp_inv, sku_dp_name, sku_dp_unit = dist_prod_by_sku.get(p_sku_u, ("", "", ""))
+                dp_inv_name = sku_dp_inv or dp_inv_name
+                dp_name = dp_name or sku_dp_name
+                dp_unit = dp_unit or sku_dp_unit
+            pc_override = prod_default_invoice_override.get(p.id, "")
+            # Thứ tự ưu tiên chuẩn xuất hóa đơn (khớp invoice_consolidation):
+            # 1. DistributorProduct.invoice_product_name -> 2. ProductCompany.invoice_name_override
+            # -> 3. Product.internal_name -> 4. DistributorProduct.distributor_product_name -> 5. Product.npp_name / Product.name
+            npp_invoice_name = (
+                dp_inv_name
+                or pc_override
+                or (p.internal_name or "").strip()
+                or dp_name
+                or p.npp_name
+                or p.name
+            )
+            npp_unit = (p.internal_unit or "").strip() or dp_unit or (p.unit.name if p.unit else "")
+            conv_factor = 1
+            if p.group_items:
+                raw_cf = p.group_items[0].conversion_factor
+                if raw_cf and int(raw_cf) > 0:
+                    conv_factor = int(raw_cf)
+            info_tuple = (
+                npp_invoice_name,
+                p.vat_rate,
+                resolved_npp,
+                npp_invoice_name,
+                npp_unit,
+                has_explicit,
+                conv_factor,
+                p.id,
+            )
+            if p_sku_u:
+                prod_info[p_sku_u] = info_tuple
+            if resolved_npp and resolved_npp not in prod_info:
+                prod_info[resolved_npp] = info_tuple
+
+        # Fallback cho các SKU chỉ khai báo trong DistributorProduct mà chưa có trong bảng products
+        for sku_u in all_skus:
+            if sku_u not in prod_info and sku_u in dist_prod_by_sku:
+                dp_inv_name, dp_name, dp_unit = dist_prod_by_sku[sku_u]
+                resolved_inv_name = dp_inv_name or dp_name
+                if resolved_inv_name or dp_unit:
+                    prod_info[sku_u] = (
+                        resolved_inv_name,
+                        None,
+                        sku_u,
+                        resolved_inv_name,
+                        dp_unit,
+                        True,
+                        1,
+                        None,
+                    )
 
     sku_positive_by_mst: dict[str, list[dict[str, Any]]] = {}
     balance_lookup: dict[tuple[str, str], float] = {}
@@ -600,10 +710,19 @@ def compute_tax_inventory_by_mst(
             if mst_filter and mst != mst_filter:
                 continue
             p_meta = prod_info.get(sku)
-            pname = (p_meta[0] if p_meta else "") or rec["product_name"]
-            pvat = p_meta[1] if p_meta else None
+            p_id = p_meta[7] if p_meta else None
             npp_code = (p_meta[2] if p_meta else sku) or sku
-            npp_name = (p_meta[3] if p_meta else "") or pname
+            dp_entry = dist_prod_by_sku.get(npp_code) or dist_prod_by_sku.get(sku) if all_skus else None
+            dp_explicit_inv_name = (dp_entry[0] if dp_entry else "")
+            mst_inv_override = prod_mst_invoice_override.get((p_id, mst), "") if p_id else ""
+            pname = (
+                dp_explicit_inv_name
+                or mst_inv_override
+                or (p_meta[0] if p_meta else "")
+                or rec["product_name"]
+            )
+            pvat = p_meta[1] if p_meta else None
+            npp_name = dp_explicit_inv_name or (p_meta[3] if p_meta else "") or pname
             npp_unit = (p_meta[4] if p_meta else "") or rec["unit_name"]
             has_explicit_npp = p_meta[5] if p_meta else False
             conv_factor = p_meta[6] if p_meta else 1
@@ -857,9 +976,18 @@ def compute_tax_inventory_by_mst(
                 continue
 
             p_meta = prod_info.get(sku)
-            pname = (p_meta[0] if p_meta else "") or rec["product_name"]
-            pvat = p_meta[1] if p_meta else None
+            p_id = p_meta[7] if p_meta else None
             npp_code = (p_meta[2] if p_meta else sku) or sku
+            dp_entry = dist_prod_by_sku.get(npp_code) or dist_prod_by_sku.get(sku) if all_skus else None
+            dp_explicit_inv_name = (dp_entry[0] if dp_entry else "")
+            mst_inv_override = prod_mst_invoice_override.get((p_id, mst), "") if p_id else ""
+            pname = (
+                dp_explicit_inv_name
+                or mst_inv_override
+                or (p_meta[0] if p_meta else "")
+                or rec["product_name"]
+            )
+            pvat = p_meta[1] if p_meta else None
 
             if search_term and not (
                 search_term in sku.lower()
@@ -1025,9 +1153,10 @@ def get_tax_inventory_card_detail(
     opening_map = _load_effective_opening_balances(
         db, distributor_id=distributor_id, to_date=to_date
     )
+    mst_cutoffs = _build_mst_cutoff_dates(opening_map)
     ob = opening_map.get((target_mst, target_sku))
     opening_qty = ob["opening_qty"] if ob else ZERO
-    opening_as_of = ob["as_of_date"] if ob else None
+    opening_as_of = (ob["as_of_date"] if ob else None) or mst_cutoffs.get(target_mst)
 
     # 1. Lấy danh sách hóa đơn mua vào hợp lệ (đã loại thay thế/hủy)
     purch_hdr_stmt = (
@@ -1255,18 +1384,58 @@ def get_daily_tax_inventory_ledger(
     if target_mst.upper() == "ALL":
         target_mst = ""
 
-    # Giải mã danh sách (cqt_sku -> conversion_factor) thuộc target_code
+    # Giải mã danh sách (cqt_sku -> conversion_factor) thuộc target_code & ưu tiên Tên sản phẩm xuất hóa đơn
     sku_conv_map: dict[str, Decimal] = {}
     resolved_product_name = ""
     resolved_unit_name = ""
+
+    dp_target = db.scalar(
+        select(DistributorProduct).where(func.upper(DistributorProduct.distributor_sku) == target_code)
+    )
+    dp_inv_name = (dp_target.invoice_product_name or "").strip() if dp_target else ""
+    dp_fallback_name = (dp_target.distributor_product_name or "").strip() if dp_target else ""
+    dp_fallback_unit = (dp_target.unit or "").strip() if dp_target else ""
 
     if target_mst:
         # Chế độ xem riêng 1 MST + 1 mã SKU CQT gốc
         sku_conv_map[target_code] = Decimal("1")
         p = db.scalar(select(Product).options(selectinload(Product.unit)).where(func.upper(Product.sku) == target_code))
+        mst_override = ""
         if p:
-            resolved_product_name = p.name or ""
-            resolved_unit_name = p.unit.name if p.unit else ""
+            p_npp_u = (p.npp_code or target_code).strip().upper()
+            if not dp_inv_name and p_npp_u != target_code:
+                dp_by_npp = db.scalar(
+                    select(DistributorProduct).where(func.upper(DistributorProduct.distributor_sku) == p_npp_u)
+                )
+                if dp_by_npp:
+                    dp_inv_name = (dp_by_npp.invoice_product_name or "").strip()
+                    dp_fallback_name = dp_fallback_name or (dp_by_npp.distributor_product_name or "").strip()
+                    dp_fallback_unit = dp_fallback_unit or (dp_by_npp.unit or "").strip()
+            mst_override = (
+                db.scalar(
+                    select(ProductCompany.invoice_name_override)
+                    .join(Company, ProductCompany.company_id == Company.id)
+                    .where(
+                        ProductCompany.product_id == p.id,
+                        Company.tax_code == target_mst,
+                        ProductCompany.invoice_name_override.is_not(None),
+                    )
+                )
+                or ""
+            ).strip()
+            resolved_product_name = (
+                dp_inv_name
+                or mst_override
+                or (p.internal_name or "").strip()
+                or dp_fallback_name
+                or p.npp_name
+                or p.name
+                or ""
+            )
+            resolved_unit_name = (p.internal_unit or "").strip() or dp_fallback_unit or (p.unit.name if p.unit else "")
+        else:
+            resolved_product_name = dp_inv_name or dp_fallback_name
+            resolved_unit_name = dp_fallback_unit
     else:
         # Chế độ xem gộp theo Mã SP nội bộ NPP (tìm tất cả mã CQT map về target_code kèm conversion_factor)
         all_prods = db.scalars(
@@ -1280,10 +1449,12 @@ def get_daily_tax_inventory_ledger(
                 .selectinload(ProductGroup.representative_product),
             )
         ).all()
+        matched_prod_ids: list[int] = []
         for p in all_prods:
             p_sku_u = (p.sku or "").strip().upper()
             p_npp_u = (p.npp_code or p_sku_u).strip().upper()
             if p_npp_u == target_code or p_sku_u == target_code:
+                matched_prod_ids.append(p.id)
                 cf = 1
                 if p.group_items and p.group_items[0].conversion_factor and int(p.group_items[0].conversion_factor) > 0:
                     cf = int(p.group_items[0].conversion_factor)
@@ -1291,7 +1462,26 @@ def get_daily_tax_inventory_ledger(
                 if not resolved_product_name:
                     resolved_product_name = (p.internal_name or "").strip() or p.npp_name or p.name or ""
                 if not resolved_unit_name:
-                    resolved_unit_name = (p.internal_unit or "").strip() or (p.unit.name if p.unit else "")
+                    resolved_unit_name = (p.internal_unit or "").strip() or dp_fallback_unit or (p.unit.name if p.unit else "")
+        pc_override = ""
+        if matched_prod_ids and not dp_inv_name:
+            pc_override = (
+                db.scalar(
+                    select(ProductCompany.invoice_name_override)
+                    .where(
+                        ProductCompany.product_id.in_(matched_prod_ids),
+                        ProductCompany.invoice_name_override.is_not(None),
+                    )
+                    .order_by(
+                        ProductCompany.is_primary.desc(),
+                        ProductCompany.last_purchased_at.desc().nullslast(),
+                    )
+                    .limit(1)
+                )
+                or ""
+            ).strip()
+        resolved_product_name = dp_inv_name or pc_override or resolved_product_name or dp_fallback_name
+        resolved_unit_name = resolved_unit_name or dp_fallback_unit
         if not sku_conv_map:
             sku_conv_map[target_code] = Decimal("1")
 
@@ -1305,6 +1495,7 @@ def get_daily_tax_inventory_ledger(
     opening_map = _load_effective_opening_balances(
         db, distributor_id=distributor_id, to_date=to_date
     )
+    mst_cutoffs = _build_mst_cutoff_dates(opening_map)
 
     # Tính số dư đầu kỳ gốc từ bảng opening_balances
     period_opening_qty = ZERO
@@ -1387,7 +1578,8 @@ def get_daily_tax_inventory_ledger(
                 c_sku = (p_code or "").strip().upper()
                 mst, inv_date = matched_purch[p_inv_id]
                 ob = opening_map.get((mst, c_sku))
-                if ob is not None and inv_date is not None and inv_date < ob["as_of_date"]:
+                cutoff_date = (ob["as_of_date"] if ob is not None else None) or mst_cutoffs.get(mst)
+                if cutoff_date is not None and inv_date is not None and inv_date < cutoff_date:
                     continue
                 if not resolved_product_name and p_name:
                     resolved_product_name = p_name.strip()
@@ -1444,7 +1636,8 @@ def get_daily_tax_inventory_ledger(
         if tx_date is not None and tx_date > to_date:
             continue
         ob = opening_map.get((mst, c_sku))
-        if ob is not None and tx_date is not None and tx_date < ob["as_of_date"]:
+        cutoff_date = (ob["as_of_date"] if ob is not None else None) or mst_cutoffs.get(mst)
+        if cutoff_date is not None and tx_date is not None and tx_date < cutoff_date:
             continue
         if not resolved_product_name and row[8]:
             resolved_product_name = row[8].strip()

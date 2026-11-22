@@ -997,9 +997,18 @@ def fetch_nazzy_orders(
     to_date: date,
     *,
     strict: bool = False,
+    progress_cb: Any = None,
 ) -> list[dict[str, Any]]:
     """Tự động đồng bộ đơn hàng từ DMS Nazzy (http://dms21.nazzy.vn) của NPP Mai Gold.
-    Hỗ trợ tự động đăng nhập HTTP bằng Mã DN + Mã NV + Mật khẩu, phân trang, đa luồng và phân bổ chiết khấu / quà tặng KM."""
+    Hỗ trợ tự động đăng nhập HTTP bằng Mã DN + Mã NV + Mật khẩu, phân trang, đa luồng
+    dùng chung Keep-Alive pool, và báo tiến trình chi tiết theo thời gian thực."""
+    def _report(stage: str, count: int = 0) -> None:
+        if callable(progress_cb):
+            try:
+                progress_cb(stage, count)
+            except Exception:
+                pass
+
     raw_url = config.api_endpoint_url or "http://dms21.nazzy.vn/handler/BillsHandler.ashx"
     base_url = raw_url.split("?")[0].strip()
 
@@ -1019,13 +1028,14 @@ def fetch_nazzy_orders(
 
     # Tự động đăng nhập qua HTTP nếu chưa có Cookie hoặc người dùng cập nhật mật khẩu mới
     if dist_code and clean_user and secret:
+        _report("Đang đăng nhập máy chủ Nazzy DMS...", 0)
         try:
             new_cookie = nazzy_login_and_get_cookie(dist_code, clean_user, secret, base_url)
             cookie_str = new_cookie
             config.session_cookie = encrypt_supplier_secret(new_cookie)
-        except Exception:
-            # Nếu login bằng user/pass không thành công nhưng đã có cookie_str cũ, tiếp tục thử với cookie_str cũ
-            pass
+        except Exception as login_exc:
+            if not cookie_str and strict:
+                raise RuntimeError(f"Đăng nhập Nazzy DMS thất bại: {login_exc}") from login_exc
 
     headers: dict[str, str] = {
         "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -1063,9 +1073,19 @@ def fetch_nazzy_orders(
 
     all_order_summaries: list[dict[str, Any]] = []
 
-    with httpx.Client(verify=False, timeout=30.0, follow_redirects=True) as client:
+    http_limits = httpx.Limits(max_connections=16, max_keepalive_connections=16)
+    list_timeout = httpx.Timeout(20.0, connect=10.0)
+    detail_timeout = httpx.Timeout(12.0, connect=8.0)
+
+    with httpx.Client(
+        verify=False,
+        timeout=list_timeout,
+        limits=http_limits,
+        follow_redirects=True,
+    ) as client:
         current_page = 1
         while True:
+            _report(f"Đang tải danh sách đơn Nazzy trang {current_page}...", len(all_order_summaries))
             params = {
                 "t": "GetBillsOrderGetListV5",
                 "type": str(type_val),
@@ -1113,118 +1133,132 @@ def fetch_nazzy_orders(
                 break
 
             all_order_summaries.extend(page_items)
+            _report(
+                f"Đã tải danh sách {len(all_order_summaries)}/{total_records or len(all_order_summaries)} đơn Nazzy...",
+                len(all_order_summaries),
+            )
             if current_page * page_size >= total_records or len(page_items) < page_size:
                 break
             current_page += 1
             if current_page > 30:
                 break
 
-    if not all_order_summaries:
-        return []
-
-    # Fetch chi tiết từng đơn hàng qua ThreadPoolExecutor để tăng tốc gấp 10 lần
-    def _fetch_order_detail(ord_sum: dict[str, Any]) -> list[dict[str, Any]]:
-        depot_id = ord_sum.get("BillsDepotId")
-        if not depot_id:
+        if not all_order_summaries:
             return []
-        try:
-            with httpx.Client(verify=False, timeout=20.0, follow_redirects=True) as local_client:
-                r_det = local_client.get(
+
+        total_orders = len(all_order_summaries)
+        _report(f"Đang tải chi tiết 0/{total_orders} đơn Nazzy...", 0)
+
+        # Dùng chung 1 httpx.Client Keep-Alive để bỏ TCP handshake lặp lại
+        def _fetch_order_detail(ord_sum: dict[str, Any]) -> list[dict[str, Any]]:
+            depot_id = ord_sum.get("BillsDepotId")
+            if not depot_id:
+                return []
+            try:
+                r_det = client.get(
                     base_url,
                     params={"t": "BillsOrderGetInfo", "id": str(depot_id), "option": "0"},
                     headers=headers,
                     cookies=cookies,
+                    timeout=detail_timeout,
                 )
                 if r_det.status_code != 200:
                     return []
                 det_data = r_det.json()
-        except Exception:
-            return []
+            except Exception:
+                return []
 
-        info = det_data.get("Info") or {}
-        details = det_data.get("Details") or []
-        promotions = det_data.get("Promotion") or []
+            info = det_data.get("Info") or {}
+            details = det_data.get("Details") or []
+            promotions = det_data.get("Promotion") or []
 
-        cash_discount_total = sum(
-            float(p.get("Price") or 0.0)
-            for p in promotions
-            if p.get("ProductId", -1) <= 0
-        )
-        order_discount = float(info.get("DiscountPromotion") or cash_discount_total or 0.0)
-        total_detail_price = sum(float(line.get("TotalPrice") or 0.0) for line in details)
-        header_data = {
-            "Code": info.get("Code") or ord_sum.get("Code"),
-            "BillsDate": info.get("BillsDate") or ord_sum.get("BillsDate"),
-            "CreateDate": info.get("CreateDate") or ord_sum.get("CreateDate"),
-            "CustomerCode": str(info.get("CustomerCode") or ord_sum.get("CustomerCode") or "KH-NAZZY").strip(),
-            "CustomerName": info.get("CustomerName") or ord_sum.get("CustomerName"),
-            "CustomerTaxCode": info.get("CustomerTaxCode") or "",
-            "Address": info.get("Address") or ord_sum.get("Address") or "",
-            "Phone": info.get("Phone") or "",
-            "GroupName": info.get("GroupName") or ord_sum.get("GroupName") or "NAZZY",
-            "SaleEmployeeCode": info.get("SaleEmployeeCode") or "",
-            "SaleEmployeeName": info.get("SaleEmployeeName") or "",
-            "DictDepotName": info.get("DictDepotName") or ord_sum.get("DictDepotName") or "Kho Mai Gold",
-            "DepotName": info.get("DepotName") or ord_sum.get("DepotName") or "",
-            "OrderTotalPrice": float(info.get("TotalPrice") or ord_sum.get("TotalPrice") or 0.0),
-            "OrderDiscount": order_discount,
-        }
+            cash_discount_total = sum(
+                float(p.get("Price") or 0.0)
+                for p in promotions
+                if p.get("ProductId", -1) <= 0
+            )
+            order_discount = float(info.get("DiscountPromotion") or cash_discount_total or 0.0)
+            total_detail_price = sum(float(line.get("TotalPrice") or 0.0) for line in details)
+            header_data = {
+                "Code": info.get("Code") or ord_sum.get("Code"),
+                "BillsDate": info.get("BillsDate") or ord_sum.get("BillsDate"),
+                "CreateDate": info.get("CreateDate") or ord_sum.get("CreateDate"),
+                "CustomerCode": str(info.get("CustomerCode") or ord_sum.get("CustomerCode") or "KH-NAZZY").strip(),
+                "CustomerName": info.get("CustomerName") or ord_sum.get("CustomerName"),
+                "CustomerTaxCode": info.get("CustomerTaxCode") or "",
+                "Address": info.get("Address") or ord_sum.get("Address") or "",
+                "Phone": info.get("Phone") or "",
+                "GroupName": info.get("GroupName") or ord_sum.get("GroupName") or "NAZZY",
+                "SaleEmployeeCode": info.get("SaleEmployeeCode") or "",
+                "SaleEmployeeName": info.get("SaleEmployeeName") or "",
+                "DictDepotName": info.get("DictDepotName") or ord_sum.get("DictDepotName") or "Kho Mai Gold",
+                "DepotName": info.get("DepotName") or ord_sum.get("DepotName") or "",
+                "OrderTotalPrice": float(info.get("TotalPrice") or ord_sum.get("TotalPrice") or 0.0),
+                "OrderDiscount": order_discount,
+            }
 
-        order_rows: list[dict[str, Any]] = []
+            order_rows: list[dict[str, Any]] = []
 
-        # Các dòng sản phẩm mua bán
-        remaining_order_discount = round(order_discount)
-        priced_lines = [line for line in details if float(line.get("TotalPrice") or 0.0) > 0]
-        for line in details:
-            line_price = float(line.get("TotalPrice") or 0.0)
-            allocated_discount = 0.0
-            if line in priced_lines and total_detail_price > 0 and order_discount > 0:
-                if line is priced_lines[-1]:
-                    allocated_discount = remaining_order_discount
-                else:
-                    allocated_discount = round(order_discount * line_price / total_detail_price)
-                remaining_order_discount -= allocated_discount
-            line_discount = float(line.get("Discount") or 0.0) + allocated_discount
+            # Các dòng sản phẩm mua bán
+            remaining_order_discount = round(order_discount)
+            priced_lines = [line for line in details if float(line.get("TotalPrice") or 0.0) > 0]
+            for line in details:
+                line_price = float(line.get("TotalPrice") or 0.0)
+                allocated_discount = 0.0
+                if line in priced_lines and total_detail_price > 0 and order_discount > 0:
+                    if line is priced_lines[-1]:
+                        allocated_discount = remaining_order_discount
+                    else:
+                        allocated_discount = round(order_discount * line_price / total_detail_price)
+                    remaining_order_discount -= allocated_discount
+                line_discount = float(line.get("Discount") or 0.0) + allocated_discount
 
-            order_rows.append({
-                **header_data,
-                "ProductCode": str(line.get("ProductCode") or f"SP-{line.get('ProductId')}").strip(),
-                "ProductName": line.get("ProductName") or "Sản phẩm Nazzy",
-                "UnitName": line.get("UnitName") or "Thùng",
-                "Amount": float(line.get("Amount") or 0.0),
-                "promo_quantity": 0.0,
-                "PriceNow": float(line.get("PriceNow") or line.get("Price") or 0.0),
-                "Discount": line_discount,
-                "TaxPercent": float(line.get("TaxPercent") or 8.0),
-                "TotalPrice": max(0.0, line_price - line_discount),
-            })
-
-        # Các dòng hàng tặng khuyến mại (hiện vật)
-        for p in promotions:
-            if p.get("ProductId", -1) > 0 and float(p.get("Amount") or p.get("PromotionAmount") or 0) > 0:
-                p_qty = float(p.get("Amount") or p.get("PromotionAmount") or 0)
                 order_rows.append({
                     **header_data,
-                    "ProductCode": str(p.get("ProductCode") or f"KM-{p.get('ProductId')}").strip(),
-                    "ProductName": f"{p.get('ProductName', 'Hàng khuyến mại')} (Hàng KM không thu tiền)",
-                    "UnitName": p.get("UnitName") or "Gói",
-                    "Amount": 0.0,
-                    "promo_quantity": p_qty,
-                    "PriceNow": 0.0,
-                    "Discount": 0.0,
-                    "TaxPercent": float(p.get("PromotionVATPercent") or 0.0),
-                    "TotalPrice": 0.0,
+                    "ProductCode": str(line.get("ProductCode") or f"SP-{line.get('ProductId')}").strip(),
+                    "ProductName": line.get("ProductName") or "Sản phẩm Nazzy",
+                    "UnitName": line.get("UnitName") or "Thùng",
+                    "Amount": float(line.get("Amount") or 0.0),
+                    "promo_quantity": 0.0,
+                    "PriceNow": float(line.get("PriceNow") or line.get("Price") or 0.0),
+                    "Discount": line_discount,
+                    "TaxPercent": float(line.get("TaxPercent") or 8.0),
+                    "TotalPrice": max(0.0, line_price - line_discount),
                 })
 
-        return order_rows
+            # Các dòng hàng tặng khuyến mại (hiện vật)
+            for p in promotions:
+                if p.get("ProductId", -1) > 0 and float(p.get("Amount") or p.get("PromotionAmount") or 0) > 0:
+                    p_qty = float(p.get("Amount") or p.get("PromotionAmount") or 0)
+                    order_rows.append({
+                        **header_data,
+                        "ProductCode": str(p.get("ProductCode") or f"KM-{p.get('ProductId')}").strip(),
+                        "ProductName": f"{p.get('ProductName', 'Hàng khuyến mại')} (Hàng KM không thu tiền)",
+                        "UnitName": p.get("UnitName") or "Gói",
+                        "Amount": 0.0,
+                        "promo_quantity": p_qty,
+                        "PriceNow": 0.0,
+                        "Discount": 0.0,
+                        "TaxPercent": float(p.get("PromotionVATPercent") or 0.0),
+                        "TotalPrice": 0.0,
+                    })
 
-    flat_results: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(_fetch_order_detail, item) for item in all_order_summaries]
-        for f in as_completed(futures):
-            res = f.result()
-            if res:
-                flat_results.extend(res)
+            return order_rows
+
+        flat_results: list[dict[str, Any]] = []
+        completed_orders = 0
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            futures = [executor.submit(_fetch_order_detail, item) for item in all_order_summaries]
+            for f in as_completed(futures):
+                completed_orders += 1
+                res = f.result()
+                if res:
+                    flat_results.extend(res)
+                if completed_orders == total_orders or completed_orders % 10 == 0:
+                    _report(
+                        f"Đang tải chi tiết đơn Nazzy {completed_orders}/{total_orders} ({len(flat_results)} dòng)...",
+                        len(flat_results),
+                    )
 
     return flat_results
 
@@ -1239,6 +1273,7 @@ class RestApiSupplierConnector(BaseSupplierConnector):
         to_date: date,
         *,
         allow_sample_fallback: bool = True,
+        progress_cb: Any = None,
     ) -> list[dict[str, Any]]:
         is_vinamilk = (
             config.supplier_code.upper() == "VINAMILK"
@@ -1259,6 +1294,7 @@ class RestApiSupplierConnector(BaseSupplierConnector):
                 from_date,
                 to_date,
                 strict=not allow_sample_fallback,
+                progress_cb=progress_cb,
             )
         headers: dict[str, str] = {"Accept": "application/json"}
         secret = decrypt_supplier_secret(config.encrypted_secret)

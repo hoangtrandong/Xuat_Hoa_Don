@@ -1330,7 +1330,27 @@ def _run_sync_supplier_configs_worker(
                 message=f"[{idx}/{total_configs}] {source_name}: Đang kết nối và tải đơn hàng...",
             )
             try:
-                raw_rows = connector.fetch_raw_orders(cfg, target_from, target_to, allow_sample_fallback=False)
+                def _on_source_progress(stage_text: str, count: int = 0) -> None:
+                    job_manager.update_item(
+                        job_id,
+                        cfg.id,
+                        status="RUNNING",
+                        stage=stage_text,
+                        raw_rows=count,
+                    )
+                    job_manager.update_progress(
+                        job_id,
+                        current_step=base_step + 1,
+                        message=f"[{idx}/{total_configs}] {source_name}: {stage_text}",
+                    )
+
+                raw_rows = connector.fetch_raw_orders(
+                    cfg,
+                    target_from,
+                    target_to,
+                    allow_sample_fallback=False,
+                    progress_cb=_on_source_progress,
+                )
                 job_manager.update_item(
                     job_id,
                     cfg.id,
@@ -1381,6 +1401,7 @@ def _run_sync_supplier_configs_worker(
                     cfg.id,
                     status="SUCCESS",
                     stage="Hoàn tất",
+                    raw_rows=len(raw_rows),
                     new_orders=n_ord,
                     updated_orders=u_ord,
                     new_lines=n_ln,

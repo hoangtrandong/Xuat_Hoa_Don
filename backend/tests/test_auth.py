@@ -46,9 +46,13 @@ def auth_client(monkeypatch):
     def override_db():
         yield db
 
+    from app.core import audit as audit_mod
+    from sqlalchemy.orm import sessionmaker
+
+    monkeypatch.setattr(audit_mod, "SessionLocal", sessionmaker(bind=engine, expire_on_commit=False))
     app.dependency_overrides[get_db] = override_db
-    with TestClient(app) as client:
-        yield client, db, viewer
+    client = TestClient(app)
+    yield client, db, viewer
     app.dependency_overrides.clear()
     db.close()
     Base.metadata.drop_all(engine)
@@ -134,3 +138,96 @@ def test_delivery_request_creator_comes_from_authenticated_user(monkeypatch):
     create_request(payload, db=Mock(), current_user=actor)
 
     assert create.call_args.kwargs["created_by"] == "authenticated-user"
+
+
+def test_me_profile_update_change_password_and_activity(auth_client):
+    from app.models.user import AuditLog
+
+    client, db, viewer = auth_client
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "viewer", "password": "a-strong-password"},
+    )
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1. GET /auth/me returns enriched profile + permissions
+    me_res = client.get("/api/v1/auth/me", headers=headers)
+    assert me_res.status_code == 200
+    me_data = me_res.json()
+    assert me_data["email"] == "viewer@example.test"
+    assert "customers:read" in me_data["permissions"]
+    assert me_data["must_change_password"] is False
+
+    # 2. PATCH /auth/me updates full_name and email
+    upd_res = client.patch(
+        "/api/v1/auth/me",
+        json={"full_name": "Nguyễn Văn Kế Toán", "email": "ketoan@example.test"},
+        headers=headers,
+    )
+    assert upd_res.status_code == 200
+    assert upd_res.json()["full_name"] == "Nguyễn Văn Kế Toán"
+    assert upd_res.json()["email"] == "ketoan@example.test"
+
+    # 3. POST /auth/change-password validates current password, same password, and length
+    wrong_res = client.post(
+        "/api/v1/auth/change-password",
+        json={"current_password": "wrong-password", "new_password": "NewPassword@2026"},
+        headers=headers,
+    )
+    assert wrong_res.status_code == 400
+
+    same_res = client.post(
+        "/api/v1/auth/change-password",
+        json={"current_password": "a-strong-password", "new_password": "a-strong-password"},
+        headers=headers,
+    )
+    assert same_res.status_code == 400
+
+    ok_res = client.post(
+        "/api/v1/auth/change-password",
+        json={"current_password": "a-strong-password", "new_password": "NewPassword@2026"},
+        headers=headers,
+    )
+    assert ok_res.status_code == 200
+    assert ok_res.json()["access_token"]
+
+    # New password works for login
+    relogin = client.post(
+        "/api/v1/auth/login",
+        json={"username": "viewer", "password": "NewPassword@2026"},
+    )
+    assert relogin.status_code == 200
+
+    # 4. GET /auth/me/activity returns only current user's audit entries
+    db.add(
+        AuditLog(
+            actor_user_id=viewer.id,
+            actor_username=viewer.username,
+            action="login",
+            resource="auth",
+            path="/api/v1/auth/login",
+            status_code=200,
+            ip_address="127.0.0.1",
+        )
+    )
+    db.add(
+        AuditLog(
+            actor_user_id=99999,
+            actor_username="other_user",
+            action="login",
+            resource="auth",
+            path="/api/v1/auth/login",
+            status_code=200,
+            ip_address="10.0.0.1",
+        )
+    )
+    db.commit()
+
+    act_res = client.get("/api/v1/auth/me/activity?category=security", headers=headers)
+    assert act_res.status_code == 200
+    rows = act_res.json()
+    assert len(rows) >= 1
+    assert all(r["resource"] == "auth" for r in rows)
+    assert all(r["ip_address"] != "10.0.0.1" for r in rows)

@@ -81,3 +81,34 @@ def record_login_attempt(*, username: str, success: bool, ip_address: str | None
         db.rollback()
     finally:
         db.close()
+
+
+def record_auth_event(
+    *,
+    user: User,
+    action: str,
+    path: str,
+    status_code: int,
+    ip_address: str | None,
+) -> None:
+    db = SessionLocal()
+    try:
+        db.add(
+            AuditLog(
+                actor_user_id=user.id,
+                actor_username=user.username,
+                action=action[:20],
+                resource="auth",
+                resource_id=str(user.id),
+                path=path,
+                status_code=status_code,
+                ip_address=ip_address,
+                created_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+    except Exception:  # pragma: no cover - defensive, must never break auth flows
+        logger.exception("Failed to write auth event audit log for %s (%s)", user.username, action)
+        db.rollback()
+    finally:
+        db.close()

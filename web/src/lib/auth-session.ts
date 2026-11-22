@@ -12,6 +12,7 @@ const DISTRIBUTOR_CODE_KEY = "dms-distributor-code";
 const DISTRIBUTOR_NAME_KEY = "dms-distributor-name";
 const DISTRIBUTOR_TAX_CODE_KEY = "dms-distributor-tax-code";
 const IS_SUPER_ADMIN_KEY = "dms-is-super-admin";
+const MUST_CHANGE_PASSWORD_KEY = "dms-must-change-password";
 const SERVER_SNAPSHOT = "server";
 
 export interface AuthSnapshot {
@@ -24,6 +25,7 @@ export interface AuthSnapshot {
   distributorName: string;
   distributorTaxCode: string;
   isSuperAdmin: boolean;
+  mustChangePassword: boolean;
 }
 
 export interface SaveAuthSessionExtras {
@@ -33,6 +35,7 @@ export interface SaveAuthSessionExtras {
   distributorName?: string | null;
   distributorTaxCode?: string | null;
   isSuperAdmin?: boolean;
+  mustChangePassword?: boolean;
 }
 
 function getSnapshot(): string {
@@ -49,6 +52,7 @@ function getSnapshot(): string {
     distributorName: window.sessionStorage.getItem(DISTRIBUTOR_NAME_KEY) || "",
     distributorTaxCode: window.sessionStorage.getItem(DISTRIBUTOR_TAX_CODE_KEY) || "",
     isSuperAdmin: window.sessionStorage.getItem(IS_SUPER_ADMIN_KEY) === "true",
+    mustChangePassword: window.sessionStorage.getItem(MUST_CHANGE_PASSWORD_KEY) === "true",
   });
 }
 
@@ -78,6 +82,7 @@ export function useAuthSession(): AuthSnapshot {
         distributorName: "",
         distributorTaxCode: "",
         isSuperAdmin: false,
+        mustChangePassword: false,
       }
     : (JSON.parse(snapshot) as AuthSnapshot);
 }
@@ -121,6 +126,12 @@ export function saveAuthSession(
         extras.isSuperAdmin ? "true" : "false",
       );
     }
+    if (extras.mustChangePassword !== undefined) {
+      window.sessionStorage.setItem(
+        MUST_CHANGE_PASSWORD_KEY,
+        extras.mustChangePassword ? "true" : "false",
+      );
+    }
   }
   emitChange();
 }
@@ -134,6 +145,7 @@ export function clearAuthSession(expired = false): void {
   window.sessionStorage.removeItem(DISTRIBUTOR_NAME_KEY);
   window.sessionStorage.removeItem(DISTRIBUTOR_TAX_CODE_KEY);
   window.sessionStorage.removeItem(IS_SUPER_ADMIN_KEY);
+  window.sessionStorage.removeItem(MUST_CHANGE_PASSWORD_KEY);
   emitChange();
   if (expired) window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
 }

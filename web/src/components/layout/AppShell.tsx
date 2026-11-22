@@ -53,7 +53,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           me.full_name !== session.fullName ||
           effDistId !== session.distributorId ||
           effDistCode !== session.distributorCode ||
-          Boolean(me.is_super_admin) !== session.isSuperAdmin
+          Boolean(me.is_super_admin) !== session.isSuperAdmin ||
+          Boolean(me.must_change_password) !== session.mustChangePassword
         ) {
           saveAuthSession(session.token!, me.username || session.username, {
             fullName: me.full_name || "",
@@ -62,6 +63,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             distributorName: effDistName || "",
             distributorTaxCode: effDistTax || "",
             isSuperAdmin: Boolean(me.is_super_admin),
+            mustChangePassword: Boolean(me.must_change_password),
           });
         }
       })
@@ -76,6 +78,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     session.distributorName,
     session.distributorTaxCode,
     session.isSuperAdmin,
+    session.mustChangePassword,
   ]);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
@@ -111,6 +114,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         distributorName: data.distributor_name || "",
         distributorTaxCode: data.distributor_tax_code || "",
         isSuperAdmin: Boolean(data.is_super_admin),
+        mustChangePassword: Boolean(data.must_change_password),
       });
       setPassword("");
       setSessionExpired(false);
@@ -257,6 +261,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             distributorName={session.distributorName}
             distributorTaxCode={session.distributorTaxCode}
             isSuperAdmin={session.isSuperAdmin}
+            mustChangePassword={session.mustChangePassword}
           />
           <GlobalTaskProgressBar />
           <main className="flex-1 overflow-y-auto p-4 lg:p-6">{children}</main>

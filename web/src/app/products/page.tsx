@@ -1579,7 +1579,7 @@ export default function ProductsPage() {
 
             <div>
               <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                Công ty quản lý / MST (CQT)
+                MST đầu vào (CQT)
               </label>
               <select
                 value={companyFilter}
@@ -1827,7 +1827,7 @@ export default function ProductsPage() {
                 <th className="w-10 px-2 py-2 text-center">STT</th>
                 <th className="px-2.5 py-2">Nhà phân phối</th>
                 <th className="px-2.5 py-2" title="Pháp nhân & Mã số thuế đứng tên mua vào trên Hóa đơn CQT hoặc được gán quản lý SKU">
-                  Công ty quản lý / MST
+                  MST đầu vào (CQT)
                 </th>
                 <th className="px-2.5 py-2">
                   <button
@@ -3413,7 +3413,7 @@ export default function ProductsPage() {
                 <div className="flex items-center justify-between gap-2 mb-2.5">
                   <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5">
                     <Building2 size={13} className="text-sky-600" />
-                    <span>4. Công ty quản lý (MST) &amp; Quy đổi quy cách khi xuất Hóa đơn</span>
+                    <span>4. MST đầu vào (CQT) &amp; Quy đổi quy cách ĐVT</span>
                   </div>
                   <select
                     value=""
@@ -3459,10 +3459,8 @@ export default function ProductsPage() {
                       <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase">
                         <tr className="border-b border-slate-200">
                           <th className="px-2 py-1.5 text-center w-12">Chính</th>
-                          <th className="px-2 py-1.5">Công ty / MST</th>
-                          <th className="px-2 py-1.5 w-32">Mã xuất HĐ riêng</th>
-                          <th className="px-2 py-1.5">Tên xuất HĐ riêng (tuỳ chọn)</th>
-                          <th className="px-2 py-1.5 w-24">ĐVT xuất HĐ</th>
+                          <th className="px-2 py-1.5">MST đầu vào / Công ty</th>
+                          <th className="px-2 py-1.5 w-28">ĐVT xuất HĐ</th>
                           <th className="px-2 py-1.5 w-36 text-center" title="SL xuất HĐ = SL gốc × (Tử / Mẫu). VD: 1 Thùng = 48 Hộp -> nhập 48 / 1">
                             Quy đổi (Tử / Mẫu)
                           </th>
@@ -3490,37 +3488,9 @@ export default function ProductsPage() {
                                 <div className="font-mono font-bold text-slate-800">
                                   {compObj?.tax_code || compObj?.code || `#${cfg.company_id}`}
                                 </div>
-                                <div className="text-[10px] text-slate-500 truncate max-w-[200px]">
+                                <div className="text-[10px] text-slate-500 truncate max-w-[260px]">
                                   {compObj?.short_name || compObj?.name || ""}
                                 </div>
-                              </td>
-                              <td className="px-2 py-1.5">
-                                <input
-                                  value={cfg.company_product_code}
-                                  onChange={(e) =>
-                                    setEditCompanyConfigs((prev) =>
-                                      prev.map((item, i) =>
-                                        i === idx ? { ...item, company_product_code: e.target.value.toUpperCase() } : item,
-                                      ),
-                                    )
-                                  }
-                                  placeholder="Mặc định Cty"
-                                  className={cn(inputCls, "font-mono text-[11px]")}
-                                />
-                              </td>
-                              <td className="px-2 py-1.5">
-                                <input
-                                  value={cfg.invoice_name_override}
-                                  onChange={(e) =>
-                                    setEditCompanyConfigs((prev) =>
-                                      prev.map((item, i) =>
-                                        i === idx ? { ...item, invoice_name_override: e.target.value } : item,
-                                      ),
-                                    )
-                                  }
-                                  placeholder="Để trống = theo quy tắc Cty"
-                                  className={cn(inputCls, "text-[11px]")}
-                                />
                               </td>
                               <td className="px-2 py-1.5">
                                 <input

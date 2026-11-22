@@ -97,12 +97,17 @@ class PreviewInvoiceLine(BaseModel):
     vat_amount: float = 0.0
     total_amount: float = 0.0
     source_order_number: str | None = None
+    source_sku: str | None = None
+    source_quantity: float | None = None
+    source_unit: str | None = None
+    conversion_ratio: str | None = None
 
 
 class PreviewInvoiceDocument(BaseModel):
     distributor_id: int
     distributor_code: str
     distributor_name: str
+    seller_company_id: int | None = None
     seller_tax_code: str
     seller_address: str
     seller_phone: str
@@ -499,7 +504,11 @@ class InvoiceFormEngine:
         if cust_codes:
             cust_rows = db.scalars(
                 select(Customer)
-                .options(selectinload(Customer.addresses), selectinload(Customer.store))
+                .options(
+                    selectinload(Customer.addresses),
+                    selectinload(Customer.store),
+                    selectinload(Customer.company),
+                )
                 .where(Customer.code.in_(cust_codes))
             ).all()
             customers_by_code = {c.code: c for c in cust_rows}
@@ -627,6 +636,7 @@ class InvoiceFormEngine:
                     vat_amt = round(amt_before_tax * (vat_rate / 100.0))
                     line_total = amt_before_tax + vat_amt
 
+                    source_sku = prod_obj.sku if prod_obj else raw_sku
                     items.append(
                         PreviewInvoiceLine(
                             line_number=line_no,
@@ -643,6 +653,9 @@ class InvoiceFormEngine:
                             vat_amount=vat_amt,
                             total_amount=line_total,
                             source_order_number=row.order_number,
+                            source_sku=source_sku,
+                            source_quantity=qty,
+                            source_unit=unit_name,
                         )
                     )
                     line_no += 1
@@ -652,6 +665,7 @@ class InvoiceFormEngine:
 
                 # Xử lý hàng khuyến mãi theo quy tắc riêng của NPP
                 if promo_qty > 0:
+                    source_sku = prod_obj.sku if prod_obj else raw_sku
                     if config.promo_handling == "ZERO_PRICE":
                         items.append(
                             PreviewInvoiceLine(
@@ -669,6 +683,9 @@ class InvoiceFormEngine:
                                 vat_amount=0.0,
                                 total_amount=0.0,
                                 source_order_number=row.order_number,
+                                source_sku=source_sku,
+                                source_quantity=promo_qty,
+                                source_unit=unit_name,
                             )
                         )
                         line_no += 1
@@ -690,6 +707,9 @@ class InvoiceFormEngine:
                                 vat_amount=0.0,
                                 total_amount=0.0,
                                 source_order_number=row.order_number,
+                                source_sku=source_sku,
+                                source_quantity=promo_qty,
+                                source_unit=unit_name,
                             )
                         )
                         line_no += 1
@@ -729,11 +749,17 @@ class InvoiceFormEngine:
             if layout_cfg.get("footer_note"):
                 note_parts.append(str(layout_cfg["footer_note"]))
 
+            seller_comp = cust_obj.company if (cust_obj and cust_obj.company) else None
+            resolved_seller_mst = (
+                (seller_comp.tax_code.strip() if (seller_comp and seller_comp.tax_code) else "")
+                or (distributor.tax_code or "0100109106")
+            )
             doc = PreviewInvoiceDocument(
                 distributor_id=distributor.id,
                 distributor_code=distributor.code,
                 distributor_name=distributor.name,
-                seller_tax_code=distributor.tax_code or "0100109106",
+                seller_company_id=seller_comp.id if seller_comp else None,
+                seller_tax_code=resolved_seller_mst,
                 seller_address=distributor.address or "Việt Nam",
                 seller_phone=distributor.phone or "",
                 seller_bank_account=config.seller_bank_account or "",

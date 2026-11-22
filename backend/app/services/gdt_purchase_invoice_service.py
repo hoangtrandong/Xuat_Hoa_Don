@@ -390,6 +390,11 @@ def parse_gdt_invoice_xml(xml_content: str) -> dict[str, Any]:
             line_no = int(stt_raw) if stt_raw else idx
         except ValueError:
             line_no = idx
+        tchat_raw = _find_child_text(item_node, "TChat")
+        try:
+            item_nature = int(tchat_raw) if tchat_raw else 1
+        except ValueError:
+            item_nature = 1
         ma = _find_child_text(item_node, "MHHDVu")
         ten = _find_child_text(item_node, "THHDVu")
         dvt = _find_child_text(item_node, "DVTinh")
@@ -401,6 +406,7 @@ def parse_gdt_invoice_xml(xml_content: str) -> dict[str, Any]:
         items.append(
             {
                 "line_number": line_no,
+                "item_nature": item_nature,
                 "product_code": ma,
                 "product_name": ten,
                 "unit_name": dvt,
@@ -879,6 +885,7 @@ def sync_gdt_purchase_invoices(
                             PurchaseInvoiceItem(
                                 purchase_invoice_id=existing.id,
                                 line_number=item_dict["line_number"],
+                                item_nature=item_dict.get("item_nature", 1),
                                 product_code=item_dict["product_code"] or None,
                                 product_name=item_dict["product_name"] or "(Không tên)",
                                 unit_name=item_dict["unit_name"] or None,

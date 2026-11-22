@@ -66,6 +66,7 @@ def init_db() -> None:
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS source_quantity DOUBLE PRECISION;"))
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS source_unit VARCHAR(50);"))
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS conversion_ratio VARCHAR(30);"))
+        conn.execute(text("ALTER TABLE purchase_invoice_items ADD COLUMN IF NOT EXISTS item_nature INTEGER DEFAULT 1;"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_products_sync_source ON products(sync_source);"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_dist_tax ON companies(distributor_id, tax_code);"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_product_companies_lookup ON product_companies(product_id, is_primary DESC, last_purchased_at DESC);"))

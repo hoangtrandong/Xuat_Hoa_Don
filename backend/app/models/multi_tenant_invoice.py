@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, List
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -302,6 +302,9 @@ class PurchaseInvoiceItem(Base):
         ForeignKey("purchase_invoices.id", ondelete="CASCADE"), index=True
     )
     line_number: Mapped[int] = mapped_column(Integer, default=1)
+    item_nature: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=1
+    )  # TChat theo NĐ 123: 1=HHDV, 2=Khuyến mãi, 3=Chiết khấu TM, 4=Ghi chú/Diễn giải
     product_code: Mapped[str | None] = mapped_column(String(100), index=True)  # MHHDVu
     product_name: Mapped[str] = mapped_column(String(500))  # THHDVu
     unit_name: Mapped[str | None] = mapped_column(String(60))  # DVTinh
@@ -313,3 +316,34 @@ class PurchaseInvoiceItem(Base):
     vat_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)
 
     invoice: Mapped["PurchaseInvoice"] = relationship(back_populates="items")
+
+
+class TaxInventoryOpeningBalance(Base):
+    """Số dư Tồn kho Thuế đầu kỳ (TK 156) theo từng cặp (MST pháp nhân, SKU đầu vào CQT)."""
+
+    __tablename__ = "tax_inventory_opening_balances"
+    __table_args__ = (
+        UniqueConstraint(
+            "distributor_id",
+            "tax_code",
+            "sku",
+            "as_of_date",
+            name="uq_tax_opening_balance_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    distributor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributors.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    tax_code: Mapped[str] = mapped_column(String(40), index=True)
+    sku: Mapped[str] = mapped_column(String(100), index=True)
+    product_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    unit_name: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    as_of_date: Mapped[date] = mapped_column(Date, index=True)  # Ngày chốt số dư đầu kỳ (VD: 2026-01-01)
+    opening_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    opening_amount: Mapped[float] = mapped_column(Numeric(16, 2), default=0)  # Trị giá tồn đầu kỳ (TK 156)
+    note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

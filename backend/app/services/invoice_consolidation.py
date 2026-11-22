@@ -501,8 +501,8 @@ def consolidate_dms_orders_for_invoicing(
     # 5. Hoàn thiện danh sách nhóm, tính tổng và tổng hợp lỗi kiểm tra + Đối chiếu Tồn kho Thuế theo MST
     from app.services.tax_inventory_service import compute_tax_inventory_by_mst
 
-    tax_inv_snapshot = compute_tax_inventory_by_mst(db, distributor_id=distributor_id)
-    tax_balance_lookup: dict[tuple[str, str], float] = tax_inv_snapshot["balance_lookup"]
+    tax_inv_snapshot = compute_tax_inventory_by_mst(db, distributor_id=distributor_id, page_size=0)
+    tax_balance_lookup: dict[tuple[str, str], float] = dict(tax_inv_snapshot["balance_lookup"])
     sku_positive_by_mst: dict[str, list[dict[str, Any]]] = tax_inv_snapshot["sku_positive_by_mst"]
 
     result_groups: list[dict[str, Any]] = []
@@ -582,6 +582,8 @@ def consolidate_dms_orders_for_invoicing(
             if comp_mst and src_sku_upper:
                 tax_balance_qty = tax_balance_lookup.get((comp_mst, src_sku_upper), 0.0)
                 projected_bal = round(tax_balance_qty - src_qty, 4)
+                # Trừ lũy kế để các nhóm hóa đơn tiếp theo trong cùng đợt gom thấy đúng tồn còn lại
+                tax_balance_lookup[(comp_mst, src_sku_upper)] = projected_bal
                 if projected_bal < -1e-6:
                     is_tax_negative = True
                     others = [
@@ -591,7 +593,7 @@ def consolidate_dms_orders_for_invoicing(
                     ]
                     other_hint = f" | MST khác đang tồn: {', '.join(others[:2])}" if others else ""
                     grp["warnings"].add(
-                        f"Âm kho thuế MST {comp_mst} - SKU {src_sku_upper}: tồn {tax_balance_qty}, sắp xuất {src_qty} (thiếu {round(abs(projected_bal), 4)}){other_hint}."
+                        f"Âm kho thuế MST {comp_mst} - SKU {src_sku_upper}: tồn khả dụng {tax_balance_qty}, sắp xuất {src_qty} (thiếu {round(abs(projected_bal), 4)}){other_hint}."
                     )
 
             items_list.append(

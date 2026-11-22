@@ -2118,6 +2118,8 @@ def issue_einvoices(
         inv = IssuedInvoice(
             distributor_id=dist.id,
             invoice_config_id=cfg.id,
+            seller_company_id=doc.seller_company_id,
+            seller_tax_code=doc.seller_tax_code or dist.tax_code,
             provider=cfg.provider,
             invoice_template_code=cfg.invoice_template_code,
             invoice_series=cfg.invoice_series,
@@ -2166,6 +2168,10 @@ def issue_einvoices(
                     vat_amount=line.vat_amount,
                     total_amount=line.total_amount,
                     source_order_number=line.source_order_number,
+                    source_sku=line.source_sku or line.product_code,
+                    source_quantity=line.source_quantity if line.source_quantity is not None else line.quantity,
+                    source_unit=line.source_unit or line.unit_name,
+                    conversion_ratio=line.conversion_ratio,
                 )
             )
 
@@ -2301,10 +2307,17 @@ def get_tax_inventory_by_mst(
     company_tax_code: str | None = Query(default=None),
     search: str | None = Query(default=None),
     only_negative: bool = Query(default=False),
+    status_filter: str | None = Query(default=None),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    include_draft: bool = Query(default=True),
+    low_threshold: float = Query(default=5.0, ge=0),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=0, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Sổ Nhập – Xuất – Tồn Thuế theo từng MST & SKU đầu vào CQT (kèm cảnh báo âm kho)."""
+    """Sổ Nhập – Xuất – Tồn Thuế theo từng MST & SKU đầu vào CQT (hỗ trợ kỳ báo cáo, cảnh báo âm thời điểm & phân trang)."""
     from app.services.tax_inventory_service import compute_tax_inventory_by_mst
 
     effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
@@ -2314,12 +2327,259 @@ def get_tax_inventory_by_mst(
         company_tax_code=company_tax_code,
         search=search,
         only_negative=only_negative,
+        status_filter=status_filter,
+        from_date=from_date,
+        to_date=to_date,
+        include_draft=include_draft,
+        low_threshold=low_threshold,
+        page=page,
+        page_size=page_size,
     )
     return {
         "summary": data["summary"],
+        "data_quality": data["data_quality"],
+        "pagination": data["pagination"],
         "available_msts": data["available_msts"],
         "items": data["items"],
     }
+
+
+@router.get("/tax-inventory/card")
+def get_tax_inventory_card(
+    tax_code: str = Query(..., min_length=1),
+    sku: str = Query(..., min_length=1),
+    distributor_id: int | None = Query(default=None),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    include_draft: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Thẻ kho thuế chi tiết (Sổ chi tiết N-X-T theo trục thời gian) cho 1 cặp (MST, SKU)."""
+    from app.services.tax_inventory_service import get_tax_inventory_card_detail
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    try:
+        return get_tax_inventory_card_detail(
+            db,
+            tax_code=tax_code,
+            sku=sku,
+            distributor_id=effective_dist_id,
+            from_date=from_date,
+            to_date=to_date,
+            include_draft=include_draft,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/tax-inventory/export")
+def export_tax_inventory_by_mst(
+    distributor_id: int | None = Query(default=None),
+    company_tax_code: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    only_negative: bool = Query(default=False),
+    status_filter: str | None = Query(default=None),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    include_draft: bool = Query(default=True),
+    low_threshold: float = Query(default=5.0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Xuất file Excel (.xlsx) Sổ Nhập – Xuất – Tồn Thuế theo MST."""
+    from app.services.tax_inventory_service import (
+        compute_tax_inventory_by_mst,
+        export_tax_inventory_excel,
+    )
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    data = compute_tax_inventory_by_mst(
+        db,
+        distributor_id=effective_dist_id,
+        company_tax_code=company_tax_code,
+        search=search,
+        only_negative=only_negative,
+        status_filter=status_filter,
+        from_date=from_date,
+        to_date=to_date,
+        include_draft=include_draft,
+        low_threshold=low_threshold,
+        page=1,
+        page_size=0,
+    )
+    buf = export_tax_inventory_excel(data)
+    mst_suffix = f"_{company_tax_code.strip()}" if company_tax_code and company_tax_code.strip() else ""
+    filename = f"So_Ton_Kho_Thue{mst_suffix}_{datetime.utcnow().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class OpeningBalanceUpsertIn(BaseModel):
+    distributor_id: int | None = None
+    tax_code: str
+    sku: str
+    as_of_date: date
+    opening_qty: float
+    opening_amount: float = 0.0
+    product_name: str | None = None
+    unit_name: str | None = None
+    note: str | None = None
+
+
+class MapUnmappedSkuIn(BaseModel):
+    sku: str
+    apply_same_name: bool = True
+
+
+@router.get("/tax-inventory/opening-balances")
+def get_tax_opening_balances(
+    distributor_id: int | None = Query(default=None),
+    tax_code: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    from app.services.tax_inventory_service import list_opening_balances
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    return list_opening_balances(
+        db,
+        distributor_id=effective_dist_id,
+        tax_code=tax_code,
+        search=search,
+    )
+
+
+@router.post("/tax-inventory/opening-balances")
+def save_tax_opening_balance(
+    payload: OpeningBalanceUpsertIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.tax_inventory_service import upsert_opening_balance
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, payload.distributor_id)
+    try:
+        row = upsert_opening_balance(
+            db,
+            distributor_id=effective_dist_id,
+            tax_code=payload.tax_code,
+            sku=payload.sku,
+            as_of_date=payload.as_of_date,
+            opening_qty=payload.opening_qty,
+            opening_amount=payload.opening_amount,
+            product_name=payload.product_name,
+            unit_name=payload.unit_name,
+            note=payload.note,
+            updated_by=getattr(current_user, "username", None) or "ADMIN",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "id": row.id,
+        "tax_code": row.tax_code,
+        "sku": row.sku,
+        "as_of_date": row.as_of_date.isoformat(),
+        "opening_qty": float(row.opening_qty or 0),
+        "opening_amount": float(row.opening_amount or 0),
+    }
+
+
+@router.delete("/tax-inventory/opening-balances/{balance_id}")
+def delete_tax_opening_balance(
+    balance_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.models.multi_tenant_invoice import TaxInventoryOpeningBalance
+
+    row = db.get(TaxInventoryOpeningBalance, balance_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bản ghi tồn đầu kỳ.")
+    if row.distributor_id is not None:
+        _enforce_user_distributor_scope(current_user, row.distributor_id)
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/tax-inventory/opening-balances/template")
+def download_opening_balance_template(
+    current_user: User = Depends(get_current_user),
+):
+    from app.services.tax_inventory_service import build_opening_balance_template_excel
+
+    buf = build_opening_balance_template_excel()
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="Mau_Ton_Dau_Ky_Thue_MST.xlsx"'},
+    )
+
+
+@router.post("/tax-inventory/opening-balances/import-excel")
+async def import_tax_opening_balances_excel(
+    file: UploadFile = File(...),
+    distributor_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.tax_inventory_service import import_opening_balances_excel
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="File Excel trống.")
+    try:
+        return import_opening_balances_excel(
+            db,
+            file_bytes=content,
+            distributor_id=effective_dist_id,
+            updated_by=getattr(current_user, "username", None) or "ADMIN",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Lỗi đọc file Excel: {exc}") from exc
+
+
+@router.get("/tax-inventory/unmapped-items")
+def get_unmapped_tax_purchase_items(
+    distributor_id: int | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    from app.services.tax_inventory_service import list_unmapped_purchase_items
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    return list_unmapped_purchase_items(db, distributor_id=effective_dist_id, limit=limit)
+
+
+@router.patch("/tax-inventory/unmapped-items/{item_id}/map-sku")
+def map_unmapped_tax_purchase_item(
+    item_id: int,
+    payload: MapUnmappedSkuIn,
+    distributor_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.tax_inventory_service import map_unmapped_purchase_item_sku
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    try:
+        return map_unmapped_purchase_item_sku(
+            db,
+            item_id=item_id,
+            sku=payload.sku,
+            distributor_id=effective_dist_id,
+            apply_same_name=payload.apply_same_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/issued/{invoice_id}/adjust-or-replace")

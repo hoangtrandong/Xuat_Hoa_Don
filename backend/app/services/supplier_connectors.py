@@ -1098,9 +1098,9 @@ def fetch_nazzy_orders(
     all_order_summaries: list[dict[str, Any]] = []
     seen_summary_ids: set[str] = set()
 
-    http_limits = httpx.Limits(max_connections=16, max_keepalive_connections=16)
+    http_limits = httpx.Limits(max_connections=8, max_keepalive_connections=8)
     list_timeout = httpx.Timeout(45.0, connect=10.0)
-    detail_timeout = httpx.Timeout(15.0, connect=8.0)
+    detail_timeout = httpx.Timeout(25.0, connect=10.0)
 
     with httpx.Client(
         verify=False,
@@ -1140,71 +1140,60 @@ def fetch_nazzy_orders(
                 raise RuntimeError("Dữ liệu trả về từ Nazzy không có danh sách đơn hàng hợp lệ.")
             return int(items_block.get("TotalRecord") or 0), (items_block.get("Items") or [])
 
-        # Tải trang 1 trước để biết tổng số đơn (TotalRecord)
+        # Tải danh sách tuần tự từng trang (tránh ASP.NET Session Lock trên IIS gây timeout khi gọi song song)
         total_records = 0
-        first_items: list[dict[str, Any]] = []
+        current_page = 1
         while True:
-            _report(f"Đang tải danh sách đơn Nazzy trang 1 ({page_size} đơn/trang)...", 0)
+            _report(
+                f"Đang tải danh sách đơn Nazzy trang {current_page} ({page_size} đơn/trang)...",
+                len(all_order_summaries),
+            )
+            page_items: list[dict[str, Any]] = []
             try:
-                total_records, first_items = _fetch_list_page(1, page_size)
-                break
+                page_total, page_items = _fetch_list_page(current_page, page_size)
+                if page_total > 0:
+                    total_records = page_total
             except httpx.TimeoutException as exc:
                 if page_size > 50:
                     page_size = 50
-                    _report("Máy chủ Nazzy phản hồi chậm — tự động hạ xuống 50 đơn/trang...", 0)
+                    current_page = max(1, (len(all_order_summaries) // page_size) + 1)
+                    _report(
+                        f"Máy chủ Nazzy phản hồi chậm — tự động hạ xuống 50 đơn/trang (trang {current_page})...",
+                        len(all_order_summaries),
+                    )
                     continue
-                if strict:
+                if strict and not all_order_summaries:
                     raise RuntimeError(f"Không thể lấy danh sách đơn Nazzy: {exc}") from exc
+                _report(f"Trang {current_page} Nazzy bị quá thời gian — dừng tải danh sách với {len(all_order_summaries)} đơn đã lấy.", len(all_order_summaries))
                 break
             except Exception as exc:
-                if strict:
+                if strict and not all_order_summaries:
                     raise RuntimeError(f"Không thể lấy danh sách đơn Nazzy: {exc}") from exc
                 break
 
-        for item in first_items:
-            key = str(item.get("BillsDepotId") or item.get("Code") or len(seen_summary_ids))
-            if key not in seen_summary_ids:
-                seen_summary_ids.add(key)
-                all_order_summaries.append(item)
+            if not page_items:
+                break
 
-        if first_items:
+            for item in page_items:
+                key = str(item.get("BillsDepotId") or item.get("Code") or len(seen_summary_ids))
+                if key not in seen_summary_ids:
+                    seen_summary_ids.add(key)
+                    all_order_summaries.append(item)
+
             _report(
                 f"Đã tải danh sách {len(all_order_summaries)}/{total_records or len(all_order_summaries)} đơn Nazzy...",
                 len(all_order_summaries),
             )
-
-        # Nếu còn nhiều trang -> tải song song 4 trang cùng lúc để giảm thời gian chờ
-        if first_items and total_records > len(all_order_summaries):
-            import math
-            total_pages = min(30, math.ceil(total_records / max(1, page_size)))
-            remaining_pages = list(range(2, total_pages + 1))
-            if remaining_pages:
-                _report(
-                    f"Đang tải song song {len(remaining_pages)} trang còn lại ({len(all_order_summaries)}/{total_records} đơn)...",
-                    len(all_order_summaries),
-                )
-                with ThreadPoolExecutor(max_workers=4) as page_exec:
-                    future_to_page = {
-                        page_exec.submit(_fetch_list_page, p, page_size): p
-                        for p in remaining_pages
-                    }
-                    for fut in as_completed(future_to_page):
-                        try:
-                            _, page_items = fut.result()
-                            for item in page_items:
-                                key = str(item.get("BillsDepotId") or item.get("Code") or len(seen_summary_ids))
-                                if key not in seen_summary_ids:
-                                    seen_summary_ids.add(key)
-                                    all_order_summaries.append(item)
-                            _report(
-                                f"Đã tải danh sách {len(all_order_summaries)}/{total_records} đơn Nazzy...",
-                                len(all_order_summaries),
-                            )
-                        except Exception:
-                            # Bỏ qua trang lỗi đơn lẻ để không làm hỏng toàn bộ đợt đồng bộ
-                            continue
+            if total_records > 0 and len(all_order_summaries) >= total_records:
+                break
+            if total_records == 0 and len(page_items) < page_size:
+                break
+            current_page += 1
+            if current_page > 30:
+                break
 
         if not all_order_summaries:
+            _report("Nazzy trả về 0 đơn hàng trong khoảng ngày đã chọn.", 0)
             return []
 
         # Lọc bỏ các đơn lịch sử (trước ngày to_date) đã có trong CSDL VÀ không đổi tổng tiền / khách hàng.
@@ -1255,24 +1244,34 @@ def fetch_nazzy_orders(
         total_orders = len(summaries_to_fetch)
         _report(f"Đang tải chi tiết 0/{total_orders} đơn Nazzy...", 0)
 
-        # Dùng chung 1 httpx.Client Keep-Alive để bỏ TCP handshake lặp lại
-        def _fetch_order_detail(ord_sum: dict[str, Any]) -> list[dict[str, Any]]:
+        # Dùng chung 1 httpx.Client Keep-Alive với 4 luồng vừa phải (tránh nghẽn ASP.NET Session Lock) + retry 1 lần
+        def _fetch_order_detail(ord_sum: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
             depot_id = ord_sum.get("BillsDepotId")
             if not depot_id:
-                return []
-            try:
-                r_det = client.get(
-                    base_url,
-                    params={"t": "BillsOrderGetInfo", "id": str(depot_id), "option": "0"},
-                    headers=headers,
-                    cookies=cookies,
-                    timeout=detail_timeout,
-                )
-                if r_det.status_code != 200:
-                    return []
-                det_data = r_det.json()
-            except Exception:
-                return []
+                return [], "Thiếu BillsDepotId"
+            det_data: dict[str, Any] | None = None
+            last_err: str | None = None
+            for attempt in range(2):
+                try:
+                    r_det = client.get(
+                        base_url,
+                        params={"t": "BillsOrderGetInfo", "id": str(depot_id), "option": "0"},
+                        headers=headers,
+                        cookies=cookies,
+                        timeout=detail_timeout,
+                    )
+                    if r_det.status_code != 200:
+                        last_err = f"HTTP {r_det.status_code}"
+                        continue
+                    det_data = r_det.json()
+                    last_err = None
+                    break
+                except Exception as exc:
+                    last_err = str(exc)
+                    if attempt == 0:
+                        time.sleep(0.5)
+            if not isinstance(det_data, dict):
+                return [], last_err or "Phản hồi chi tiết rỗng"
 
             info = det_data.get("Info") or {}
             details = det_data.get("Details") or []
@@ -1349,22 +1348,33 @@ def fetch_nazzy_orders(
                         "TotalPrice": 0.0,
                     })
 
-            return order_rows
+            return order_rows, None
 
         flat_results: list[dict[str, Any]] = []
         completed_orders = 0
-        with ThreadPoolExecutor(max_workers=12) as executor:
+        failed_details = 0
+        last_detail_err: str | None = None
+        with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(_fetch_order_detail, item) for item in summaries_to_fetch]
             for f in as_completed(futures):
                 completed_orders += 1
-                res = f.result()
+                res, err = f.result()
                 if res:
                     flat_results.extend(res)
+                elif err:
+                    failed_details += 1
+                    last_detail_err = err
                 if completed_orders == total_orders or completed_orders % 10 == 0:
+                    err_note = f", {failed_details} lỗi" if failed_details else ""
                     _report(
-                        f"Đang tải chi tiết đơn Nazzy {completed_orders}/{total_orders} ({len(flat_results)} dòng)...",
+                        f"Đang tải chi tiết đơn Nazzy {completed_orders}/{total_orders} ({len(flat_results)} dòng{err_note})...",
                         len(flat_results),
                     )
+
+        if total_orders > 0 and not flat_results and failed_details > 0 and strict:
+            raise RuntimeError(
+                f"Không tải được chi tiết đơn Nazzy ({failed_details}/{total_orders} đơn lỗi): {last_detail_err}"
+            )
 
     return flat_results
 

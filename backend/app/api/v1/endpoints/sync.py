@@ -2444,6 +2444,7 @@ def list_grouped_vinamilk_orders(
     customer: str = "",
     staff: str = "",
     product: str = "",
+    supplier: str = "",
     processing_status: str = "",
     delivery_status: str = "",
     distributor_code: str | None = None,
@@ -2487,17 +2488,26 @@ def list_grouped_vinamilk_orders(
     def includes(value: str, query: str) -> bool:
         return not query or query.strip().casefold() in value.casefold()
 
-    order_search, customer, staff, product = (value.strip() for value in (order_search, customer, staff, product))
+    order_search, customer, staff, product, supplier = (
+        value.strip() for value in (order_search, customer, staff, product, supplier)
+    )
     summaries = []
     statuses = set()
     delivery_statuses = set()
+    all_suppliers: set[str] = set()
     total_value = total_discount = confirmed = 0
     for key, lines in groups.items():
         row = lines[0]
         status = status_for(row)
         delivery = field(row, ("Tình trạng xuất kho", "_delivery_status")) or "Chưa yêu cầu"
+        line_suppliers = sorted({
+            field(line, ("Nhà cung cấp", "supplier", "_supplier"))
+            for line in lines
+            if field(line, ("Nhà cung cấp", "supplier", "_supplier"))
+        })
         statuses.add(status)
         delivery_statuses.add(delivery)
+        all_suppliers.update(line_suppliers)
         related = " ".join(str(item or "") for item in (
             key, row.get("_replacement_display"), row.get("_replaced_order_number"),
             *(row.get("_replaced_by_order_numbers") or []),
@@ -2513,6 +2523,8 @@ def list_grouped_vinamilk_orders(
         if not any(includes(field(line, ("productCode", "itemCode", "sku", "Mã sản phẩm")), product) or
                    includes(field(line, ("productName", "itemName", "product", "Sản phẩm")), product) or
                    includes(field(line, ("Nhà cung cấp",)), product) for line in lines):
+            continue
+        if supplier and not any(s.casefold() == supplier.casefold() for s in line_suppliers):
             continue
         if processing_status and status != processing_status:
             continue
@@ -2575,6 +2587,7 @@ def list_grouped_vinamilk_orders(
         "rows": summaries[skip:skip + limit], "total": len(summaries), "all_total": len(groups),
         "total_value": total_value, "total_discount": total_discount, "confirmed": confirmed,
         "statuses": sorted(statuses), "delivery_statuses": sorted(delivery_statuses),
+        "suppliers": sorted(all_suppliers),
         "last_synced_at": last_synced_at,
     }
 

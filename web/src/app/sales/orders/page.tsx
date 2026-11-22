@@ -525,6 +525,7 @@ export default function SalesOrdersPage() {
   const [listTotals, setListTotals] = useState({ value: 0, discount: 0, confirmed: 0 });
   const [serverStatuses, setServerStatuses] = useState<string[]>([]);
   const [serverDeliveryStatuses, setServerDeliveryStatuses] = useState<string[]>([]);
+  const [serverSuppliers, setServerSuppliers] = useState<string[]>([]);
   const listRequestVersion = useRef(0);
   const detailRequestVersion = useRef(0);
   const [remoteError, setRemoteError] = useState("");
@@ -534,6 +535,7 @@ export default function SalesOrdersPage() {
   const [customerFilter, setCustomerFilter] = useState("");
   const [staffFilter, setStaffFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
+  const [supplierFilter, setSupplierFilter] = useState("Tất cả");
   const [statusFilter, setStatusFilter] = useState("Tất cả");
   const [deliveryStatusFilter, setDeliveryStatusFilter] = useState("Tất cả");
   const [editingReplacement, setEditingReplacement] = useState<ReplacementEditForm | null>(null);
@@ -696,6 +698,7 @@ export default function SalesOrdersPage() {
     const params = new URLSearchParams({
       from_date: fromDate, to_date: toDate, skip: String((listPage - 1) * pageSize), limit: String(pageSize),
       order_search: orderFilter, customer: customerFilter, staff: staffFilter, product: productFilter,
+      supplier: supplierFilter === "Tất cả" ? "" : supplierFilter,
       processing_status: statusFilter === "Tất cả" ? "" : statusFilter,
       delivery_status: deliveryStatusFilter === "Tất cả" ? "" : deliveryStatusFilter,
     });
@@ -707,6 +710,7 @@ export default function SalesOrdersPage() {
       const payload = await response.json() as {
         rows?: RemoteOrder[]; total?: number; all_total?: number; total_value?: number;
         total_discount?: number; confirmed?: number; statuses?: string[]; delivery_statuses?: string[];
+        suppliers?: string[];
         last_synced_at?: string | null; detail?: string;
       };
       if (!response.ok || !Array.isArray(payload.rows)) throw new Error(payload.detail ?? "Không thể tải danh sách đơn hàng.");
@@ -720,13 +724,14 @@ export default function SalesOrdersPage() {
       setListTotals({ value: payload.total_value ?? 0, discount: payload.total_discount ?? 0, confirmed: payload.confirmed ?? 0 });
       setServerStatuses(payload.statuses ?? []);
       setServerDeliveryStatuses(payload.delivery_statuses ?? []);
+      setServerSuppliers(payload.suppliers ?? []);
       setLastSyncedAt(payload.last_synced_at ?? null);
       setRemoteError("");
     } finally {
       if (version === listRequestVersion.current) setListLoading(false);
     }
     void loadSplitApprovalRequests();
-  }, [fromDate, toDate, listPage, pageSize, orderFilter, customerFilter, staffFilter, productFilter, statusFilter, deliveryStatusFilter, activeDistributorCode, loadSplitApprovalRequests]);
+  }, [fromDate, toDate, listPage, pageSize, orderFilter, customerFilter, staffFilter, productFilter, supplierFilter, statusFilter, deliveryStatusFilter, activeDistributorCode, loadSplitApprovalRequests]);
 
   useEffect(() => {
     const requestVersion = listRequestVersion;
@@ -2633,6 +2638,10 @@ return Array.from(map.values());
     if (!matches("Mã KH", customerFilter) && !matches("Tên KH", customerFilter)) return false;
     if (!matches("Mã NVBH", staffFilter) && !matches("Tên NVBH", staffFilter)) return false;
     if (!matches("Mã sản phẩm", productFilter) && !matches("Sản phẩm", productFilter) && !matches("Nhà cung cấp", productFilter)) return false;
+    if (supplierFilter !== "Tất cả") {
+      const rowSup = displayRemoteValue(order["Nhà cung cấp"]).toLowerCase();
+      if (!rowSup.split("/").map((s) => s.trim()).includes(supplierFilter.toLowerCase())) return false;
+    }
     if (statusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]) !== statusFilter) return false;
     if (deliveryStatusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xuất kho"]) !== deliveryStatusFilter) return false;
     return true;
@@ -3048,6 +3057,7 @@ return Array.from(map.values());
     setCustomerFilter("");
     setStaffFilter("");
     setProductFilter("");
+    setSupplierFilter("Tất cả");
     setStatusFilter("Tất cả");
     setDeliveryStatusFilter("Tất cả");
   }
@@ -3344,7 +3354,7 @@ return Array.from(map.values());
             Lọc đơn hàng
           </div>
           <div className="border-b border-slate-200 px-3 py-2.5">
-            <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 2xl:grid-cols-7">
+            <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-8">
               <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
                 Số đơn hàng
                 <input value={orderFilter} onChange={(event) => { setListPage(1); setOrderFilter(event.target.value); }} placeholder="Lọc số đơn hàng" className={`${compactInputCls} mt-0.5`} />
@@ -3358,8 +3368,15 @@ return Array.from(map.values());
                 <input value={staffFilter} onChange={(event) => { setListPage(1); setStaffFilter(event.target.value); }} placeholder="Lọc mã/tên NVBH" className={`${compactInputCls} mt-0.5`} />
               </label>
               <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
-                Sản phẩm / nhà cung cấp
-                <input value={productFilter} onChange={(event) => { setListPage(1); setProductFilter(event.target.value); }} placeholder="Lọc mã/tên SP, nhà cung cấp" className={`${compactInputCls} mt-0.5`} />
+                Sản phẩm
+                <input value={productFilter} onChange={(event) => { setListPage(1); setProductFilter(event.target.value); }} placeholder="Lọc mã/tên sản phẩm" className={`${compactInputCls} mt-0.5`} />
+              </label>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Nhà cung cấp
+                <select value={supplierFilter} onChange={(event) => { setListPage(1); setSupplierFilter(event.target.value); }} className={`${compactInputCls} mt-0.5`}>
+                  <option value="Tất cả">Tất cả</option>
+                  {serverSuppliers.map((sup) => <option key={sup} value={sup}>{sup}</option>)}
+                </select>
               </label>
               <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
                 Tình trạng xử lý
@@ -3394,7 +3411,7 @@ return Array.from(map.values());
 
       {remoteColumns.length > 0 ? (
         <DataTable
-          key={`${orderFilter}|${customerFilter}|${staffFilter}|${productFilter}|${statusFilter}|${deliveryStatusFilter}|${pageSize}`}
+          key={`${orderFilter}|${customerFilter}|${staffFilter}|${productFilter}|${supplierFilter}|${statusFilter}|${deliveryStatusFilter}|${pageSize}`}
           data={orderSummaries}
           columns={summaryColumns.map((column) => ({ ...column, sortable: false }))}
           searchable={false}

@@ -1228,7 +1228,7 @@ class SyncAllSupplierOrdersAsyncRequest(BaseModel):
     to_date: date | None = None
 
 
-async def _run_sync_supplier_configs_background(
+def _run_sync_supplier_configs_worker(
     job_id: str,
     distributor_id: int,
     target_from: date,
@@ -1254,23 +1254,66 @@ async def _run_sync_supplier_configs_background(
             return
 
         total_configs = len(configs)
-        job_manager.start_job(job_id, f"Bắt đầu đồng bộ từ {total_configs} nguồn nhà cung cấp...")
+        total_steps = max(1, total_configs * 3 + 1)
+        job_manager.set_total_steps(job_id, total_steps)
+        job_manager.set_items(
+            job_id,
+            [
+                {
+                    "id": cfg.id,
+                    "code": cfg.supplier_code,
+                    "name": cfg.supplier_name or cfg.supplier_code,
+                    "status": "PENDING",
+                    "stage": "Chờ đến lượt",
+                    "raw_rows": 0,
+                    "new_orders": 0,
+                    "updated_orders": 0,
+                    "new_lines": 0,
+                    "updated_lines": 0,
+                    "message": "",
+                }
+                for cfg in configs
+            ],
+        )
+        job_manager.start_job(
+            job_id,
+            f"Bắt đầu đồng bộ từ {total_configs} nguồn nhà cung cấp ({target_from:%d/%m/%Y} → {target_to:%d/%m/%Y})...",
+        )
         connector = RestApiSupplierConnector()
         total_new_orders = 0
         total_updated_orders = 0
         total_new_lines = 0
         total_updated_lines = 0
         total_unchanged_lines = 0
+        failed_sources = 0
 
         for idx, cfg in enumerate(configs, start=1):
             source_name = cfg.supplier_name or cfg.supplier_code
+            base_step = (idx - 1) * 3
+            job_manager.update_item(
+                job_id,
+                cfg.id,
+                status="RUNNING",
+                stage="Đang kết nối & tải đơn từ API NCC...",
+            )
             job_manager.update_progress(
                 job_id,
-                current_step=idx - 1,
-                message=f"Đang đồng bộ nguồn {idx}/{total_configs}: {source_name}...",
+                current_step=base_step + 1,
+                message=f"[{idx}/{total_configs}] {source_name}: Đang kết nối và tải đơn hàng...",
             )
             try:
                 raw_rows = connector.fetch_raw_orders(cfg, target_from, target_to, allow_sample_fallback=False)
+                job_manager.update_item(
+                    job_id,
+                    cfg.id,
+                    raw_rows=len(raw_rows),
+                    stage=f"Đã tải {len(raw_rows)} dòng — đang chuẩn hóa & lưu CSDL...",
+                )
+                job_manager.update_progress(
+                    job_id,
+                    current_step=base_step + 2,
+                    message=f"[{idx}/{total_configs}] {source_name}: Đã tải {len(raw_rows)} dòng dữ liệu, đang đối soát & lưu...",
+                )
                 dist_code = cfg.distributor.code if cfg.distributor else None
                 canonical_orders = DynamicFieldMapper.transform_rows_to_canonical(
                     raw_rows=raw_rows,
@@ -1303,19 +1346,41 @@ async def _run_sync_supplier_configs_background(
                 src_msg = (
                     f"{source_name}: {', '.join(parts)}"
                     if parts
-                    else f"{source_name}: không có đơn mới hoặc thay đổi."
+                    else f"{source_name}: không có đơn mới hoặc thay đổi ({len(raw_rows)} dòng kiểm tra)."
+                )
+                job_manager.update_item(
+                    job_id,
+                    cfg.id,
+                    status="SUCCESS",
+                    stage="Hoàn tất",
+                    new_orders=n_ord,
+                    updated_orders=u_ord,
+                    new_lines=n_ln,
+                    updated_lines=u_ln,
+                    message=src_msg,
                 )
                 job_manager.update_progress(
                     job_id,
-                    current_step=idx,
+                    current_step=base_step + 3,
                     message=src_msg,
+                    level="success",
                 )
             except Exception as src_err:
                 db.rollback()
+                failed_sources += 1
+                err_msg = f"Nguồn {source_name} gặp lỗi: {src_err}"
+                job_manager.update_item(
+                    job_id,
+                    cfg.id,
+                    status="FAILED",
+                    stage="Lỗi đồng bộ",
+                    message=str(src_err),
+                )
                 job_manager.update_progress(
                     job_id,
-                    current_step=idx,
-                    message=f"Nguồn {source_name} gặp lỗi: {src_err}",
+                    current_step=base_step + 3,
+                    message=err_msg,
+                    level="error",
                 )
 
         summary_parts: list[str] = []
@@ -1323,6 +1388,8 @@ async def _run_sync_supplier_configs_background(
             summary_parts.append(f"+{total_new_orders} đơn mới ({total_new_lines} dòng)")
         if total_updated_orders > 0:
             summary_parts.append(f"{total_updated_orders} đơn cập nhật ({total_updated_lines} dòng)")
+        if failed_sources > 0:
+            summary_parts.append(f"{failed_sources}/{total_configs} nguồn lỗi")
         final_message = (
             f"Đồng bộ hoàn tất: {', '.join(summary_parts)}."
             if summary_parts
@@ -1337,6 +1404,8 @@ async def _run_sync_supplier_configs_background(
                 "new_lines": total_new_lines,
                 "updated_lines": total_updated_lines,
                 "unchanged_lines": total_unchanged_lines,
+                "failed_sources": failed_sources,
+                "total_sources": total_configs,
                 "synced_at": synced_at_iso,
             },
             message=final_message,
@@ -1366,7 +1435,13 @@ async def sync_all_supplier_configs_async(
     )
 
     asyncio.create_task(
-        _run_sync_supplier_configs_background(job.id, payload.distributor_id, target_from, target_to)
+        asyncio.to_thread(
+            _run_sync_supplier_configs_worker,
+            job.id,
+            payload.distributor_id,
+            target_from,
+            target_to,
+        )
     )
 
     return {

@@ -14,6 +14,8 @@ class JobInfo(BaseModel):
     current_step: int
     total_steps: int
     message: str
+    items: List[Dict[str, Any]] = []
+    logs: List[Dict[str, Any]] = []
     result_summary: Optional[Dict[str, Any]] = None
     error_detail: Optional[str] = None
     created_at: datetime
@@ -27,9 +29,25 @@ class JobQueueManager:
         self._jobs: Dict[str, JobInfo] = {}
         self._lock = asyncio.Lock()
 
+    def _push_log(self, job: JobInfo, message: str, level: str = "info") -> None:
+        if not message:
+            return
+        if job.logs and job.logs[-1].get("message") == message:
+            return
+        job.logs.append(
+            {
+                "time": datetime.now(timezone.utc).isoformat(),
+                "level": level,
+                "message": message,
+            }
+        )
+        if len(job.logs) > 60:
+            job.logs = job.logs[-60:]
+
     def create_job(self, job_type: str, title: str, total_steps: int = 100) -> JobInfo:
         job_id = str(uuid.uuid4())[:12]
         now = datetime.now(timezone.utc)
+        initial_msg = "Đã khởi tạo và đưa vào hàng đợi..."
         job = JobInfo(
             id=job_id,
             job_type=job_type,
@@ -38,7 +56,9 @@ class JobQueueManager:
             progress=0,
             current_step=0,
             total_steps=max(1, total_steps),
-            message="Đã khởi tạo và đưa vào hàng đợi...",
+            message=initial_msg,
+            items=[],
+            logs=[{"time": now.isoformat(), "level": "info", "message": initial_msg}],
             result_summary=None,
             error_detail=None,
             created_at=now,
@@ -47,13 +67,48 @@ class JobQueueManager:
         self._jobs[job_id] = job
         return job
 
+    def set_total_steps(self, job_id: str, total_steps: int) -> None:
+        if job_id in self._jobs:
+            job = self._jobs[job_id]
+            job.total_steps = max(1, total_steps)
+            job.updated_at = datetime.now(timezone.utc)
+
+    def set_items(self, job_id: str, items: List[Dict[str, Any]]) -> None:
+        if job_id in self._jobs:
+            job = self._jobs[job_id]
+            job.items = list(items)
+            job.updated_at = datetime.now(timezone.utc)
+
+    def update_item(self, job_id: str, item_id: Any, **fields: Any) -> None:
+        if job_id in self._jobs:
+            job = self._jobs[job_id]
+            for item in job.items:
+                if item.get("id") == item_id:
+                    item.update(fields)
+                    break
+            job.updated_at = datetime.now(timezone.utc)
+
+    def append_log(self, job_id: str, message: str, level: str = "info") -> None:
+        if job_id in self._jobs:
+            job = self._jobs[job_id]
+            self._push_log(job, message, level=level)
+            job.updated_at = datetime.now(timezone.utc)
+
     def start_job(self, job_id: str, message: str = "Đang bắt đầu xử lý..."):
         if job_id in self._jobs:
-            self._jobs[job_id].status = "RUNNING"
-            self._jobs[job_id].message = message
-            self._jobs[job_id].updated_at = datetime.now(timezone.utc)
+            job = self._jobs[job_id]
+            job.status = "RUNNING"
+            job.message = message
+            self._push_log(job, message, level="info")
+            job.updated_at = datetime.now(timezone.utc)
 
-    def update_progress(self, job_id: str, current_step: int, message: Optional[str] = None):
+    def update_progress(
+        self,
+        job_id: str,
+        current_step: int,
+        message: Optional[str] = None,
+        level: str = "info",
+    ):
         if job_id in self._jobs:
             job = self._jobs[job_id]
             job.current_step = current_step
@@ -62,6 +117,7 @@ class JobQueueManager:
             job.progress = min(99, max(0, percent))
             if message:
                 job.message = message
+                self._push_log(job, message, level=level)
             job.updated_at = datetime.now(timezone.utc)
 
     def set_success(self, job_id: str, result_summary: Optional[Dict[str, Any]] = None, message: str = "Hoàn tất thành công!"):
@@ -72,6 +128,7 @@ class JobQueueManager:
             job.current_step = job.total_steps
             job.message = message
             job.result_summary = result_summary
+            self._push_log(job, message, level="success")
             job.updated_at = datetime.now(timezone.utc)
 
     def set_failed(self, job_id: str, error_detail: str):
@@ -80,6 +137,7 @@ class JobQueueManager:
             job.status = "FAILED"
             job.message = f"Thất bại: {error_detail[:120]}"
             job.error_detail = error_detail
+            self._push_log(job, f"Lỗi: {error_detail}", level="error")
             job.updated_at = datetime.now(timezone.utc)
 
     def get_job(self, job_id: str) -> Optional[JobInfo]:

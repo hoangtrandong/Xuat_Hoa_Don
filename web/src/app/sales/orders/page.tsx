@@ -28,6 +28,11 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
 import OrderActionModal from "@/components/ui/OrderActionModal";
 import CreateOrderForm from "@/components/sales/CreateOrderForm";
+import OrderSyncProgressPanel, {
+  type SyncProgressLogEntry,
+  type SyncProgressState,
+  type SyncSourceProgressItem,
+} from "@/components/sales/OrderSyncProgressPanel";
 import { formatCustomerCode, formatNumber, formatVND, formatVNDFull } from "@/lib/format";
 import { API_URL, apiFetch } from "@/lib/api";
 import { useAuthSession } from "@/lib/auth-session";
@@ -503,6 +508,7 @@ export default function SalesOrdersPage() {
   const [toast, setToast] = useState("");
   const [isCreateOrderOpen, setIsCreateOrderOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
   const defaultDateRange = getDefaultDateRange();
   const [fromDate, setFromDate] = useState(defaultDateRange.from);
   const [toDate, setToDate] = useState(defaultDateRange.to);
@@ -2051,12 +2057,48 @@ return Array.from(map.values());
     if (days.length > LONG_SYNC_DAYS && !window.confirm(`Khoảng ${days.length} ngày sẽ được đồng bộ cho từng nguồn đang cấu hình. Tiếp tục?`)) {
       return;
     }
+
+    const startedAt = Date.now();
+    const pushLocalLog = (
+      prev: SyncProgressState | null,
+      message: string,
+      level: SyncProgressLogEntry["level"] = "info",
+    ): SyncProgressLogEntry[] => {
+      const existing = prev?.logs ?? [];
+      if (existing.length > 0 && existing[existing.length - 1]?.message === message) {
+        return existing;
+      }
+      return [...existing, { time: new Date().toISOString(), level, message }];
+    };
+
     setIsSyncing(true);
     setRemoteError("");
-    setToast("Đang tải danh sách nguồn dữ liệu đã cấu hình...");
+    setToast("");
+    setSyncProgress({
+      visible: true,
+      phase: "preparing",
+      title: `Đồng bộ đơn hàng NCC (${fromDate} → ${toDate})`,
+      progress: 5,
+      message: "Bước 1/3: Đang xác định Nhà phân phối và tải danh sách nguồn dữ liệu đã cấu hình...",
+      startedAt,
+      finishedAt: null,
+      items: [],
+      logs: [
+        {
+          time: new Date().toISOString(),
+          level: "info",
+          message: `Khởi tạo đồng bộ khoảng ngày ${fromDate} → ${toDate} (${days.length} ngày).`,
+        },
+      ],
+    });
+
     try {
       const distributorsResponse = await apiFetch(`${API_URL}/einvoice/distributors`);
-      const distributorList = await distributorsResponse.json() as Array<{ id: number }>;
+      const distributorList = (await distributorsResponse.json()) as Array<{
+        id: number;
+        code?: string;
+        name?: string;
+      }>;
       if (!distributorsResponse.ok) {
         throw new Error("Không thể tải danh sách Nhà phân phối để xác định nguồn dữ liệu.");
       }
@@ -2065,11 +2107,26 @@ return Array.from(map.values());
       if (!distributorId) {
         throw new Error("Không tìm thấy Nhà phân phối để tải cấu hình nguồn dữ liệu.");
       }
+      const activeDist = distributorList.find((d) => d.id === distributorId);
+
+      setSyncProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              progress: 10,
+              message: `Đang tải danh sách nguồn Nhà cung cấp của ${activeDist?.name || `NPP #${distributorId}`}...`,
+              logs: pushLocalLog(
+                prev,
+                `Đã xác định Nhà phân phối: ${activeDist?.name || `#${distributorId}`}.`,
+              ),
+            }
+          : prev,
+      );
 
       const configsResponse = await apiFetch(
         `${API_URL}/einvoice/supplier-configs?distributor_id=${distributorId}`
       );
-      const configuredSources = await configsResponse.json() as Array<{
+      const configuredSources = (await configsResponse.json()) as Array<{
         id: number;
         supplier_code: string;
         supplier_name: string;
@@ -2085,6 +2142,32 @@ return Array.from(map.values());
         throw new Error("Nhà phân phối chưa có nguồn dữ liệu Nhà cung cấp nào đang hoạt động.");
       }
 
+      const initialItems: SyncSourceProgressItem[] = activeSources.map((src) => ({
+        id: src.id,
+        code: src.supplier_code,
+        name: src.supplier_name || src.supplier_code,
+        status: "PENDING",
+        stage: "Chờ gửi vào hàng đợi đồng bộ...",
+        raw_rows: 0,
+        new_orders: 0,
+        updated_orders: 0,
+      }));
+
+      setSyncProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              progress: 15,
+              message: `Tìm thấy ${activeSources.length} nguồn đang hoạt động. Đang gửi tác vụ vào hàng đợi máy chủ...`,
+              items: initialItems,
+              logs: pushLocalLog(
+                prev,
+                `Tìm thấy ${activeSources.length} nguồn hoạt động: ${activeSources.map((s) => s.supplier_name || s.supplier_code).join(", ")}.`,
+              ),
+            }
+          : prev,
+      );
+
       // Gửi yêu cầu vào Hàng Đợi Ngầm (Queue Engine)
       const asyncRes = await apiFetch(
         `${API_URL}/einvoice/supplier-configs/sync-all-async`,
@@ -2098,42 +2181,99 @@ return Array.from(map.values());
           }),
         }
       );
-      const asyncData = await asyncRes.json() as { message?: string; job_id?: string; detail?: string };
+      const asyncData = (await asyncRes.json()) as {
+        message?: string;
+        job_id?: string;
+        title?: string;
+        detail?: string;
+      };
       if (!asyncRes.ok) {
         throw new Error(asyncData.detail || "Không thể kích hoạt hàng đợi đồng bộ ngầm.");
       }
 
-      setToast("Đang đồng bộ dữ liệu đơn hàng từ nguồn NCC...");
+      setSyncProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              phase: "running",
+              title: asyncData.title || prev.title,
+              progress: 18,
+              message: "Bước 2/3: Máy chủ đã tiếp nhận — đang kết nối và tải đơn hàng từ các nguồn NCC...",
+              logs: pushLocalLog(
+                prev,
+                `Đã khởi tạo tiến trình đồng bộ trên máy chủ (Mã tác vụ: ${asyncData.job_id || "async"}).`,
+              ),
+            }
+          : prev,
+      );
 
-      // Theo dõi tiến trình đồng bộ để báo chính xác đơn mới thêm / cập nhật (bỏ qua đơn cũ không đổi)
+      // Theo dõi tiến trình đồng bộ theo thời gian thực mỗi 1 giây
       if (asyncData.job_id) {
         const jobId = asyncData.job_id;
         let finished = false;
-        for (let attempt = 0; attempt < 30; attempt++) {
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+        for (let attempt = 0; attempt < 120; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
           const jobRes = await apiFetch(`${API_URL}/sync/jobs/${jobId}`);
           if (!jobRes.ok) break;
           const jobInfo = (await jobRes.json()) as {
             status?: string;
+            progress?: number;
             message?: string;
             error_detail?: string;
+            items?: SyncSourceProgressItem[];
+            logs?: SyncProgressLogEntry[];
             result_summary?: {
               new_orders?: number;
               updated_orders?: number;
+              new_lines?: number;
+              updated_lines?: number;
+              unchanged_lines?: number;
+              failed_sources?: number;
+              total_sources?: number;
               synced_at?: string;
             };
           };
+
+          const serverProgress = Number(jobInfo.progress ?? 0);
+          setSyncProgress((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  phase:
+                    jobInfo.status === "SUCCESS"
+                      ? "success"
+                      : jobInfo.status === "FAILED"
+                        ? "failed"
+                        : "running",
+                  progress:
+                    jobInfo.status === "SUCCESS"
+                      ? 100
+                      : Math.max(prev.progress, serverProgress),
+                  message: jobInfo.message || prev.message,
+                  items:
+                    Array.isArray(jobInfo.items) && jobInfo.items.length > 0
+                      ? jobInfo.items
+                      : prev.items,
+                  logs:
+                    Array.isArray(jobInfo.logs) && jobInfo.logs.length > 0
+                      ? jobInfo.logs
+                      : prev.logs,
+                  summary: jobInfo.result_summary || prev.summary,
+                  finishedAt:
+                    jobInfo.status === "SUCCESS" || jobInfo.status === "FAILED"
+                      ? Date.now()
+                      : null,
+                }
+              : prev,
+          );
+
           if (jobInfo.status === "SUCCESS") {
             finished = true;
             setLastSyncedAt(jobInfo.result_summary?.synced_at || new Date().toISOString());
             const nOrd = Number(jobInfo.result_summary?.new_orders ?? 0);
             const uOrd = Number(jobInfo.result_summary?.updated_orders ?? 0);
             if (nOrd > 0 || uOrd > 0) {
-              setToast(jobInfo.message || `Đồng bộ hoàn tất: +${nOrd} đơn mới, ${uOrd} đơn cập nhật.`);
               void loadLocalOrders();
-            } else {
-              // Đơn cũ không thay đổi -> chỉ cập nhật thời gian đồng bộ lần cuối, không hiện banner làm phiền
-              setToast("");
             }
             break;
           }
@@ -2143,7 +2283,20 @@ return Array.from(map.values());
           }
         }
         if (!finished) {
-          setToast("Tác vụ đồng bộ vẫn đang chạy ngầm. Danh sách sẽ tự cập nhật khi hoàn tất.");
+          setSyncProgress((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  message:
+                    "Tác vụ đồng bộ vẫn đang chạy ngầm trên máy chủ. Thanh tiến trình phía trên sẽ tiếp tục cập nhật khi hoàn tất.",
+                  logs: pushLocalLog(
+                    prev,
+                    "Tác vụ kéo dài hơn 2 phút — tiếp tục theo dõi ở thanh tiến trình ngầm phía trên.",
+                    "warning",
+                  ),
+                }
+              : prev,
+          );
           setTimeout(() => {
             void loadLocalOrders();
           }, 4000);
@@ -2154,8 +2307,20 @@ return Array.from(map.values());
         }, 4000);
       }
     } catch (error) {
-      setRemoteError(error instanceof Error ? error.message : "Lỗi kết nối tới Server.");
+      const errMsg = error instanceof Error ? error.message : "Lỗi kết nối tới Server.";
+      setRemoteError(errMsg);
       setToast("");
+      setSyncProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              phase: "failed",
+              message: errMsg,
+              finishedAt: Date.now(),
+              logs: pushLocalLog(prev, `Lỗi: ${errMsg}`, "error"),
+            }
+          : prev,
+      );
     } finally {
       setIsSyncing(false);
     }
@@ -2985,6 +3150,10 @@ return Array.from(map.values());
           <button onClick={() => setToast("")} className="text-sky-500 hover:text-sky-700"><Ban size={14} /></button>
         </div>
       )}
+      <OrderSyncProgressPanel
+        state={syncProgress}
+        onClose={() => setSyncProgress((prev) => (prev ? { ...prev, visible: false } : null))}
+      />
       <PageHeader
         title="Đơn hàng bán"
         subtitle="Quản lý đơn đặt hàng, phiếu bán và trạng thái xử lý"

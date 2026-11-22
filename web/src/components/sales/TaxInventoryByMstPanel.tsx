@@ -1132,9 +1132,9 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                 </td>
               </tr>
             ) : (
-              rows.map((r) => (
+              rows.map((r, idx) => (
                 <tr
-                  key={groupBy === "NPP_SKU" ? `NPP::${r.npp_code || r.sku}` : `${r.tax_code}::${r.sku}`}
+                  key={`${groupBy}::${r.tax_code}::${r.npp_code || r.sku}::${r.sku}::${idx}`}
                   onClick={() => {
                     if (groupBy === "NPP_SKU") {
                       setSelectedNppRow(r);

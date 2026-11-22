@@ -75,7 +75,7 @@ export default function RevenueChart({ data, title }: RevenueChartProps) {
             stroke="#0ea5e9"
             strokeWidth={2}
             fill="url(#revenueGrad)"
-            dot={{ r: 4, fill: "#0ea5e9", strokeWidth: 2, stroke: "#fff" }}
+            dot={{ r: 4, fill: "#0ea5e9", strokeWidth: 2, stroke: "var(--dms-surface, #ffffff)" }}
             activeDot={{ r: 6 }}
           />
         </AreaChart>

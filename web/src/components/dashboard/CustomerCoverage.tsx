@@ -1,6 +1,7 @@
 "use client";
 
 import { PieChart, Pie, Cell, ResponsiveContainer } from "recharts";
+import { useTheme } from "@/lib/theme";
 
 interface CustomerCoverageProps {
   visited: number;
@@ -10,13 +11,15 @@ interface CustomerCoverageProps {
 }
 
 export default function CustomerCoverage({ visited, total, bought, notBought }: CustomerCoverageProps) {
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === "dark";
   const coveragePercent = ((visited / total) * 100).toFixed(1);
   const boughtPercent = ((bought / visited) * 100).toFixed(1);
 
   const pieData = [
     { name: "Đã mua", value: bought, color: "#0ea5e9" },
-    { name: "Chưa mua", value: notBought, color: "#e0f2fe" },
-    { name: "Chưa ghé", value: total - visited, color: "#f3f4f6" },
+    { name: "Chưa mua", value: notBought, color: isDark ? "#164e63" : "#e0f2fe" },
+    { name: "Chưa ghé", value: total - visited, color: isDark ? "#334155" : "#f3f4f6" },
   ];
 
   return (

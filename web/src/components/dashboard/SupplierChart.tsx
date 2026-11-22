@@ -53,7 +53,7 @@ function RenderShape(props: {
       startAngle={startAngle}
       endAngle={endAngle}
       fill={fill}
-      stroke="#fff"
+      stroke="var(--dms-surface, #ffffff)"
       strokeWidth={isActive ? 2 : 1}
     />
   );

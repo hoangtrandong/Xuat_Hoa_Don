@@ -1344,21 +1344,34 @@ def _run_sync_supplier_configs_worker(
                         message=f"[{idx}/{total_configs}] {source_name}: {stage_text}",
                     )
 
-                existing_order_numbers: set[str] | None = None
+                existing_order_fingerprints: dict[str, dict[str, Any]] | None = None
                 if (cfg.supplier_code or "").upper() == "NAZZY" or "nazzy" in (cfg.api_endpoint_url or "").lower():
-                    existing_order_numbers = {
-                        str(code).strip()
-                        for code in db.scalars(
-                            select(VinamilkOrderSnapshot.order_number)
-                            .where(
-                                VinamilkOrderSnapshot.processing_status == f"NCC:{cfg.supplier_code}",
-                                VinamilkOrderSnapshot.order_created_date >= target_from,
-                                VinamilkOrderSnapshot.order_created_date <= target_to,
-                            )
-                            .distinct()
-                        ).all()
-                        if code
-                    }
+                    existing_snaps = db.scalars(
+                        select(VinamilkOrderSnapshot).where(
+                            VinamilkOrderSnapshot.processing_status == f"NCC:{cfg.supplier_code}",
+                            VinamilkOrderSnapshot.order_created_date >= target_from,
+                            VinamilkOrderSnapshot.order_created_date <= target_to,
+                        )
+                    ).all()
+                    fp_map: dict[str, dict[str, Any]] = {}
+                    for snap in existing_snaps:
+                        code = (snap.order_number or "").strip()
+                        if not code:
+                            continue
+                        payload = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+                        net_val = float(payload.get("Thành tiền") or 0.0)
+                        gross_val = float(payload.get("Giá trị") or 0.0)
+                        entry = fp_map.setdefault(
+                            code,
+                            {
+                                "customer_code": (snap.customer_code or "").strip(),
+                                "total_amount": 0.0,
+                                "gross_amount": 0.0,
+                            },
+                        )
+                        entry["total_amount"] += net_val
+                        entry["gross_amount"] += gross_val
+                    existing_order_fingerprints = fp_map
 
                 raw_rows = connector.fetch_raw_orders(
                     cfg,
@@ -1366,7 +1379,7 @@ def _run_sync_supplier_configs_worker(
                     target_to,
                     allow_sample_fallback=False,
                     progress_cb=_on_source_progress,
-                    skip_existing_order_numbers=existing_order_numbers,
+                    existing_order_fingerprints=existing_order_fingerprints,
                 )
                 job_manager.update_item(
                     job_id,

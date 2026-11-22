@@ -999,6 +999,7 @@ def fetch_nazzy_orders(
     strict: bool = False,
     progress_cb: Any = None,
     skip_existing_order_numbers: set[str] | None = None,
+    existing_order_fingerprints: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Tự động đồng bộ đơn hàng từ DMS Nazzy (http://dms21.nazzy.vn) của NPP Mai Gold.
     Hỗ trợ tự động đăng nhập HTTP bằng Mã DN + Mã NV + Mật khẩu, phân trang, đa luồng
@@ -1150,28 +1151,45 @@ def fetch_nazzy_orders(
         if not all_order_summaries:
             return []
 
-        # Lọc bỏ các đơn lịch sử (trước ngày to_date) đã có sẵn trong CSDL để không tải lại chi tiết
+        # Lọc bỏ các đơn lịch sử (trước ngày to_date) đã có trong CSDL VÀ không đổi tổng tiền / khách hàng.
+        # Nếu đơn cũ có thay đổi giá trị, chiết khấu hoặc khách hàng -> vẫn tự động tải lại chi tiết để cập nhật.
         summaries_to_fetch = all_order_summaries
-        if skip_existing_order_numbers:
+        if existing_order_fingerprints or skip_existing_order_numbers:
             filtered: list[dict[str, Any]] = []
             skipped_count = 0
+            changed_historical = 0
             for ord_sum in all_order_summaries:
                 ord_code = str(ord_sum.get("Code") or "").strip()
                 raw_dt = ord_sum.get("BillsDate") or ord_sum.get("CreateDate")
                 ord_date = _to_date(raw_dt, fallback=to_date) if raw_dt else None
-                if (
-                    ord_code
-                    and ord_code in skip_existing_order_numbers
-                    and ord_date is not None
-                    and ord_date < to_date
-                ):
-                    skipped_count += 1
-                    continue
+                is_historical = ord_date is not None and ord_date < to_date
+                if ord_code and is_historical:
+                    fp = existing_order_fingerprints.get(ord_code) if existing_order_fingerprints else None
+                    if fp is not None:
+                        remote_total = float(ord_sum.get("TotalPrice") or 0.0)
+                        remote_cust = str(ord_sum.get("CustomerCode") or "").strip().upper()
+                        db_total = float(fp.get("total_amount") or 0.0)
+                        db_gross = float(fp.get("gross_amount") or 0.0)
+                        db_cust = str(fp.get("customer_code") or "").strip().upper()
+                        # Khớp tổng tiền (theo thành tiền hoặc tổng trước CK trong sai số làm tròn 10đ) và cùng mã KH
+                        total_matches = (
+                            abs(remote_total - db_total) <= 10.0
+                            or abs(remote_total - db_gross) <= 10.0
+                        )
+                        cust_matches = (not remote_cust) or (not db_cust) or (remote_cust == db_cust)
+                        if total_matches and cust_matches:
+                            skipped_count += 1
+                            continue
+                        changed_historical += 1
+                    elif skip_existing_order_numbers and ord_code in skip_existing_order_numbers:
+                        skipped_count += 1
+                        continue
                 filtered.append(ord_sum)
             summaries_to_fetch = filtered
-            if skipped_count > 0:
+            if skipped_count > 0 or changed_historical > 0:
+                extra = f" (phát hiện {changed_historical} đơn cũ thay đổi cần tải lại)" if changed_historical > 0 else ""
                 _report(
-                    f"Bỏ qua {skipped_count}/{len(all_order_summaries)} đơn lịch sử đã có — chỉ tải chi tiết {len(summaries_to_fetch)} đơn mới/gần nhất...",
+                    f"Bỏ qua {skipped_count}/{len(all_order_summaries)} đơn lịch sử không đổi{extra} — tải chi tiết {len(summaries_to_fetch)} đơn...",
                     0,
                 )
 
@@ -1307,6 +1325,7 @@ class RestApiSupplierConnector(BaseSupplierConnector):
         allow_sample_fallback: bool = True,
         progress_cb: Any = None,
         skip_existing_order_numbers: set[str] | None = None,
+        existing_order_fingerprints: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         is_vinamilk = (
             config.supplier_code.upper() == "VINAMILK"
@@ -1329,6 +1348,7 @@ class RestApiSupplierConnector(BaseSupplierConnector):
                 strict=not allow_sample_fallback,
                 progress_cb=progress_cb,
                 skip_existing_order_numbers=skip_existing_order_numbers,
+                existing_order_fingerprints=existing_order_fingerprints,
             )
         headers: dict[str, str] = {"Accept": "application/json"}
         secret = decrypt_supplier_secret(config.encrypted_secret)

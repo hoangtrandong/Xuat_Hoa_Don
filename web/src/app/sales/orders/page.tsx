@@ -2253,7 +2253,8 @@ return Array.from(map.values());
       if (asyncData.job_id) {
         const jobId = asyncData.job_id;
         let finished = false;
-        for (let attempt = 0; attempt < 120; attempt++) {
+        let consecutiveErrors = 0;
+        for (let attempt = 0; attempt < 180; attempt++) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
           let jobRes: Response;
           try {
@@ -2264,9 +2265,16 @@ return Array.from(map.values());
               "kiểm tra tiến trình đồng bộ",
             );
           } catch {
+            consecutiveErrors += 1;
+            if (consecutiveErrors >= 8) break;
             continue;
           }
-          if (!jobRes.ok) break;
+          if (!jobRes.ok) {
+            consecutiveErrors += 1;
+            if (consecutiveErrors >= 6) break;
+            continue;
+          }
+          consecutiveErrors = 0;
           const jobInfo = (await jobRes.json()) as {
             status?: string;
             progress?: number;

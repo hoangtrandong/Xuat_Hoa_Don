@@ -1088,9 +1088,7 @@ def fetch_nazzy_orders(
         limits=http_limits,
         follow_redirects=True,
     ) as client:
-        current_page = 1
-        while True:
-            _report(f"Đang tải danh sách đơn Nazzy trang {current_page} ({page_size} đơn/trang)...", len(all_order_summaries))
+        def _fetch_list_page(page_num: int, ps: int) -> tuple[int, list[dict[str, Any]]]:
             params = {
                 "t": "GetBillsOrderGetListV5",
                 "type": str(type_val),
@@ -1106,26 +1104,34 @@ def fetch_nazzy_orders(
                 "status": str(status_val),
                 "fromDate": from_str,
                 "toDate": to_str,
-                "currentPage": str(current_page),
-                "pageSize": str(page_size),
+                "currentPage": str(page_num),
+                "pageSize": str(ps),
                 "orderBy": "1",
                 "_": str(int(datetime.utcnow().timestamp() * 1000)),
             }
+            resp = client.get(base_url, params=params, headers=headers, cookies=cookies)
+            if resp.status_code != 200:
+                raise RuntimeError(f"HTTP {resp.status_code} khi lấy danh sách đơn Nazzy trang {page_num}.")
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("Dữ liệu trả về từ Nazzy không đúng định dạng.")
+            items_block = data.get("Items") or {}
+            if not isinstance(items_block, dict):
+                raise RuntimeError("Dữ liệu trả về từ Nazzy không có danh sách đơn hàng hợp lệ.")
+            return int(items_block.get("TotalRecord") or 0), (items_block.get("Items") or [])
+
+        # Tải trang 1 trước để biết tổng số đơn (TotalRecord)
+        total_records = 0
+        first_items: list[dict[str, Any]] = []
+        while True:
+            _report(f"Đang tải danh sách đơn Nazzy trang 1 ({page_size} đơn/trang)...", 0)
             try:
-                resp = client.get(base_url, params=params, headers=headers, cookies=cookies)
-                if resp.status_code != 200:
-                    if strict:
-                        raise RuntimeError(f"HTTP {resp.status_code} khi lấy danh sách đơn Nazzy.")
-                    break
-                data = resp.json()
+                total_records, first_items = _fetch_list_page(1, page_size)
+                break
             except httpx.TimeoutException as exc:
                 if page_size > 50:
                     page_size = 50
-                    current_page = max(1, (len(all_order_summaries) // page_size) + 1)
-                    _report(
-                        f"Máy chủ Nazzy phản hồi chậm — tự động hạ xuống 50 đơn/trang (trang {current_page})...",
-                        len(all_order_summaries),
-                    )
+                    _report("Máy chủ Nazzy phản hồi chậm — tự động hạ xuống 50 đơn/trang...", 0)
                     continue
                 if strict:
                     raise RuntimeError(f"Không thể lấy danh sách đơn Nazzy: {exc}") from exc
@@ -1135,36 +1141,48 @@ def fetch_nazzy_orders(
                     raise RuntimeError(f"Không thể lấy danh sách đơn Nazzy: {exc}") from exc
                 break
 
-            if not isinstance(data, dict):
-                if strict:
-                    raise RuntimeError("Dữ liệu trả về từ Nazzy không đúng định dạng.")
-                break
-            items_block = data.get("Items") or {}
-            if not isinstance(items_block, dict):
-                if strict:
-                    raise RuntimeError("Dữ liệu trả về từ Nazzy không có danh sách đơn hàng hợp lệ.")
-                break
-            total_records = int(items_block.get("TotalRecord") or 0)
-            page_items = items_block.get("Items") or []
-            if not page_items:
-                break
+        for item in first_items:
+            key = str(item.get("BillsDepotId") or item.get("Code") or len(seen_summary_ids))
+            if key not in seen_summary_ids:
+                seen_summary_ids.add(key)
+                all_order_summaries.append(item)
 
-            for item in page_items:
-                key = str(item.get("BillsDepotId") or item.get("Code") or len(seen_summary_ids))
-                if key not in seen_summary_ids:
-                    seen_summary_ids.add(key)
-                    all_order_summaries.append(item)
+        if first_items:
             _report(
                 f"Đã tải danh sách {len(all_order_summaries)}/{total_records or len(all_order_summaries)} đơn Nazzy...",
                 len(all_order_summaries),
             )
-            if total_records > 0 and len(all_order_summaries) >= total_records:
-                break
-            if total_records == 0 and len(page_items) < page_size:
-                break
-            current_page += 1
-            if current_page > 30:
-                break
+
+        # Nếu còn nhiều trang -> tải song song 4 trang cùng lúc để giảm thời gian chờ
+        if first_items and total_records > len(all_order_summaries):
+            import math
+            total_pages = min(30, math.ceil(total_records / max(1, page_size)))
+            remaining_pages = list(range(2, total_pages + 1))
+            if remaining_pages:
+                _report(
+                    f"Đang tải song song {len(remaining_pages)} trang còn lại ({len(all_order_summaries)}/{total_records} đơn)...",
+                    len(all_order_summaries),
+                )
+                with ThreadPoolExecutor(max_workers=4) as page_exec:
+                    future_to_page = {
+                        page_exec.submit(_fetch_list_page, p, page_size): p
+                        for p in remaining_pages
+                    }
+                    for fut in as_completed(future_to_page):
+                        try:
+                            _, page_items = fut.result()
+                            for item in page_items:
+                                key = str(item.get("BillsDepotId") or item.get("Code") or len(seen_summary_ids))
+                                if key not in seen_summary_ids:
+                                    seen_summary_ids.add(key)
+                                    all_order_summaries.append(item)
+                            _report(
+                                f"Đã tải danh sách {len(all_order_summaries)}/{total_records} đơn Nazzy...",
+                                len(all_order_summaries),
+                            )
+                        except Exception:
+                            # Bỏ qua trang lỗi đơn lẻ để không làm hỏng toàn bộ đợt đồng bộ
+                            continue
 
         if not all_order_summaries:
             return []

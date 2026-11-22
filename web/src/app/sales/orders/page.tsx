@@ -2254,13 +2254,13 @@ return Array.from(map.values());
           : prev,
       );
 
-      // Theo dõi tiến trình đồng bộ theo thời gian thực mỗi 1 giây
+      // Theo dõi tiến trình đồng bộ theo thời gian thực mỗi 1.5 giây (tối đa 12 phút)
       if (asyncData.job_id) {
         const jobId = asyncData.job_id;
         let finished = false;
         let consecutiveErrors = 0;
-        for (let attempt = 0; attempt < 180; attempt++) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+        for (let attempt = 0; attempt < 480; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
           let jobRes: Response;
           try {
             jobRes = await fetchWithTimeout(
@@ -2271,12 +2271,12 @@ return Array.from(map.values());
             );
           } catch {
             consecutiveErrors += 1;
-            if (consecutiveErrors >= 8) break;
+            if (consecutiveErrors >= 10) break;
             continue;
           }
           if (!jobRes.ok) {
             consecutiveErrors += 1;
-            if (consecutiveErrors >= 6) break;
+            if (consecutiveErrors >= 8) break;
             continue;
           }
           consecutiveErrors = 0;
@@ -2352,19 +2352,19 @@ return Array.from(map.values());
             prev
               ? {
                   ...prev,
+                  phase: "failed",
+                  finishedAt: Date.now(),
                   message:
-                    "Tác vụ đồng bộ vẫn đang chạy ngầm trên máy chủ. Thanh tiến trình phía trên sẽ tiếp tục cập nhật khi hoàn tất.",
+                    "Mất kết nối theo dõi tiến trình đồng bộ (tác vụ trên máy chủ có thể đã hoàn tất). Bấm Tải lại trang để kiểm tra dữ liệu mới nhất.",
                   logs: pushLocalLog(
                     prev,
-                    "Tác vụ kéo dài hơn 2 phút — tiếp tục theo dõi ở thanh tiến trình ngầm phía trên.",
+                    "Dừng theo dõi tiến trình tự động — vui lòng tải lại danh sách đơn hàng.",
                     "warning",
                   ),
                 }
               : prev,
           );
-          setTimeout(() => {
-            void loadLocalOrders();
-          }, 4000);
+          void loadLocalOrders();
         }
       } else {
         setTimeout(() => {

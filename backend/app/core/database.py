@@ -33,6 +33,9 @@ def init_db() -> None:
     from app.crud import product as product_crud
     Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            conn.execute(text("SET LOCAL lock_timeout = '3s'"))
+            conn.execute(text("SET LOCAL statement_timeout = '15s'"))
         conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS sync_source VARCHAR(30) DEFAULT 'MANUAL';"))
         conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS internal_name VARCHAR(255);"))
         conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS internal_unit VARCHAR(50);"))

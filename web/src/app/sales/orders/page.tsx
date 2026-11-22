@@ -498,7 +498,7 @@ function SplitQuantityInput({ quantity, boxesPerCarton, label, onChange }: {
 export default function SalesOrdersPage() {
   const router = useRouter();
   const authSession = useAuthSession();
-  const { effectiveDistributorId, effectiveDistributor } = useDistributorContext();
+  const { distributors, effectiveDistributorId, effectiveDistributor } = useDistributorContext();
   const activeDistributorCode = effectiveDistributor?.code || authSession.distributorCode || "";
   const { username: sessionUsername } = authSession;
   const [isAdminUser, setIsAdminUser] = useState(false);
@@ -2092,39 +2092,79 @@ return Array.from(map.values());
       ],
     });
 
-    try {
-      const distributorsResponse = await apiFetch(`${API_URL}/einvoice/distributors`);
-      const distributorList = (await distributorsResponse.json()) as Array<{
-        id: number;
-        code?: string;
-        name?: string;
-      }>;
-      if (!distributorsResponse.ok) {
-        throw new Error("Không thể tải danh sách Nhà phân phối để xác định nguồn dữ liệu.");
+    const fetchWithTimeout = async (
+      url: string,
+      init: RequestInit | undefined,
+      timeoutMs: number,
+      stepLabel: string,
+    ): Promise<Response> => {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await apiFetch(url, { ...init, signal: controller.signal });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          throw new Error(
+            `Quá thời gian chờ (${Math.round(timeoutMs / 1000)}s) khi ${stepLabel}. Vui lòng kiểm tra trạng thái Backend hoặc mạng rồi thử lại.`,
+          );
+        }
+        throw err;
+      } finally {
+        window.clearTimeout(timer);
       }
-      const distributorId =
-        effectiveDistributorId ?? authSession.distributorId ?? distributorList[0]?.id;
+    };
+
+    try {
+      let distributorId: number | undefined =
+        effectiveDistributorId ?? authSession.distributorId ?? distributors[0]?.id;
+      let activeDistName =
+        effectiveDistributor?.name ||
+        authSession.distributorName ||
+        distributors.find((d) => d.id === distributorId)?.name ||
+        "";
+
+      if (!distributorId) {
+        const distributorsResponse = await fetchWithTimeout(
+          `${API_URL}/einvoice/distributors`,
+          undefined,
+          20000,
+          "tải danh sách Nhà phân phối",
+        );
+        const distributorList = (await distributorsResponse.json()) as Array<{
+          id: number;
+          code?: string;
+          name?: string;
+        }>;
+        if (!distributorsResponse.ok) {
+          throw new Error("Không thể tải danh sách Nhà phân phối để xác định nguồn dữ liệu.");
+        }
+        distributorId = distributorList[0]?.id;
+        activeDistName = distributorList[0]?.name || "";
+      }
+
       if (!distributorId) {
         throw new Error("Không tìm thấy Nhà phân phối để tải cấu hình nguồn dữ liệu.");
       }
-      const activeDist = distributorList.find((d) => d.id === distributorId);
 
       setSyncProgress((prev) =>
         prev
           ? {
               ...prev,
               progress: 10,
-              message: `Đang tải danh sách nguồn Nhà cung cấp của ${activeDist?.name || `NPP #${distributorId}`}...`,
+              message: `Đang tải danh sách nguồn Nhà cung cấp của ${activeDistName || `NPP #${distributorId}`}...`,
               logs: pushLocalLog(
                 prev,
-                `Đã xác định Nhà phân phối: ${activeDist?.name || `#${distributorId}`}.`,
+                `Đã xác định Nhà phân phối: ${activeDistName || `#${distributorId}`}. Đang tải cấu hình nguồn NCC...`,
               ),
             }
           : prev,
       );
 
-      const configsResponse = await apiFetch(
-        `${API_URL}/einvoice/supplier-configs?distributor_id=${distributorId}`
+      const configsResponse = await fetchWithTimeout(
+        `${API_URL}/einvoice/supplier-configs?distributor_id=${distributorId}`,
+        undefined,
+        20000,
+        "tải cấu hình nguồn dữ liệu Nhà cung cấp",
       );
       const configuredSources = (await configsResponse.json()) as Array<{
         id: number;
@@ -2169,7 +2209,7 @@ return Array.from(map.values());
       );
 
       // Gửi yêu cầu vào Hàng Đợi Ngầm (Queue Engine)
-      const asyncRes = await apiFetch(
+      const asyncRes = await fetchWithTimeout(
         `${API_URL}/einvoice/supplier-configs/sync-all-async`,
         {
           method: "POST",
@@ -2179,7 +2219,9 @@ return Array.from(map.values());
             from_date: fromDate,
             to_date: toDate,
           }),
-        }
+        },
+        20000,
+        "kích hoạt hàng đợi đồng bộ ngầm",
       );
       const asyncData = (await asyncRes.json()) as {
         message?: string;
@@ -2213,7 +2255,17 @@ return Array.from(map.values());
         let finished = false;
         for (let attempt = 0; attempt < 120; attempt++) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
-          const jobRes = await apiFetch(`${API_URL}/sync/jobs/${jobId}`);
+          let jobRes: Response;
+          try {
+            jobRes = await fetchWithTimeout(
+              `${API_URL}/sync/jobs/${jobId}`,
+              undefined,
+              15000,
+              "kiểm tra tiến trình đồng bộ",
+            );
+          } catch {
+            continue;
+          }
           if (!jobRes.ok) break;
           const jobInfo = (await jobRes.json()) as {
             status?: string;

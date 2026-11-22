@@ -225,8 +225,14 @@ class InvoiceIssueRequest(BaseModel):
     buyer_override: dict[str, Any] | None = None
 
 
+_DEFAULT_DISTRIBUTORS_CHECKED = False
+
+
 def _ensure_default_distributors_seeded(db: Session) -> None:
     """Khởi tạo sẵn dữ liệu mẫu chuẩn cho Nhà phân phối, Nguồn đơn NCC và Cấu hình HĐĐT nếu bảng đang trống."""
+    global _DEFAULT_DISTRIBUTORS_CHECKED
+    if _DEFAULT_DISTRIBUTORS_CHECKED:
+        return
     count = db.scalar(select(func.count(Distributor.id))) or 0
     if count == 0:
         npp1 = Distributor(
@@ -407,6 +413,7 @@ def _ensure_default_distributors_seeded(db: Session) -> None:
             changed_legacy_secrets = True
     if changed_legacy_secrets:
         db.commit()
+    _DEFAULT_DISTRIBUTORS_CHECKED = True
 
 
 def _enforce_user_distributor_scope(
@@ -443,26 +450,47 @@ def list_distributors(
     current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     _ensure_default_distributors_seeded(db)
-    stmt = (
-        select(Distributor)
-        .options(
-            selectinload(Distributor.supplier_configs),
-            selectinload(Distributor.invoice_configs),
-            selectinload(Distributor.issued_invoices),
-        )
-        .order_by(Distributor.id)
-    )
+    stmt = select(Distributor).order_by(Distributor.id)
     if current_user.distributor_id is not None:
         stmt = stmt.where(Distributor.id == current_user.distributor_id)
     distributors = db.scalars(stmt).all()
+    dist_ids = [d.id for d in distributors]
 
-    dist_users = db.scalars(
-        select(User).where(User.distributor_id.is_not(None)).order_by(User.id)
-    ).all()
+    supplier_counts: dict[int, int] = {}
+    invoice_cfg_counts: dict[int, int] = {}
+    issued_inv_counts: dict[int, int] = {}
     user_by_dist: dict[int, User] = {}
-    for u in dist_users:
-        if u.distributor_id and u.distributor_id not in user_by_dist:
-            user_by_dist[u.distributor_id] = u
+
+    if dist_ids:
+        for did, cnt in db.execute(
+            select(DistributorSupplierConfig.distributor_id, func.count(DistributorSupplierConfig.id))
+            .where(DistributorSupplierConfig.distributor_id.in_(dist_ids))
+            .group_by(DistributorSupplierConfig.distributor_id)
+        ).all():
+            supplier_counts[int(did)] = int(cnt)
+
+        for did, cnt in db.execute(
+            select(DistributorInvoiceConfig.distributor_id, func.count(DistributorInvoiceConfig.id))
+            .where(DistributorInvoiceConfig.distributor_id.in_(dist_ids))
+            .group_by(DistributorInvoiceConfig.distributor_id)
+        ).all():
+            invoice_cfg_counts[int(did)] = int(cnt)
+
+        for did, cnt in db.execute(
+            select(IssuedInvoice.distributor_id, func.count(IssuedInvoice.id))
+            .where(IssuedInvoice.distributor_id.in_(dist_ids))
+            .group_by(IssuedInvoice.distributor_id)
+        ).all():
+            issued_inv_counts[int(did)] = int(cnt)
+
+        dist_users = db.scalars(
+            select(User)
+            .where(User.distributor_id.in_(dist_ids))
+            .order_by(User.id)
+        ).all()
+        for u in dist_users:
+            if u.distributor_id and u.distributor_id not in user_by_dist:
+                user_by_dist[u.distributor_id] = u
 
     return [
         {
@@ -477,9 +505,9 @@ def list_distributors(
             "company_allocation_mode": d.company_allocation_mode or "BY_CUSTOMER",
             "status": d.status,
             "login_username": user_by_dist[d.id].username if d.id in user_by_dist else d.code.lower().replace("-", "_"),
-            "supplier_config_count": len(d.supplier_configs),
-            "invoice_config_count": len(d.invoice_configs),
-            "issued_invoice_count": len(d.issued_invoices),
+            "supplier_config_count": supplier_counts.get(d.id, 0),
+            "invoice_config_count": invoice_cfg_counts.get(d.id, 0),
+            "issued_invoice_count": issued_inv_counts.get(d.id, 0),
             "created_at": d.created_at.isoformat() if d.created_at else None,
         }
         for d in distributors

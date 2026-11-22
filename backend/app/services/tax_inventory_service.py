@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from io import BytesIO
 from typing import Any
@@ -1229,6 +1229,408 @@ def get_tax_inventory_card_detail(
         "closing_qty": _q_qty(running),
         "entries": entries,
     }
+
+
+def get_daily_tax_inventory_ledger(
+    db: Session,
+    *,
+    sku: str,
+    from_date: date,
+    to_date: date,
+    tax_code: str | None = None,
+    distributor_id: int | None = None,
+    include_draft: bool = True,
+    only_active_days: bool = False,
+) -> dict[str, Any]:
+    """Nhật ký Nhập – Xuất – Tồn Thuế theo từng ngày (Ngày 1 → Ngày N) cho 1 Mã SP nội bộ NPP (hoặc 1 cặp MST + SKU)."""
+    target_code = (sku or "").strip().upper()
+    if not target_code:
+        raise ValueError("Thiếu mã SKU / mã SP nội bộ NPP.")
+    if from_date > to_date:
+        raise ValueError("Từ ngày không được lớn hơn Đến ngày.")
+    if (to_date - from_date).days > 366:
+        raise ValueError("Khoảng thời gian xem nhật ký từng ngày tối đa 366 ngày.")
+
+    target_mst = (tax_code or "").strip()
+    if target_mst.upper() == "ALL":
+        target_mst = ""
+
+    # Giải mã danh sách (cqt_sku -> conversion_factor) thuộc target_code
+    sku_conv_map: dict[str, Decimal] = {}
+    resolved_product_name = ""
+    resolved_unit_name = ""
+
+    if target_mst:
+        # Chế độ xem riêng 1 MST + 1 mã SKU CQT gốc
+        sku_conv_map[target_code] = Decimal("1")
+        p = db.scalar(select(Product).options(selectinload(Product.unit)).where(func.upper(Product.sku) == target_code))
+        if p:
+            resolved_product_name = p.name or ""
+            resolved_unit_name = p.unit.name if p.unit else ""
+    else:
+        # Chế độ xem gộp theo Mã SP nội bộ NPP (tìm tất cả mã CQT map về target_code kèm conversion_factor)
+        all_prods = db.scalars(
+            select(Product).options(
+                selectinload(Product.unit),
+                selectinload(Product.group_items)
+                .selectinload(ProductGroupItem.group)
+                .selectinload(ProductGroup.company_links),
+                selectinload(Product.group_items)
+                .selectinload(ProductGroupItem.group)
+                .selectinload(ProductGroup.representative_product),
+            )
+        ).all()
+        for p in all_prods:
+            p_sku_u = (p.sku or "").strip().upper()
+            p_npp_u = (p.npp_code or p_sku_u).strip().upper()
+            if p_npp_u == target_code or p_sku_u == target_code:
+                cf = 1
+                if p.group_items and p.group_items[0].conversion_factor and int(p.group_items[0].conversion_factor) > 0:
+                    cf = int(p.group_items[0].conversion_factor)
+                sku_conv_map[p_sku_u] = Decimal(str(cf))
+                if not resolved_product_name:
+                    resolved_product_name = (p.internal_name or "").strip() or p.npp_name or p.name or ""
+                if not resolved_unit_name:
+                    resolved_unit_name = (p.internal_unit or "").strip() or (p.unit.name if p.unit else "")
+        if not sku_conv_map:
+            sku_conv_map[target_code] = Decimal("1")
+
+    target_skus = set(sku_conv_map.keys())
+
+    dist_mst_by_id: dict[int, str] = {
+        d_id: d_mst.strip()
+        for d_id, d_mst in db.execute(select(Distributor.id, Distributor.tax_code)).all()
+        if d_mst
+    }
+    opening_map = _load_effective_opening_balances(
+        db, distributor_id=distributor_id, to_date=to_date
+    )
+
+    # Tính số dư đầu kỳ gốc từ bảng opening_balances
+    period_opening_qty = ZERO
+    for (o_mst, o_sku), ob in opening_map.items():
+        if o_sku not in target_skus:
+            continue
+        if target_mst and o_mst != target_mst:
+            continue
+        cf_dec = sku_conv_map.get(o_sku, Decimal("1"))
+        period_opening_qty += ob["opening_qty"] * cf_dec
+
+    daily_in_qty: dict[date, Decimal] = {}
+    daily_in_amt: dict[date, Decimal] = {}
+    daily_out_qty: dict[date, Decimal] = {}
+    daily_out_amt: dict[date, Decimal] = {}
+
+    # 1. Đầu vào CQT
+    purch_hdr_stmt = (
+        select(
+            PurchaseInvoice.id,
+            PurchaseInvoice.seller_tax_code,
+            PurchaseInvoice.invoice_number,
+            PurchaseInvoice.replaced_invoice_number,
+            PurchaseInvoice.raw_metadata,
+            PurchaseInvoice.buyer_tax_code,
+            PurchaseInvoice.distributor_id,
+            PurchaseInvoice.invoice_date,
+            PurchaseInvoice.invoice_symbol,
+            PurchaseInvoice.seller_name,
+            TaxAuthorityCredential.username,
+            PurchaseInvoice.amount_before_tax,
+            PurchaseInvoice.total_amount,
+        )
+        .outerjoin(
+            TaxAuthorityCredential,
+            PurchaseInvoice.tax_credential_id == TaxAuthorityCredential.id,
+        )
+    )
+    if distributor_id is not None:
+        purch_hdr_stmt = purch_hdr_stmt.where(PurchaseInvoice.distributor_id == distributor_id)
+    purch_headers = list(db.execute(purch_hdr_stmt).all())
+    excluded_purch_ids = _build_excluded_purchase_invoice_ids(purch_headers)
+
+    matched_purch: dict[int, tuple[str, date | None]] = {}
+    for row in purch_headers:
+        inv_id = row[0]
+        if inv_id in excluded_purch_ids:
+            continue
+        mst = (row[5] or row[10] or dist_mst_by_id.get(row[6]) or "").strip()
+        if not mst:
+            continue
+        if target_mst and mst != target_mst:
+            continue
+        inv_date = _to_date(row[7])
+        if inv_date is not None and inv_date > to_date:
+            continue
+        matched_purch[inv_id] = (mst, inv_date)
+
+    if matched_purch:
+        p_ids = list(matched_purch.keys())
+        for i in range(0, len(p_ids), 500):
+            batch_ids = p_ids[i : i + 500]
+            item_rows = db.execute(
+                select(
+                    PurchaseInvoiceItem.purchase_invoice_id,
+                    PurchaseInvoiceItem.item_nature,
+                    PurchaseInvoiceItem.product_code,
+                    PurchaseInvoiceItem.product_name,
+                    PurchaseInvoiceItem.unit_name,
+                    PurchaseInvoiceItem.quantity,
+                    PurchaseInvoiceItem.amount_before_tax,
+                ).where(
+                    PurchaseInvoiceItem.purchase_invoice_id.in_(batch_ids),
+                    func.upper(func.trim(PurchaseInvoiceItem.product_code)).in_(list(target_skus)),
+                )
+            ).all()
+            for p_inv_id, item_nature, p_code, p_name, u_name, qty_raw, amt_raw in item_rows:
+                if item_nature in NON_STOCK_ITEM_NATURES:
+                    continue
+                c_sku = (p_code or "").strip().upper()
+                mst, inv_date = matched_purch[p_inv_id]
+                ob = opening_map.get((mst, c_sku))
+                if ob is not None and inv_date is not None and inv_date < ob["as_of_date"]:
+                    continue
+                if not resolved_product_name and p_name:
+                    resolved_product_name = p_name.strip()
+                if not resolved_unit_name and u_name:
+                    resolved_unit_name = u_name.strip()
+                cf_dec = sku_conv_map.get(c_sku, Decimal("1"))
+                qty_scaled = _to_dec(qty_raw) * cf_dec
+                amt_dec = _to_dec(amt_raw)
+                if inv_date is None or inv_date < from_date:
+                    period_opening_qty += qty_scaled
+                else:
+                    daily_in_qty[inv_date] = daily_in_qty.get(inv_date, ZERO) + qty_scaled
+                    daily_in_amt[inv_date] = daily_in_amt.get(inv_date, ZERO) + amt_dec
+
+    # 2. Đầu ra HĐĐT
+    issued_stmt = (
+        select(
+            IssuedInvoice.seller_tax_code,
+            IssuedInvoice.distributor_id,
+            IssuedInvoice.status,
+            IssuedInvoice.issued_at,
+            IssuedInvoice.created_at,
+            IssuedInvoiceItem.item_type,
+            IssuedInvoiceItem.source_sku,
+            IssuedInvoiceItem.product_code,
+            IssuedInvoiceItem.product_name,
+            IssuedInvoiceItem.source_unit,
+            IssuedInvoiceItem.unit_name,
+            IssuedInvoiceItem.source_quantity,
+            IssuedInvoiceItem.quantity,
+            IssuedInvoiceItem.amount_before_tax,
+        )
+        .join(IssuedInvoiceItem, IssuedInvoiceItem.invoice_id == IssuedInvoice.id)
+        .where(IssuedInvoice.status.notin_(("CANCELLED", "REPLACED")))
+    )
+    if distributor_id is not None:
+        issued_stmt = issued_stmt.where(IssuedInvoice.distributor_id == distributor_id)
+
+    for row in db.execute(issued_stmt).all():
+        if (row[5] or "NORMAL").upper() not in ("NORMAL", "PROMOTION", "ADJUSTMENT"):
+            continue
+        is_draft = (row[2] or "").upper() == "DRAFT"
+        if is_draft and not include_draft:
+            continue
+        mst = (row[0] or dist_mst_by_id.get(row[1]) or "").strip()
+        if not mst:
+            continue
+        if target_mst and mst != target_mst:
+            continue
+        c_sku = (row[6] or row[7] or "").strip().upper()
+        if c_sku not in target_skus:
+            continue
+        tx_date = _to_date(row[3] or row[4])
+        if tx_date is not None and tx_date > to_date:
+            continue
+        ob = opening_map.get((mst, c_sku))
+        if ob is not None and tx_date is not None and tx_date < ob["as_of_date"]:
+            continue
+        if not resolved_product_name and row[8]:
+            resolved_product_name = row[8].strip()
+        if not resolved_unit_name and (row[9] or row[10]):
+            resolved_unit_name = (row[9] or row[10]).strip()
+        cf_dec = sku_conv_map.get(c_sku, Decimal("1"))
+        raw_q = _to_dec(row[11]) if row[11] is not None else _to_dec(row[12])
+        qty_scaled = raw_q * cf_dec
+        amt_dec = _to_dec(row[13])
+        if tx_date is None or tx_date < from_date:
+            period_opening_qty -= qty_scaled
+        else:
+            daily_out_qty[tx_date] = daily_out_qty.get(tx_date, ZERO) + qty_scaled
+            daily_out_amt[tx_date] = daily_out_amt.get(tx_date, ZERO) + amt_dec
+
+    # 3. Sinh bảng từng ngày liên tục từ from_date -> to_date
+    days_list: list[dict[str, Any]] = []
+    running = period_opening_qty
+    tot_in_q = ZERO
+    tot_in_a = ZERO
+    tot_out_q = ZERO
+    tot_out_a = ZERO
+    negative_days_count = 0
+    active_days_count = 0
+
+    cur = from_date
+    while cur <= to_date:
+        day_open = running
+        in_q = daily_in_qty.get(cur, ZERO)
+        in_a = daily_in_amt.get(cur, ZERO)
+        out_q = daily_out_qty.get(cur, ZERO)
+        out_a = daily_out_amt.get(cur, ZERO)
+        day_close = day_open + in_q - out_q
+        running = day_close
+
+        has_activity = (in_q != ZERO) or (out_q != ZERO)
+        is_neg = day_close < -EPSILON
+        if has_activity:
+            active_days_count += 1
+        if is_neg:
+            negative_days_count += 1
+
+        tot_in_q += in_q
+        tot_in_a += in_a
+        tot_out_q += out_q
+        tot_out_a += out_a
+
+        if not only_active_days or has_activity:
+            days_list.append(
+                {
+                    "date": cur.isoformat(),
+                    "opening_qty": _q_qty(day_open),
+                    "input_qty": _q_qty(in_q),
+                    "input_amount": _q_amt(in_a),
+                    "output_qty": _q_qty(out_q),
+                    "output_amount": _q_amt(out_a),
+                    "closing_qty": _q_qty(day_close),
+                    "is_negative": is_neg,
+                    "has_activity": has_activity,
+                }
+            )
+        cur += timedelta(days=1)
+
+    return {
+        "sku": target_code,
+        "tax_code": target_mst or "ALL",
+        "product_name": resolved_product_name,
+        "unit_name": resolved_unit_name,
+        "from_date": from_date.isoformat(),
+        "to_date": to_date.isoformat(),
+        "cqt_skus": sorted(target_skus),
+        "summary": {
+            "period_opening_qty": _q_qty(period_opening_qty),
+            "total_input_qty": _q_qty(tot_in_q),
+            "total_input_amount": _q_amt(tot_in_a),
+            "total_output_qty": _q_qty(tot_out_q),
+            "total_output_amount": _q_amt(tot_out_a),
+            "period_closing_qty": _q_qty(running),
+            "negative_days_count": negative_days_count,
+            "active_days_count": active_days_count,
+            "total_days": (to_date - from_date).days + 1,
+        },
+        "days": days_list,
+    }
+
+
+def export_daily_tax_inventory_excel(daily_data: dict[str, Any]) -> BytesIO:
+    """Xuất Nhật ký Nhập – Xuất – Tồn Thuế theo từng ngày ra file Excel (.xlsx)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Nhat_Ky_NXT_Ngay"
+
+    header_fill = PatternFill("solid", fgColor="14263D")
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    red_fill = PatternFill("solid", fgColor="FEE2E2")
+    red_font = Font(bold=True, color="B91C1C", size=10)
+    bold_font = Font(bold=True, size=10)
+    thin_border = Border(
+        left=Side(style="thin", color="CBD5E1"),
+        right=Side(style="thin", color="CBD5E1"),
+        top=Side(style="thin", color="CBD5E1"),
+        bottom=Side(style="thin", color="CBD5E1"),
+    )
+
+    ws.merge_cells("A1:H1")
+    ws["A1"] = (
+        f"NHẬT KÝ NHẬP – XUẤT – TỒN THUẾ TỪNG NGÀY · MÃ {daily_data['sku']}"
+        + (f" · MST {daily_data['tax_code']}" if daily_data.get("tax_code") != "ALL" else " · TỔNG HỢP NPP")
+    )
+    ws["A1"].font = Font(bold=True, size=12, color="14263D")
+    ws["A1"].alignment = Alignment(horizontal="center")
+
+    ws.merge_cells("A2:H2")
+    ws["A2"] = f"{daily_data.get('product_name', '')} ({daily_data.get('unit_name', '')}) | Từ {daily_data['from_date']} đến {daily_data['to_date']}"
+    ws["A2"].font = Font(italic=True, size=10, color="475569")
+    ws["A2"].alignment = Alignment(horizontal="center")
+
+    headers = [
+        "Ngày",
+        "Tồn đầu ngày (SL)",
+        "Nhập trong ngày (SL)",
+        "Giá trị Nhập (VND)",
+        "Xuất trong ngày (SL)",
+        "Doanh thu Xuất (VND)",
+        "Tồn cuối ngày (SL)",
+        "Trạng thái",
+    ]
+    ws.append([])
+    ws.append(headers)
+    for col_idx in range(1, len(headers) + 1):
+        c = ws.cell(row=4, column=col_idx)
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = thin_border
+    ws.row_dimensions[4].height = 24
+
+    for idx, d in enumerate(daily_data.get("days", []), start=5):
+        ws.append([
+            d["date"],
+            d["opening_qty"],
+            d["input_qty"],
+            d["input_amount"],
+            d["output_qty"],
+            d["output_amount"],
+            d["closing_qty"],
+            "ÂM KHO THUẾ" if d["is_negative"] else ("Có phát sinh" if d["has_activity"] else "Ổn định"),
+        ])
+        for col_idx in range(1, 9):
+            c = ws.cell(row=idx, column=col_idx)
+            c.border = thin_border
+            if col_idx in (2, 3, 4, 5, 6, 7):
+                c.number_format = "#,##0.##"
+                c.alignment = Alignment(horizontal="right")
+            if d["is_negative"]:
+                c.fill = red_fill
+                if col_idx in (7, 8):
+                    c.font = red_font
+
+    s = daily_data.get("summary", {})
+    tot_r = len(daily_data.get("days", [])) + 5
+    ws.append([
+        "TỔNG KỲ",
+        s.get("period_opening_qty", 0),
+        s.get("total_input_qty", 0),
+        s.get("total_input_amount", 0),
+        s.get("total_output_qty", 0),
+        s.get("total_output_amount", 0),
+        s.get("period_closing_qty", 0),
+        f"{s.get('negative_days_count', 0)} ngày âm",
+    ])
+    for col_idx in range(1, 9):
+        c = ws.cell(row=tot_r, column=col_idx)
+        c.font = bold_font
+        c.border = thin_border
+        if col_idx in (2, 3, 4, 5, 6, 7):
+            c.number_format = "#,##0.##"
+            c.alignment = Alignment(horizontal="right")
+
+    for i, w in enumerate([14, 18, 18, 20, 18, 20, 18, 16], start=1):
+        ws.column_dimensions[ws.cell(row=4, column=i).column_letter].width = w
+
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
 
 
 # ==============================================================================

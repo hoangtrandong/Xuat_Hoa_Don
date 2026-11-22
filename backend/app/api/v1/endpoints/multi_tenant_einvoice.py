@@ -2447,6 +2447,78 @@ def export_tax_sku_mapping_explanation(
     )
 
 
+@router.get("/tax-inventory/daily")
+def get_daily_tax_inventory(
+    sku: str = Query(..., min_length=1),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    tax_code: str | None = Query(default=None),
+    distributor_id: int | None = Query(default=None),
+    include_draft: bool = Query(default=True),
+    only_active_days: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Nhật ký Nhập – Xuất – Tồn Thuế theo từng ngày cho 1 Mã SP nội bộ NPP (hoặc 1 cặp MST + SKU)."""
+    from app.services.tax_inventory_service import get_daily_tax_inventory_ledger
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    try:
+        return get_daily_tax_inventory_ledger(
+            db,
+            sku=sku,
+            from_date=from_date,
+            to_date=to_date,
+            tax_code=tax_code,
+            distributor_id=effective_dist_id,
+            include_draft=include_draft,
+            only_active_days=only_active_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/tax-inventory/daily/export")
+def export_daily_tax_inventory(
+    sku: str = Query(..., min_length=1),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    tax_code: str | None = Query(default=None),
+    distributor_id: int | None = Query(default=None),
+    include_draft: bool = Query(default=True),
+    only_active_days: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Xuất file Excel Nhật ký Nhập – Xuất – Tồn Thuế theo từng ngày."""
+    from app.services.tax_inventory_service import (
+        export_daily_tax_inventory_excel,
+        get_daily_tax_inventory_ledger,
+    )
+
+    effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
+    try:
+        daily_data = get_daily_tax_inventory_ledger(
+            db,
+            sku=sku,
+            from_date=from_date,
+            to_date=to_date,
+            tax_code=tax_code,
+            distributor_id=effective_dist_id,
+            include_draft=include_draft,
+            only_active_days=only_active_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    buf = export_daily_tax_inventory_excel(daily_data)
+    filename = f"Nhat_Ky_NXT_Ngay_{sku.strip()}_{from_date.isoformat()}_{to_date.isoformat()}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 class OpeningBalanceUpsertIn(BaseModel):
     distributor_id: int | None = None
     tax_code: str

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Building2,
+  Calendar,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -150,6 +151,40 @@ interface TaxCardResponse {
   entries: CardEntry[];
 }
 
+interface DailyLedgerRow {
+  date: string;
+  opening_qty: number;
+  input_qty: number;
+  input_amount: number;
+  output_qty: number;
+  output_amount: number;
+  closing_qty: number;
+  is_negative: boolean;
+  has_activity: boolean;
+}
+
+interface DailyLedgerResponse {
+  sku: string;
+  tax_code: string;
+  product_name: string;
+  unit_name: string;
+  from_date: string;
+  to_date: string;
+  cqt_skus: string[];
+  summary: {
+    period_opening_qty: number;
+    total_input_qty: number;
+    total_input_amount: number;
+    total_output_qty: number;
+    total_output_amount: number;
+    period_closing_qty: number;
+    negative_days_count: number;
+    active_days_count: number;
+    total_days: number;
+  };
+  days: DailyLedgerRow[];
+}
+
 interface OpeningBalanceRow {
   id: number;
   tax_code: string;
@@ -213,6 +248,21 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
   const [cardData, setCardData] = useState<TaxCardResponse | null>(null);
   const [cardLoading, setCardLoading] = useState(false);
   const [cardError, setCardError] = useState("");
+
+  // Modal 1b: Nhật ký N-X-T từng ngày (Daily Ledger)
+  const [dailyTarget, setDailyTarget] = useState<{
+    sku: string;
+    tax_code: string;
+    product_name: string;
+    unit_name: string;
+  } | null>(null);
+  const [dailyFrom, setDailyFrom] = useState("");
+  const [dailyTo, setDailyTo] = useState("");
+  const [dailyOnlyActive, setDailyOnlyActive] = useState(false);
+  const [dailyData, setDailyData] = useState<DailyLedgerResponse | null>(null);
+  const [dailyLoading, setDailyLoading] = useState(false);
+  const [dailyExporting, setDailyExporting] = useState(false);
+  const [dailyError, setDailyError] = useState("");
 
   // Modal 2: Tồn đầu kỳ TK 156
   const [showOpeningModal, setShowOpeningModal] = useState(false);
@@ -362,6 +412,113 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
       setError(e instanceof Error ? e.message : "Lỗi xuất Bảng giải trình mã hàng.");
     } finally {
       setExportingMapping(false);
+    }
+  }
+
+  function isoDate(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function shiftSingleDay(delta: number) {
+    const base = fromDate ? new Date(`${fromDate}T00:00:00`) : new Date();
+    base.setDate(base.getDate() + delta);
+    const next = isoDate(base);
+    setFromDate(next);
+    setToDate(next);
+    setPage(1);
+  }
+
+  function setTodayRange() {
+    const today = isoDate(new Date());
+    setFromDate(today);
+    setToDate(today);
+    setPage(1);
+  }
+
+  function setCurrentMonthRange() {
+    const now = new Date();
+    const first = new Date(now.getFullYear(), now.getMonth(), 1);
+    setFromDate(isoDate(first));
+    setToDate(isoDate(now));
+    setPage(1);
+  }
+
+  const loadDailyLedger = useCallback(
+    async (
+      target: { sku: string; tax_code: string },
+      fDate: string,
+      tDate: string,
+      onlyAct: boolean,
+    ) => {
+      if (!fDate || !tDate) return;
+      setDailyLoading(true);
+      setDailyError("");
+      try {
+        const params = new URLSearchParams();
+        params.set("sku", target.sku);
+        params.set("from_date", fDate);
+        params.set("to_date", tDate);
+        if (target.tax_code && target.tax_code !== "ALL") params.set("tax_code", target.tax_code);
+        if (distributorId !== null) params.set("distributor_id", String(distributorId));
+        params.set("include_draft", includeDraft ? "true" : "false");
+        params.set("only_active_days", onlyAct ? "true" : "false");
+        const res = await apiFetch(`${API_URL}/einvoice/tax-inventory/daily?${params.toString()}`);
+        if (!res.ok) {
+          const err = (await res.json().catch(() => ({}))) as { detail?: string };
+          throw new Error(err.detail || "Không tải được nhật ký N-X-T từng ngày.");
+        }
+        setDailyData((await res.json()) as DailyLedgerResponse);
+      } catch (e) {
+        setDailyError(e instanceof Error ? e.message : "Lỗi tải nhật ký từng ngày.");
+      } finally {
+        setDailyLoading(false);
+      }
+    },
+    [distributorId, includeDraft],
+  );
+
+  function openDailyModal(target: { sku: string; tax_code: string; product_name: string; unit_name: string }) {
+    const now = new Date();
+    const fDate = fromDate || isoDate(new Date(now.getFullYear(), now.getMonth(), 1));
+    const tDate = toDate || isoDate(now);
+    setDailyTarget(target);
+    setDailyFrom(fDate);
+    setDailyTo(tDate);
+    setDailyData(null);
+    void loadDailyLedger(target, fDate, tDate, dailyOnlyActive);
+  }
+
+  async function handleExportDailyExcel() {
+    if (!dailyTarget || !dailyFrom || !dailyTo) return;
+    setDailyExporting(true);
+    setDailyError("");
+    try {
+      const params = new URLSearchParams();
+      params.set("sku", dailyTarget.sku);
+      params.set("from_date", dailyFrom);
+      params.set("to_date", dailyTo);
+      if (dailyTarget.tax_code && dailyTarget.tax_code !== "ALL") params.set("tax_code", dailyTarget.tax_code);
+      if (distributorId !== null) params.set("distributor_id", String(distributorId));
+      params.set("include_draft", includeDraft ? "true" : "false");
+      params.set("only_active_days", dailyOnlyActive ? "true" : "false");
+      const res = await apiFetch(`${API_URL}/einvoice/tax-inventory/daily/export?${params.toString()}`);
+      if (!res.ok) throw new Error("Không xuất được file Excel nhật ký từng ngày.");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Nhat_Ky_NXT_Ngay_${dailyTarget.sku}_${dailyFrom}_${dailyTo}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      setDailyError(e instanceof Error ? e.message : "Lỗi xuất Excel.");
+    } finally {
+      setDailyExporting(false);
     }
   }
 
@@ -887,6 +1044,52 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
             Gồm HĐ Nháp (DRAFT)
           </label>
         </div>
+
+        {/* Thanh chuyển ngày nhanh để check N-X-T từng ngày */}
+        <div className="sm:col-span-2 xl:col-span-5 flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-100 text-[11px]">
+          <span className="text-[10px] font-semibold text-slate-500 mr-1">Chọn nhanh theo ngày:</span>
+          <button
+            type="button"
+            onClick={() => shiftSingleDay(-1)}
+            className="inline-flex items-center gap-0.5 rounded border border-slate-300 bg-white hover:bg-slate-100 px-2 py-0.5 font-semibold text-slate-700"
+          >
+            <ChevronLeft size={12} /> Ngày trước
+          </button>
+          <button
+            type="button"
+            onClick={setTodayRange}
+            className="rounded border border-sky-300 bg-sky-50 hover:bg-sky-100 px-2 py-0.5 font-semibold text-sky-800"
+          >
+            Hôm nay
+          </button>
+          <button
+            type="button"
+            onClick={() => shiftSingleDay(1)}
+            className="inline-flex items-center gap-0.5 rounded border border-slate-300 bg-white hover:bg-slate-100 px-2 py-0.5 font-semibold text-slate-700"
+          >
+            Ngày sau <ChevronRight size={12} />
+          </button>
+          <button
+            type="button"
+            onClick={setCurrentMonthRange}
+            className="rounded border border-slate-300 bg-white hover:bg-slate-100 px-2 py-0.5 font-semibold text-slate-700"
+          >
+            Tháng này
+          </button>
+          {(fromDate || toDate) && (
+            <button
+              type="button"
+              onClick={() => {
+                setFromDate("");
+                setToDate("");
+                setPage(1);
+              }}
+              className="rounded border border-red-200 bg-red-50 hover:bg-red-100 px-2 py-0.5 font-semibold text-red-700"
+            >
+              Tất cả thời gian
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -1083,28 +1286,46 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                     </div>
                   </td>
                   <td className="px-2 py-1.5 text-center whitespace-nowrap">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (groupBy === "NPP_SKU") {
-                          setSelectedNppRow(r);
-                        } else {
-                          void openStockCard(r);
-                        }
-                      }}
-                      className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 hover:bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800"
-                    >
-                      {groupBy === "NPP_SKU" ? (
-                        <>
-                          <Building2 size={11} /> {r.mst_count ?? 1} MST
-                        </>
-                      ) : (
-                        <>
-                          <History size={11} /> Chi tiết
-                        </>
-                      )}
-                    </button>
+                    <div className="inline-flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openDailyModal({
+                            sku: groupBy === "NPP_SKU" ? r.npp_code || r.sku : r.sku,
+                            tax_code: groupBy === "NPP_SKU" ? "ALL" : r.tax_code,
+                            product_name: r.product_name,
+                            unit_name: r.unit_name,
+                          });
+                        }}
+                        title="Xem Nhật ký Tồn đầu ngày – Nhập – Xuất – Tồn cuối ngày"
+                        className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800"
+                      >
+                        <Calendar size={11} /> Ngày
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (groupBy === "NPP_SKU") {
+                            setSelectedNppRow(r);
+                          } else {
+                            void openStockCard(r);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 hover:bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-800"
+                      >
+                        {groupBy === "NPP_SKU" ? (
+                          <>
+                            <Building2 size={11} /> {r.mst_count ?? 1} MST
+                          </>
+                        ) : (
+                          <>
+                            <History size={11} /> Thẻ kho
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))
@@ -1318,6 +1539,214 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
               <button
                 type="button"
                 onClick={() => setSelectedNppRow(null)}
+                className="rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
+              >
+                Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 1b: Nhật Ký Nhập – Xuất – Tồn Thuế Theo Từng Ngày */}
+      {dailyTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setDailyTarget(null)}
+        >
+          <div
+            className="w-full max-w-5xl border border-slate-400 bg-white shadow-lg max-h-[90vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <Calendar size={17} className="text-red-500" />
+                <span className="text-xs font-bold uppercase tracking-wide text-white">
+                  Nhật Ký Tồn Đầu – Nhập – Xuất – Tồn Cuối Từng Ngày · {dailyTarget.sku}
+                  {dailyTarget.tax_code !== "ALL" ? ` · MST ${dailyTarget.tax_code}` : " · Tổng Hợp NPP"}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDailyTarget(null)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 flex flex-wrap items-end justify-between gap-2 text-[11px]">
+              <div>
+                <div className="font-bold text-sky-900">
+                  {dailyTarget.product_name} ({dailyTarget.unit_name || "ĐVT"})
+                </div>
+                {dailyData && (
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold text-slate-700 mt-0.5">
+                    <span>Đầu kỳ: {formatNumber(dailyData.summary.period_opening_qty)}</span>
+                    <span className="text-emerald-700">Nhập: +{formatNumber(dailyData.summary.total_input_qty)}</span>
+                    <span className="text-slate-700">Xuất: -{formatNumber(dailyData.summary.total_output_qty)}</span>
+                    <span className={dailyData.summary.period_closing_qty < 0 ? "text-red-700 font-bold" : "text-emerald-700 font-bold"}>
+                      Cuối kỳ: {formatNumber(dailyData.summary.period_closing_qty)}
+                    </span>
+                    {dailyData.summary.negative_days_count > 0 && (
+                      <span className="rounded bg-red-100 border border-red-300 px-1.5 py-0.5 text-[10px] font-bold text-red-800">
+                        {dailyData.summary.negative_days_count} ngày âm kho!
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-end gap-2">
+                <div>
+                  <label className="text-[10px] font-semibold text-slate-600 block">Từ ngày</label>
+                  <input
+                    type="date"
+                    value={dailyFrom}
+                    onChange={(e) => {
+                      setDailyFrom(e.target.value);
+                      void loadDailyLedger(dailyTarget, e.target.value, dailyTo, dailyOnlyActive);
+                    }}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-slate-600 block">Đến ngày</label>
+                  <input
+                    type="date"
+                    value={dailyTo}
+                    onChange={(e) => {
+                      setDailyTo(e.target.value);
+                      void loadDailyLedger(dailyTarget, dailyFrom, e.target.value, dailyOnlyActive);
+                    }}
+                    className={inputCls}
+                  />
+                </div>
+                <label className="inline-flex items-center gap-1.5 pb-1 text-[11px] font-semibold text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={dailyOnlyActive}
+                    onChange={(e) => {
+                      setDailyOnlyActive(e.target.checked);
+                      void loadDailyLedger(dailyTarget, dailyFrom, dailyTo, e.target.checked);
+                    }}
+                    className="h-3.5 w-3.5 rounded border-slate-300 text-sky-600"
+                  />
+                  Chỉ ngày có phát sinh
+                </label>
+                <button
+                  type="button"
+                  disabled={dailyExporting || dailyLoading}
+                  onClick={() => void handleExportDailyExcel()}
+                  className="inline-flex items-center gap-1 rounded bg-emerald-600 hover:bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-60"
+                >
+                  {dailyExporting ? <Loader2 size={12} className="animate-spin" /> : <FileSpreadsheet size={12} />}
+                  Xuất Excel
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto flex-1">
+              {dailyLoading ? (
+                <div className="py-10 text-center text-xs text-slate-500">
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 size={14} className="animate-spin text-sky-600" /> Đang tính tồn kho thuế theo từng ngày...
+                  </span>
+                </div>
+              ) : dailyError ? (
+                <div className="m-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  {dailyError}
+                </div>
+              ) : !dailyData || dailyData.days.length === 0 ? (
+                <div className="py-10 text-center text-xs text-slate-500">
+                  Không có dữ liệu ngày nào khớp với bộ lọc.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-left">
+                    <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase sticky top-0">
+                      <tr className="border-b border-slate-200">
+                        <th className="px-2.5 py-2">Ngày</th>
+                        <th className="px-2.5 py-2 text-right">Tồn đầu ngày</th>
+                        <th className="px-2.5 py-2 text-right">Nhập trong ngày</th>
+                        <th className="px-2.5 py-2 text-right">Xuất trong ngày</th>
+                        <th className="px-2.5 py-2 text-right">Tồn cuối ngày</th>
+                        <th className="px-2.5 py-2 text-center">Trạng thái</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dailyData.days.map((d) => (
+                        <tr
+                          key={d.date}
+                          className={`border-b border-slate-100 text-[11px] ${
+                            d.is_negative
+                              ? "bg-red-50/80 hover:bg-red-100/70"
+                              : d.has_activity
+                              ? "bg-sky-50/30 hover:bg-sky-50/70"
+                              : "even:bg-amber-50/30 hover:bg-slate-50"
+                          }`}
+                        >
+                          <td className="px-2.5 py-1.5 font-mono font-semibold text-slate-800 whitespace-nowrap">
+                            {d.date}
+                          </td>
+                          <td className="px-2.5 py-1.5 text-right font-medium text-slate-700">
+                            {formatNumber(d.opening_qty)}
+                          </td>
+                          <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
+                            {d.input_qty !== 0 ? (
+                              <>
+                                <div className="font-semibold text-emerald-700">+{formatNumber(d.input_qty)}</div>
+                                <div className="text-[10px] text-slate-400">{formatVND(d.input_amount)}</div>
+                              </>
+                            ) : (
+                              <span className="text-slate-300">—</span>
+                            )}
+                          </td>
+                          <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
+                            {d.output_qty !== 0 ? (
+                              <>
+                                <div className="font-semibold text-slate-700">-{formatNumber(d.output_qty)}</div>
+                                <div className="text-[10px] text-slate-400">{formatVND(d.output_amount)}</div>
+                              </>
+                            ) : (
+                              <span className="text-slate-300">—</span>
+                            )}
+                          </td>
+                          <td
+                            className={`px-2.5 py-1.5 text-right font-bold whitespace-nowrap ${
+                              d.is_negative ? "text-red-700" : "text-emerald-700"
+                            }`}
+                          >
+                            {formatNumber(d.closing_qty)}
+                          </td>
+                          <td className="px-2.5 py-1.5 text-center whitespace-nowrap">
+                            {d.is_negative ? (
+                              <span className="inline-flex items-center gap-1 rounded bg-red-100 border border-red-300 px-1.5 py-0.5 text-[9px] font-bold text-red-800">
+                                <ShieldAlert size={10} /> Âm kho thuế
+                              </span>
+                            ) : d.has_activity ? (
+                              <span className="rounded bg-sky-100 border border-sky-200 px-1.5 py-0.5 text-[9px] font-semibold text-sky-800">
+                                Có phát sinh
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-400">Ổn định</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3 shrink-0">
+              <span className="text-[10px] text-slate-500">
+                Các ngày bị tô đỏ là ngày tồn cuối ngày bị âm (rủi ro thanh tra thuế xuất trước khi có đầu vào).
+              </span>
+              <button
+                type="button"
+                onClick={() => setDailyTarget(null)}
                 className="rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
               >
                 Đóng

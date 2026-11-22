@@ -17,8 +17,10 @@ from app.services.tax_inventory_service import (
     build_opening_balance_template_excel,
     compute_tax_inventory_by_mst,
     create_adjustment_or_replacement_invoice,
+    export_daily_tax_inventory_excel,
     export_sku_mapping_explanation_excel,
     export_tax_inventory_excel,
+    get_daily_tax_inventory_ledger,
     get_tax_inventory_card_detail,
     import_opening_balances_excel,
     list_unmapped_purchase_items,
@@ -790,4 +792,101 @@ def test_conversion_factor_uom_rollup_vat_mismatch_and_explanation_excel(db_sess
 
     exp_buf = export_sku_mapping_explanation_excel(db_session, distributor_id=dist.id)
     assert len(exp_buf.getvalue()) > 2000
+
+
+def test_daily_tax_inventory_ledger_tracks_day_by_day_opening_in_out_closing(db_session):
+    """Kiểm tra Nhật ký N-X-T từng ngày: tồn đầu ngày, nhập, xuất, tồn cuối ngày & phát hiện ngày âm."""
+    dist, _, _ = _seed_distributor_and_companies(db_session)
+
+    # Đầu kỳ chốt 01/11/2026: 10 thùng
+    upsert_opening_balance(
+        db_session,
+        distributor_id=dist.id,
+        tax_code="2900000001",
+        sku="SKU_DAY",
+        as_of_date=date(2026, 11, 1),
+        opening_qty=10,
+        opening_amount=1_000_000,
+    )
+    # Ngày 02/11: Xuất 15 thùng -> Tồn cuối ngày 02/11 = -5 (ÂM!)
+    db_session.add(
+        IssuedInvoice(
+            distributor_id=dist.id,
+            seller_tax_code="2900000001",
+            provider="VIETTEL",
+            invoice_template_code="1/001",
+            invoice_series="1C26TAA",
+            invoice_number="0000901",
+            status="ISSUED",
+            buyer_name="KH 1",
+            issued_at=datetime(2026, 11, 2),
+            items=[
+                IssuedInvoiceItem(
+                    line_number=1,
+                    product_code="SKU_DAY",
+                    source_sku="SKU_DAY",
+                    product_name="Hang Test Ngay",
+                    unit_name="Thùng",
+                    quantity=15,
+                    source_quantity=15,
+                    unit_price=120000,
+                    amount_before_tax=1_800_000,
+                )
+            ],
+        )
+    )
+    # Ngày 04/11: Nhập 20 thùng -> Tồn cuối ngày 04/11 = +15
+    db_session.add(
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0004001",
+            invoice_date=datetime(2026, 11, 4),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code="2900000001",
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="SKU_DAY",
+                    product_name="Hang Test Ngay",
+                    unit_name="Thùng",
+                    quantity=20,
+                    unit_price=100000,
+                    amount_before_tax=2_000_000,
+                )
+            ],
+        )
+    )
+    db_session.commit()
+
+    daily = get_daily_tax_inventory_ledger(
+        db_session,
+        sku="SKU_DAY",
+        from_date=date(2026, 11, 1),
+        to_date=date(2026, 11, 5),
+        distributor_id=dist.id,
+        only_active_days=False,
+    )
+    assert len(daily["days"]) == 5
+    # Ngày 01: đầu 10, cuối 10
+    assert daily["days"][0]["opening_qty"] == 10.0 and daily["days"][0]["closing_qty"] == 10.0
+    # Ngày 02: đầu 10, xuất 15, cuối -5 (Âm!)
+    assert daily["days"][1]["opening_qty"] == 10.0 and daily["days"][1]["output_qty"] == 15.0
+    assert daily["days"][1]["closing_qty"] == -5.0 and daily["days"][1]["is_negative"] is True
+    # Ngày 03: không phát sinh, vẫn âm -5
+    assert daily["days"][2]["closing_qty"] == -5.0 and daily["days"][2]["is_negative"] is True
+    # Ngày 04: đầu -5, nhập 20, cuối 15
+    assert daily["days"][3]["opening_qty"] == -5.0 and daily["days"][3]["input_qty"] == 20.0
+    assert daily["days"][3]["closing_qty"] == 15.0 and daily["days"][3]["is_negative"] is False
+    # Tổng 2 ngày âm (ngày 02 và ngày 03)
+    assert daily["summary"]["negative_days_count"] == 2
+    assert daily["summary"]["period_closing_qty"] == 15.0
+
+    # Kiểm tra xuất Excel nhật ký từng ngày
+    buf = export_daily_tax_inventory_excel(daily)
+    assert len(buf.getvalue()) > 1500
 

@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 from io import BytesIO
 import time
@@ -325,7 +325,27 @@ def _to_date(val: Any, fallback: date | None = None) -> date:
         return val
     if val is not None:
         text = str(val).strip()
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d/%m/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        # Hỗ trợ định dạng ASP.NET JSON Date: /Date(1763596800000)/ hoặc /Date(1763596800000+0700)/
+        if text.startswith("/Date(") and text.endswith(")/"):
+            import re
+            m = re.search(r"-?\d+", text)
+            if m:
+                try:
+                    ms = int(m.group(0))
+                    return (datetime.utcfromtimestamp(ms / 1000.0) + timedelta(hours=7)).date()
+                except (ValueError, OSError, OverflowError):
+                    pass
+        for fmt in (
+            "%Y-%m-%d",
+            "%d/%m/%Y",
+            "%d-%m-%Y",
+            "%Y/%m/%d",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y %H:%M",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+        ):
             try:
                 return datetime.strptime(text[:19], fmt).date()
             except ValueError:
@@ -508,7 +528,7 @@ class DynamicFieldMapper:
                 _extract_value(
                     row,
                     field_mapping.get("order_number"),
-                    ("orderNumber", "so_don_hang", "orderNo", "DocNumber", "Số đơn hàng", "order_code"),
+                    ("orderNumber", "Code", "so_don_hang", "orderNo", "DocNumber", "Số đơn hàng", "order_code"),
                 )
                 or f"{supplier_code}-ORD-{idx:04d}"
             ).strip()
@@ -517,7 +537,7 @@ class DynamicFieldMapper:
                 _extract_value(
                     row,
                     field_mapping.get("order_date"),
-                    ("orderDate", "ngay_dat", "DocDate", "Ngày đơn hàng", "created_at"),
+                    ("orderDate", "BillsDate", "CreateDate", "ngay_dat", "DocDate", "Ngày đơn hàng", "created_at"),
                 )
             )
             delivery_date = _to_date(

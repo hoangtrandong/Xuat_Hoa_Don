@@ -2468,8 +2468,8 @@ def list_grouped_vinamilk_orders(
         last_synced_at = page["last_synced_at"]
         for row in page["rows"]:
             number = row.get("_snapshot_order_number") or _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
-            distributor_code = row.get("_distributor_code") or ""
-            key = f"{distributor_code}|{number}" if number else f"{distributor_code}|__snapshot_{row['_local_id']}"
+            row_distributor_code = row.get("_distributor_code") or ""
+            key = f"{row_distributor_code}|{number}" if number else f"{row_distributor_code}|__snapshot_{row['_local_id']}"
             groups.setdefault(key, []).append(row)
         offset += page["snapshot_count"]
         if not page["snapshot_count"] or offset >= page["snapshot_total"]:

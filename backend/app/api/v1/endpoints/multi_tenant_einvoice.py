@@ -2312,12 +2312,13 @@ def get_tax_inventory_by_mst(
     to_date: date | None = Query(default=None),
     include_draft: bool = Query(default=True),
     low_threshold: float = Query(default=5.0, ge=0),
+    group_by: str = Query(default="NPP_SKU"),  # NPP_SKU | MST_SKU
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=0, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Sổ Nhập – Xuất – Tồn Thuế theo từng MST & SKU đầu vào CQT (hỗ trợ kỳ báo cáo, cảnh báo âm thời điểm & phân trang)."""
+    """Sổ Nhập – Xuất – Tồn Thuế (mặc định gom theo Mã sản phẩm nội bộ NPP, click xem chi tiết theo từng MST)."""
     from app.services.tax_inventory_service import compute_tax_inventory_by_mst
 
     effective_dist_id = _enforce_user_distributor_scope(current_user, distributor_id)
@@ -2332,10 +2333,12 @@ def get_tax_inventory_by_mst(
         to_date=to_date,
         include_draft=include_draft,
         low_threshold=low_threshold,
+        group_by=group_by,
         page=page,
         page_size=page_size,
     )
     return {
+        "group_by": data["group_by"],
         "summary": data["summary"],
         "data_quality": data["data_quality"],
         "pagination": data["pagination"],
@@ -2384,10 +2387,11 @@ def export_tax_inventory_by_mst(
     to_date: date | None = Query(default=None),
     include_draft: bool = Query(default=True),
     low_threshold: float = Query(default=5.0, ge=0),
+    group_by: str = Query(default="NPP_SKU"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Xuất file Excel (.xlsx) Sổ Nhập – Xuất – Tồn Thuế theo MST."""
+    """Xuất file Excel (.xlsx) Sổ Nhập – Xuất – Tồn Thuế."""
     from app.services.tax_inventory_service import (
         compute_tax_inventory_by_mst,
         export_tax_inventory_excel,
@@ -2405,6 +2409,7 @@ def export_tax_inventory_by_mst(
         to_date=to_date,
         include_draft=include_draft,
         low_threshold=low_threshold,
+        group_by=group_by,
         page=1,
         page_size=0,
     )

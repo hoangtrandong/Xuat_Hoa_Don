@@ -8,7 +8,7 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.customer import Company
 from app.models.multi_tenant_invoice import (
@@ -20,7 +20,7 @@ from app.models.multi_tenant_invoice import (
     TaxAuthorityCredential,
     TaxInventoryOpeningBalance,
 )
-from app.models.product import Product
+from app.models.product import DistributorProduct, Product, ProductGroup, ProductGroupItem
 
 ZERO = Decimal("0")
 QTY_QUANT = Decimal("0.0001")
@@ -172,6 +172,7 @@ def compute_tax_inventory_by_mst(
     to_date: date | None = None,
     include_draft: bool = True,
     low_threshold: float = 5.0,
+    group_by: str = "MST_SKU",
     page: int = 1,
     page_size: int = 0,
 ) -> dict[str, Any]:
@@ -444,17 +445,55 @@ def compute_tax_inventory_by_mst(
                 dmap = daily_deltas.setdefault((mst, sku), {})
                 dmap[tx_date] = dmap.get(tx_date, ZERO) - qty_dec
 
-    # 4. Chuẩn hóa tên sản phẩm từ bảng products & tính Tồn đầu kỳ, Bình quân gia quyền (TK 632 & TK 156)
+    # 4. Chuẩn hóa tên sản phẩm & ánh xạ Mã sản phẩm nội bộ NPP (npp_code) từ bảng products + distributor_products
     all_skus = list({sku for _, sku in ledger.keys()})
-    prod_info: dict[str, tuple[str, float | None]] = {}
+    # prod_info[sku] = (name, vat_rate, npp_code, npp_name, npp_unit, has_explicit_npp)
+    prod_info: dict[str, tuple[str, float | None, str, str, str, bool]] = {}
     if all_skus:
+        dist_prod_by_sku: dict[str, tuple[str, str]] = {}
+        for d_sku, d_name, d_unit in db.execute(
+            select(
+                DistributorProduct.distributor_sku,
+                DistributorProduct.distributor_product_name,
+                DistributorProduct.unit,
+            )
+        ).all():
+            if d_sku:
+                dist_prod_by_sku[d_sku.strip().upper()] = (
+                    (d_name or "").strip(),
+                    (d_unit or "").strip(),
+                )
+
         for i in range(0, len(all_skus), 500):
             batch_skus = all_skus[i : i + 500]
-            for p_sku, p_name, p_vat in db.execute(
-                select(Product.sku, Product.name, Product.vat_rate).where(Product.sku.in_(batch_skus))
-            ).all():
-                if p_sku:
-                    prod_info[p_sku.strip().upper()] = (p_name, p_vat)
+            prods = db.scalars(
+                select(Product)
+                .options(
+                    selectinload(Product.unit),
+                    selectinload(Product.group_items)
+                    .selectinload(ProductGroupItem.group)
+                    .selectinload(ProductGroup.company_links),
+                    selectinload(Product.group_items)
+                    .selectinload(ProductGroupItem.group)
+                    .selectinload(ProductGroup.representative_product),
+                )
+                .where(
+                    (func.upper(Product.sku).in_(batch_skus))
+                    | (func.upper(Product._npp_code).in_(batch_skus))
+                )
+            ).all()
+            for p in prods:
+                p_sku_u = (p.sku or "").strip().upper()
+                resolved_npp = (p.npp_code or p_sku_u).strip().upper()
+                has_explicit = bool((p._npp_code or "").strip()) or (resolved_npp != p_sku_u)
+                dp_name, dp_unit = dist_prod_by_sku.get(resolved_npp, ("", ""))
+                npp_name = (p.internal_name or "").strip() or dp_name or p.npp_name or p.name
+                npp_unit = (p.internal_unit or "").strip() or dp_unit or (p.unit.name if p.unit else "")
+                info_tuple = (p.name, p.vat_rate, resolved_npp, npp_name, npp_unit, has_explicit)
+                if p_sku_u:
+                    prod_info[p_sku_u] = info_tuple
+                if resolved_npp and resolved_npp not in prod_info:
+                    prod_info[resolved_npp] = info_tuple
 
     sku_positive_by_mst: dict[str, list[dict[str, Any]]] = {}
     balance_lookup: dict[tuple[str, str], float] = {}
@@ -531,122 +570,14 @@ def compute_tax_inventory_by_mst(
             "min_running_bal": _q_qty(min_running),
         }
 
-    # 5. Lọc theo MST & search, tính KPI Summary khớp đúng ngữ cảnh đang chọn
+    # 5. Lọc theo MST & search, tính KPI Summary (hỗ trợ 2 chế độ: MST_SKU hoặc gộp theo NPP_SKU)
     mst_filter = (company_tax_code or "").strip()
     search_term = (search or "").strip().lower()
     norm_status_filter = (status_filter or "").strip().upper()
     if only_negative and not norm_status_filter:
         norm_status_filter = "NEGATIVE"
+    norm_group_by = (group_by or "MST_SKU").strip().upper()
 
-    rows: list[dict[str, Any]] = []
-    scoped_total = 0
-    negative_count = 0
-    low_count = 0
-    ok_count = 0
-    chrono_negative_count = 0
-    below_cost_count = 0
-    total_opening_amount = ZERO
-    total_input_amount = ZERO
-    total_output_amount = ZERO
-    total_cogs_amount = ZERO
-    total_ending_inventory_value = ZERO
-
-    for (mst, sku), rec in ledger.items():
-        if mst_filter and mst != mst_filter:
-            continue
-
-        pname = prod_info.get(sku, (rec["product_name"], None))[0] or rec["product_name"]
-        pvat = prod_info.get(sku, (None, None))[1]
-
-        if search_term and not (
-            search_term in sku.lower()
-            or search_term in pname.lower()
-            or search_term in mst.lower()
-            or search_term in rec["company_name"].lower()
-        ):
-            continue
-
-        m = computed_metrics[(mst, sku)]
-        bal_dec = m["bal_dec"]
-        bal = balance_lookup[(mst, sku)]
-        has_chrono_neg = m["has_chrono_neg"]
-        is_below_cost = m["is_below_cost"]
-
-        if bal_dec < -EPSILON:
-            status = "NEGATIVE"
-            negative_count += 1
-        elif bal_dec <= low_thresh_dec:
-            status = "LOW"
-            low_count += 1
-        else:
-            status = "OK"
-            ok_count += 1
-
-        if has_chrono_neg and status != "NEGATIVE":
-            chrono_negative_count += 1
-        if is_below_cost:
-            below_cost_count += 1
-
-        scoped_total += 1
-
-        if norm_status_filter == "NEGATIVE" and status != "NEGATIVE":
-            continue
-        if norm_status_filter == "LOW" and status != "LOW":
-            continue
-        if norm_status_filter == "OK" and status != "OK":
-            continue
-        if norm_status_filter == "CHRONO_NEGATIVE" and not has_chrono_neg:
-            continue
-        if norm_status_filter == "BELOW_COST" and not is_below_cost:
-            continue
-
-        total_opening_amount += m["opening_amt_dec"]
-        total_input_amount += rec["input_amount"]
-        total_output_amount += rec["output_amount"]
-        total_cogs_amount += m["cogs_amt_dec"]
-        total_ending_inventory_value += m["ending_val_dec"]
-
-        other_stocks = [
-            x for x in sku_positive_by_mst.get(sku, []) if x["tax_code"] != mst
-        ]
-        rows.append(
-            {
-                "tax_code": mst,
-                "company_name": rec["company_name"],
-                "sku": sku,
-                "product_name": pname,
-                "unit_name": rec["unit_name"],
-                "vat_rate": pvat,
-                "opening_as_of_date": rec["opening_as_of_date"].isoformat() if rec["opening_as_of_date"] else None,
-                "opening_qty": _q_qty(m["opening_qty_dec"]),
-                "opening_amount": _q_amt(m["opening_amt_dec"]),
-                "input_qty": _q_qty(rec["input_qty"]),
-                "input_amount": _q_amt(rec["input_amount"]),
-                "output_qty": _q_qty(rec["output_qty"]),
-                "output_amount": _q_amt(rec["output_amount"]),
-                "official_output_qty": _q_qty(rec["official_output_qty"]),
-                "draft_output_qty": _q_qty(rec["draft_output_qty"]),
-                "adjustment_qty": _q_qty(rec["adjustment_qty"]),
-                "balance_qty": bal,
-                "avg_unit_cost": _q_amt(m["avg_unit_cost_dec"]),
-                "avg_sale_price": _q_amt(m["avg_sale_price_dec"]),
-                "cogs_amount": _q_amt(m["cogs_amt_dec"]),
-                "ending_inventory_value": _q_amt(m["ending_val_dec"]),
-                "is_below_cost": is_below_cost,
-                "has_chronological_negative": has_chrono_neg,
-                "min_running_balance": m["min_running_bal"],
-                "status": status,
-                "other_mst_stocks": other_stocks,
-            }
-        )
-
-    rows.sort(
-        key=lambda r: (
-            0 if r["status"] == "NEGATIVE" else (1 if r["has_chronological_negative"] else (2 if r["is_below_cost"] else 3)),
-            r["tax_code"],
-            r["sku"],
-        )
-    )
     available_msts = sorted(
         [
             {"tax_code": mst, "company_name": company_name_by_mst.get(mst, f"MST {mst}")}
@@ -654,6 +585,352 @@ def compute_tax_inventory_by_mst(
         ],
         key=lambda x: x["tax_code"],
     )
+
+    if norm_group_by == "NPP_SKU":
+        # Gom toàn bộ tồn kho thuế theo Mã sản phẩm nội bộ NPP (không tách dòng theo từng MST ở bảng chính)
+        npp_groups: dict[str, dict[str, Any]] = {}
+        for (mst, sku), rec in ledger.items():
+            if mst_filter and mst != mst_filter:
+                continue
+            p_meta = prod_info.get(sku)
+            pname = (p_meta[0] if p_meta else "") or rec["product_name"]
+            pvat = p_meta[1] if p_meta else None
+            npp_code = (p_meta[2] if p_meta else sku) or sku
+            npp_name = (p_meta[3] if p_meta else "") or pname
+            npp_unit = (p_meta[4] if p_meta else "") or rec["unit_name"]
+            has_explicit_npp = p_meta[5] if p_meta else False
+
+            m = computed_metrics[(mst, sku)]
+            bal_dec = m["bal_dec"]
+            child_status = "NEGATIVE" if bal_dec < -EPSILON else ("LOW" if bal_dec <= low_thresh_dec else "OK")
+
+            grp = npp_groups.get(npp_code)
+            if grp is None:
+                grp = {
+                    "npp_code": npp_code,
+                    "product_name": npp_name,
+                    "unit_name": npp_unit,
+                    "vat_rate": pvat,
+                    "has_npp_code": has_explicit_npp,
+                    "cqt_skus": set(),
+                    "msts": set(),
+                    "opening_qty": ZERO,
+                    "opening_amount": ZERO,
+                    "input_qty": ZERO,
+                    "input_amount": ZERO,
+                    "output_qty": ZERO,
+                    "output_amount": ZERO,
+                    "official_output_qty": ZERO,
+                    "draft_output_qty": ZERO,
+                    "adjustment_qty": ZERO,
+                    "has_chrono_neg": False,
+                    "min_running_bal": None,
+                    "negative_mst_count": 0,
+                    "mst_breakdown": [],
+                }
+                npp_groups[npp_code] = grp
+
+            grp["cqt_skus"].add(sku)
+            grp["msts"].add(mst)
+            if grp["vat_rate"] is None and pvat is not None:
+                grp["vat_rate"] = pvat
+            if not grp["product_name"] and npp_name:
+                grp["product_name"] = npp_name
+            if not grp["unit_name"] and npp_unit:
+                grp["unit_name"] = npp_unit
+
+            grp["opening_qty"] += m["opening_qty_dec"]
+            grp["opening_amount"] += m["opening_amt_dec"]
+            grp["input_qty"] += rec["input_qty"]
+            grp["input_amount"] += rec["input_amount"]
+            grp["output_qty"] += rec["output_qty"]
+            grp["output_amount"] += rec["output_amount"]
+            grp["official_output_qty"] += rec["official_output_qty"]
+            grp["draft_output_qty"] += rec["draft_output_qty"]
+            grp["adjustment_qty"] += rec["adjustment_qty"]
+            if m["has_chrono_neg"]:
+                grp["has_chrono_neg"] = True
+            if grp["min_running_bal"] is None or m["min_running_bal"] < grp["min_running_bal"]:
+                grp["min_running_bal"] = m["min_running_bal"]
+            if child_status == "NEGATIVE":
+                grp["negative_mst_count"] += 1
+
+            grp["mst_breakdown"].append(
+                {
+                    "tax_code": mst,
+                    "company_name": rec["company_name"],
+                    "sku": sku,
+                    "product_name": pname,
+                    "unit_name": rec["unit_name"],
+                    "vat_rate": pvat,
+                    "opening_as_of_date": rec["opening_as_of_date"].isoformat() if rec["opening_as_of_date"] else None,
+                    "opening_qty": _q_qty(m["opening_qty_dec"]),
+                    "opening_amount": _q_amt(m["opening_amt_dec"]),
+                    "input_qty": _q_qty(rec["input_qty"]),
+                    "input_amount": _q_amt(rec["input_amount"]),
+                    "output_qty": _q_qty(rec["output_qty"]),
+                    "output_amount": _q_amt(rec["output_amount"]),
+                    "official_output_qty": _q_qty(rec["official_output_qty"]),
+                    "draft_output_qty": _q_qty(rec["draft_output_qty"]),
+                    "adjustment_qty": _q_qty(rec["adjustment_qty"]),
+                    "balance_qty": balance_lookup[(mst, sku)],
+                    "avg_unit_cost": _q_amt(m["avg_unit_cost_dec"]),
+                    "avg_sale_price": _q_amt(m["avg_sale_price_dec"]),
+                    "cogs_amount": _q_amt(m["cogs_amt_dec"]),
+                    "ending_inventory_value": _q_amt(m["ending_val_dec"]),
+                    "is_below_cost": m["is_below_cost"],
+                    "has_chronological_negative": m["has_chrono_neg"],
+                    "min_running_balance": m["min_running_bal"],
+                    "status": child_status,
+                }
+            )
+
+        rows: list[dict[str, Any]] = []
+        scoped_total = 0
+        negative_count = 0
+        low_count = 0
+        ok_count = 0
+        chrono_negative_count = 0
+        below_cost_count = 0
+        total_opening_amount = ZERO
+        total_input_amount = ZERO
+        total_output_amount = ZERO
+        total_cogs_amount = ZERO
+        total_ending_inventory_value = ZERO
+
+        for npp_code, grp in npp_groups.items():
+            cqt_skus_sorted = sorted(grp["cqt_skus"])
+            if search_term and not (
+                search_term in npp_code.lower()
+                or search_term in (grp["product_name"] or "").lower()
+                or any(search_term in s.lower() for s in cqt_skus_sorted)
+                or any(
+                    search_term in b["tax_code"].lower() or search_term in b["company_name"].lower()
+                    for b in grp["mst_breakdown"]
+                )
+            ):
+                continue
+
+            avail_qty = grp["opening_qty"] + grp["input_qty"]
+            avail_amt = grp["opening_amount"] + grp["input_amount"]
+            avg_unit_cost_dec = (avail_amt / avail_qty) if (avail_qty > EPSILON and avail_amt > ZERO) else ZERO
+            bal_dec = avail_qty - grp["output_qty"]
+            cogs_amt_dec = (grp["output_qty"] * avg_unit_cost_dec).quantize(AMT_QUANT, rounding=ROUND_HALF_UP)
+            ending_val_dec = (
+                max(ZERO, (avail_amt - cogs_amt_dec).quantize(AMT_QUANT, rounding=ROUND_HALF_UP))
+                if bal_dec > EPSILON
+                else ZERO
+            )
+            avg_sale_price_dec = (
+                (grp["output_amount"] / grp["output_qty"]) if grp["output_qty"] > EPSILON else ZERO
+            )
+            is_below_cost = bool(
+                grp["output_qty"] > EPSILON
+                and grp["output_amount"] > ZERO
+                and avg_unit_cost_dec > ZERO
+                and avg_sale_price_dec < (avg_unit_cost_dec - Decimal("1"))
+            )
+
+            if bal_dec < -EPSILON:
+                status = "NEGATIVE"
+                negative_count += 1
+            elif bal_dec <= low_thresh_dec:
+                status = "LOW"
+                low_count += 1
+            else:
+                status = "OK"
+                ok_count += 1
+
+            has_chrono_neg = grp["has_chrono_neg"]
+            if has_chrono_neg and status != "NEGATIVE":
+                chrono_negative_count += 1
+            if is_below_cost:
+                below_cost_count += 1
+
+            scoped_total += 1
+
+            if norm_status_filter == "NEGATIVE" and status != "NEGATIVE":
+                continue
+            if norm_status_filter == "LOW" and status != "LOW":
+                continue
+            if norm_status_filter == "OK" and status != "OK":
+                continue
+            if norm_status_filter == "CHRONO_NEGATIVE" and not has_chrono_neg:
+                continue
+            if norm_status_filter == "BELOW_COST" and not is_below_cost:
+                continue
+
+            total_opening_amount += grp["opening_amount"]
+            total_input_amount += grp["input_amount"]
+            total_output_amount += grp["output_amount"]
+            total_cogs_amount += cogs_amt_dec
+            total_ending_inventory_value += ending_val_dec
+
+            grp["mst_breakdown"].sort(
+                key=lambda b: (0 if b["status"] == "NEGATIVE" else 1, b["tax_code"], b["sku"])
+            )
+            rows.append(
+                {
+                    "tax_code": "ALL",
+                    "company_name": f"{len(grp['msts'])} MST",
+                    "sku": npp_code,
+                    "npp_code": npp_code,
+                    "has_npp_code": grp["has_npp_code"],
+                    "cqt_skus": cqt_skus_sorted,
+                    "mst_count": len(grp["msts"]),
+                    "negative_mst_count": grp["negative_mst_count"],
+                    "product_name": grp["product_name"],
+                    "unit_name": grp["unit_name"],
+                    "vat_rate": grp["vat_rate"],
+                    "opening_as_of_date": None,
+                    "opening_qty": _q_qty(grp["opening_qty"]),
+                    "opening_amount": _q_amt(grp["opening_amount"]),
+                    "input_qty": _q_qty(grp["input_qty"]),
+                    "input_amount": _q_amt(grp["input_amount"]),
+                    "output_qty": _q_qty(grp["output_qty"]),
+                    "output_amount": _q_amt(grp["output_amount"]),
+                    "official_output_qty": _q_qty(grp["official_output_qty"]),
+                    "draft_output_qty": _q_qty(grp["draft_output_qty"]),
+                    "adjustment_qty": _q_qty(grp["adjustment_qty"]),
+                    "balance_qty": _q_qty(bal_dec),
+                    "avg_unit_cost": _q_amt(avg_unit_cost_dec),
+                    "avg_sale_price": _q_amt(avg_sale_price_dec),
+                    "cogs_amount": _q_amt(cogs_amt_dec),
+                    "ending_inventory_value": _q_amt(ending_val_dec),
+                    "is_below_cost": is_below_cost,
+                    "has_chronological_negative": has_chrono_neg,
+                    "min_running_balance": grp["min_running_bal"] if grp["min_running_bal"] is not None else 0.0,
+                    "status": status,
+                    "other_mst_stocks": [],
+                    "mst_breakdown": grp["mst_breakdown"],
+                }
+            )
+
+        rows.sort(
+            key=lambda r: (
+                0 if r["status"] == "NEGATIVE" else (1 if r["negative_mst_count"] > 0 else (2 if r["has_chronological_negative"] else (3 if r["is_below_cost"] else 4))),
+                r["npp_code"],
+            )
+        )
+    else:
+        rows = []
+        scoped_total = 0
+        negative_count = 0
+        low_count = 0
+        ok_count = 0
+        chrono_negative_count = 0
+        below_cost_count = 0
+        total_opening_amount = ZERO
+        total_input_amount = ZERO
+        total_output_amount = ZERO
+        total_cogs_amount = ZERO
+        total_ending_inventory_value = ZERO
+
+        for (mst, sku), rec in ledger.items():
+            if mst_filter and mst != mst_filter:
+                continue
+
+            p_meta = prod_info.get(sku)
+            pname = (p_meta[0] if p_meta else "") or rec["product_name"]
+            pvat = p_meta[1] if p_meta else None
+            npp_code = (p_meta[2] if p_meta else sku) or sku
+
+            if search_term and not (
+                search_term in sku.lower()
+                or search_term in npp_code.lower()
+                or search_term in pname.lower()
+                or search_term in mst.lower()
+                or search_term in rec["company_name"].lower()
+            ):
+                continue
+
+            m = computed_metrics[(mst, sku)]
+            bal_dec = m["bal_dec"]
+            bal = balance_lookup[(mst, sku)]
+            has_chrono_neg = m["has_chrono_neg"]
+            is_below_cost = m["is_below_cost"]
+
+            if bal_dec < -EPSILON:
+                status = "NEGATIVE"
+                negative_count += 1
+            elif bal_dec <= low_thresh_dec:
+                status = "LOW"
+                low_count += 1
+            else:
+                status = "OK"
+                ok_count += 1
+
+            if has_chrono_neg and status != "NEGATIVE":
+                chrono_negative_count += 1
+            if is_below_cost:
+                below_cost_count += 1
+
+            scoped_total += 1
+
+            if norm_status_filter == "NEGATIVE" and status != "NEGATIVE":
+                continue
+            if norm_status_filter == "LOW" and status != "LOW":
+                continue
+            if norm_status_filter == "OK" and status != "OK":
+                continue
+            if norm_status_filter == "CHRONO_NEGATIVE" and not has_chrono_neg:
+                continue
+            if norm_status_filter == "BELOW_COST" and not is_below_cost:
+                continue
+
+            total_opening_amount += m["opening_amt_dec"]
+            total_input_amount += rec["input_amount"]
+            total_output_amount += rec["output_amount"]
+            total_cogs_amount += m["cogs_amt_dec"]
+            total_ending_inventory_value += m["ending_val_dec"]
+
+            other_stocks = [
+                x for x in sku_positive_by_mst.get(sku, []) if x["tax_code"] != mst
+            ]
+            rows.append(
+                {
+                    "tax_code": mst,
+                    "company_name": rec["company_name"],
+                    "sku": sku,
+                    "npp_code": npp_code,
+                    "has_npp_code": bool(p_meta[5]) if p_meta else False,
+                    "cqt_skus": [sku],
+                    "mst_count": 1,
+                    "negative_mst_count": 1 if status == "NEGATIVE" else 0,
+                    "product_name": pname,
+                    "unit_name": rec["unit_name"],
+                    "vat_rate": pvat,
+                    "opening_as_of_date": rec["opening_as_of_date"].isoformat() if rec["opening_as_of_date"] else None,
+                    "opening_qty": _q_qty(m["opening_qty_dec"]),
+                    "opening_amount": _q_amt(m["opening_amt_dec"]),
+                    "input_qty": _q_qty(rec["input_qty"]),
+                    "input_amount": _q_amt(rec["input_amount"]),
+                    "output_qty": _q_qty(rec["output_qty"]),
+                    "output_amount": _q_amt(rec["output_amount"]),
+                    "official_output_qty": _q_qty(rec["official_output_qty"]),
+                    "draft_output_qty": _q_qty(rec["draft_output_qty"]),
+                    "adjustment_qty": _q_qty(rec["adjustment_qty"]),
+                    "balance_qty": bal,
+                    "avg_unit_cost": _q_amt(m["avg_unit_cost_dec"]),
+                    "avg_sale_price": _q_amt(m["avg_sale_price_dec"]),
+                    "cogs_amount": _q_amt(m["cogs_amt_dec"]),
+                    "ending_inventory_value": _q_amt(m["ending_val_dec"]),
+                    "is_below_cost": is_below_cost,
+                    "has_chronological_negative": has_chrono_neg,
+                    "min_running_balance": m["min_running_bal"],
+                    "status": status,
+                    "other_mst_stocks": other_stocks,
+                    "mst_breakdown": [],
+                }
+            )
+
+        rows.sort(
+            key=lambda r: (
+                0 if r["status"] == "NEGATIVE" else (1 if r["has_chronological_negative"] else (2 if r["is_below_cost"] else 3)),
+                r["tax_code"],
+                r["sku"],
+            )
+        )
 
     total_filtered = len(rows)
     if page_size > 0:
@@ -665,6 +942,7 @@ def compute_tax_inventory_by_mst(
         paged_rows = rows
 
     return {
+        "group_by": norm_group_by,
         "summary": {
             "total_records": scoped_total,
             "filtered_records": total_filtered,
@@ -1272,27 +1550,52 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
         bottom=Side(style="thin", color="CBD5E1"),
     )
 
-    headers = [
-        "STT",
-        "MST Pháp nhân",
-        "Tên Công ty quản lý",
-        "Mã SKU (CQT)",
-        "Tên hàng hóa",
-        "ĐVT",
-        "VAT (%)",
-        "Tồn đầu kỳ (SL)",
-        "Giá trị đầu kỳ TK 156",
-        "Nhập CQT (SL)",
-        "Giá trị Nhập (VND)",
-        "Xuất HĐĐT (SL)",
-        "Doanh thu Xuất (VND)",
-        "Đơn giá vốn BQ",
-        "Giá vốn xuất (TK 632)",
-        "Tồn cuối kỳ (SL)",
-        "Trị giá tồn cuối kỳ (TK 156)",
-        "Trạng thái",
-        "Cảnh báo thanh tra thuế",
-    ]
+    is_npp_mode = (data.get("group_by") or "MST_SKU").upper() == "NPP_SKU"
+    headers = (
+        [
+            "STT",
+            "Mã SP nội bộ NPP",
+            "Mã SKU CQT gộp",
+            "Số MST",
+            "Tên hàng hóa",
+            "ĐVT",
+            "VAT (%)",
+            "Tồn đầu kỳ (SL)",
+            "Giá trị đầu kỳ TK 156",
+            "Nhập CQT (SL)",
+            "Giá trị Nhập (VND)",
+            "Xuất HĐĐT (SL)",
+            "Doanh thu Xuất (VND)",
+            "Đơn giá vốn BQ",
+            "Giá vốn xuất (TK 632)",
+            "Tồn cuối kỳ (SL)",
+            "Trị giá tồn cuối kỳ (TK 156)",
+            "Trạng thái",
+            "Cảnh báo thanh tra thuế",
+        ]
+        if is_npp_mode
+        else [
+            "STT",
+            "MST Pháp nhân",
+            "Tên Công ty quản lý",
+            "Mã SKU (CQT)",
+            "Tên hàng hóa",
+            "ĐVT",
+            "VAT (%)",
+            "Tồn đầu kỳ (SL)",
+            "Giá trị đầu kỳ TK 156",
+            "Nhập CQT (SL)",
+            "Giá trị Nhập (VND)",
+            "Xuất HĐĐT (SL)",
+            "Doanh thu Xuất (VND)",
+            "Đơn giá vốn BQ",
+            "Giá vốn xuất (TK 632)",
+            "Tồn cuối kỳ (SL)",
+            "Trị giá tồn cuối kỳ (TK 156)",
+            "Trạng thái",
+            "Cảnh báo thanh tra thuế",
+        ]
+    )
     ws.append(headers)
     for col_idx in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -1324,9 +1627,9 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
 
         row_vals = [
             idx,
-            r["tax_code"],
-            r["company_name"],
-            r["sku"],
+            r.get("npp_code") or r["sku"] if is_npp_mode else r["tax_code"],
+            ", ".join(r.get("cqt_skus") or [r["sku"]]) if is_npp_mode else r["company_name"],
+            r.get("mst_count", 1) if is_npp_mode else r["sku"],
             r["product_name"],
             r["unit_name"],
             vat_str,

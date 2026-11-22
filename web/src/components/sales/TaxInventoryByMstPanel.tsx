@@ -26,7 +26,7 @@ import {
 import { API_URL, apiFetch } from "@/lib/api";
 import { formatNumber, formatVND } from "@/lib/format";
 
-interface TaxInventoryRow {
+interface MstBreakdownItem {
   tax_code: string;
   company_name: string;
   sku: string;
@@ -52,10 +52,45 @@ interface TaxInventoryRow {
   has_chronological_negative: boolean;
   min_running_balance: number;
   status: "NEGATIVE" | "LOW" | "OK";
+}
+
+interface TaxInventoryRow {
+  tax_code: string;
+  company_name: string;
+  sku: string;
+  npp_code?: string;
+  has_npp_code?: boolean;
+  cqt_skus?: string[];
+  mst_count?: number;
+  negative_mst_count?: number;
+  product_name: string;
+  unit_name: string;
+  vat_rate: number | null;
+  opening_as_of_date: string | null;
+  opening_qty: number;
+  opening_amount: number;
+  input_qty: number;
+  input_amount: number;
+  output_qty: number;
+  output_amount: number;
+  official_output_qty: number;
+  draft_output_qty: number;
+  adjustment_qty: number;
+  balance_qty: number;
+  avg_unit_cost: number;
+  avg_sale_price: number;
+  cogs_amount: number;
+  ending_inventory_value: number;
+  is_below_cost: boolean;
+  has_chronological_negative: boolean;
+  min_running_balance: number;
+  status: "NEGATIVE" | "LOW" | "OK";
   other_mst_stocks: Array<{ tax_code: string; company_name: string; balance_qty: number }>;
+  mst_breakdown?: MstBreakdownItem[];
 }
 
 interface TaxInventoryResponse {
+  group_by?: "NPP_SKU" | "MST_SKU";
   summary: {
     total_records: number;
     filtered_records: number;
@@ -147,6 +182,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
+  const [groupBy, setGroupBy] = useState<"NPP_SKU" | "MST_SKU">("NPP_SKU");
   const [selectedMst, setSelectedMst] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -159,8 +195,17 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
   const [page, setPage] = useState(1);
   const pageSize = 50;
 
+  // Modal 0: Chi tiết theo từng MST khi click vào 1 Mã SP nội bộ NPP
+  const [selectedNppRow, setSelectedNppRow] = useState<TaxInventoryRow | null>(null);
+
   // Modal 1: Drill-down Thẻ kho thuế
-  const [selectedCardRow, setSelectedCardRow] = useState<TaxInventoryRow | null>(null);
+  const [selectedCardRow, setSelectedCardRow] = useState<{
+    tax_code: string;
+    company_name: string;
+    sku: string;
+    product_name: string;
+    unit_name: string;
+  } | null>(null);
   const [cardData, setCardData] = useState<TaxCardResponse | null>(null);
   const [cardLoading, setCardLoading] = useState(false);
   const [cardError, setCardError] = useState("");
@@ -204,6 +249,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
     (forExport = false) => {
       const params = new URLSearchParams();
       if (distributorId !== null) params.set("distributor_id", String(distributorId));
+      params.set("group_by", groupBy);
       if (selectedMst) params.set("company_tax_code", selectedMst);
       if (debouncedSearch) params.set("search", debouncedSearch);
       if (statusFilter) params.set("status_filter", statusFilter);
@@ -216,7 +262,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
       }
       return params;
     },
-    [distributorId, selectedMst, debouncedSearch, statusFilter, fromDate, toDate, includeDraft, page],
+    [distributorId, groupBy, selectedMst, debouncedSearch, statusFilter, fromDate, toDate, includeDraft, page],
   );
 
   const load = useCallback(async () => {
@@ -285,7 +331,13 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
     }
   }
 
-  async function openStockCard(row: TaxInventoryRow) {
+  async function openStockCard(row: {
+    tax_code: string;
+    company_name: string;
+    sku: string;
+    product_name: string;
+    unit_name: string;
+  }) {
     setSelectedCardRow(row);
     setCardData(null);
     setCardError("");
@@ -503,10 +555,38 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
         <div className="flex items-center gap-2">
           <Building2 size={17} className="text-red-500" />
           <span className="text-xs font-bold uppercase tracking-wide text-white">
-            Sổ Nhập – Xuất – Tồn Thuế Theo MST (TK 156 &amp; Giá Vốn TK 632)
+            {groupBy === "NPP_SKU"
+              ? "Sổ Tồn Kho Thuế Tổng Hợp Theo Mã Sản Phẩm Nội Bộ NPP (TK 156 & TK 632)"
+              : "Sổ Nhập – Xuất – Tồn Thuế Chi Tiết Theo Từng MST (TK 156 & TK 632)"}
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex rounded border border-white/20 bg-white/10 p-0.5 text-[10px] font-semibold">
+            <button
+              type="button"
+              onClick={() => {
+                setGroupBy("NPP_SKU");
+                setPage(1);
+              }}
+              className={`rounded px-2 py-0.5 transition-colors ${
+                groupBy === "NPP_SKU" ? "bg-sky-600 text-white" : "text-slate-200 hover:bg-white/10"
+              }`}
+            >
+              Gộp theo Mã NPP
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setGroupBy("MST_SKU");
+                setPage(1);
+              }}
+              className={`rounded px-2 py-0.5 transition-colors ${
+                groupBy === "MST_SKU" ? "bg-sky-600 text-white" : "text-slate-200 hover:bg-white/10"
+              }`}
+            >
+              Tách theo MST
+            </button>
+          </div>
           <button
             type="button"
             onClick={openOpeningModal}
@@ -776,8 +856,8 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
         <table className="w-full border-collapse text-left">
           <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase">
             <tr className="border-b border-slate-200">
-              <th className="px-2.5 py-2">MST / Công ty</th>
-              <th className="px-2.5 py-2">Mã SKU</th>
+              {groupBy === "MST_SKU" && <th className="px-2.5 py-2">MST / Công ty</th>}
+              <th className="px-2.5 py-2">{groupBy === "NPP_SKU" ? "Mã SP nội bộ NPP" : "Mã SKU"}</th>
               <th className="px-2.5 py-2">Tên hàng hóa</th>
               <th className="px-2 py-2 text-center">ĐVT/VAT</th>
               {showOpeningCol && <th className="px-2.5 py-2 text-right">Đầu kỳ</th>}
@@ -786,13 +866,13 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
               <th className="px-2.5 py-2 text-right">Giá vốn (TK 632)</th>
               <th className="px-2.5 py-2 text-right">Tồn / TK 156</th>
               <th className="px-2.5 py-2">Trạng thái &amp; Cảnh báo</th>
-              <th className="px-2 py-2 text-center">Thẻ kho</th>
+              <th className="px-2 py-2 text-center">{groupBy === "NPP_SKU" ? "Theo MST" : "Thẻ kho"}</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={showOpeningCol ? 11 : 10} className="px-4 py-8 text-center text-xs text-slate-500">
+                <td colSpan={(groupBy === "MST_SKU" ? 10 : 9) + (showOpeningCol ? 1 : 0)} className="px-4 py-8 text-center text-xs text-slate-500">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 size={14} className="animate-spin text-sky-600" /> Đang tính tồn kho thuế &amp; giá vốn TK 156...
                   </span>
@@ -800,27 +880,46 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={showOpeningCol ? 11 : 10} className="px-4 py-8 text-center text-xs text-slate-500">
+                <td colSpan={(groupBy === "MST_SKU" ? 10 : 9) + (showOpeningCol ? 1 : 0)} className="px-4 py-8 text-center text-xs text-slate-500">
                   Chưa có dữ liệu Nhập – Xuất Thuế khớp với bộ lọc.
                 </td>
               </tr>
             ) : (
               rows.map((r) => (
                 <tr
-                  key={`${r.tax_code}::${r.sku}`}
-                  onClick={() => void openStockCard(r)}
+                  key={groupBy === "NPP_SKU" ? `NPP::${r.npp_code || r.sku}` : `${r.tax_code}::${r.sku}`}
+                  onClick={() => {
+                    if (groupBy === "NPP_SKU") {
+                      setSelectedNppRow(r);
+                    } else {
+                      void openStockCard(r);
+                    }
+                  }}
                   className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/60 text-[11px] cursor-pointer"
                 >
-                  <td className="px-2.5 py-1.5 max-w-[175px]">
-                    <div className="font-mono font-bold text-slate-800">{r.tax_code}</div>
-                    <div className="truncate text-[10px] text-slate-500" title={r.company_name}>
-                      {r.company_name}
-                    </div>
+                  {groupBy === "MST_SKU" && (
+                    <td className="px-2.5 py-1.5 max-w-[175px]">
+                      <div className="font-mono font-bold text-slate-800">{r.tax_code}</div>
+                      <div className="truncate text-[10px] text-slate-500" title={r.company_name}>
+                        {r.company_name}
+                      </div>
+                    </td>
+                  )}
+                  <td className="px-2.5 py-1.5 whitespace-nowrap">
+                    <div className="font-mono font-bold text-sky-800">{r.npp_code || r.sku}</div>
+                    {groupBy === "NPP_SKU" && (
+                      <div className="text-[10px] text-slate-500">
+                        {r.mst_count ?? 1} MST
+                        {r.cqt_skus && r.cqt_skus.length > 0 && !(r.cqt_skus.length === 1 && r.cqt_skus[0] === (r.npp_code || r.sku)) && (
+                          <span className="ml-1 font-mono text-slate-400" title={`Mã CQT gộp: ${r.cqt_skus.join(", ")}`}>
+                            · CQT: {r.cqt_skus.slice(0, 2).join(", ")}
+                            {r.cqt_skus.length > 2 ? ` +${r.cqt_skus.length - 2}` : ""}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </td>
-                  <td className="px-2.5 py-1.5 font-mono font-bold text-sky-800 whitespace-nowrap">
-                    {r.sku}
-                  </td>
-                  <td className="px-2.5 py-1.5 text-slate-800 font-medium max-w-[220px] truncate" title={r.product_name}>
+                  <td className="px-2.5 py-1.5 text-slate-800 font-medium max-w-[260px] truncate" title={r.product_name}>
                     {r.product_name}
                   </td>
                   <td className="px-2 py-1.5 text-center whitespace-nowrap">
@@ -890,6 +989,13 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                           Đủ đầu vào
                         </span>
                       )}
+                      {groupBy === "NPP_SKU" && (r.negative_mst_count ?? 0) > 0 && r.status !== "NEGATIVE" && (
+                        <div>
+                          <span className="inline-flex items-center gap-1 rounded bg-red-50 border border-red-200 px-1.5 py-0.5 text-[9px] font-bold text-red-700">
+                            {r.negative_mst_count} MST con đang âm
+                          </span>
+                        </div>
+                      )}
                       {r.has_chronological_negative && r.status !== "NEGATIVE" && (
                         <div>
                           <span className="inline-flex items-center gap-1 rounded bg-orange-100 border border-orange-300 px-1.5 py-0.5 text-[9px] font-bold text-orange-800">
@@ -907,7 +1013,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                           </span>
                         </div>
                       )}
-                      {r.status === "NEGATIVE" && r.other_mst_stocks.length > 0 && (
+                      {groupBy === "MST_SKU" && r.status === "NEGATIVE" && r.other_mst_stocks.length > 0 && (
                         <div className="text-[10px] text-sky-700">
                           MST khác:{" "}
                           {r.other_mst_stocks
@@ -923,11 +1029,23 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        void openStockCard(r);
+                        if (groupBy === "NPP_SKU") {
+                          setSelectedNppRow(r);
+                        } else {
+                          void openStockCard(r);
+                        }
                       }}
                       className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 hover:bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800"
                     >
-                      <History size={11} /> Chi tiết
+                      {groupBy === "NPP_SKU" ? (
+                        <>
+                          <Building2 size={11} /> {r.mst_count ?? 1} MST
+                        </>
+                      ) : (
+                        <>
+                          <History size={11} /> Chi tiết
+                        </>
+                      )}
                     </button>
                   </td>
                 </tr>
@@ -937,7 +1055,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
           {rows.length > 0 && (
             <tfoot className="border-t border-slate-200 bg-slate-50 text-[10px] font-semibold text-slate-600">
               <tr>
-                <td colSpan={showOpeningCol ? 5 : 4} className="px-2.5 py-2 text-right uppercase">
+                <td colSpan={(groupBy === "MST_SKU" ? 4 : 3) + (showOpeningCol ? 1 : 0)} className="px-2.5 py-2 text-right uppercase">
                   Tổng bộ lọc ({formatNumber(summary?.filtered_records ?? rows.length)} dòng):
                 </td>
                 <td className="px-2.5 py-2 text-right">
@@ -955,7 +1073,9 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                   {formatVND(summary?.total_ending_inventory_value ?? 0)}
                 </td>
                 <td colSpan={2} className="px-2.5 py-2 text-[10px] text-slate-500">
-                  Click dòng bất kỳ để mở Thẻ kho thuế
+                  {groupBy === "NPP_SKU"
+                    ? "Click dòng bất kỳ để xem chi tiết theo từng MST"
+                    : "Click dòng bất kỳ để mở Thẻ kho thuế"}
                 </td>
               </tr>
             </tfoot>
@@ -987,6 +1107,159 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
             >
               Sau <ChevronRight size={12} />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 0: Chi tiết phân bổ Tồn Kho Thuế theo từng MST của 1 Mã SP nội bộ NPP */}
+      {selectedNppRow && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setSelectedNppRow(null)}
+        >
+          <div
+            className="w-full max-w-5xl border border-slate-400 bg-white shadow-lg max-h-[88vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <Building2 size={17} className="text-red-500" />
+                <span className="text-xs font-bold uppercase tracking-wide text-white">
+                  Chi Tiết Tồn Kho Thuế Theo Từng MST · Mã NPP {selectedNppRow.npp_code || selectedNppRow.sku}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedNppRow(null)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <div className="font-bold text-sky-900">
+                {selectedNppRow.product_name} ({selectedNppRow.unit_name || "ĐVT"})
+              </div>
+              <div className="flex flex-wrap items-center gap-4 font-semibold text-slate-700">
+                <span>Tổng Nhập: {formatNumber(selectedNppRow.input_qty)}</span>
+                <span>Tổng Xuất: {formatNumber(selectedNppRow.output_qty)}</span>
+                <span
+                  className={
+                    selectedNppRow.balance_qty < 0 ? "text-red-700 font-bold" : "text-emerald-700 font-bold"
+                  }
+                >
+                  Tổng Tồn NPP: {formatNumber(selectedNppRow.balance_qty)} ({formatVND(selectedNppRow.ending_inventory_value)})
+                </span>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto flex-1">
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-left">
+                  <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase sticky top-0">
+                    <tr className="border-b border-slate-200">
+                      <th className="px-2.5 py-2">MST / Công ty quản lý</th>
+                      <th className="px-2.5 py-2">Mã SKU CQT</th>
+                      <th className="px-2.5 py-2 text-right">Đầu kỳ</th>
+                      <th className="px-2.5 py-2 text-right">Nhập CQT</th>
+                      <th className="px-2.5 py-2 text-right">Xuất HĐĐT</th>
+                      <th className="px-2.5 py-2 text-right">Tồn kho / TK 156</th>
+                      <th className="px-2.5 py-2">Trạng thái</th>
+                      <th className="px-2 py-2 text-center">Thẻ kho</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(selectedNppRow.mst_breakdown ?? []).map((b) => (
+                      <tr
+                        key={`${b.tax_code}::${b.sku}`}
+                        className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/60 text-[11px]"
+                      >
+                        <td className="px-2.5 py-1.5 max-w-[220px]">
+                          <div className="font-mono font-bold text-slate-800">{b.tax_code}</div>
+                          <div className="truncate text-[10px] text-slate-500" title={b.company_name}>
+                            {b.company_name}
+                          </div>
+                        </td>
+                        <td className="px-2.5 py-1.5 font-mono font-bold text-sky-800 whitespace-nowrap">
+                          {b.sku}
+                        </td>
+                        <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
+                          {formatNumber(b.opening_qty)}
+                        </td>
+                        <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
+                          <div className="font-semibold text-emerald-700">{formatNumber(b.input_qty)}</div>
+                          <div className="text-[10px] text-slate-400">{formatVND(b.input_amount)}</div>
+                        </td>
+                        <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
+                          <div className="font-semibold text-slate-700">{formatNumber(b.output_qty)}</div>
+                          <div className="text-[10px] text-slate-400">{formatVND(b.output_amount)}</div>
+                        </td>
+                        <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
+                          <div
+                            className={`font-bold ${
+                              b.status === "NEGATIVE"
+                                ? "text-red-700"
+                                : b.status === "LOW"
+                                ? "text-amber-700"
+                                : "text-emerald-700"
+                            }`}
+                          >
+                            {formatNumber(b.balance_qty)}
+                          </div>
+                          <div className="text-[10px] text-slate-500">{formatVND(b.ending_inventory_value)}</div>
+                        </td>
+                        <td className="px-2.5 py-1.5 whitespace-nowrap">
+                          {b.status === "NEGATIVE" ? (
+                            <span className="inline-flex items-center gap-1 rounded bg-red-100 border border-red-300 px-1.5 py-0.5 text-[10px] font-bold text-red-800">
+                              <ShieldAlert size={11} /> Âm kho
+                            </span>
+                          ) : b.status === "LOW" ? (
+                            <span className="inline-flex items-center gap-1 rounded bg-amber-100 border border-amber-300 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
+                              Tồn thấp
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded bg-emerald-100 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
+                              Đủ đầu vào
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1.5 text-center whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void openStockCard({
+                                tax_code: b.tax_code,
+                                company_name: b.company_name,
+                                sku: b.sku,
+                                product_name: b.product_name,
+                                unit_name: b.unit_name,
+                              })
+                            }
+                            className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 hover:bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800"
+                          >
+                            <History size={11} /> Thẻ kho
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3 shrink-0">
+              <span className="text-[10px] text-slate-500">
+                Bấm nút &ldquo;Thẻ kho&rdquo; trên từng MST để xem chi tiết từng hóa đơn Nhập – Xuất theo trục thời gian.
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedNppRow(null)}
+                className="rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
+              >
+                Đóng
+              </button>
+            </div>
           </div>
         </div>
       )}

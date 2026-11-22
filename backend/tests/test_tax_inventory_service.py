@@ -598,3 +598,119 @@ def test_adjustment_decrease_purchase_invoice_does_not_exclude_original(db_sessi
     assert res["items"][0]["input_qty"] == 0.0
     assert res["items"][0]["balance_qty"] == 0.0
 
+
+def test_group_by_npp_sku_consolidates_across_msts_and_returns_mst_breakdown(db_session):
+    """Gom toàn bộ tồn kho thuế theo Mã sản phẩm nội bộ NPP (không tách dòng theo từng MST), kèm mst_breakdown khi click."""
+    from app.models.product import Product, ProductCategory, ProductUnit
+
+    dist, _, _ = _seed_distributor_and_companies(db_session)
+    cat = ProductCategory(code="SUA", name="Sua")
+    unit = ProductUnit(code="THUNG", name="Thùng")
+    db_session.add_all([cat, unit])
+    db_session.flush()
+
+    # Hai mã CQT khác nhau cùng map về 1 Mã nội bộ NPP = "NPP-SUA-01"
+    p1 = Product(sku="CQT_A", name="Sua CQT A", category_id=cat.id, unit_id=unit.id, internal_name="Sua Noi Bo 01")
+    p1.npp_code = "NPP-SUA-01"
+    p2 = Product(sku="CQT_B", name="Sua CQT B", category_id=cat.id, unit_id=unit.id, internal_name="Sua Noi Bo 01")
+    p2.npp_code = "NPP-SUA-01"
+    db_session.add_all([p1, p2])
+    db_session.flush()
+
+    # MST 1 nhập CQT_A: 40 thùng
+    db_session.add(
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0002001",
+            invoice_date=datetime(2026, 11, 1),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code="2900000001",
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="CQT_A",
+                    product_name="Sua CQT A",
+                    unit_name="Thùng",
+                    quantity=40,
+                    unit_price=200000,
+                    amount_before_tax=8_000_000,
+                )
+            ],
+        )
+    )
+    # MST 2 nhập CQT_B: 60 thùng, xuất 70 thùng (MST 2 bị âm -10, nhưng tổng NPP = +30!)
+    db_session.add(
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TBB",
+            invoice_number="0002002",
+            invoice_date=datetime(2026, 11, 2),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code="2900000002",
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="CQT_B",
+                    product_name="Sua CQT B",
+                    unit_name="Thùng",
+                    quantity=60,
+                    unit_price=200000,
+                    amount_before_tax=12_000_000,
+                )
+            ],
+        )
+    )
+    db_session.add(
+        IssuedInvoice(
+            distributor_id=dist.id,
+            seller_tax_code="2900000002",
+            provider="VIETTEL",
+            invoice_template_code="1/001",
+            invoice_series="1C26TBB",
+            invoice_number="0000050",
+            status="ISSUED",
+            buyer_name="KH B",
+            issued_at=datetime(2026, 11, 3),
+            items=[
+                IssuedInvoiceItem(
+                    line_number=1,
+                    product_code="CQT_B",
+                    source_sku="CQT_B",
+                    product_name="Sua CQT B",
+                    unit_name="Thùng",
+                    quantity=70,
+                    source_quantity=70,
+                    unit_price=250000,
+                    amount_before_tax=17_500_000,
+                )
+            ],
+        )
+    )
+    db_session.commit()
+
+    res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id, group_by="NPP_SKU")
+    assert res["group_by"] == "NPP_SKU"
+    assert len(res["items"]) == 1
+    row = res["items"][0]
+    assert row["npp_code"] == "NPP-SUA-01"
+    assert row["product_name"] == "Sua Noi Bo 01"
+    assert row["mst_count"] == 2
+    assert row["cqt_skus"] == ["CQT_A", "CQT_B"]
+    assert row["input_qty"] == 100.0
+    assert row["output_qty"] == 70.0
+    assert row["balance_qty"] == 30.0
+    assert row["negative_mst_count"] == 1
+    assert len(row["mst_breakdown"]) == 2
+    # Kiểm tra xuất Excel ở chế độ NPP_SKU không lỗi
+    excel_buf = export_tax_inventory_excel(res)
+    assert len(excel_buf.getvalue()) > 1000
+

@@ -1973,36 +1973,51 @@ def list_local_vinamilk_orders(
     )
     req_dist_code = (distributor_code or "").strip().upper() or None
     effective_dist_code = user_dist_code if (user_dist_id is not None and user_dist_code) else req_dist_code
+    all_dist_rows = db.scalars(select(Distributor)).all()
+    distributors_by_code = {
+        (distributor.code or "").strip().upper(): distributor
+        for distributor in all_dist_rows
+        if (distributor.code or "").strip()
+    }
+    distributors_by_id = {distributor.id: distributor for distributor in distributors_by_code.values()}
+    all_supplier_configs = db.scalars(select(DistributorSupplierConfig)).all()
+    active_supplier_distributor_codes: dict[str, set[str]] = defaultdict(set)
+    all_supplier_distributor_codes: dict[str, set[str]] = defaultdict(set)
+    for config in all_supplier_configs:
+        distributor = distributors_by_id.get(config.distributor_id)
+        if distributor and config.supplier_code:
+            sup_key = config.supplier_code.strip().upper()
+            d_code_upper = distributor.code.strip().upper()
+            all_supplier_distributor_codes[sup_key].add(d_code_upper)
+            if (config.status or "active").strip().lower() == "active":
+                active_supplier_distributor_codes[sup_key].add(d_code_upper)
+    supplier_distributor_codes: dict[str, set[str]] = {
+        sup_key: (active_supplier_distributor_codes.get(sup_key) or d_codes)
+        for sup_key, d_codes in all_supplier_distributor_codes.items()
+    }
+
+    is_default_legacy_dist = False
     if effective_dist_code:
         payload_dist_code = VinamilkOrderSnapshot.raw_payload["Mã NPP"].as_string()
+        payload_sync_source = VinamilkOrderSnapshot.raw_payload["Nguồn đồng bộ"].as_string()
         dist_conditions = [
             func.upper(VinamilkOrderSnapshot.performed_by) == effective_dist_code,
             func.upper(payload_dist_code) == effective_dist_code,
         ]
-        # Bao gồm các đơn có processing_status = 'NCC:<SUPPLIER>' thuộc duy nhất NPP này (VD: NCC:NAZZY -> NPP-MAIGOLD)
-        all_dist_rows = db.scalars(select(Distributor)).all()
-        dist_code_by_id = {
-            d.id: (d.code or "").strip().upper()
-            for d in all_dist_rows
-            if (d.code or "").strip()
-        }
-        target_dist_obj = next(
-            (d for d in all_dist_rows if (d.code or "").strip().upper() == effective_dist_code),
-            None,
-        )
-        sup_to_dists: dict[str, set[str]] = defaultdict(set)
-        for cfg in db.scalars(select(DistributorSupplierConfig)).all():
-            d_code = dist_code_by_id.get(cfg.distributor_id)
-            if d_code and cfg.supplier_code:
-                sup_to_dists[cfg.supplier_code.strip().upper()].add(d_code)
-        exclusive_ncc_statuses = [
-            f"NCC:{sup_code}"
-            for sup_code, d_codes in sup_to_dists.items()
+        target_dist_obj = distributors_by_code.get(effective_dist_code)
+        # Bao gồm các đơn có processing_status = 'NCC:<SUPPLIER>' hoặc Nguồn đồng bộ thuộc duy nhất NPP này (VD: NCC:NAZZY -> NPP-MAIGOLD)
+        exclusive_suppliers = [
+            sup_code
+            for sup_code, d_codes in supplier_distributor_codes.items()
             if d_codes == {effective_dist_code}
         ]
-        if exclusive_ncc_statuses:
+        if exclusive_suppliers:
+            exclusive_ncc_statuses = [f"NCC:{sup_code}" for sup_code in exclusive_suppliers]
             dist_conditions.append(
                 func.upper(VinamilkOrderSnapshot.processing_status).in_(exclusive_ncc_statuses)
+            )
+            dist_conditions.append(
+                func.upper(payload_sync_source).in_(exclusive_suppliers)
             )
         is_default_legacy_dist = (
             user_dist_id == 1
@@ -2022,6 +2037,7 @@ def list_local_vinamilk_orders(
             )
         filters.append(or_(*dist_conditions))
     snapshot_total = db.scalar(select(func.count()).select_from(VinamilkOrderSnapshot).where(*filters)) or 0
+    raw_snapshot_total = snapshot_total
     rows = db.scalars(
         select(VinamilkOrderSnapshot)
         .where(*filters)
@@ -2029,17 +2045,7 @@ def list_local_vinamilk_orders(
         .offset(skip)
         .limit(limit)
     ).all()
-    distributors_by_code = {
-        (distributor.code or "").strip().upper(): distributor
-        for distributor in db.scalars(select(Distributor)).all()
-        if (distributor.code or "").strip()
-    }
-    distributors_by_id = {distributor.id: distributor for distributor in distributors_by_code.values()}
-    supplier_distributor_codes: dict[str, set[str]] = defaultdict(set)
-    for config in db.scalars(select(DistributorSupplierConfig)).all():
-        distributor = distributors_by_id.get(config.distributor_id)
-        if distributor and config.supplier_code:
-            supplier_distributor_codes[config.supplier_code.strip().upper()].add(distributor.code.upper())
+    raw_snapshot_count = len(rows)
 
     latest = db.scalar(select(VinamilkSyncRun).where(
         VinamilkSyncRun.from_date <= to_date,
@@ -2352,11 +2358,16 @@ def list_local_vinamilk_orders(
                 source_for_distributor = processing_source.split(":", 1)[1].strip()
             if not source_for_distributor:
                 normalized_actor = unicodedata.normalize("NFKD", row_actor).encode("ascii", "ignore").decode("ascii").casefold()
-                if normalized_actor == "he thong" and not getattr(row, "is_synthetic", False):
+                if normalized_actor in ("", "he thong") and not getattr(row, "is_synthetic", False):
                     source_for_distributor = "VINAMILK"
-            configured_distributors = supplier_distributor_codes.get((source_for_distributor or "").strip().upper(), set())
+            normalized_source = (source_for_distributor or "").strip().upper()
+            configured_distributors = supplier_distributor_codes.get(normalized_source, set())
             if len(configured_distributors) == 1:
                 resolved_distributor_code = next(iter(configured_distributors))
+            elif effective_dist_code and effective_dist_code in configured_distributors:
+                resolved_distributor_code = effective_dist_code
+            elif effective_dist_code and is_default_legacy_dist and normalized_source in ("", "VINAMILK"):
+                resolved_distributor_code = effective_dist_code
         distributor = distributors_by_code.get(resolved_distributor_code)
         distributor_name = distributor.name if distributor else ""
         distributor_label = distributor_name or resolved_distributor_code
@@ -2446,11 +2457,10 @@ def list_local_vinamilk_orders(
                 "_uploaded_by": allocation.uploaded_by,
                 "_note": allocation.note,
             })
-    if distributor_code:
-        normalized_distributor_code = distributor_code.strip().upper()
+    if effective_dist_code:
         output_rows = [
             row for row in output_rows
-            if (row.get("_distributor_code") or "").strip().upper() == normalized_distributor_code
+            if (row.get("_distributor_code") or "").strip().upper() == effective_dist_code
         ]
         snapshot_total = len(output_rows)
 
@@ -2458,7 +2468,9 @@ def list_local_vinamilk_orders(
         "rows": output_rows,
         "total": snapshot_total,
         "snapshot_total": snapshot_total,
-        "snapshot_count": len(output_rows) if distributor_code else len(rows),
+        "snapshot_count": len(output_rows) if effective_dist_code else raw_snapshot_count,
+        "raw_snapshot_total": raw_snapshot_total,
+        "raw_snapshot_count": raw_snapshot_count,
         "row_count": len(output_rows),
         "skip": skip,
         "limit": limit,
@@ -2502,8 +2514,10 @@ def list_grouped_vinamilk_orders(
             row_distributor_code = row.get("_distributor_code") or ""
             key = f"{row_distributor_code}|{number}" if number else f"{row_distributor_code}|__snapshot_{row['_local_id']}"
             groups.setdefault(key, []).append(row)
-        offset += page["snapshot_count"]
-        if not page["snapshot_count"] or offset >= page["snapshot_total"]:
+        raw_count = page.get("raw_snapshot_count", page["snapshot_count"])
+        raw_total = page.get("raw_snapshot_total", page["snapshot_total"])
+        offset += raw_count
+        if not raw_count or offset >= raw_total:
             break
 
     def field(row: dict[str, Any], keys: tuple[str, ...]) -> str:

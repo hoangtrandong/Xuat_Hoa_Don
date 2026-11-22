@@ -2335,11 +2335,16 @@ return Array.from(map.values());
           if (jobInfo.status === "SUCCESS") {
             finished = true;
             setLastSyncedAt(jobInfo.result_summary?.synced_at || new Date().toISOString());
-            const nOrd = Number(jobInfo.result_summary?.new_orders ?? 0);
-            const uOrd = Number(jobInfo.result_summary?.updated_orders ?? 0);
-            if (nOrd > 0 || uOrd > 0) {
-              void loadLocalOrders();
+            const failedItems = Array.isArray(jobInfo.items)
+              ? jobInfo.items.filter((item) => item.status === "FAILED")
+              : [];
+            if (failedItems.length > 0) {
+              const errDetails = failedItems
+                .map((item) => `${item.name || item.code}: ${item.message || item.stage || "Lỗi đồng bộ"}`)
+                .join(" | ");
+              setRemoteError(`Một số nguồn NCC đồng bộ thất bại: ${errDetails}`);
             }
+            void loadLocalOrders();
             break;
           }
           if (jobInfo.status === "FAILED") {

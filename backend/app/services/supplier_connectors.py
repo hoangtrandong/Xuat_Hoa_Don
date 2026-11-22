@@ -1108,6 +1108,18 @@ def fetch_nazzy_orders(
         limits=http_limits,
         follow_redirects=True,
     ) as client:
+        class _NazzySessionExpiredError(RuntimeError):
+            pass
+
+        def _is_login_html(resp_obj: Any) -> bool:
+            text_val = getattr(resp_obj, "text", None)
+            if not isinstance(text_val, str):
+                return False
+            sample = text_val[:2000].lower()
+            return ("<html" in sample or "<!doctype" in sample) and (
+                "txtpassword" in sample or "btnlogin" in sample or "__viewstate" in sample
+            )
+
         def _fetch_list_page(page_num: int, ps: int) -> tuple[int, list[dict[str, Any]]]:
             params = {
                 "t": "GetBillsOrderGetListV5",
@@ -1132,17 +1144,31 @@ def fetch_nazzy_orders(
             resp = client.get(base_url, params=params, headers=headers, cookies=cookies)
             if resp.status_code != 200:
                 raise RuntimeError(f"HTTP {resp.status_code} khi lấy danh sách đơn Nazzy trang {page_num}.")
-            data = resp.json()
+            if _is_login_html(resp):
+                raise _NazzySessionExpiredError(
+                    "Phiên đăng nhập Nazzy DMS đã hết hạn. Vui lòng kiểm tra Mã DN / Mã NV / Mật khẩu hoặc cập nhật Cookie mới."
+                )
+            try:
+                data = resp.json()
+            except Exception as json_exc:
+                raise _NazzySessionExpiredError(
+                    "Nazzy DMS trả về dữ liệu không phải JSON (có thể phiên đăng nhập đã hết hạn)."
+                ) from json_exc
             if not isinstance(data, dict):
                 raise RuntimeError("Dữ liệu trả về từ Nazzy không đúng định dạng.")
-            items_block = data.get("Items") or {}
+            items_block = data.get("Items")
             if not isinstance(items_block, dict):
+                if data.get("IsLogin") is False or data.get("Status") in (-1, 401):
+                    raise _NazzySessionExpiredError(
+                        str(data.get("Message") or "Phiên đăng nhập Nazzy DMS đã hết hạn.")
+                    )
                 raise RuntimeError("Dữ liệu trả về từ Nazzy không có danh sách đơn hàng hợp lệ.")
             return int(items_block.get("TotalRecord") or 0), (items_block.get("Items") or [])
 
         # Tải danh sách tuần tự từng trang (tránh ASP.NET Session Lock trên IIS gây timeout khi gọi song song)
         total_records = 0
         current_page = 1
+        relogged_once = False
         while True:
             _report(
                 f"Đang tải danh sách đơn Nazzy trang {current_page} ({page_size} đơn/trang)...",
@@ -1153,6 +1179,21 @@ def fetch_nazzy_orders(
                 page_total, page_items = _fetch_list_page(current_page, page_size)
                 if page_total > 0:
                     total_records = page_total
+            except _NazzySessionExpiredError as sess_exc:
+                if not relogged_once and dist_code and clean_user and secret:
+                    relogged_once = True
+                    _report("Phiên Nazzy hết hạn — đang tự động đăng nhập lại...", len(all_order_summaries))
+                    new_cookie = nazzy_login_and_get_cookie(dist_code, clean_user, secret, base_url)
+                    config.session_cookie = encrypt_supplier_secret(new_cookie)
+                    cookies.clear()
+                    for part in new_cookie.split(";"):
+                        if "=" in part:
+                            ck, cv = part.strip().split("=", 1)
+                            cookies[ck.strip()] = cv.strip()
+                    continue
+                if strict:
+                    raise RuntimeError(str(sess_exc)) from sess_exc
+                break
             except httpx.TimeoutException as exc:
                 if page_size > 50:
                     page_size = 50

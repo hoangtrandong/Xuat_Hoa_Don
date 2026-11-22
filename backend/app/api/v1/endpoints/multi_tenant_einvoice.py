@@ -1344,8 +1344,11 @@ def _run_sync_supplier_configs_worker(
                         message=f"[{idx}/{total_configs}] {source_name}: {stage_text}",
                     )
 
+                dist_code = (cfg.distributor.code if cfg.distributor else "").strip() or None
+                dist_code_upper = (dist_code or "").upper()
+                sup_code_upper = (cfg.supplier_code or "").strip().upper()
                 existing_order_fingerprints: dict[str, dict[str, Any]] | None = None
-                if (cfg.supplier_code or "").upper() == "NAZZY" or "nazzy" in (cfg.api_endpoint_url or "").lower():
+                if sup_code_upper == "NAZZY" or "nazzy" in (cfg.api_endpoint_url or "").lower():
                     existing_snaps = db.scalars(
                         select(VinamilkOrderSnapshot).where(
                             VinamilkOrderSnapshot.processing_status == f"NCC:{cfg.supplier_code}",
@@ -1354,11 +1357,22 @@ def _run_sync_supplier_configs_worker(
                         )
                     ).all()
                     fp_map: dict[str, dict[str, Any]] = {}
+                    incomplete_orders: set[str] = set()
                     for snap in existing_snaps:
                         code = (snap.order_number or "").strip()
                         if not code:
                             continue
                         payload = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+                        # Chỉ bỏ qua tải lại đơn lịch sử nếu dòng đã gắn đủ Mã NPP & Nguồn đồng bộ đúng NPP hiện tại
+                        snap_actor = (snap.performed_by or "").strip().upper()
+                        payload_dist = str(payload.get("Mã NPP") or "").strip().upper()
+                        payload_src = str(payload.get("Nguồn đồng bộ") or "").strip().upper()
+                        if dist_code_upper and (snap_actor != dist_code_upper or payload_dist != dist_code_upper):
+                            incomplete_orders.add(code)
+                            continue
+                        if sup_code_upper and payload_src != sup_code_upper:
+                            incomplete_orders.add(code)
+                            continue
                         net_val = float(payload.get("Thành tiền") or 0.0)
                         gross_val = float(payload.get("Giá trị") or 0.0)
                         entry = fp_map.setdefault(
@@ -1371,6 +1385,8 @@ def _run_sync_supplier_configs_worker(
                         )
                         entry["total_amount"] += net_val
                         entry["gross_amount"] += gross_val
+                    for bad_code in incomplete_orders:
+                        fp_map.pop(bad_code, None)
                     existing_order_fingerprints = fp_map
 
                 raw_rows = connector.fetch_raw_orders(
@@ -1392,7 +1408,6 @@ def _run_sync_supplier_configs_worker(
                     current_step=base_step + 2,
                     message=f"[{idx}/{total_configs}] {source_name}: Đã tải {len(raw_rows)} dòng dữ liệu, đang đối soát & lưu...",
                 )
-                dist_code = cfg.distributor.code if cfg.distributor else None
                 canonical_orders = DynamicFieldMapper.transform_rows_to_canonical(
                     raw_rows=raw_rows,
                     supplier_code=cfg.supplier_code,
@@ -1475,20 +1490,26 @@ def _run_sync_supplier_configs_worker(
             else "Dữ liệu đã mới nhất — không có đơn hàng mới hoặc thay đổi."
         )
         synced_at_iso = datetime.utcnow().isoformat() + "Z"
-        job_manager.set_success(
-            job_id,
-            result_summary={
-                "new_orders": total_new_orders,
-                "updated_orders": total_updated_orders,
-                "new_lines": total_new_lines,
-                "updated_lines": total_updated_lines,
-                "unchanged_lines": total_unchanged_lines,
-                "failed_sources": failed_sources,
-                "total_sources": total_configs,
-                "synced_at": synced_at_iso,
-            },
-            message=final_message,
-        )
+        if failed_sources >= total_configs and total_configs > 0:
+            job_manager.set_failed(
+                job_id,
+                f"Đồng bộ thất bại ({failed_sources}/{total_configs} nguồn gặp lỗi). Vui lòng kiểm tra chi tiết từng nguồn NCC.",
+            )
+        else:
+            job_manager.set_success(
+                job_id,
+                result_summary={
+                    "new_orders": total_new_orders,
+                    "updated_orders": total_updated_orders,
+                    "new_lines": total_new_lines,
+                    "updated_lines": total_updated_lines,
+                    "unchanged_lines": total_unchanged_lines,
+                    "failed_sources": failed_sources,
+                    "total_sources": total_configs,
+                    "synced_at": synced_at_iso,
+                },
+                message=final_message,
+            )
     except Exception as exc:
         db.rollback()
         job_manager.set_failed(job_id, str(exc))

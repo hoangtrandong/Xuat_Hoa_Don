@@ -167,3 +167,121 @@ def test_invoice_discount_allocation_does_not_duplicate_line_discounts():
     ]
 
     assert _allocate_order_discounts(rows) == {}
+
+
+def test_nazzy_session_expired_html_triggers_relogin(monkeypatch):
+    calls = {"list": 0, "relogin": 0}
+
+    class ExpiringClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, _url, *, params, **_kwargs):
+            if params["t"] == "GetBillsOrderGetListV5":
+                calls["list"] += 1
+                if calls["list"] == 1:
+                    return SimpleNamespace(
+                        status_code=200,
+                        text="<html><body><input id='txtPassword'/><input id='btnLogin'/></body></html>",
+                    )
+                return FakeResponse({
+                    "Items": {
+                        "TotalRecord": 1,
+                        "Items": [{"BillsDepotId": 10, "Code": "26113454"}],
+                    }
+                })
+            return FakeClient().get(_url, params=params)
+
+    def fake_login(_dist, _user, _pwd, _base):
+        calls["relogin"] += 1
+        return "ASP.NET_SessionId=fresh; ses_adminId=1"
+
+    monkeypatch.setattr("app.services.supplier_connectors.httpx.Client", ExpiringClient)
+    monkeypatch.setattr("app.services.supplier_connectors.nazzy_login_and_get_cookie", fake_login)
+    monkeypatch.setattr("app.services.supplier_connectors.decrypt_supplier_secret", lambda v: v or "")
+    monkeypatch.setattr("app.services.supplier_connectors.encrypt_supplier_secret", lambda v: v or "")
+
+    config = SimpleNamespace(
+        api_endpoint_url="http://dms21.nazzy.vn/handler/BillsHandler.ashx",
+        request_config={"distributor_code": "MAITRUNG"},
+        username="NV01",
+        encrypted_secret="secret123",
+        session_cookie="ASP.NET_SessionId=expired",
+    )
+
+    rows = fetch_nazzy_orders(config, date(2026, 11, 16), date(2026, 11, 16), strict=True)
+    assert len(rows) == 3
+    assert calls["list"] == 2
+    assert calls["relogin"] == 2
+
+
+def test_grouped_orders_paginates_all_pages_and_includes_nazzy_for_maigold(monkeypatch):
+    from app.api.v1.endpoints import sync as sync_ep
+
+    page_calls = []
+
+    def fake_list_local(*, skip, limit, distributor_code, **_kwargs):
+        page_calls.append((skip, limit, distributor_code))
+        if skip == 0:
+            # Trang 1: toàn đơn Vinamilk (bị giới hạn 10_000 dòng SQL, nhưng sau lọc chỉ còn 1 dòng)
+            return {
+                "rows": [{
+                    "_local_id": 1,
+                    "_snapshot_order_number": "VNM-001",
+                    "_distributor_code": "NPP-MAIGOLD",
+                    "NPP": "Nhà Phân Phối Mai Gold",
+                    "Nguồn đồng bộ": "VINAMILK",
+                    "Nhà cung cấp": "Vinamilk",
+                    "totalValue": 100000,
+                    "totalDiscount": 0,
+                }],
+                "total": 1,
+                "snapshot_total": 1,
+                "snapshot_count": 1,
+                "raw_snapshot_total": 2,
+                "raw_snapshot_count": 1,
+                "last_synced_at": None,
+            }
+        # Trang 2: đơn Nazzy nằm sau trang 1
+        return {
+            "rows": [{
+                "_local_id": 2,
+                "_snapshot_order_number": "NAZ-001",
+                "_distributor_code": "NPP-MAIGOLD",
+                "NPP": "Nhà Phân Phối Mai Gold",
+                "Nguồn đồng bộ": "NAZZY",
+                "Nhà cung cấp": "Việt Đài",
+                "_processing_status": "NCC:NAZZY",
+                "totalValue": 250000,
+                "totalDiscount": 0,
+            }],
+            "total": 1,
+            "snapshot_total": 1,
+            "snapshot_count": 1,
+            "raw_snapshot_total": 2,
+            "raw_snapshot_count": 1,
+            "last_synced_at": None,
+        }
+
+    monkeypatch.setattr(sync_ep, "list_local_vinamilk_orders", fake_list_local)
+
+    result = sync_ep.list_grouped_vinamilk_orders(
+        from_date=date(2026, 11, 1),
+        to_date=date(2026, 11, 22),
+        distributor_code="NPP-MAIGOLD",
+        skip=0,
+        limit=20,
+        db=None,
+        current_user=None,
+    )
+
+    assert len(page_calls) == 2
+    order_nums = {row["orderNumber"] for row in result["rows"]}
+    assert order_nums == {"VNM-001", "NAZ-001"}
+    assert "NAZZY" in result["suppliers"]

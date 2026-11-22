@@ -531,3 +531,70 @@ def test_tchat_xml_filtering_and_unmapped_sku_mapping(db_session):
     skus = {r["sku"]: r["input_qty"] for r in res_after["items"]}
     assert skus["SKU99"] == 7.0
 
+
+def test_adjustment_decrease_purchase_invoice_does_not_exclude_original(db_session):
+    """HĐ mua vào điều chỉnh giảm (SL & tiền âm) có replaced_invoice_number trỏ về HĐ gốc KHÔNG ĐƯỢC loại bỏ HĐ gốc."""
+    dist, _, _ = _seed_distributor_and_companies(db_session)
+
+    # HĐ gốc: +9204 hộp
+    p_orig = PurchaseInvoice(
+        distributor_id=dist.id,
+        invoice_template="1",
+        invoice_symbol="1C26TVM",
+        invoice_number="0001000",
+        invoice_date=datetime(2026, 11, 1),
+        seller_tax_code="0300588569",
+        seller_name="Vinamilk",
+        buyer_tax_code="2901744664",
+        amount_before_tax=462_962_963,
+        total_amount=500_000_000,
+        xml_downloaded=True,
+        items=[
+            PurchaseInvoiceItem(
+                line_number=1,
+                item_nature=1,
+                product_code="01SB10",
+                product_name="Creamer dac co duong",
+                unit_name="Hop",
+                quantity=9204,
+                unit_price=50300.19,
+                amount_before_tax=462_962_963,
+            )
+        ],
+    )
+    # HĐ điều chỉnh giảm: -9204 hộp (trỏ về 0001000 nhưng raw_metadata không có tthai=3)
+    p_adj = PurchaseInvoice(
+        distributor_id=dist.id,
+        invoice_template="1",
+        invoice_symbol="1C26TVM",
+        invoice_number="0001001",
+        invoice_date=datetime(2026, 11, 2),
+        seller_tax_code="0300588569",
+        seller_name="Vinamilk",
+        buyer_tax_code="2901744664",
+        replaced_invoice_number="0001000",
+        amount_before_tax=-462_962_963,
+        total_amount=-500_000_000,
+        xml_downloaded=True,
+        items=[
+            PurchaseInvoiceItem(
+                line_number=1,
+                item_nature=1,
+                product_code="01SB10",
+                product_name="Creamer dac co duong",
+                unit_name="Hop",
+                quantity=-9204,
+                unit_price=50300.19,
+                amount_before_tax=-462_962_963,
+            )
+        ],
+    )
+    db_session.add_all([p_orig, p_adj])
+    db_session.commit()
+
+    res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id)
+    assert len(res["items"]) == 1
+    # (+9204) + (-9204) = 0, KHÔNG bị thành -9204!
+    assert res["items"][0]["input_qty"] == 0.0
+    assert res["items"][0]["balance_qty"] == 0.0
+

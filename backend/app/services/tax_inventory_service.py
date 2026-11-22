@@ -74,8 +74,10 @@ def _build_excluded_purchase_invoice_ids(
 ) -> set[int]:
     """Xác định các PurchaseInvoice ID phải LOẠI TRỪ khỏi đầu vào (không nhân -1):
     - Hóa đơn có trạng thái GDT tthai in (4: Đã bị thay thế, 6: Đã bị hủy).
-    - Hóa đơn bị tham chiếu trong `replaced_invoice_number` bởi một hóa đơn khác
-      CÙNG nhà cung cấp (`seller_tax_code`), ngoại trừ hóa đơn điều chỉnh (`tthai == 3`).
+    - Hóa đơn bị tham chiếu trong `replaced_invoice_number` bởi một hóa đơn THAY THẾ
+      CÙNG nhà cung cấp (`seller_tax_code`).
+    - QUAN TRỌNG: Nếu hóa đơn tham chiếu là Hóa đơn ĐIỀU CHỈNH (tthai == 3, tchdon == 2,
+      hoặc có tổng tiền âm) thì TUYỆT ĐỐI KHÔNG loại trừ hóa đơn gốc (vì HĐ điều chỉnh chỉ cộng/trừ phần chênh lệch).
     """
     excluded_ids: set[int] = set()
     replaced_keys: set[tuple[str, str]] = set()
@@ -88,10 +90,21 @@ def _build_excluded_purchase_invoice_ids(
             row[3],
             row[4],
         )
+        amt_before = _to_dec(row[11]) if len(row) > 11 else ZERO
+        total_amt = _to_dec(row[12]) if len(row) > 12 else ZERO
+
         tthai = _extract_purchase_tthai(raw_meta)
+        tchdon_raw = raw_meta.get("tchdon") if isinstance(raw_meta, dict) else None
+        is_adjustment_doc = (
+            tthai == 3
+            or str(tchdon_raw or "").strip() == "2"
+            or amt_before < ZERO
+            or total_amt < ZERO
+        )
+
         if tthai in (4, 6):
             excluded_ids.add(inv_id)
-        if replaced_no and tthai != 3:
+        if replaced_no and not is_adjustment_doc:
             for part in str(replaced_no).split("/"):
                 clean = part.strip()
                 if clean:
@@ -249,6 +262,8 @@ def compute_tax_inventory_by_mst(
             PurchaseInvoice.invoice_date,
             PurchaseInvoice.xml_downloaded,
             TaxAuthorityCredential.username,
+            PurchaseInvoice.amount_before_tax,
+            PurchaseInvoice.total_amount,
         )
         .outerjoin(
             TaxAuthorityCredential,
@@ -276,6 +291,8 @@ def compute_tax_inventory_by_mst(
             inv_dt,
             xml_downloaded,
             cred_username,
+            _amt_before,
+            _total_amt,
         ) = row
         if inv_id in excluded_purch_ids:
             continue
@@ -722,6 +739,8 @@ def get_tax_inventory_card_detail(
             PurchaseInvoice.invoice_symbol,
             PurchaseInvoice.seller_name,
             TaxAuthorityCredential.username,
+            PurchaseInvoice.amount_before_tax,
+            PurchaseInvoice.total_amount,
         )
         .outerjoin(
             TaxAuthorityCredential,

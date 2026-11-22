@@ -2494,7 +2494,7 @@ def list_grouped_vinamilk_orders(
     summaries = []
     statuses = set()
     delivery_statuses = set()
-    all_suppliers: set[str] = set()
+    all_suppliers_by_key: dict[str, str] = {}
     total_value = total_discount = confirmed = 0
     for key, lines in groups.items():
         row = lines[0]
@@ -2505,9 +2505,36 @@ def list_grouped_vinamilk_orders(
             for line in lines
             if field(line, ("Nhà cung cấp", "supplier", "_supplier"))
         })
+        line_sync_sources = sorted({
+            (
+                field(line, ("Nguồn đồng bộ", "_sync_source"))
+                or (
+                    field(line, ("_processing_status",)).split(":", 1)[1].strip()
+                    if field(line, ("_processing_status",)).upper().startswith("NCC:")
+                    else ""
+                )
+            )
+            for line in lines
+            if (
+                field(line, ("Nguồn đồng bộ", "_sync_source"))
+                or field(line, ("_processing_status",)).upper().startswith("NCC:")
+            )
+        })
+        order_supplier_candidates: list[str] = []
+        for candidate in (*line_suppliers, *line_sync_sources):
+            c_clean = candidate.strip()
+            if not c_clean:
+                continue
+            c_key = c_clean.casefold()
+            if c_key not in all_suppliers_by_key:
+                all_suppliers_by_key[c_key] = c_clean
+            elif all_suppliers_by_key[c_key].isupper() and not c_clean.isupper():
+                # Ưu tiên dạng chữ đẹp như "Vinamilk" thay vì "VINAMILK"
+                all_suppliers_by_key[c_key] = c_clean
+            order_supplier_candidates.append(c_key)
+
         statuses.add(status)
         delivery_statuses.add(delivery)
-        all_suppliers.update(line_suppliers)
         related = " ".join(str(item or "") for item in (
             key, row.get("_replacement_display"), row.get("_replaced_order_number"),
             *(row.get("_replaced_by_order_numbers") or []),
@@ -2524,7 +2551,7 @@ def list_grouped_vinamilk_orders(
                    includes(field(line, ("productName", "itemName", "product", "Sản phẩm")), product) or
                    includes(field(line, ("Nhà cung cấp",)), product) for line in lines):
             continue
-        if supplier and not any(s.casefold() == supplier.casefold() for s in line_suppliers):
+        if supplier and supplier.casefold() not in order_supplier_candidates:
             continue
         if processing_status and status != processing_status:
             continue
@@ -2587,7 +2614,7 @@ def list_grouped_vinamilk_orders(
         "rows": summaries[skip:skip + limit], "total": len(summaries), "all_total": len(groups),
         "total_value": total_value, "total_discount": total_discount, "confirmed": confirmed,
         "statuses": sorted(statuses), "delivery_statuses": sorted(delivery_statuses),
-        "suppliers": sorted(all_suppliers),
+        "suppliers": sorted(all_suppliers_by_key.values(), key=str.casefold),
         "last_synced_at": last_synced_at,
     }
 

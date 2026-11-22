@@ -2639,8 +2639,11 @@ return Array.from(map.values());
     if (!matches("Mã NVBH", staffFilter) && !matches("Tên NVBH", staffFilter)) return false;
     if (!matches("Mã sản phẩm", productFilter) && !matches("Sản phẩm", productFilter) && !matches("Nhà cung cấp", productFilter)) return false;
     if (supplierFilter !== "Tất cả") {
+      const target = supplierFilter.toLowerCase();
       const rowSup = displayRemoteValue(order["Nhà cung cấp"]).toLowerCase();
-      if (!rowSup.split("/").map((s) => s.trim()).includes(supplierFilter.toLowerCase())) return false;
+      const rowSrc = displayRemoteValue(order["Nguồn đồng bộ"]).toLowerCase();
+      const tokens = [...rowSup.split("/"), ...rowSrc.split("/")].map((s) => s.trim()).filter(Boolean);
+      if (!tokens.includes(target)) return false;
     }
     if (statusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["Trạng thái xử lý"]) !== statusFilter) return false;
     if (deliveryStatusFilter !== "Tất cả" && displayRemoteValue(order["Tình trạng xuất kho"]) !== deliveryStatusFilter) return false;

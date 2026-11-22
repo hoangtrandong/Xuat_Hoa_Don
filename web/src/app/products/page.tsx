@@ -408,25 +408,29 @@ export default function ProductsPage() {
       if (companyLinksResponse && companyLinksResponse.ok) {
         const rawLinks = (await companyLinksResponse.json().catch(() => [])) as Array<Record<string, unknown>>;
         if (Array.isArray(rawLinks)) {
-          const nppList: NppProductOption[] = rawLinks
-            .map((item) => {
-              const memberSkus = Array.isArray(item.member_skus) ? (item.member_skus as string[]) : [];
-              const memberNames = Array.isArray(item.member_names) ? (item.member_names as string[]) : [];
-              const companies = Array.isArray(item.companies) ? (item.companies as Array<Record<string, unknown>>) : [];
-              const code = (
-                memberSkus[0] ||
-                (companies[0]?.distributor_sku as string) ||
-                ""
-              )
-                .trim()
-                .toUpperCase();
-              const name =
-                (item.group_name as string) ||
-                memberNames[0] ||
-                (companies[0]?.distributor_name as string) ||
-                "";
-              const repSku = (item.representative_sku as string) || "";
-              return {
+          const nppByCode = new Map<string, NppProductOption>();
+          for (const item of rawLinks) {
+            const memberSkus = Array.isArray(item.member_skus) ? (item.member_skus as string[]) : [];
+            const memberNames = Array.isArray(item.member_names) ? (item.member_names as string[]) : [];
+            const companies = Array.isArray(item.companies) ? (item.companies as Array<Record<string, unknown>>) : [];
+            const code = (
+              memberSkus[0] ||
+              (companies[0]?.distributor_sku as string) ||
+              ""
+            )
+              .trim()
+              .toUpperCase();
+            if (!code) continue;
+            const name =
+              (item.group_name as string) ||
+              memberNames[0] ||
+              (companies[0]?.distributor_name as string) ||
+              "";
+            const repSku = (item.representative_sku as string) || "";
+            const compName = ((companies[0]?.company_name as string) || "").trim();
+            const existing = nppByCode.get(code);
+            if (!existing) {
+              nppByCode.set(code, {
                 code,
                 name,
                 supplier: ((item.supplier as string) || "Vinamilk").trim(),
@@ -434,11 +438,15 @@ export default function ProductsPage() {
                 unitPrice: Number(item.unit_price) || 0,
                 orderCount: Number(item.order_count) || 0,
                 mappedSku: repSku && repSku !== "Chưa gán SKU CQT" ? repSku : "",
-                companyName: (companies[0]?.company_name as string) || "",
-              };
-            })
-            .filter((x: NppProductOption) => Boolean(x.code));
-          setNppProductOptions(nppList);
+                companyName: compName,
+              });
+            } else if (compName && !existing.companyName.includes(compName)) {
+              existing.companyName = existing.companyName
+                ? `${existing.companyName}, ${compName}`
+                : compName;
+            }
+          }
+          setNppProductOptions(Array.from(nppByCode.values()));
         }
       }
     } catch {
@@ -3770,8 +3778,8 @@ export default function ProductsPage() {
 
       {/* DATALIST GỢI Ý MÃ NPP NỘI BỘ TOÀN HỆ THỐNG */}
       <datalist id="sku-npp-options-datalist">
-        {nppProductOptions.map((npp) => (
-          <option key={npp.code} value={npp.code}>
+        {nppProductOptions.map((npp, idx) => (
+          <option key={`${npp.code}-${idx}`} value={npp.code}>
             {npp.name} ({npp.supplier}{npp.unit ? ` - ${npp.unit}` : ""})
           </option>
         ))}

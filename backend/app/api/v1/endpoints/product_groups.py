@@ -395,6 +395,7 @@ def list_distributor_products(db: Session = Depends(get_db)):
             distributor_name=item.distributor_name or "Nhà Phân Phối Mai Gold",
             distributor_sku=item.distributor_sku,
             distributor_product_name=item.distributor_product_name,
+            invoice_product_code=item.invoice_product_code,
             invoice_product_name=item.invoice_product_name,
             supplier=item.supplier or "Vinamilk",
             unit=item.unit or "HOP",
@@ -510,29 +511,48 @@ def map_distributor_sku(payload: DistributorSkuMappingPayload, db: Session = Dep
 
 @router.post("/distributor-products", response_model=DistributorProductItem)
 def create_distributor_product(payload: DistributorProductCreate, db: Session = Depends(get_db)):
-    """Thêm mới 1 mã sản phẩm NPP nội bộ."""
+    """Thêm mới 1 dòng mã sản phẩm NPP nội bộ (cho phép cùng Mã SP NPP cho nhiều Công ty quản lý khác nhau)."""
     clean_sku = payload.distributor_sku.strip().upper()
     if not clean_sku or not payload.distributor_product_name.strip():
         raise HTTPException(status_code=400, detail="Mã SP NPP và Tên sản phẩm không được để trống.")
 
-    existing = db.scalar(select(DistributorProduct).where(DistributorProduct.distributor_sku == clean_sku))
+    target_company_id = payload.company_id if (payload.company_id and payload.company_id > 0) else None
+
+    # Kiểm tra trùng theo cặp (distributor_sku, company_id)
+    dup_stmt = select(DistributorProduct).where(DistributorProduct.distributor_sku == clean_sku)
+    if target_company_id is not None:
+        dup_stmt = dup_stmt.where(DistributorProduct.company_id == target_company_id)
+    else:
+        dup_stmt = dup_stmt.where(DistributorProduct.company_id.is_(None))
+    existing = db.scalar(dup_stmt)
     if existing:
-        raise HTTPException(status_code=400, detail=f"Mã sản phẩm NPP '{clean_sku}' đã tồn tại trong hệ thống.")
+        if target_company_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Mã SP NPP '{clean_sku}' đã được đăng ký cho Công ty quản lý này rồi.",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mã SP NPP '{clean_sku}' (chưa gán Công ty QL) đã tồn tại trong hệ thống.",
+        )
 
     # Kiểm tra company_id nếu có
-    if payload.company_id:
-        comp = db.get(Company, payload.company_id)
+    if target_company_id is not None:
+        comp = db.get(Company, target_company_id)
         if not comp:
             raise HTTPException(status_code=400, detail="Công ty quản lý không tồn tại.")
+
+    clean_inv_code = (payload.invoice_product_code or "").strip().upper() or None
 
     new_prod = DistributorProduct(
         distributor_name=payload.distributor_name or "Nhà Phân Phối Mai Gold",
         distributor_sku=clean_sku,
         distributor_product_name=payload.distributor_product_name.strip(),
+        invoice_product_code=clean_inv_code,
         invoice_product_name=(payload.invoice_product_name or "").strip() or None,
         supplier=payload.supplier or "Vinamilk",
-        unit=payload.unit or "HOP",
-        company_id=payload.company_id,
+        unit=(payload.unit or "HOP").strip().upper(),
+        company_id=target_company_id,
         status="active",
     )
     db.add(new_prod)
@@ -544,6 +564,7 @@ def create_distributor_product(payload: DistributorProductCreate, db: Session = 
         distributor_name=new_prod.distributor_name,
         distributor_sku=new_prod.distributor_sku,
         distributor_product_name=new_prod.distributor_product_name,
+        invoice_product_code=new_prod.invoice_product_code,
         invoice_product_name=new_prod.invoice_product_name,
         supplier=new_prod.supplier,
         unit=new_prod.unit,
@@ -556,7 +577,7 @@ def create_distributor_product(payload: DistributorProductCreate, db: Session = 
 
 @router.put("/distributor-products")
 def update_distributor_product(payload: DistributorProductUpdate, db: Session = Depends(get_db)):
-    """Chỉnh sửa thông tin mã sản phẩm NPP nội bộ & gán/gỡ công ty quản lý."""
+    """Chỉnh sửa thông tin mã sản phẩm NPP nội bộ, Mã/Tên SP xuất hóa đơn & gán/gỡ công ty quản lý."""
     orig_sku = (payload.original_code or payload.distributor_sku).strip().upper()
     target_sku = payload.distributor_sku.strip().upper()
 
@@ -571,15 +592,34 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
     if not item:
         raise HTTPException(status_code=404, detail="Không tìm thấy mã sản phẩm NPP để cập nhật.")
 
-    # Kiểm tra trùng mã nếu đổi SKU
-    if target_sku != item.distributor_sku:
-        dup = db.scalar(select(DistributorProduct).where(DistributorProduct.distributor_sku == target_sku, DistributorProduct.id != item.id))
-        if dup:
-            raise HTTPException(status_code=400, detail=f"Mã sản phẩm NPP '{target_sku}' đã được sử dụng bởi sản phẩm khác.")
-        item.distributor_sku = target_sku
+    # Xác định company_id đích trước khi kiểm tra trùng cặp (distributor_sku, company_id)
+    target_company_id: int | None = None
+    if payload.company_id and payload.company_id > 0:
+        comp = db.get(Company, payload.company_id)
+        if comp:
+            target_company_id = comp.id
+
+    dup_stmt = select(DistributorProduct).where(
+        DistributorProduct.distributor_sku == target_sku,
+        DistributorProduct.id != item.id,
+    )
+    if target_company_id is not None:
+        dup_stmt = dup_stmt.where(DistributorProduct.company_id == target_company_id)
+    else:
+        dup_stmt = dup_stmt.where(DistributorProduct.company_id.is_(None))
+    dup = db.scalar(dup_stmt)
+    if dup:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mã SP NPP '{target_sku}' đã tồn tại cho cùng Công ty quản lý này.",
+        )
+
+    old_sku = item.distributor_sku
+    item.distributor_sku = target_sku
 
     if payload.distributor_product_name.strip():
         item.distributor_product_name = payload.distributor_product_name.strip()
+    item.invoice_product_code = (payload.invoice_product_code or "").strip().upper() or None
     item.invoice_product_name = (payload.invoice_product_name or "").strip() or None
     if payload.distributor_name:
         item.distributor_name = payload.distributor_name.strip()
@@ -587,22 +627,20 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
         item.supplier = payload.supplier.strip()
     if payload.unit:
         item.unit = payload.unit.strip().upper()
+    item.company_id = target_company_id
 
-    # Gán hoặc gỡ Công ty Quản lý
-    if payload.company_id and payload.company_id > 0:
-        comp = db.get(Company, payload.company_id)
-        if comp:
-            item.company_id = comp.id
-        else:
-            item.company_id = None
-    else:
-        item.company_id = None
-
-    # Đồng bộ nếu có Product đang liên kết với npp_code cũ
-    if orig_sku and orig_sku != target_sku:
-        prods = db.scalars(select(Product).where(Product.npp_code == orig_sku)).all()
-        for p in prods:
-            p.npp_code = target_sku
+    # Chỉ đổi npp_code trên Product nếu không còn dòng DistributorProduct nào khác dùng old_sku
+    if old_sku and old_sku != target_sku:
+        remaining_old = db.scalar(
+            select(DistributorProduct.id).where(
+                DistributorProduct.distributor_sku == old_sku,
+                DistributorProduct.id != item.id,
+            )
+        )
+        if not remaining_old:
+            prods = db.scalars(select(Product).where(Product._npp_code == old_sku)).all()
+            for p in prods:
+                p.npp_code = target_sku
 
     db.commit()
     db.refresh(item)
@@ -613,6 +651,7 @@ def update_distributor_product(payload: DistributorProductUpdate, db: Session = 
         "id": item.id,
         "distributor_sku": item.distributor_sku,
         "distributor_product_name": item.distributor_product_name,
+        "invoice_product_code": item.invoice_product_code,
         "invoice_product_name": item.invoice_product_name,
         "company_id": item.company_id,
         "company_code": item.company.code if item.company else None,
@@ -637,12 +676,21 @@ def delete_distributor_product(id_or_code: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Không tìm thấy mã sản phẩm NPP cần xóa.")
 
     sku_to_remove = item.distributor_sku
+    item_id = item.id
     db.delete(item)
+    db.flush()
 
-    # Gỡ npp_code trong Product nếu có
-    prods = db.scalars(select(Product).where(Product.npp_code == sku_to_remove)).all()
-    for p in prods:
-        p.npp_code = None
+    # Chỉ gỡ npp_code trong Product nếu không còn dòng DistributorProduct nào khác giữ mã này
+    still_exists = db.scalar(
+        select(DistributorProduct.id).where(
+            DistributorProduct.distributor_sku == sku_to_remove,
+            DistributorProduct.id != item_id,
+        )
+    )
+    if not still_exists:
+        prods = db.scalars(select(Product).where(Product._npp_code == sku_to_remove)).all()
+        for p in prods:
+            p.npp_code = None
 
     db.commit()
     return {
@@ -678,16 +726,17 @@ def bulk_delete_distributor_products(payload: DistributorProductBulkDelete, db: 
 
 @router.get("/distributor-products/template")
 def download_distributor_product_template():
-    """Tải file Excel mẫu để thêm / cập nhật danh sách mã sản phẩm NPP chuẩn 7 cột."""
+    """Tải file Excel mẫu để thêm / cập nhật danh sách mã sản phẩm NPP chuẩn 9 cột (hỗ trợ nhiều Công ty QL cho cùng Mã SP NPP)."""
     wb = Workbook()
     ws = wb.active
     ws.title = "DS_Ma_SP_NPP"
-    
+
     headers = [
         "STT",
         "Nhà phân phối",
         "Mã SP NPP",
         "Tên Sản Phẩm NPP",
+        "Mã SP Xuất Hóa Đơn",
         "Tên Sản Phẩm Xuất Hóa Đơn",
         "Nhà cung cấp",
         "Mã Công ty QL",
@@ -696,10 +745,10 @@ def download_distributor_product_template():
     ws.append(headers)
 
     sample_rows = [
-        [1, "Nhà Phân Phối Mai Gold", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML", "Vinamilk", "CT01", "Công ty TNHH Phân Phối Mai Gold"],
-        [2, "Nhà Phân Phối Mai Gold", "07KD12", "Sữa chua ăn lựu đỏ 100g", "SỮA CHUA ĂN VINAMILK 100G", "Vinamilk", "", ""],
-        [3, "Nhà Phân Phối Mai Gold", "01SX11", "Sữa dinh dưỡng Optimum Gold 110ml", "SỮA DINH DƯỠNG OPTIMUM GOLD 110ML", "Vinamilk", "", ""],
-        [4, "Nhà Phân Phối Mai Gold", "02HD14", "Sữa chua ăn Có đường 100g", "SỮA CHUA ĂN CÓ ĐƯỜNG 100G", "Vinamilk", "CT02", "Công ty Cổ Phần Tiếp Vận Nam Việt"],
+        [1, "Nhà Phân Phối Mai Gold", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "01TD03", "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML (CT01)", "Vinamilk", "CT01", "Công ty TNHH Phân Phối Mai Gold"],
+        [2, "Nhà Phân Phối Mai Gold", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "01TD03-B", "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML (CT02)", "Vinamilk", "CT02", "Công ty Cổ Phần Tiếp Vận Nam Việt"],
+        [3, "Nhà Phân Phối Mai Gold", "07KD12", "Sữa chua ăn lựu đỏ 100g", "07KD12", "SỮA CHUA ĂN VINAMILK 100G", "Vinamilk", "", ""],
+        [4, "Nhà Phân Phối Mai Gold", "01SX11", "Sữa dinh dưỡng Optimum Gold 110ml", "01SX11", "SỮA DINH DƯỠNG OPTIMUM GOLD 110ML", "Vinamilk", "", ""],
     ]
     for row in sample_rows:
         ws.append(row)
@@ -708,11 +757,12 @@ def download_distributor_product_template():
     ws.column_dimensions["A"].width = 8
     ws.column_dimensions["B"].width = 28
     ws.column_dimensions["C"].width = 16
-    ws.column_dimensions["D"].width = 44
-    ws.column_dimensions["E"].width = 44
-    ws.column_dimensions["F"].width = 18
+    ws.column_dimensions["D"].width = 40
+    ws.column_dimensions["E"].width = 20
+    ws.column_dimensions["F"].width = 44
     ws.column_dimensions["G"].width = 18
-    ws.column_dimensions["H"].width = 36
+    ws.column_dimensions["H"].width = 18
+    ws.column_dimensions["I"].width = 36
 
     output = BytesIO()
     wb.save(output)
@@ -727,10 +777,8 @@ def download_distributor_product_template():
 def upload_distributor_products(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
     Upload file Excel để thêm mới và chỉnh sửa hàng loạt danh sách mã sản phẩm NPP.
-    - Cột bắt buộc: Mã SP NPP, Tên Sản Phẩm NPP.
-    - Khớp Mã Công ty QL với bảng Companies (nếu để trống -> để trống chưa gán).
-    - Nếu Mã SP NPP đã có trong hệ thống -> Cập nhật thông tin (Bulk Edit).
-    - Nếu chưa có -> Thêm mới.
+    - Hỗ trợ nhiều Công ty quản lý trên cùng 1 Mã SP NPP (khóa upsert = (Mã SP NPP, Công ty QL)).
+    - Hỗ trợ cột Mã SP Xuất Hóa Đơn & Tên Sản Phẩm Xuất Hóa Đơn riêng theo từng Công ty QL.
     """
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
         raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel định dạng .xlsx hoặc .xls.")
@@ -748,18 +796,21 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
         # Chuẩn hóa headers
         raw_headers = [str(c or "").strip().lower() for c in rows[0]]
 
-        # Tìm index các cột
+        # Tìm index các cột (kiểm tra Mã SP Xuất Hóa Đơn TRƯỚC Mã SP NPP để không bị nhầm substring)
         sku_idx = -1
         name_idx = -1
+        invoice_code_idx = -1
         invoice_name_idx = -1
         dist_idx = -1
         supplier_idx = -1
         company_code_idx = -1
 
         for idx, h in enumerate(raw_headers):
-            if any(k in h for k in ["mã sp npp", "mã sp", "distributor_sku", "sku", "ma_sp", "mã sản phẩm"]):
+            if any(k in h for k in ["mã sp xuất hóa đơn", "mã sản phẩm xuất hóa đơn", "mã xuất hóa đơn", "mã xuất hđ", "mã sp xuất hđ", "invoice_product_code", "invoice_code"]):
+                invoice_code_idx = idx
+            elif any(k in h for k in ["mã sp npp", "mã sp", "distributor_sku", "sku", "ma_sp", "mã sản phẩm"]):
                 sku_idx = idx
-            elif any(k in h for k in ["tên sản phẩm xuất hóa đơn", "tên hóa đơn", "invoice_product_name", "invoice_name"]):
+            elif any(k in h for k in ["tên sản phẩm xuất hóa đơn", "tên sp xuất hóa đơn", "tên hóa đơn", "invoice_product_name", "invoice_name"]):
                 invoice_name_idx = idx
             elif any(k in h for k in ["tên sản phẩm npp", "tên sản phẩm", "tên sp", "distributor_name", "distributor_product_name", "ten_sp"]):
                 name_idx = idx
@@ -781,9 +832,9 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
             c.code.strip().upper(): c for c in all_companies if c.code
         }
 
-        # Cache danh sách sản phẩm NPP hiện có theo SKU
-        existing_products = {
-            p.distributor_sku.strip().upper(): p
+        # Cache danh sách sản phẩm NPP hiện có theo cặp (SKU, company_id)
+        existing_products: dict[tuple[str, int | None], DistributorProduct] = {
+            (p.distributor_sku.strip().upper(), p.company_id): p
             for p in db.scalars(select(DistributorProduct)).all()
         }
 
@@ -802,6 +853,12 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
             name_val = str(row[name_idx] or "").strip() if name_idx < len(row) and row[name_idx] is not None else ""
             if not name_val:
                 name_val = f"Sản phẩm {sku_val}"
+
+            invoice_code_val = (
+                str(row[invoice_code_idx] or "").strip().upper()
+                if invoice_code_idx != -1 and invoice_code_idx < len(row) and row[invoice_code_idx] is not None
+                else ""
+            )
 
             invoice_name_val = (
                 str(row[invoice_name_idx] or "").strip()
@@ -832,11 +889,16 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
                 if raw_code and raw_code in companies_by_code:
                     company_id = companies_by_code[raw_code].id
 
-            # Upsert
-            if sku_val in existing_products:
-                item = existing_products[sku_val]
+            upsert_key = (sku_val, company_id)
+
+            # Upsert theo cặp (distributor_sku, company_id)
+            if upsert_key in existing_products:
+                item = existing_products[upsert_key]
                 item.distributor_product_name = name_val
-                item.invoice_product_name = invoice_name_val or None
+                if invoice_code_idx != -1:
+                    item.invoice_product_code = invoice_code_val or None
+                if invoice_name_idx != -1:
+                    item.invoice_product_name = invoice_name_val or None
                 item.distributor_name = dist_val
                 item.supplier = supplier_val
                 item.company_id = company_id
@@ -847,6 +909,7 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
                     distributor_name=dist_val,
                     distributor_sku=sku_val,
                     distributor_product_name=name_val,
+                    invoice_product_code=invoice_code_val or None,
                     invoice_product_name=invoice_name_val or None,
                     supplier=supplier_val,
                     unit="HOP",
@@ -856,7 +919,7 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
                     updated_at=now,
                 )
                 db.add(new_item)
-                existing_products[sku_val] = new_item
+                existing_products[upsert_key] = new_item
                 added += 1
 
         db.commit()

@@ -484,20 +484,48 @@ def compute_tax_inventory_by_mst(
     prod_mst_invoice_override: dict[tuple[int, str], str] = {}
     prod_default_invoice_override: dict[int, str] = {}
     if all_skus:
-        dist_prod_by_sku: dict[str, tuple[str, str, str]] = {}
-        for d_sku, d_name, d_inv_name, d_unit in db.execute(
+        # dist_prod_by_sku_mst[(npp_sku, mst)] = (inv_code, inv_name, dp_name, dp_unit)
+        dist_prod_by_sku_mst: dict[tuple[str, str], tuple[str, str, str, str]] = {}
+        # dist_prod_by_sku[npp_sku] = (inv_name, dp_name, dp_unit, inv_code) (fallback chung)
+        dist_prod_by_sku: dict[str, tuple[str, str, str, str]] = {}
+        inv_code_to_npp: dict[tuple[str, str], str] = {}
+        inv_code_to_npp_default: dict[str, str] = {}
+        for d_sku, d_name, d_inv_code, d_inv_name, d_unit, d_comp_mst in db.execute(
             select(
                 DistributorProduct.distributor_sku,
                 DistributorProduct.distributor_product_name,
+                DistributorProduct.invoice_product_code,
                 DistributorProduct.invoice_product_name,
                 DistributorProduct.unit,
-            )
+                Company.tax_code,
+            ).outerjoin(Company, DistributorProduct.company_id == Company.id)
         ).all():
-            if d_sku:
-                dist_prod_by_sku[d_sku.strip().upper()] = (
-                    (d_inv_name or "").strip(),
-                    (d_name or "").strip(),
-                    (d_unit or "").strip(),
+            if not d_sku:
+                continue
+            sku_u = d_sku.strip().upper()
+            clean_inv_code = (d_inv_code or "").strip().upper()
+            clean_inv_name = (d_inv_name or "").strip()
+            clean_name = (d_name or "").strip()
+            clean_unit = (d_unit or "").strip()
+            clean_mst = (d_comp_mst or "").strip()
+            if clean_mst:
+                dist_prod_by_sku_mst[(sku_u, clean_mst)] = (
+                    clean_inv_code,
+                    clean_inv_name,
+                    clean_name,
+                    clean_unit,
+                )
+                if clean_inv_code:
+                    inv_code_to_npp[(clean_inv_code, clean_mst)] = sku_u
+            if clean_inv_code and clean_inv_code not in inv_code_to_npp_default:
+                inv_code_to_npp_default[clean_inv_code] = sku_u
+            # Ưu tiên dòng chưa gán công ty làm mặc định, hoặc dòng đầu tiên
+            if not clean_mst or sku_u not in dist_prod_by_sku:
+                dist_prod_by_sku[sku_u] = (
+                    clean_inv_name,
+                    clean_name,
+                    clean_unit,
+                    clean_inv_code,
                 )
 
         loaded_prod_ids: set[int] = set()
@@ -556,9 +584,9 @@ def compute_tax_inventory_by_mst(
             p_sku_u = (p.sku or "").strip().upper()
             resolved_npp = (p.npp_code or p_sku_u).strip().upper()
             has_explicit = bool((p._npp_code or "").strip()) or (resolved_npp != p_sku_u)
-            dp_inv_name, dp_name, dp_unit = dist_prod_by_sku.get(resolved_npp, ("", "", ""))
+            dp_inv_name, dp_name, dp_unit, _dp_inv_code = dist_prod_by_sku.get(resolved_npp, ("", "", "", ""))
             if not dp_inv_name and p_sku_u and p_sku_u != resolved_npp:
-                sku_dp_inv, sku_dp_name, sku_dp_unit = dist_prod_by_sku.get(p_sku_u, ("", "", ""))
+                sku_dp_inv, sku_dp_name, sku_dp_unit, _ = dist_prod_by_sku.get(p_sku_u, ("", "", "", ""))
                 dp_inv_name = sku_dp_inv or dp_inv_name
                 dp_name = dp_name or sku_dp_name
                 dp_unit = dp_unit or sku_dp_unit
@@ -597,20 +625,22 @@ def compute_tax_inventory_by_mst(
 
         # Fallback cho các SKU chỉ khai báo trong DistributorProduct mà chưa có trong bảng products
         for sku_u in all_skus:
-            if sku_u not in prod_info and sku_u in dist_prod_by_sku:
-                dp_inv_name, dp_name, dp_unit = dist_prod_by_sku[sku_u]
-                resolved_inv_name = dp_inv_name or dp_name
-                if resolved_inv_name or dp_unit:
-                    prod_info[sku_u] = (
-                        resolved_inv_name,
-                        None,
-                        sku_u,
-                        resolved_inv_name,
-                        dp_unit,
-                        True,
-                        1,
-                        None,
-                    )
+            if sku_u not in prod_info:
+                mapped_npp = inv_code_to_npp_default.get(sku_u, sku_u)
+                if mapped_npp in dist_prod_by_sku:
+                    dp_inv_name, dp_name, dp_unit, _dp_inv_code = dist_prod_by_sku[mapped_npp]
+                    resolved_inv_name = dp_inv_name or dp_name
+                    if resolved_inv_name or dp_unit:
+                        prod_info[sku_u] = (
+                            resolved_inv_name,
+                            None,
+                            mapped_npp,
+                            resolved_inv_name,
+                            dp_unit,
+                            True,
+                            1,
+                            None,
+                        )
 
     sku_positive_by_mst: dict[str, list[dict[str, Any]]] = {}
     balance_lookup: dict[tuple[str, str], float] = {}
@@ -711,18 +741,27 @@ def compute_tax_inventory_by_mst(
                 continue
             p_meta = prod_info.get(sku)
             p_id = p_meta[7] if p_meta else None
-            npp_code = (p_meta[2] if p_meta else sku) or sku
+            npp_code = (p_meta[2] if p_meta else inv_code_to_npp.get((sku, mst)) or inv_code_to_npp_default.get(sku) or sku) or sku
+            dp_mst_entry = (
+                dist_prod_by_sku_mst.get((npp_code, mst))
+                or dist_prod_by_sku_mst.get((sku, mst))
+                if all_skus
+                else None
+            )
             dp_entry = dist_prod_by_sku.get(npp_code) or dist_prod_by_sku.get(sku) if all_skus else None
-            dp_explicit_inv_name = (dp_entry[0] if dp_entry else "")
+            mst_inv_code = (dp_mst_entry[0] if dp_mst_entry else "") or (dp_entry[3] if dp_entry else "") or npp_code
+            dp_mst_inv_name = (dp_mst_entry[1] if dp_mst_entry else "")
+            dp_default_inv_name = (dp_entry[0] if dp_entry else "")
             mst_inv_override = prod_mst_invoice_override.get((p_id, mst), "") if p_id else ""
             pname = (
-                dp_explicit_inv_name
+                dp_mst_inv_name
                 or mst_inv_override
+                or dp_default_inv_name
                 or (p_meta[0] if p_meta else "")
                 or rec["product_name"]
             )
             pvat = p_meta[1] if p_meta else None
-            npp_name = dp_explicit_inv_name or (p_meta[3] if p_meta else "") or pname
+            npp_name = dp_default_inv_name or dp_mst_inv_name or (p_meta[3] if p_meta else "") or pname
             npp_unit = (p_meta[4] if p_meta else "") or rec["unit_name"]
             has_explicit_npp = p_meta[5] if p_meta else False
             conv_factor = p_meta[6] if p_meta else 1
@@ -741,6 +780,7 @@ def compute_tax_inventory_by_mst(
                     "vat_rate": pvat,
                     "has_npp_code": has_explicit_npp,
                     "cqt_skus": set(),
+                    "invoice_product_codes": set(),
                     "msts": set(),
                     "vat_rates_seen": set(),
                     "raw_units_seen": set(),
@@ -762,6 +802,8 @@ def compute_tax_inventory_by_mst(
                 npp_groups[npp_code] = grp
 
             grp["cqt_skus"].add(sku)
+            if mst_inv_code:
+                grp["invoice_product_codes"].add(mst_inv_code)
             grp["msts"].add(mst)
             if pvat is not None:
                 grp["vat_rates_seen"].add(float(pvat))
@@ -799,6 +841,7 @@ def compute_tax_inventory_by_mst(
                     "tax_code": mst,
                     "company_name": rec["company_name"],
                     "sku": sku,
+                    "invoice_product_code": mst_inv_code,
                     "product_name": pname,
                     "unit_name": rec["unit_name"],
                     "conversion_factor": conv_factor,
@@ -841,10 +884,12 @@ def compute_tax_inventory_by_mst(
 
         for npp_code, grp in npp_groups.items():
             cqt_skus_sorted = sorted(grp["cqt_skus"])
+            inv_codes_sorted = sorted(grp["invoice_product_codes"])
             if search_term and not (
                 search_term in npp_code.lower()
                 or search_term in (grp["product_name"] or "").lower()
                 or any(search_term in s.lower() for s in cqt_skus_sorted)
+                or any(search_term in ic.lower() for ic in inv_codes_sorted)
                 or any(
                     search_term in b["tax_code"].lower() or search_term in b["company_name"].lower()
                     for b in grp["mst_breakdown"]
@@ -918,6 +963,8 @@ def compute_tax_inventory_by_mst(
                     "company_name": f"{len(grp['msts'])} MST",
                     "sku": npp_code,
                     "npp_code": npp_code,
+                    "invoice_product_code": inv_codes_sorted[0] if len(inv_codes_sorted) == 1 else (inv_codes_sorted[0] if inv_codes_sorted else npp_code),
+                    "invoice_product_codes": inv_codes_sorted,
                     "has_npp_code": grp["has_npp_code"],
                     "cqt_skus": cqt_skus_sorted,
                     "mst_count": len(grp["msts"]),
@@ -977,13 +1024,22 @@ def compute_tax_inventory_by_mst(
 
             p_meta = prod_info.get(sku)
             p_id = p_meta[7] if p_meta else None
-            npp_code = (p_meta[2] if p_meta else sku) or sku
+            npp_code = (p_meta[2] if p_meta else inv_code_to_npp.get((sku, mst)) or inv_code_to_npp_default.get(sku) or sku) or sku
+            dp_mst_entry = (
+                dist_prod_by_sku_mst.get((npp_code, mst))
+                or dist_prod_by_sku_mst.get((sku, mst))
+                if all_skus
+                else None
+            )
             dp_entry = dist_prod_by_sku.get(npp_code) or dist_prod_by_sku.get(sku) if all_skus else None
-            dp_explicit_inv_name = (dp_entry[0] if dp_entry else "")
+            mst_inv_code = (dp_mst_entry[0] if dp_mst_entry else "") or (dp_entry[3] if dp_entry else "") or npp_code
+            dp_mst_inv_name = (dp_mst_entry[1] if dp_mst_entry else "")
+            dp_default_inv_name = (dp_entry[0] if dp_entry else "")
             mst_inv_override = prod_mst_invoice_override.get((p_id, mst), "") if p_id else ""
             pname = (
-                dp_explicit_inv_name
+                dp_mst_inv_name
                 or mst_inv_override
+                or dp_default_inv_name
                 or (p_meta[0] if p_meta else "")
                 or rec["product_name"]
             )
@@ -992,6 +1048,7 @@ def compute_tax_inventory_by_mst(
             if search_term and not (
                 search_term in sku.lower()
                 or search_term in npp_code.lower()
+                or search_term in mst_inv_code.lower()
                 or search_term in pname.lower()
                 or search_term in mst.lower()
                 or search_term in rec["company_name"].lower()
@@ -1047,6 +1104,8 @@ def compute_tax_inventory_by_mst(
                     "company_name": rec["company_name"],
                     "sku": sku,
                     "npp_code": npp_code,
+                    "invoice_product_code": mst_inv_code,
+                    "invoice_product_codes": [mst_inv_code],
                     "has_npp_code": bool(p_meta[5]) if p_meta else False,
                     "cqt_skus": [sku],
                     "mst_count": 1,

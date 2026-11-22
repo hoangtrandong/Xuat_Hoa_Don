@@ -18,6 +18,7 @@ import {
   Download,
   Info,
   Check,
+  Plus,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { API_URL, apiFetch } from "@/lib/api";
@@ -32,6 +33,7 @@ type DistributorProductRow = {
   distributor_name: string;
   distributor_sku: string;
   distributor_product_name: string;
+  invoice_product_code: string | null;
   invoice_product_name: string | null;
   supplier: string;
   unit: string;
@@ -52,6 +54,7 @@ type ExcelPreviewRow = {
   distributor_name: string;
   distributor_sku: string;
   distributor_product_name: string;
+  invoice_product_code: string;
   invoice_product_name: string;
   supplier: string;
   company_code: string;
@@ -72,10 +75,12 @@ export default function ProductCompanyManagementPage() {
   const [error, setError] = useState<string>("");
   const [toastMessage, setToastMessage] = useState<string>("");
 
-  // State Chỉnh sửa Modal
+  // State Thêm mới / Chỉnh sửa Modal
+  const [isCreatingNew, setIsCreatingNew] = useState<boolean>(false);
   const [editingRow, setEditingRow] = useState<DistributorProductRow | null>(null);
   const [editSku, setEditSku] = useState<string>("");
   const [editName, setEditName] = useState<string>("");
+  const [editInvoiceCode, setEditInvoiceCode] = useState<string>("");
   const [editInvoiceName, setEditInvoiceName] = useState<string>("");
   const [editDistributor, setEditDistributor] = useState<string>("");
   const [editSupplier, setEditSupplier] = useState<string>("");
@@ -145,6 +150,7 @@ export default function ProductCompanyManagementPage() {
         const match =
           row.distributor_sku.toLowerCase().includes(q) ||
           row.distributor_product_name.toLowerCase().includes(q) ||
+          (row.invoice_product_code && row.invoice_product_code.toLowerCase().includes(q)) ||
           (row.invoice_product_name && row.invoice_product_name.toLowerCase().includes(q)) ||
           row.distributor_name.toLowerCase().includes(q) ||
           row.supplier.toLowerCase().includes(q) ||
@@ -196,11 +202,27 @@ export default function ProductCompanyManagementPage() {
     return filteredRows.slice(start, start + pageSize);
   }, [filteredRows, safePage, pageSize]);
 
+  // Mở modal thêm mới
+  function openCreateModal() {
+    setIsCreatingNew(true);
+    setEditingRow(null);
+    setEditSku("");
+    setEditName("");
+    setEditInvoiceCode("");
+    setEditInvoiceName("");
+    setEditDistributor("Nhà Phân Phối Mai Gold");
+    setEditSupplier("Vinamilk");
+    setEditCompanyId("");
+    setEditError("");
+  }
+
   // Mở modal sửa
   function openEditModal(row: DistributorProductRow) {
+    setIsCreatingNew(false);
     setEditingRow(row);
     setEditSku(row.distributor_sku);
     setEditName(row.distributor_product_name);
+    setEditInvoiceCode(row.invoice_product_code || "");
     setEditInvoiceName(row.invoice_product_name || "");
     setEditDistributor(row.distributor_name);
     setEditSupplier(row.supplier);
@@ -208,10 +230,10 @@ export default function ProductCompanyManagementPage() {
     setEditError("");
   }
 
-  // Lưu chỉnh sửa
+  // Lưu thêm mới hoặc chỉnh sửa
   async function handleSaveEdit(e: React.FormEvent) {
     e.preventDefault();
-    if (!editingRow) return;
+    if (!isCreatingNew && !editingRow) return;
     if (!editSku.trim() || !editName.trim()) {
       setEditError("Mã SP NPP và Tên sản phẩm không được để trống.");
       return;
@@ -221,15 +243,44 @@ export default function ProductCompanyManagementPage() {
     setEditError("");
     try {
       const selectedComp = companies.find((c) => String(c.id) === editCompanyId);
+      const cleanSku = editSku.trim().toUpperCase();
+      const cleanInvCode = editInvoiceCode.trim().toUpperCase() || null;
+      const cleanInvName = editInvoiceName.trim() || null;
+
+      if (isCreatingNew) {
+        const res = await apiFetch(`${API_URL}/product-groups/distributor-products`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            distributor_sku: cleanSku,
+            distributor_product_name: editName.trim(),
+            invoice_product_code: cleanInvCode,
+            invoice_product_name: cleanInvName,
+            distributor_name: editDistributor.trim() || "Nhà Phân Phối Mai Gold",
+            supplier: editSupplier.trim() || "Vinamilk",
+            company_id: editCompanyId ? Number(editCompanyId) : null,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Không thể thêm mới mã sản phẩm NPP.");
+        setRows((prev) => [data as DistributorProductRow, ...prev]);
+        setToastMessage(`Đã thêm mới mã sản phẩm NPP '${cleanSku}' thành công.`);
+        setTimeout(() => setToastMessage(""), 4000);
+        setIsCreatingNew(false);
+        return;
+      }
+
+      if (!editingRow) return;
       const res = await apiFetch(`${API_URL}/product-groups/distributor-products`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: editingRow.id,
           original_code: editingRow.distributor_sku,
-          distributor_sku: editSku.trim().toUpperCase(),
+          distributor_sku: cleanSku,
           distributor_product_name: editName.trim(),
-          invoice_product_name: editInvoiceName.trim() || null,
+          invoice_product_code: cleanInvCode,
+          invoice_product_name: cleanInvName,
           distributor_name: editDistributor.trim() || "Nhà Phân Phối Mai Gold",
           supplier: editSupplier.trim() || "Vinamilk",
           company_id: editCompanyId ? Number(editCompanyId) : null,
@@ -245,9 +296,10 @@ export default function ProductCompanyManagementPage() {
           r.id === editingRow.id
             ? {
                 ...r,
-                distributor_sku: editSku.trim().toUpperCase(),
+                distributor_sku: cleanSku,
                 distributor_product_name: editName.trim(),
-                invoice_product_name: editInvoiceName.trim() || null,
+                invoice_product_code: cleanInvCode,
+                invoice_product_name: cleanInvName,
                 distributor_name: editDistributor.trim() || "Nhà Phân Phối Mai Gold",
                 supplier: editSupplier.trim() || "Vinamilk",
                 company_id: editCompanyId ? Number(editCompanyId) : null,
@@ -258,11 +310,11 @@ export default function ProductCompanyManagementPage() {
         )
       );
 
-      setToastMessage(`Đã cập nhật mã sản phẩm NPP '${editSku.trim().toUpperCase()}' thành công.`);
+      setToastMessage(`Đã cập nhật mã sản phẩm NPP '${cleanSku}' thành công.`);
       setTimeout(() => setToastMessage(""), 4000);
       setEditingRow(null);
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : "Lỗi khi cập nhật.");
+      setEditError(err instanceof Error ? err.message : "Lỗi khi lưu dữ liệu.");
     } finally {
       setSavingEdit(false);
     }
@@ -319,15 +371,26 @@ export default function ProductCompanyManagementPage() {
 
       let skuIdx = -1;
       let nameIdx = -1;
+      let invoiceCodeIdx = -1;
       let invoiceNameIdx = -1;
       let distIdx = -1;
       let supplierIdx = -1;
       let compCodeIdx = -1;
 
       headers.forEach((h, idx) => {
-        if (h.includes("mã sp npp") || h.includes("mã sp") || h.includes("distributor_sku") || h.includes("sku")) {
+        if (
+          h.includes("mã sp xuất hóa đơn") ||
+          h.includes("mã sản phẩm xuất hóa đơn") ||
+          h.includes("mã xuất hóa đơn") ||
+          h.includes("mã xuất hđ") ||
+          h.includes("mã sp xuất hđ") ||
+          h.includes("invoice_product_code") ||
+          h.includes("invoice_code")
+        ) {
+          invoiceCodeIdx = idx;
+        } else if (h.includes("mã sp npp") || h.includes("mã sp") || h.includes("distributor_sku") || h.includes("sku")) {
           skuIdx = idx;
-        } else if (h.includes("tên sản phẩm xuất hóa đơn") || h.includes("tên hóa đơn") || h.includes("invoice_product_name") || h.includes("invoice_name")) {
+        } else if (h.includes("tên sản phẩm xuất hóa đơn") || h.includes("tên sp xuất hóa đơn") || h.includes("tên hóa đơn") || h.includes("invoice_product_name") || h.includes("invoice_name")) {
           invoiceNameIdx = idx;
         } else if (h.includes("tên sản phẩm") || h.includes("tên sp") || h.includes("distributor_name") || h.includes("distributor_product_name")) {
           nameIdx = idx;
@@ -343,8 +406,10 @@ export default function ProductCompanyManagementPage() {
       if (skuIdx === -1) skuIdx = 2 < headers.length ? 2 : 0;
       if (nameIdx === -1) nameIdx = 3 < headers.length ? 3 : 1;
 
-      const existingMap = new Map(rows.map((r) => [r.distributor_sku.toUpperCase(), r]));
       const companyMap = new Map(companies.map((c) => [c.code.toUpperCase(), c]));
+      const existingKeySet = new Set(
+        rows.map((r) => `${r.distributor_sku.toUpperCase()}::${r.company_id ?? "NONE"}`)
+      );
 
       const previewList: ExcelPreviewRow[] = [];
       for (let i = 1; i < rawData.length; i++) {
@@ -355,6 +420,9 @@ export default function ProductCompanyManagementPage() {
         if (!sku || sku.includes("BẮT BUỘC") || sku.includes("MÃ SP")) continue;
 
         const name = String(row[nameIdx] || "").trim() || `Sản phẩm ${sku}`;
+        const invoiceCode = invoiceCodeIdx !== -1 && row[invoiceCodeIdx]
+          ? String(row[invoiceCodeIdx]).trim().toUpperCase()
+          : "";
         const invoiceName = invoiceNameIdx !== -1 && row[invoiceNameIdx]
           ? String(row[invoiceNameIdx]).trim()
           : "";
@@ -363,14 +431,16 @@ export default function ProductCompanyManagementPage() {
         const compCode = compCodeIdx !== -1 && row[compCodeIdx] ? String(row[compCodeIdx]).trim().toUpperCase() : "";
         const matchedComp = compCode ? companyMap.get(compCode) : null;
         const compName = matchedComp ? matchedComp.name : compCode ? "Mã chưa khớp công ty QL" : "";
+        const upsertKey = `${sku}::${matchedComp ? matchedComp.id : "NONE"}`;
 
-        const actionType: ExcelPreviewRow["action_type"] = existingMap.has(sku) ? "Cập nhật" : "Thêm mới";
+        const actionType: ExcelPreviewRow["action_type"] = existingKeySet.has(upsertKey) ? "Cập nhật" : "Thêm mới";
 
         previewList.push({
           stt: previewList.length + 1,
           distributor_name: dist || "Nhà Phân Phối Mai Gold",
           distributor_sku: sku,
           distributor_product_name: name,
+          invoice_product_code: invoiceCode,
           invoice_product_name: invoiceName,
           supplier: supplier || "Vinamilk",
           company_code: compCode,
@@ -422,7 +492,7 @@ export default function ProductCompanyManagementPage() {
     }
   }
 
-  // Tải file Excel mẫu 8 cột chuẩn
+  // Tải file Excel mẫu 9 cột chuẩn
   function handleDownloadTemplate() {
     const templateRows = [
       {
@@ -430,7 +500,8 @@ export default function ProductCompanyManagementPage() {
         "Nhà phân phối": "Nhà Phân Phối Mai Gold",
         "Mã SP NPP": "01TD03",
         "Tên Sản Phẩm NPP": "Sữa tươi tiệt trùng có đường 180ml",
-        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML",
+        "Mã SP Xuất Hóa Đơn": "01TD03",
+        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML (CT01)",
         "Nhà cung cấp": "Vinamilk",
         "Mã Công ty QL": "CT01",
         "Tên Công ty QL": "Công ty TNHH Phân Phối Mai Gold",
@@ -438,19 +509,21 @@ export default function ProductCompanyManagementPage() {
       {
         STT: 2,
         "Nhà phân phối": "Nhà Phân Phối Mai Gold",
-        "Mã SP NPP": "07KD12",
-        "Tên Sản Phẩm NPP": "Sữa chua ăn lựu đỏ 100g",
-        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA CHUA ĂN VINAMILK 100G",
+        "Mã SP NPP": "01TD03",
+        "Tên Sản Phẩm NPP": "Sữa tươi tiệt trùng có đường 180ml",
+        "Mã SP Xuất Hóa Đơn": "01TD03-B",
+        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA TƯƠI TIỆT TRÙNG VINAMILK 180ML (CT02)",
         "Nhà cung cấp": "Vinamilk",
-        "Mã Công ty QL": "",
-        "Tên Công ty QL": "",
+        "Mã Công ty QL": "CT02",
+        "Tên Công ty QL": "Công ty Cổ Phần Tiếp Vận Nam Việt",
       },
       {
         STT: 3,
         "Nhà phân phối": "Nhà Phân Phối Mai Gold",
-        "Mã SP NPP": "01SX11",
-        "Tên Sản Phẩm NPP": "Sữa dinh dưỡng Optimum Gold 110ml",
-        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA DINH DƯỠNG OPTIMUM GOLD 110ML",
+        "Mã SP NPP": "07KD12",
+        "Tên Sản Phẩm NPP": "Sữa chua ăn lựu đỏ 100g",
+        "Mã SP Xuất Hóa Đơn": "07KD12",
+        "Tên Sản Phẩm Xuất Hóa Đơn": "SỮA CHUA ĂN VINAMILK 100G",
         "Nhà cung cấp": "Vinamilk",
         "Mã Công ty QL": "",
         "Tên Công ty QL": "",
@@ -467,6 +540,7 @@ export default function ProductCompanyManagementPage() {
       "Nhà phân phối": r.distributor_name || "Nhà Phân Phối Mai Gold",
       "Mã SP NPP": r.distributor_sku,
       "Tên Sản Phẩm NPP": r.distributor_product_name,
+      "Mã SP Xuất Hóa Đơn": r.invoice_product_code || "",
       "Tên Sản Phẩm Xuất Hóa Đơn": r.invoice_product_name || "",
       "Nhà cung cấp": r.supplier || "Vinamilk",
       "Mã Công ty QL": r.company_code || "",
@@ -512,9 +586,19 @@ export default function ProductCompanyManagementPage() {
           <div className="flex items-center gap-2">
             <button
               type="button"
+              onClick={openCreateModal}
+              className="inline-flex items-center gap-1 rounded bg-sky-600 hover:bg-sky-700 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors shadow-sm"
+              title="Thêm mới 1 dòng mã SP NPP (có thể cùng Mã SP NPP cho nhiều Công ty QL khác nhau)"
+            >
+              <Plus size={12} />
+              Thêm mới
+            </button>
+
+            <button
+              type="button"
               onClick={handleDownloadTemplate}
               className="inline-flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors"
-              title="Tải file Excel mẫu gồm 8 cột chuẩn để nhập dữ liệu"
+              title="Tải file Excel mẫu gồm 9 cột chuẩn để nhập dữ liệu"
             >
               <Download size={12} />
               Tải file mẫu
@@ -711,6 +795,7 @@ export default function ProductCompanyManagementPage() {
                 <th className="px-2.5 py-2">Nhà phân phối</th>
                 <th className="px-2.5 py-2">Mã SP NPP</th>
                 <th className="px-2.5 py-2">Tên Sản Phẩm NPP</th>
+                <th className="px-2.5 py-2">Mã SP Xuất HĐ</th>
                 <th className="px-2.5 py-2">Tên Sản Phẩm Xuất Hóa Đơn</th>
                 <th className="px-2.5 py-2">Nhà cung cấp</th>
                 <th className="px-2.5 py-2">Mã Công ty QL</th>
@@ -722,7 +807,7 @@ export default function ProductCompanyManagementPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={10} className="px-4 py-10 text-center text-xs text-slate-500">
                     <span className="inline-flex items-center gap-2">
                       <Loader2 size={15} className="animate-spin text-sky-600" />
                       Đang tải danh sách mã sản phẩm NPP nội bộ...
@@ -731,7 +816,7 @@ export default function ProductCompanyManagementPage() {
                 </tr>
               ) : pagedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={10} className="px-4 py-10 text-center text-xs text-slate-500">
                     {error || "Chưa có mã sản phẩm NPP nào. Hãy bấm 'Upload thêm & Sửa hàng loạt' hoặc tải file mẫu để tải lên."}
                   </td>
                 </tr>
@@ -761,6 +846,16 @@ export default function ProductCompanyManagementPage() {
 
                       <td className="px-2.5 py-1.5 font-medium text-slate-800">
                         {row.distributor_product_name}
+                      </td>
+
+                      <td className="px-2.5 py-1.5 whitespace-nowrap font-mono">
+                        {row.invoice_product_code ? (
+                          <span className="rounded bg-violet-50 border border-violet-300 px-1.5 py-0.5 font-bold text-violet-800">
+                            {row.invoice_product_code}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] italic text-slate-400">Theo mã NPP</span>
+                        )}
                       </td>
 
                       <td className="px-2.5 py-1.5 max-w-[260px]">
@@ -882,20 +977,29 @@ export default function ProductCompanyManagementPage() {
         </footer>
       </div>
 
-      {/* MODAL CHỈNH SỬA MÃ SP NPP & GÁN CÔNG TY QUẢN LÝ (Standard GEMINI.md) */}
-      {editingRow && (
+      {/* MODAL THÊM MỚI / CHỈNH SỬA MÃ SP NPP & GÁN CÔNG TY QUẢN LÝ (Standard GEMINI.md) */}
+      {(isCreatingNew || editingRow) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 animate-in fade-in-50">
           <div className="w-full max-w-xl border border-slate-400 bg-white shadow-2xl">
             <header className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Pencil size={17} className="text-red-500" />
+                {isCreatingNew ? (
+                  <Plus size={17} className="text-red-500" />
+                ) : (
+                  <Pencil size={17} className="text-red-500" />
+                )}
                 <h2 className="text-xs font-bold uppercase tracking-wide text-white">
-                  Chỉnh Sửa Mã SP NPP & Gán Công Ty Quản Lý
+                  {isCreatingNew
+                    ? "Thêm Mới Mã SP NPP & Cấu Hình Xuất Hóa Đơn Theo Công Ty"
+                    : "Chỉnh Sửa Mã SP NPP & Gán Công Ty Quản Lý"}
                 </h2>
               </div>
               <button
                 type="button"
-                onClick={() => setEditingRow(null)}
+                onClick={() => {
+                  setIsCreatingNew(false);
+                  setEditingRow(null);
+                }}
                 className="rounded p-1 text-white hover:bg-white/10"
               >
                 <X size={16} />
@@ -920,6 +1024,7 @@ export default function ProductCompanyManagementPage() {
                       type="text"
                       value={editSku}
                       onChange={(e) => setEditSku(e.target.value.toUpperCase())}
+                      placeholder="VD: 01SB10"
                       className={inputCls}
                       required
                     />
@@ -927,12 +1032,13 @@ export default function ProductCompanyManagementPage() {
 
                   <div>
                     <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                      Nhà phân phối
+                      Mã SP Xuất Hóa Đơn (Theo Công ty QL)
                     </label>
                     <input
                       type="text"
-                      value={editDistributor}
-                      onChange={(e) => setEditDistributor(e.target.value)}
+                      value={editInvoiceCode}
+                      onChange={(e) => setEditInvoiceCode(e.target.value.toUpperCase())}
+                      placeholder="Để trống nếu dùng theo Mã SP NPP"
                       className={inputCls}
                     />
                   </div>
@@ -952,18 +1058,30 @@ export default function ProductCompanyManagementPage() {
 
                   <div className="sm:col-span-2">
                     <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                      Tên Sản Phẩm Xuất Hóa Đơn
+                      Tên Sản Phẩm Xuất Hóa Đơn (Theo Công ty QL)
                     </label>
                     <input
                       type="text"
                       value={editInvoiceName}
                       onChange={(e) => setEditInvoiceName(e.target.value)}
-                      placeholder="Tên sẽ hiển thị trên hóa đơn điện tử"
+                      placeholder="Tên sẽ hiển thị trên hóa đơn điện tử của Công ty này"
                       className={inputCls}
                     />
                     <p className="mt-0.5 text-[9px] text-slate-400">
                       Để trống nếu muốn hệ thống dùng tên Sản Phẩm NPP làm tên trên hóa đơn.
                     </p>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                      Nhà phân phối
+                    </label>
+                    <input
+                      type="text"
+                      value={editDistributor}
+                      onChange={(e) => setEditDistributor(e.target.value)}
+                      className={inputCls}
+                    />
                   </div>
 
                   <div>
@@ -978,7 +1096,7 @@ export default function ProductCompanyManagementPage() {
                     />
                   </div>
 
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                       Công ty Quản lý (Khớp từ Đăng ký quản lý)
                     </label>
@@ -987,7 +1105,7 @@ export default function ProductCompanyManagementPage() {
                       onChange={(e) => setEditCompanyId(e.target.value)}
                       className={inputCls}
                     >
-                      <option value="">[-- Chưa gán Công ty Quản lý --]</option>
+                      <option value="">[-- Chưa gán Công ty Quản lý (Dùng chung) --]</option>
                       {companies.map((c) => (
                         <option key={c.id} value={String(c.id)}>
                           [{c.code}] - {c.name}
@@ -1000,19 +1118,28 @@ export default function ProductCompanyManagementPage() {
                 <div className="rounded bg-sky-50 border border-sky-200 p-2 text-[11px] text-sky-800 flex items-start gap-1.5">
                   <Info size={14} className="shrink-0 mt-0.5 text-sky-600" />
                   <span>
-                    Nếu chọn <strong>[-- Chưa gán Công ty Quản lý --]</strong>, sản phẩm sẽ để trống và chưa thuộc công ty con nào phụ trách xuất hóa đơn.
+                    Bạn có thể đăng ký <strong>nhiều dòng cùng Mã SP NPP</strong> tương ứng với <strong>từng Công ty quản lý khác nhau</strong> để khai báo Mã SP Xuất Hóa Đơn &amp; Tên SP Xuất Hóa Đơn riêng cho từng công ty.
                   </span>
                 </div>
               </div>
 
               <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
                 <span className="text-[10px] text-slate-500">
-                  Mã gốc: <strong>{editingRow.distributor_sku}</strong>
+                  {editingRow ? (
+                    <>
+                      Mã gốc: <strong>{editingRow.distributor_sku}</strong>
+                    </>
+                  ) : (
+                    "Thêm mới dòng cấu hình xuất hóa đơn theo Công ty QL"
+                  )}
                 </span>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setEditingRow(null)}
+                    onClick={() => {
+                      setIsCreatingNew(false);
+                      setEditingRow(null);
+                    }}
                     className="rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
                   >
                     Hủy bỏ
@@ -1027,7 +1154,7 @@ export default function ProductCompanyManagementPage() {
                     ) : (
                       <CheckCircle2 size={13} />
                     )}
-                    Lưu thay đổi
+                    {isCreatingNew ? "Thêm mới" : "Lưu thay đổi"}
                   </button>
                 </div>
               </footer>
@@ -1064,10 +1191,10 @@ export default function ProductCompanyManagementPage() {
                 </div>
                 <ul className="list-disc list-inside space-y-0.5 text-[11px] text-slate-700">
                   <li>
-                    <strong>File Excel gồm 8 cột:</strong> STT, Nhà phân phối, Mã SP NPP, Tên Sản Phẩm NPP, Tên Sản Phẩm Xuất Hóa Đơn, Nhà cung cấp, Mã Công ty QL, Tên Công ty QL.
+                    <strong>File Excel gồm 9 cột:</strong> STT, Nhà phân phối, Mã SP NPP, Tên Sản Phẩm NPP, Mã SP Xuất Hóa Đơn, Tên Sản Phẩm Xuất Hóa Đơn, Nhà cung cấp, Mã Công ty QL, Tên Công ty QL.
                   </li>
                   <li>
-                    <strong>Mã Công ty QL:</strong> Khớp theo mã của Công ty trong <em>Đăng ký quản lý</em>. Nếu để trống thì hệ thống sẽ <strong>để trống (chưa gán)</strong>.
+                    <strong>Nhiều Công ty QL cho cùng 1 Mã SP NPP:</strong> Hệ thống đối soát theo cặp <strong>(Mã SP NPP + Mã Công ty QL)</strong>, cho phép khai báo Mã &amp; Tên SP Xuất Hóa Đơn riêng cho từng Công ty quản lý.
                   </li>
                   <li>
                     <strong>Chỉnh sửa hàng loạt:</strong> Nếu Mã SP NPP đã có trong danh mục, hệ thống sẽ tự động cập nhật lại thông tin từ file Excel (Bulk Edit). Nếu mã chưa có, hệ thống sẽ thêm mới.
@@ -1127,6 +1254,7 @@ export default function ProductCompanyManagementPage() {
                           <th className="px-2 py-1.5">Nhà phân phối</th>
                           <th className="px-2 py-1.5">Mã SP NPP</th>
                           <th className="px-2 py-1.5">Tên Sản Phẩm NPP</th>
+                          <th className="px-2 py-1.5">Mã SP Xuất HĐ</th>
                           <th className="px-2 py-1.5">Tên Sản Phẩm Xuất Hóa Đơn</th>
                           <th className="px-2 py-1.5">Nhà cung cấp</th>
                           <th className="px-2 py-1.5">Mã Công ty QL</th>
@@ -1146,6 +1274,9 @@ export default function ProductCompanyManagementPage() {
                               {p.distributor_sku}
                             </td>
                             <td className="px-2 py-1">{p.distributor_product_name}</td>
+                            <td className="px-2 py-1 font-mono font-bold text-violet-800 whitespace-nowrap">
+                              {p.invoice_product_code || <span className="text-slate-400 font-normal italic">Theo mã NPP</span>}
+                            </td>
                             <td className="px-2 py-1 font-semibold text-slate-800">
                               {p.invoice_product_name || <span className="text-slate-400 italic">Chưa cấu hình</span>}
                             </td>

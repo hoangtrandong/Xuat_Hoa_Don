@@ -1059,4 +1059,109 @@ def test_mst_cutoff_date_excludes_old_invoices_even_for_zero_opening_skus(db_ses
     assert daily["summary"]["period_closing_qty"] == 5.0
 
 
+def test_multiple_companies_per_distributor_sku_with_distinct_invoice_codes_and_names(db_session):
+    """Cùng 1 Mã SP NPP có thể đăng ký cho 2 Công ty QL khác nhau với Mã SP xuất HĐ và Tên SP xuất HĐ riêng."""
+    from app.models.product import DistributorProduct, Product, ProductCategory, ProductUnit
+
+    dist, comp_a, comp_b = _seed_distributor_and_companies(db_session)
+    cat = ProductCategory(code="SUA3", name="Sua")
+    unit = ProductUnit(code="HOP3", name="Hộp")
+    db_session.add_all([cat, unit])
+    db_session.flush()
+
+    p = Product(sku="01SB10", name="Ten Goc", category_id=cat.id, unit_id=unit.id)
+    p.npp_code = "01SB10"
+    dp_a = DistributorProduct(
+        distributor_sku="01SB10",
+        distributor_product_name="Creamer NSPN 1284g",
+        invoice_product_code="INV-A-01",
+        invoice_product_name="Sữa đặc NSPN 1284g (Công ty A)",
+        company_id=comp_a.id,
+        unit="HOP",
+    )
+    dp_b = DistributorProduct(
+        distributor_sku="01SB10",
+        distributor_product_name="Creamer NSPN 1284g",
+        invoice_product_code="INV-B-01",
+        invoice_product_name="Creamer đặc NSPN 1284g (Công ty B)",
+        company_id=comp_b.id,
+        unit="HOP",
+    )
+    db_session.add_all([p, dp_a, dp_b])
+    db_session.flush()
+
+    db_session.add_all([
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0009201",
+            invoice_date=datetime(2026, 11, 10),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code=comp_a.tax_code,
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="01SB10",
+                    product_name="Ten XML A",
+                    unit_name="Hộp",
+                    quantity=10,
+                    unit_price=50000,
+                    amount_before_tax=500_000,
+                )
+            ],
+        ),
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TBB",
+            invoice_number="0009202",
+            invoice_date=datetime(2026, 11, 11),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code=comp_b.tax_code,
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="01SB10",
+                    product_name="Ten XML B",
+                    unit_name="Hộp",
+                    quantity=25,
+                    unit_price=50000,
+                    amount_before_tax=1_250_000,
+                )
+            ],
+        ),
+    ])
+    db_session.commit()
+
+    # 1. Chế độ gộp NPP_SKU -> 1 dòng chung, mst_breakdown tách đúng Mã/Tên xuất HĐ từng MST
+    npp_res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id, group_by="NPP_SKU")
+    assert len(npp_res["items"]) == 1
+    row = npp_res["items"][0]
+    assert row["npp_code"] == "01SB10"
+    assert row["invoice_product_codes"] == ["INV-A-01", "INV-B-01"]
+    assert row["balance_qty"] == 35.0
+    by_mst = {b["tax_code"]: b for b in row["mst_breakdown"]}
+    assert by_mst[comp_a.tax_code]["invoice_product_code"] == "INV-A-01"
+    assert by_mst[comp_a.tax_code]["product_name"] == "Sữa đặc NSPN 1284g (Công ty A)"
+    assert by_mst[comp_b.tax_code]["invoice_product_code"] == "INV-B-01"
+    assert by_mst[comp_b.tax_code]["product_name"] == "Creamer đặc NSPN 1284g (Công ty B)"
+
+    # 2. Chế độ MST_SKU -> 2 dòng riêng biệt theo từng MST với đúng Mã/Tên xuất HĐ
+    mst_res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id, group_by="MST_SKU")
+    assert len(mst_res["items"]) == 2
+    mst_rows = {item["tax_code"]: item for item in mst_res["items"]}
+    assert mst_rows[comp_a.tax_code]["invoice_product_code"] == "INV-A-01"
+    assert mst_rows[comp_a.tax_code]["product_name"] == "Sữa đặc NSPN 1284g (Công ty A)"
+    assert mst_rows[comp_b.tax_code]["invoice_product_code"] == "INV-B-01"
+    assert mst_rows[comp_b.tax_code]["product_name"] == "Creamer đặc NSPN 1284g (Công ty B)"
+
+
+
 

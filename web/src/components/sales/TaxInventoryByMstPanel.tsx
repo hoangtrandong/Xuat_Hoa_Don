@@ -31,6 +31,7 @@ interface MstBreakdownItem {
   tax_code: string;
   company_name: string;
   sku: string;
+  invoice_product_code?: string;
   product_name: string;
   unit_name: string;
   conversion_factor?: number;
@@ -61,6 +62,8 @@ interface TaxInventoryRow {
   company_name: string;
   sku: string;
   npp_code?: string;
+  invoice_product_code?: string;
+  invoice_product_codes?: string[];
   has_npp_code?: boolean;
   cqt_skus?: string[];
   mst_count?: number;
@@ -1153,10 +1156,30 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                     </td>
                   )}
                   <td className="px-2.5 py-1.5 whitespace-nowrap">
-                    <div className="font-mono font-bold text-sky-800">{r.npp_code || r.sku}</div>
+                    <div className="font-mono font-bold text-sky-800">
+                      {groupBy === "MST_SKU"
+                        ? r.invoice_product_code || r.npp_code || r.sku
+                        : r.npp_code || r.sku}
+                    </div>
+                    {groupBy === "MST_SKU" && r.invoice_product_code && r.invoice_product_code !== r.sku && (
+                      <div className="text-[10px] font-mono text-slate-400">
+                        CQT: {r.sku}
+                      </div>
+                    )}
                     {groupBy === "NPP_SKU" && (
                       <div className="text-[10px] text-slate-500">
                         {r.mst_count ?? 1} MST
+                        {r.invoice_product_codes &&
+                          r.invoice_product_codes.length > 0 &&
+                          !(r.invoice_product_codes.length === 1 && r.invoice_product_codes[0] === (r.npp_code || r.sku)) && (
+                            <span
+                              className="ml-1 font-mono font-semibold text-violet-700"
+                              title={`Mã SP xuất HĐ: ${r.invoice_product_codes.join(", ")}`}
+                            >
+                              · HĐ: {r.invoice_product_codes.slice(0, 2).join(", ")}
+                              {r.invoice_product_codes.length > 2 ? ` +${r.invoice_product_codes.length - 2}` : ""}
+                            </span>
+                          )}
                         {r.cqt_skus && r.cqt_skus.length > 0 && !(r.cqt_skus.length === 1 && r.cqt_skus[0] === (r.npp_code || r.sku)) && (
                           <span className="ml-1 font-mono text-slate-400" title={`Mã CQT gộp: ${r.cqt_skus.join(", ")}`}>
                             · CQT: {r.cqt_skus.slice(0, 2).join(", ")}
@@ -1461,7 +1484,12 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                           </div>
                         </td>
                         <td className="px-2.5 py-1.5 font-mono font-bold text-sky-800 whitespace-nowrap">
-                          <div>{b.sku}</div>
+                          <div>{b.invoice_product_code || b.sku}</div>
+                          {b.invoice_product_code && b.invoice_product_code !== b.sku && (
+                            <div className="text-[9px] font-normal text-slate-400">
+                              CQT: {b.sku}
+                            </div>
+                          )}
                           {(b.conversion_factor ?? 1) > 1 && (
                             <div className="text-[9px] font-semibold text-violet-700">
                               Quy đổi: ×{b.conversion_factor} ({b.unit_name})

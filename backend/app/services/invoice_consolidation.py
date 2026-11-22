@@ -79,6 +79,7 @@ def resolve_invoice_item_presentation(
     raw_code: str,
     raw_name: str,
     raw_unit: str,
+    distributor_invoice_code: str | None = None,
     distributor_invoice_name: str | None = None,
 ) -> dict[str, Any]:
     """Phân giải Mã hàng, Tên hàng, ĐVT xuất hóa đơn và Tỷ lệ quy đổi quy cách.
@@ -123,6 +124,10 @@ def resolve_invoice_item_presentation(
             resolved_unit = link.invoice_unit_name.strip()
         conv_num = max(1, int(link.conversion_num or 1))
         conv_den = max(1, int(link.conversion_den or 1))
+
+    manual_invoice_code = (distributor_invoice_code or "").strip().upper()
+    if manual_invoice_code:
+        resolved_code = manual_invoice_code
 
     manual_invoice_name = (distributor_invoice_name or "").strip()
     if manual_invoice_name:
@@ -245,13 +250,18 @@ def consolidate_dms_orders_for_invoicing(
         if p._npp_code:
             prod_map[p._npp_code.strip().upper()] = p
 
-    distributor_invoice_name_map: dict[str, str] = {}
+    distributor_invoice_profile_map: dict[tuple[str, int | None], tuple[str, str]] = {}
     distributor_products = db.scalars(select(DistributorProduct)).all()
     for distributor_product in distributor_products:
         sku = (distributor_product.distributor_sku or "").strip().upper()
+        invoice_code = (distributor_product.invoice_product_code or "").strip().upper()
         invoice_name = (distributor_product.invoice_product_name or "").strip()
         if sku:
-            distributor_invoice_name_map[sku] = invoice_name
+            key = (sku, distributor_product.company_id)
+            distributor_invoice_profile_map[key] = (invoice_code, invoice_name)
+            # Giữ thêm fallback chung nếu chưa có dòng company_id=None
+            if distributor_product.company_id is not None and (sku, None) not in distributor_invoice_profile_map:
+                distributor_invoice_profile_map[(sku, None)] = (invoice_code, invoice_name)
 
     # Nạp sẵn bảng ProductCompany (kèm Company) 1 lần để phân giải Công ty quản lý & Quy đổi quy cách (zero N+1)
     pc_links = db.scalars(
@@ -413,6 +423,20 @@ def consolidate_dms_orders_for_invoicing(
             )
 
         pc_link = prod_company_map.get((prod.id, comp.id)) if (prod and comp) else None
+        npp_lookup_sku = ((prod._npp_code or prod.sku) if prod else raw_prod_code).strip().upper()
+        dp_profile = None
+        if comp is not None:
+            dp_profile = (
+                distributor_invoice_profile_map.get((npp_lookup_sku, comp.id))
+                or distributor_invoice_profile_map.get((raw_prod_code, comp.id))
+            )
+        if dp_profile is None:
+            dp_profile = (
+                distributor_invoice_profile_map.get((npp_lookup_sku, None))
+                or distributor_invoice_profile_map.get((raw_prod_code, None))
+            )
+        dp_inv_code = dp_profile[0] if dp_profile else None
+        dp_inv_name = dp_profile[1] if dp_profile else None
         pres = resolve_invoice_item_presentation(
             prod=prod,
             comp=comp,
@@ -420,7 +444,8 @@ def consolidate_dms_orders_for_invoicing(
             raw_code=raw_prod_code,
             raw_name=snap.product_name or "",
             raw_unit=str(raw.get("ĐVT") or raw.get("unit") or "THUNG").strip(),
-            distributor_invoice_name=distributor_invoice_name_map.get(raw_prod_code),
+            distributor_invoice_code=dp_inv_code,
+            distributor_invoice_name=dp_inv_name,
         )
         if pres["warning"]:
             grp["warnings"].add(pres["warning"])

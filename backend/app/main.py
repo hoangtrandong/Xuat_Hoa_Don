@@ -1,6 +1,7 @@
 import logging
 import os
 from pathlib import Path
+import re
 import traceback
 import asyncio
 import uuid
@@ -151,6 +152,12 @@ def _is_allowed_origin(origin: str | None) -> bool:
     clean = origin.strip().rstrip("/")
     if clean in settings.cors_origins:
         return True
+    if settings.ALLOWED_ORIGIN_REGEX:
+        try:
+            if re.fullmatch(settings.ALLOWED_ORIGIN_REGEX, clean):
+                return True
+        except re.error:
+            pass
     if settings.DEBUG and (
         clean.startswith("http://localhost:")
         or clean.startswith("http://127.0.0.1:")
@@ -186,16 +193,17 @@ async def add_cors_headers(request: Request, call_next):
         response.headers["Vary"] = "Origin"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
-        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Requested-With"
+        response.headers["Access-Control-Allow-Headers"] = "*"
 
     return response
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_origin_regex=settings.ALLOWED_ORIGIN_REGEX or None,
     allow_credentials=True,
     allow_methods=["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    allow_headers=["*"],
 )
 
 

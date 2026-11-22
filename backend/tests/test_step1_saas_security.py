@@ -120,6 +120,8 @@ def test_cors_whitelist_blocks_arbitrary_origins(monkeypatch):
     monkeypatch.setattr(settings, "DEBUG", False)
     assert _is_allowed_origin("https://app.dms.vn") is True
     assert _is_allowed_origin("http://localhost:3001") is True
+    assert _is_allowed_origin("http://103.90.225.142.sslip.io") is True
+    assert _is_allowed_origin("https://web.103.90.225.142.sslip.io") is True
     assert _is_allowed_origin("https://evil.example.com") is False
     assert _is_allowed_origin(None) is False
 

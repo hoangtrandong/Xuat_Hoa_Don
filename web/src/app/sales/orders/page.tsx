@@ -2393,7 +2393,7 @@ return Array.from(map.values());
 
   const remoteColumns = remoteColumnDefinitions
     .filter(({ title }) => (
-      ["NVGH", "Thành tiền", "Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Trạng thái xử lý", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
+      ["NVGH", "Thành tiền", "Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Trạng thái xử lý", "Nhà cung cấp", "Nguồn đồng bộ", "Thay thế cho đơn", "Người thực hiện"].includes(title)
     ) || remoteOrders.some((order) => hasRemoteValue(order[title])) || detailOrderLines.some((order) => hasRemoteValue(order[title])))
     .filter(({ title }) => title !== "Mã NVGH" && title !== "Tên NVGH")
     .map(({ title, width, align }): Column<RemoteOrder> => ({

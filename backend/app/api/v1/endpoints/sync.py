@@ -2338,11 +2338,11 @@ def list_local_vinamilk_orders(
             processing_source = (getattr(row, "processing_status", None) or "").strip()
             if processing_source.upper().startswith("NCC:"):
                 sync_source = processing_source.split(":", 1)[1].strip()
-            elif (
-                unicodedata.normalize("NFKD", row_actor).encode("ascii", "ignore").decode("ascii").casefold()
-                == "he thong"
-                and not getattr(row, "is_synthetic", False)
-            ):
+            elif (order_num or "").upper().startswith("TC-"):
+                sync_source = "Tự tạo"
+            elif getattr(row, "is_synthetic", False):
+                sync_source = "Tách/Gộp"
+            else:
                 sync_source = "VINAMILK"
 
         resolved_created_date = (

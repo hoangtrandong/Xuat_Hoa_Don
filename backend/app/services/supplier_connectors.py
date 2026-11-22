@@ -1068,17 +1068,19 @@ def fetch_nazzy_orders(
     )
     type_val = req_cfg.get("type", 4)
     status_val = req_cfg.get("status", 2)
-    # Tối ưu pageSize tối thiểu 500 để giảm số vòng gọi phân trang (mỗi trang Nazzy mất ~15s)
-    page_size = max(500, int(req_cfg.get("pageSize") or 500))
+    # Nazzy SQL Server xử lý nặng theo pageSize -> mặc định 100 đơn/trang (tự hạ về 50 nếu timeout)
+    raw_ps = int(req_cfg.get("pageSize") or 100)
+    page_size = min(150, max(50, raw_ps if raw_ps != 50 else 100))
 
     from_str = from_date.strftime("%Y/%m/%d")
     to_str = to_date.strftime("%Y/%m/%d")
 
     all_order_summaries: list[dict[str, Any]] = []
+    seen_summary_ids: set[str] = set()
 
     http_limits = httpx.Limits(max_connections=16, max_keepalive_connections=16)
-    list_timeout = httpx.Timeout(30.0, connect=10.0)
-    detail_timeout = httpx.Timeout(12.0, connect=8.0)
+    list_timeout = httpx.Timeout(45.0, connect=10.0)
+    detail_timeout = httpx.Timeout(15.0, connect=8.0)
 
     with httpx.Client(
         verify=False,
@@ -1088,7 +1090,7 @@ def fetch_nazzy_orders(
     ) as client:
         current_page = 1
         while True:
-            _report(f"Đang tải danh sách đơn Nazzy trang {current_page} (tối đa {page_size} đơn/trang)...", len(all_order_summaries))
+            _report(f"Đang tải danh sách đơn Nazzy trang {current_page} ({page_size} đơn/trang)...", len(all_order_summaries))
             params = {
                 "t": "GetBillsOrderGetListV5",
                 "type": str(type_val),
@@ -1116,6 +1118,18 @@ def fetch_nazzy_orders(
                         raise RuntimeError(f"HTTP {resp.status_code} khi lấy danh sách đơn Nazzy.")
                     break
                 data = resp.json()
+            except httpx.TimeoutException as exc:
+                if page_size > 50:
+                    page_size = 50
+                    current_page = max(1, (len(all_order_summaries) // page_size) + 1)
+                    _report(
+                        f"Máy chủ Nazzy phản hồi chậm — tự động hạ xuống 50 đơn/trang (trang {current_page})...",
+                        len(all_order_summaries),
+                    )
+                    continue
+                if strict:
+                    raise RuntimeError(f"Không thể lấy danh sách đơn Nazzy: {exc}") from exc
+                break
             except Exception as exc:
                 if strict:
                     raise RuntimeError(f"Không thể lấy danh sách đơn Nazzy: {exc}") from exc
@@ -1135,7 +1149,11 @@ def fetch_nazzy_orders(
             if not page_items:
                 break
 
-            all_order_summaries.extend(page_items)
+            for item in page_items:
+                key = str(item.get("BillsDepotId") or item.get("Code") or len(seen_summary_ids))
+                if key not in seen_summary_ids:
+                    seen_summary_ids.add(key)
+                    all_order_summaries.append(item)
             _report(
                 f"Đã tải danh sách {len(all_order_summaries)}/{total_records or len(all_order_summaries)} đơn Nazzy...",
                 len(all_order_summaries),

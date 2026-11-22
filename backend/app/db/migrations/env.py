@@ -84,6 +84,13 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        if connection.dialect.name == "postgresql":
+            from sqlalchemy import text
+
+            connection.execute(text("SET lock_timeout = '5s'"))
+            connection.execute(text("SET statement_timeout = '25s'"))
+            connection.commit()
+
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

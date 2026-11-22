@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 import traceback
 import asyncio
@@ -44,7 +45,8 @@ def run_database_migrations() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    run_database_migrations()
+    if os.getenv("SKIP_LIFESPAN_MIGRATIONS", "").strip().lower() not in {"1", "true", "yes"}:
+        run_database_migrations()
     try:
         from app.core.database import Base, engine, init_db
         import app.models.multi_tenant_invoice  # noqa: F401
@@ -52,6 +54,9 @@ async def lifespan(_: FastAPI):
         init_db()
         from sqlalchemy import text
         with engine.connect() as conn:
+            if engine.dialect.name == "postgresql":
+                conn.execute(text("SET lock_timeout = '3s'"))
+                conn.execute(text("SET statement_timeout = '15s'"))
             conn.execute(text("ALTER TABLE vinamilk_order_snapshots ADD COLUMN IF NOT EXISTS processing_status VARCHAR(40)"))
             conn.execute(text("ALTER TABLE vinamilk_order_snapshots ADD COLUMN IF NOT EXISTS performed_by VARCHAR(120)"))
             conn.execute(text("ALTER TABLE vinamilk_order_snapshots ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN DEFAULT FALSE NOT NULL"))

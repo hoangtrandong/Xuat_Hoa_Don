@@ -80,7 +80,7 @@ export default function OrderSyncProgressPanel({
   onClose,
 }: OrderSyncProgressPanelProps) {
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [showLogs, setShowLogs] = useState(true);
+  const [showLogs, setShowLogs] = useState(false);
 
   const isActive =
     Boolean(state?.visible) &&
@@ -121,13 +121,13 @@ export default function OrderSyncProgressPanel({
   return (
     <section
       aria-live="polite"
-      className="border border-slate-400 bg-white shadow-lg overflow-hidden"
+      className="overflow-hidden border border-slate-300 bg-white shadow-sm"
     >
       {/* Header chuẩn CreateOrderForm (GEMINI.md) */}
       <div className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           {isActive ? (
-            <Loader2 size={16} className="text-red-500 animate-spin shrink-0" />
+            <Loader2 size={16} className="animate-spin shrink-0 text-sky-400" />
           ) : isSuccess ? (
             <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
           ) : (
@@ -159,7 +159,7 @@ export default function OrderSyncProgressPanel({
       </div>
 
       {/* Thanh tiến độ & thông điệp bước hiện tại */}
-      <div className="border-b border-slate-200 px-3 py-2.5 space-y-2">
+      <div className="space-y-1.5 border-b border-slate-200 px-3 py-2">
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
           <span
             className={`font-semibold ${
@@ -183,7 +183,14 @@ export default function OrderSyncProgressPanel({
           </span>
         </div>
 
-        <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
+        <div
+          className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200"
+          role="progressbar"
+          aria-label="Tiến trình đồng bộ"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={isSuccess ? 100 : Math.max(0, Math.min(100, state.progress))}
+        >
           <div
             className={`h-full rounded-full transition-all duration-300 ease-out ${
               isFailed
@@ -199,11 +206,11 @@ export default function OrderSyncProgressPanel({
         </div>
 
         {/* 3 giai đoạn tổng quan */}
-        <div className="grid gap-1.5 sm:grid-cols-3 pt-0.5">
+        <div className="grid gap-1 sm:grid-cols-3 pt-0.5">
           {pipelineSteps.map((step) => (
             <div
               key={step.label}
-              className={`flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] font-medium ${
+              className={`flex min-h-7 items-center gap-1.5 rounded border px-2 py-1 text-[11px] font-medium ${
                 step.done
                   ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                   : step.active
@@ -249,29 +256,29 @@ export default function OrderSyncProgressPanel({
                 {state.items.map((item) => (
                   <tr
                     key={item.id}
-                    className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/50 text-[11px]"
+                    className="border-b border-slate-100 even:bg-amber-50/40 text-xs hover:bg-sky-50/50"
                   >
                     <td className="px-3 py-1.5 font-semibold text-slate-800">
                       <span>{item.name}</span>
                       {item.code && item.code !== item.name && (
-                        <span className="ml-1.5 font-mono text-[10px] text-slate-500">
+                        <span className="ml-1.5 font-mono text-[11px] text-slate-500">
                           [{item.code}]
                         </span>
                       )}
                     </td>
                     <td className="px-3 py-1.5">
                       {item.status === "RUNNING" ? (
-                        <span className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">
+                        <span className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[11px] font-semibold text-sky-700">
                           <Loader2 size={10} className="animate-spin" />
                           Đang đồng bộ
                         </span>
                       ) : item.status === "SUCCESS" ? (
-                        <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                        <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[11px] font-semibold text-emerald-700">
                           <CheckCircle2 size={10} />
                           Hoàn tất
                         </span>
                       ) : item.status === "FAILED" ? (
-                        <span className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">
+                        <span className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-700">
                           <AlertTriangle size={10} />
                           Lỗi
                         </span>
@@ -314,16 +321,24 @@ export default function OrderSyncProgressPanel({
           <button
             type="button"
             onClick={() => setShowLogs((v) => !v)}
-            className="w-full border-b border-slate-200 bg-slate-50 px-3 py-1.5 flex items-center justify-between text-[10px] font-bold uppercase text-slate-600 hover:bg-slate-100"
+            aria-expanded={showLogs}
+            className="flex w-full items-center justify-between border-b border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-bold uppercase text-slate-600 hover:bg-slate-100"
           >
-            <span>Nhật ký tiến trình ({state.logs.length} sự kiện)</span>
+            <span className="min-w-0 truncate">
+              Nhật ký tiến trình ({state.logs.length} sự kiện)
+              {!showLogs && state.logs.length > 0 && (
+                <span className="ml-2 font-normal normal-case text-slate-500">
+                  Mới nhất: {state.logs[state.logs.length - 1].message}
+                </span>
+              )}
+            </span>
             {showLogs ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
           </button>
           {showLogs && (
-            <div className="max-h-32 overflow-y-auto px-3 py-2 bg-slate-50/50 space-y-1 font-mono text-[11px]">
+            <div className="max-h-28 space-y-1 overflow-y-auto bg-slate-50 px-3 py-2 font-mono text-[11px] dark:bg-[#101725]">
               {state.logs.map((entry, idx) => (
                 <div key={`${entry.time}-${idx}`} className="flex items-start gap-2">
-                  <span className="text-[10px] text-slate-400 shrink-0">
+                  <span className="shrink-0 text-[11px] text-slate-500">
                     [{formatLogTime(entry.time)}]
                   </span>
                   <span
@@ -352,7 +367,7 @@ export default function OrderSyncProgressPanel({
           {isSuccess && state.summary
             ? `Tổng kết: +${state.summary.new_orders ?? 0} đơn mới (${state.summary.new_lines ?? 0} dòng), ${state.summary.updated_orders ?? 0} đơn cập nhật (${state.summary.updated_lines ?? 0} dòng), ${state.summary.unchanged_lines ?? 0} dòng không đổi.`
             : isActive
-              ? "Hệ thống đang cập nhật tiến trình trực tiếp từng giây..."
+              ? "Tiến trình tự cập nhật."
               : "Kiểm tra lại kết nối hoặc cấu hình nguồn dữ liệu Nhà cung cấp nếu có lỗi."}
         </span>
         {!isActive && (

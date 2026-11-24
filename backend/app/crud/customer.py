@@ -6,6 +6,7 @@ from app.models.customer import Company, Customer, CustomerAddress, CustomerComp
 from app.models.employee import Employee
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.schemas.customer import CustomerCreate, CustomerUpdate
+from app.services.vinamilk_customer_code import normalize_vinamilk_customer_code
 
 
 def _extract_raw_str(raw: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -53,12 +54,13 @@ def sync_customers_from_snapshots(
         raw_code = (snap.customer_code or "").strip()
         if not raw_code:
             continue
-        clean_code = raw_code[:20]
+        raw = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+        sup_code = _extract_raw_str(raw, ("Nguồn đồng bộ", "Nhà cung cấp")) or "VINAMILK"
+        clean_code = normalize_vinamilk_customer_code(raw_code, sup_code)[:20]
         upper_code = clean_code.upper()
         if upper_code.startswith(("NVGH-", "NVBH-")) or upper_code == "NVBH":
             continue
 
-        raw = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
         row_dist_code = _extract_raw_str(raw, ("Mã NPP", "distributorCode")).upper()
         resolved_dist_id = distributor_id or dist_id_by_code.get(row_dist_code)
         if (resolved_dist_id, upper_code) in existing_keys:

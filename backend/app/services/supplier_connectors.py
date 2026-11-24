@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.models.multi_tenant_invoice import DistributorSupplierConfig
 from app.models.vinamilk import VinamilkOrderSnapshot
+from app.services.vinamilk_customer_code import normalize_vinamilk_customer_code
 from app.services.supplier_secrets import decrypt_supplier_secret, encrypt_supplier_secret
 
 
@@ -582,7 +583,7 @@ class DynamicFieldMapper:
                 ),
                 fallback=order_date,
             )
-            customer_code = str(
+            raw_customer_code = str(
                 _extract_value(
                     row,
                     field_mapping.get("customer_code"),
@@ -590,6 +591,7 @@ class DynamicFieldMapper:
                 )
                 or f"KH-{supplier_code}-001"
             ).strip()
+            customer_code = normalize_vinamilk_customer_code(raw_customer_code, supplier_code)
             customer_name = str(
                 _extract_value(
                     row,

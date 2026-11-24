@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.customer import Customer
+from app.services.vinamilk_customer_code import normalize_vinamilk_customer_code
 from scripts.vinamilk_login import login_and_get_cookie
 
 VINAMILK_CUSTOMER_URL = "https://vinamilk.dmsone.vn/catalog-customer-manager/searchCustomerVO"
@@ -118,7 +119,7 @@ def build_customer_report() -> str:
         raise RuntimeError("Vinamilk trả về danh sách khách hàng rỗng; không gửi báo cáo đối soát.")
 
     remote = {
-        str(row.get("customerCode") or "").strip()[:3]: str(row.get("customerName") or "").strip()
+        normalize_vinamilk_customer_code(str(row.get("customerCode") or ""), "VINAMILK"): str(row.get("customerName") or "").strip()
         for row in remote_rows
         if row.get("customerCode")
     }

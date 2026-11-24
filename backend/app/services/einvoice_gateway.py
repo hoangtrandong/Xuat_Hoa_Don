@@ -17,6 +17,7 @@ from app.models.multi_tenant_invoice import (
 )
 from app.models.product import Product, ProductGroup, ProductGroupItem
 from app.models.vinamilk import VinamilkOrderSnapshot
+from app.services.vinamilk_customer_code import normalize_vinamilk_customer_code
 
 
 _DIGITS = ["không", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín"]
@@ -534,8 +535,19 @@ class InvoiceFormEngine:
         if not snapshots:
             return []
 
-        # Tra cứu thông tin khách hàng (MST, Địa chỉ, Tên pháp lý)
-        cust_codes = {s.customer_code for s in snapshots if s.customer_code}
+        # Tra cứu thông tin khách hàng (MST, Địa chỉ, Tên pháp lý) — hỗ trợ khớp cả mã gốc lẫn 3 ký tự cuối Vinamilk
+        cust_codes: set[str] = set()
+        for s in snapshots:
+            if s.customer_code:
+                cust_codes.add(s.customer_code.strip())
+                raw_sup = (
+                    (s.raw_payload.get("Nguồn đồng bộ") or s.raw_payload.get("Nhà cung cấp"))
+                    if isinstance(s.raw_payload, dict)
+                    else "VINAMILK"
+                )
+                norm = normalize_vinamilk_customer_code(s.customer_code, str(raw_sup or "VINAMILK"))
+                if norm:
+                    cust_codes.add(norm)
         customers_by_code: dict[str, Customer] = {}
         if cust_codes:
             cust_rows = db.scalars(
@@ -547,7 +559,7 @@ class InvoiceFormEngine:
                 )
                 .where(Customer.code.in_(cust_codes))
             ).all()
-            customers_by_code = {c.code: c for c in cust_rows}
+            customers_by_code = {c.code.strip().upper(): c for c in cust_rows if c.code}
 
         # Tra cứu mã sản phẩm NPP nội bộ nếu cấu hình yêu cầu DISTRIBUTOR_SKU
         prod_codes = {s.product_code for s in snapshots if s.product_code}
@@ -585,8 +597,14 @@ class InvoiceFormEngine:
         for _, group_rows in grouped_snapshots.items():
             first_row = group_rows[0]
             first_raw = first_row.raw_payload if isinstance(first_row.raw_payload, dict) else {}
-            cust_code = first_row.customer_code or _safe_str(first_raw, ("Mã KH", "customerCode"), "KH-LE")
-            cust_obj = customers_by_code.get(cust_code)
+            raw_cust_code = first_row.customer_code or _safe_str(first_raw, ("Mã KH", "customerCode"), "KH-LE")
+            raw_sup = str(first_raw.get("Nguồn đồng bộ") or first_raw.get("Nhà cung cấp") or "VINAMILK")
+            norm_cust_code = normalize_vinamilk_customer_code(raw_cust_code, raw_sup)
+            cust_obj = (
+                customers_by_code.get(raw_cust_code.strip().upper())
+                or customers_by_code.get(norm_cust_code.strip().upper())
+            )
+            cust_code = cust_obj.code if cust_obj else norm_cust_code
 
             buyer_name = (
                 (buyer_override or {}).get("buyer_name")

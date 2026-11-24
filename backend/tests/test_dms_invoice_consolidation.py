@@ -160,3 +160,55 @@ def test_consolidation_merges_by_tax_cccd_and_company_and_blocks_invalid(seeded_
     assert xls_name.endswith(".xls")
     assert xls_media == "application/vnd.ms-excel"
     assert len(xls_buf.getvalue()) > 1000
+
+
+def test_vinamilk_customer_code_normalized_to_last_3_chars(seeded_db):
+    from app.services.vinamilk_customer_code import normalize_vinamilk_customer_code
+
+    assert normalize_vinamilk_customer_code("MG200310CR", "VINAMILK") == "0CR"
+    assert normalize_vinamilk_customer_code("MG2003100J", "VINAMILK") == "00J"
+    assert normalize_vinamilk_customer_code("00J", "VINAMILK") == "00J"
+    assert normalize_vinamilk_customer_code("NVGH-001", "VINAMILK") == "NVGH-001"
+    assert normalize_vinamilk_customer_code("MG200310CR", "KIOTVIET") == "MG200310CR"
+
+    db, dist, d = seeded_db
+    comp1 = db.query(Company).filter(Company.code == "CT01").first()
+    c_0cr = Customer(
+        distributor_id=dist.id,
+        code="0CR",
+        name="Cửa hàng 0CR",
+        type="RETAIL",
+        tax_code="0909090909",
+        company_id=comp1.id,
+    )
+    db.add(c_0cr)
+    db.flush()
+    db.add(
+        VinamilkOrderSnapshot(
+            remote_key="k_vnm_full",
+            order_number="ORD_VNM_01",
+            customer_code="MG200310CR",
+            customer_name="Cửa hàng 0CR",
+            product_code="SKU001",
+            product_name="Sữa tươi 180ml",
+            order_created_date=d,
+            delivery_date=d,
+            synced_from=d,
+            synced_to=d,
+            raw_payload={"Nhà cung cấp": "VINAMILK", "Số lượng": 2, "Giá bán": 100000, "Thành tiền": 200000},
+        )
+    )
+    db.commit()
+
+    res = consolidate_dms_orders_for_invoicing(
+        db,
+        from_date=d,
+        to_date=d,
+        distributor_id=dist.id,
+        default_vat_rate=8.0,
+    )
+    grp_0cr = next((g for g in res["groups"] if g["buyer_tax_code"] == "0909090909"), None)
+    assert grp_0cr is not None
+    assert grp_0cr["is_valid"] is True
+    assert grp_0cr["customer_codes"] == ["0CR"]
+    assert grp_0cr["buyer_name"] == "Cửa hàng 0CR"

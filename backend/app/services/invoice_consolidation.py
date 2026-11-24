@@ -18,6 +18,7 @@ from app.models.customer import Company, Customer, CustomerCompany
 from app.models.multi_tenant_invoice import Distributor, IssuedInvoice
 from app.models.product import DistributorProduct, Product, ProductCompany
 from app.models.vinamilk import VinamilkOrderSnapshot
+from app.services.vinamilk_customer_code import is_vinamilk_supplier, normalize_vinamilk_customer_code
 
 VIETTEL_TEMPLATE_PATH = (
     Path(__file__).resolve().parents[1] / "templates" / "viettel_sinvoice_template.xls"
@@ -312,8 +313,18 @@ def consolidate_dms_orders_for_invoicing(
             continue
 
         cust_code_raw = (snap.customer_code or "").strip()
+        cust_code_normalized = normalize_vinamilk_customer_code(cust_code_raw, sup) if cust_code_raw else ""
         cust_code_key = cust_code_raw.upper()
+        cust_code_norm_key = cust_code_normalized.upper()
         customer = customer_map.get(cust_code_key) if cust_code_key else None
+        if customer is None and cust_code_norm_key and cust_code_norm_key != cust_code_key:
+            customer = customer_map.get(cust_code_norm_key)
+        # Mã KH hiển thị/gom: ưu tiên mã đã khớp trong danh mục, hoặc 3 ký tự cuối nếu là nguồn Vinamilk
+        cust_code_effective = (
+            customer.code
+            if customer is not None
+            else (cust_code_normalized if is_vinamilk_supplier(sup) else cust_code_raw)
+        )
 
         # Nếu lọc theo distributor_id và dòng snapshot không có "Mã NPP" thì kiểm tra qua customer.distributor_id
         if (
@@ -380,7 +391,7 @@ def consolidate_dms_orders_for_invoicing(
             identity_value = citizen_id
         else:
             identity_type = "MISSING_ID"
-            identity_value = cust_code_key or f"ORDER_{order_num}"
+            identity_value = (cust_code_effective or cust_code_key).upper() or f"ORDER_{order_num}"
 
         group_key = f"{comp_id or 'NO_COMPANY'}::{identity_type}::{identity_value}"
 
@@ -427,14 +438,14 @@ def consolidate_dms_orders_for_invoicing(
             }
 
         grp = groups_acc[group_key]
-        if cust_code_raw:
-            grp["customer_codes"].add(cust_code_raw)
+        if cust_code_effective:
+            grp["customer_codes"].add(cust_code_effective)
         grp["order_numbers"].add(order_num)
         grp["suppliers"].add(sup)
 
         # Kiểm tra điều kiện đăng ký Khách hàng & Công ty quản lý (theo chế độ phân bổ của NPP)
         if customer is None:
-            grp["missing_customers"].add(cust_code_raw or f"(Đơn {order_num})")
+            grp["missing_customers"].add(cust_code_effective or f"(Đơn {order_num})")
         else:
             if not tax_code and not citizen_id:
                 grp["missing_tax_or_cccd"].add(f"{customer.code} ({customer.name})")

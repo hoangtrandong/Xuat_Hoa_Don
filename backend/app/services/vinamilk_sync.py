@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.customer import Customer
+from app.services.vinamilk_customer_code import normalize_vinamilk_customer_code
 from app.models.product import Product, ProductUnit, ProductCategory
 from app.models.employee import Employee
 from app.models.inventory import Warehouse
@@ -50,7 +51,8 @@ def sync_from_excel(db: Session, file_path: str):
         employee = None
 
         # Customer
-        cust_code = str(row_dict.get('Mã KH'))
+        raw_cust_code = str(row_dict.get('Mã KH') or "").strip()
+        cust_code = normalize_vinamilk_customer_code(raw_cust_code, "VINAMILK")
         cust_name = str(row_dict.get('Tên KH') or '')
         customer = None
         if cust_code and cust_code != 'None':

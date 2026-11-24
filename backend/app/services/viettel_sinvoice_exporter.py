@@ -9,6 +9,7 @@ import xlrd
 from xlutils.copy import copy
 
 from app.models.vinamilk import VinamilkOrderSnapshot
+from app.services.vinamilk_customer_code import normalize_vinamilk_customer_code
 from app.models.product import Product
 
 
@@ -161,7 +162,8 @@ def export_orders_to_viettel_sinvoice(
             first_snap = order_snaps[0]
             raw_first = first_snap.raw_payload or {}
 
-            buyer_code = (first_snap.customer_code or "").strip() or "KH_LE"
+            raw_sup = str(raw_first.get("Nguồn đồng bộ") or raw_first.get("Nhà cung cấp") or "VINAMILK")
+            buyer_code = normalize_vinamilk_customer_code(first_snap.customer_code, raw_sup) or "KH_LE"
             buyer_name = (first_snap.customer_name or "").strip() or "Khách hàng"
             buyer_tax = (raw_first.get("Mã số thuế") or "").strip()
             buyer_addr = (raw_first.get("Địa chỉ") or "").strip() or "Hà Tĩnh / Nghệ An"

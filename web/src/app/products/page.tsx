@@ -2018,14 +2018,6 @@ export default function ProductsPage() {
                               <span className="font-mono text-[11px] font-bold text-slate-800">
                                 {row.rowCompanyTaxCode || row.rowCompanyCode}
                               </span>
-                              {row.mstCount > 1 && (
-                                <span
-                                  className="rounded bg-amber-50 border border-amber-200 px-1 py-0 text-[9px] font-semibold text-amber-800"
-                                  title={`Mã SKU ${row.code} xuất hiện trên ${row.mstCount} MST đầu vào khác nhau — mỗi dòng gán Mã NPP riêng theo từng MST`}
-                                >
-                                  {row.mstCount} MST
-                                </span>
-                              )}
                               {row.rowCompanyHasConversion && (
                                 <span
                                   className="rounded bg-sky-100 border border-sky-200 px-1 py-0 text-[9px] font-bold text-sky-800"

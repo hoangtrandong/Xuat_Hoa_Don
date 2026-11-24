@@ -512,6 +512,7 @@ def compute_tax_inventory_by_mst(
     prod_info: dict[str, tuple[str, float | None, str, str, str, bool, int, int | None]] = {}
     prod_mst_invoice_override: dict[tuple[int, str], str] = {}
     prod_default_invoice_override: dict[int, str] = {}
+    prod_mst_npp_code: dict[tuple[int, str], str] = {}
     if all_skus:
         # dist_prod_by_sku_mst[(npp_sku, mst)] = (inv_code, inv_name, dp_name, dp_unit)
         dist_prod_by_sku_mst: dict[tuple[str, str], tuple[str, str, str, str]] = {}
@@ -594,25 +595,26 @@ def compute_tax_inventory_by_mst(
                 select(
                     ProductCompany.product_id,
                     ProductCompany.invoice_name_override,
+                    ProductCompany.npp_code,
                     Company.tax_code,
                 )
                 .outerjoin(Company, ProductCompany.company_id == Company.id)
-                .where(
-                    ProductCompany.product_id.in_(loaded_prod_ids),
-                    ProductCompany.invoice_name_override.is_not(None),
-                )
+                .where(ProductCompany.product_id.in_(loaded_prod_ids))
                 .order_by(
                     ProductCompany.is_primary.desc(),
                     ProductCompany.last_purchased_at.desc().nullslast(),
                 )
             ).all()
-            for p_id, inv_ovr, c_mst in pc_rows:
+            for p_id, inv_ovr, pc_npp, c_mst in pc_rows:
+                clean_mst = (c_mst or "").strip()
+                clean_pc_npp = (pc_npp or "").strip().upper()
+                if clean_mst and clean_pc_npp and (p_id, clean_mst) not in prod_mst_npp_code:
+                    prod_mst_npp_code[(p_id, clean_mst)] = clean_pc_npp
                 clean_ovr = (inv_ovr or "").strip()
                 if not clean_ovr:
                     continue
                 if p_id not in prod_default_invoice_override:
                     prod_default_invoice_override[p_id] = clean_ovr
-                clean_mst = (c_mst or "").strip()
                 if clean_mst and (p_id, clean_mst) not in prod_mst_invoice_override:
                     prod_mst_invoice_override[(p_id, clean_mst)] = clean_ovr
 
@@ -809,7 +811,12 @@ def compute_tax_inventory_by_mst(
                 continue
             p_meta = prod_info.get(sku)
             p_id = p_meta[7] if p_meta else None
-            npp_code = (p_meta[2] if p_meta else inv_code_to_npp.get((sku, mst)) or inv_code_to_npp_default.get(sku) or sku) or sku
+            mst_specific_npp = prod_mst_npp_code.get((p_id, mst), "") if p_id else ""
+            npp_code = (
+                mst_specific_npp
+                or (p_meta[2] if p_meta else inv_code_to_npp.get((sku, mst)) or inv_code_to_npp_default.get(sku) or sku)
+                or sku
+            )
             dp_mst_entry = (
                 dist_prod_by_sku_mst.get((npp_code, mst))
                 or dist_prod_by_sku_mst.get((sku, mst))
@@ -831,7 +838,7 @@ def compute_tax_inventory_by_mst(
             pvat = p_meta[1] if p_meta else None
             npp_name = dp_default_inv_name or dp_mst_inv_name or (p_meta[3] if p_meta else "") or pname
             npp_unit = (p_meta[4] if p_meta else "") or rec["unit_name"]
-            has_explicit_npp = p_meta[5] if p_meta else False
+            has_explicit_npp = bool(mst_specific_npp) or (p_meta[5] if p_meta else False)
             conv_factor = p_meta[6] if p_meta else 1
             cf_dec = Decimal(str(conv_factor))
 
@@ -1102,7 +1109,12 @@ def compute_tax_inventory_by_mst(
 
             p_meta = prod_info.get(sku)
             p_id = p_meta[7] if p_meta else None
-            npp_code = (p_meta[2] if p_meta else inv_code_to_npp.get((sku, mst)) or inv_code_to_npp_default.get(sku) or sku) or sku
+            mst_specific_npp = prod_mst_npp_code.get((p_id, mst), "") if p_id else ""
+            npp_code = (
+                mst_specific_npp
+                or (p_meta[2] if p_meta else inv_code_to_npp.get((sku, mst)) or inv_code_to_npp_default.get(sku) or sku)
+                or sku
+            )
             dp_mst_entry = (
                 dist_prod_by_sku_mst.get((npp_code, mst))
                 or dist_prod_by_sku_mst.get((sku, mst))
@@ -1184,7 +1196,7 @@ def compute_tax_inventory_by_mst(
                     "npp_code": npp_code,
                     "invoice_product_code": mst_inv_code,
                     "invoice_product_codes": [mst_inv_code],
-                    "has_npp_code": bool(p_meta[5]) if p_meta else False,
+                    "has_npp_code": bool(mst_specific_npp) or (bool(p_meta[5]) if p_meta else False),
                     "cqt_skus": [sku],
                     "mst_count": 1,
                     "negative_mst_count": 1 if status == "NEGATIVE" else 0,

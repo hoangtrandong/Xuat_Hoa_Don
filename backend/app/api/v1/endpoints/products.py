@@ -21,6 +21,7 @@ from app.schemas.product import (
     ProductPagination,
     ProductStats,
     ProductCompanyConfigsUpdate,
+    ProductCompanyNppCodeUpdate,
 )
 from app.models.customer import Company as CompanyModel
 from app.models.product import ProductCategory, ProductCompany, ProductUnit, ProductGroup, ProductGroupItem
@@ -388,6 +389,7 @@ def _product_managed_companies(db: Session, product_ids: list[int]) -> dict[int,
                 "invoice_item_mode": comp.invoice_item_mode or "TAX_INPUT",
                 "source": link.source or "MANUAL",
                 "is_primary": bool(link.is_primary),
+                "npp_code": link.npp_code,
                 "company_product_code": link.company_product_code,
                 "invoice_name_override": link.invoice_name_override,
                 "invoice_unit_name": link.invoice_unit_name,
@@ -415,9 +417,49 @@ def list_products_paged(
     has_internal_code: bool | None = None,
     sort_field: str = "code",
     sort_order: str = "asc",
+    expand_by_mst: bool = True,
     db: Session = Depends(get_db),
 ):
-    items, total, stats_dict = product_crud.list_paged(
+    if not expand_by_mst:
+        items, total, stats_dict = product_crud.list_paged(
+            db,
+            page=page,
+            page_size=page_size,
+            search=search,
+            category_id=category_id,
+            supplier=supplier,
+            unit=unit,
+            status=status,
+            distributor_code=distributor_code,
+            company_id=company_id,
+            company_tax_code=company_tax_code,
+            has_internal_code=has_internal_code,
+            sort_field=sort_field,
+            sort_order=sort_order,
+        )
+        distributor_map = _product_distributors(db, {product.sku.strip().upper() for product in items if product.sku})
+        managed_companies_map = _product_managed_companies(db, [product.id for product in items])
+        total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
+
+        return {
+            "items": [
+                {
+                    **Product.model_validate(product).model_dump(),
+                    "distributors": distributor_map.get(product.sku.strip().upper(), []),
+                    "managed_companies": managed_companies_map.get(product.id, []),
+                    "row_key": f"{product.id}:0",
+                    "mst_count": len(managed_companies_map.get(product.id, [])),
+                }
+                for product in items
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "stats": stats_dict,
+        }
+
+    row_tuples, total, stats_dict = product_crud.list_paged_by_mst(
         db,
         page=page,
         page_size=page_size,
@@ -433,19 +475,68 @@ def list_products_paged(
         sort_field=sort_field,
         sort_order=sort_order,
     )
-    distributor_map = _product_distributors(db, {product.sku.strip().upper() for product in items if product.sku})
-    managed_companies_map = _product_managed_companies(db, [product.id for product in items])
+    unique_skus = {prod.sku.strip().upper() for prod, _, _ in row_tuples if prod.sku}
+    unique_ids = list({prod.id for prod, _, _ in row_tuples})
+    distributor_map = _product_distributors(db, unique_skus)
+    managed_companies_map = _product_managed_companies(db, unique_ids)
     total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
 
+    # Cache base product dump per product_id để tránh validate lặp khi 1 SKU có nhiều MST
+    base_dump_cache: dict[int, dict] = {}
+    serialized_items: list[dict] = []
+    for prod, pc_link, comp in row_tuples:
+        if prod.id not in base_dump_cache:
+            base_dump_cache[prod.id] = Product.model_validate(prod).model_dump()
+        base_data = dict(base_dump_cache[prod.id])
+        managed_list = managed_companies_map.get(prod.id, [])
+        if pc_link is not None and comp is not None:
+            row_npp = (pc_link.npp_code or "").strip().upper() or None
+            has_conv = bool(
+                (pc_link.conversion_num and pc_link.conversion_num != 1)
+                or (pc_link.conversion_den and pc_link.conversion_den != 1)
+                or (pc_link.invoice_unit_name or "").strip()
+                or (pc_link.invoice_name_override or "").strip()
+            )
+            base_data.update(
+                {
+                    "npp_code": row_npp,
+                    "row_key": f"{prod.id}:{comp.id}",
+                    "row_company_id": comp.id,
+                    "row_company_code": comp.code,
+                    "row_company_name": comp.name,
+                    "row_company_short_name": comp.short_name,
+                    "row_company_tax_code": comp.tax_code,
+                    "row_company_is_primary": bool(pc_link.is_primary),
+                    "row_company_npp_code": row_npp,
+                    "row_company_purchased_qty": float(pc_link.total_purchased_qty or 0.0),
+                    "row_company_has_conversion": has_conv,
+                    "mst_count": len(managed_list),
+                }
+            )
+        else:
+            row_npp = (prod._npp_code or "").strip().upper() or None
+            base_data.update(
+                {
+                    "npp_code": row_npp,
+                    "row_key": f"{prod.id}:0",
+                    "row_company_id": None,
+                    "row_company_code": None,
+                    "row_company_name": None,
+                    "row_company_short_name": None,
+                    "row_company_tax_code": None,
+                    "row_company_is_primary": None,
+                    "row_company_npp_code": None,
+                    "row_company_purchased_qty": None,
+                    "row_company_has_conversion": False,
+                    "mst_count": len(managed_list),
+                }
+            )
+        base_data["distributors"] = distributor_map.get(prod.sku.strip().upper(), [])
+        base_data["managed_companies"] = managed_list
+        serialized_items.append(base_data)
+
     return {
-        "items": [
-            {
-                **Product.model_validate(product).model_dump(),
-                "distributors": distributor_map.get(product.sku.strip().upper(), []),
-                "managed_companies": managed_companies_map.get(product.id, []),
-            }
-            for product in items
-        ],
+        "items": serialized_items,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -532,12 +623,14 @@ def update_product_company_configs(
         is_prim = bool(item.is_primary) and not primary_assigned
         if is_prim:
             primary_assigned = True
+        clean_npp = (item.npp_code or "").strip().upper() or None
         link = existing_by_company.get(item.company_id)
         if link is None:
             link = ProductCompany(
                 product_id=product_id,
                 company_id=item.company_id,
                 role="MANAGER",
+                npp_code=clean_npp,
                 source="MANUAL",
                 is_primary=is_prim,
                 company_product_code=(item.company_product_code or "").strip() or None,
@@ -550,6 +643,7 @@ def update_product_company_configs(
             db.add(link)
         else:
             link.is_primary = is_prim
+            link.npp_code = clean_npp
             link.company_product_code = (item.company_product_code or "").strip() or None
             link.invoice_name_override = (item.invoice_name_override or "").strip() or None
             link.invoice_unit_name = (item.invoice_unit_name or "").strip() or None
@@ -564,11 +658,65 @@ def update_product_company_configs(
             ):
                 link.source = "MANUAL"
 
+    db.flush()
+    # Đồng bộ lại Product._npp_code theo dòng MST chính (hoặc dòng MST đầu tiên có mã NPP)
+    _sync_product_fallback_npp_code(db, product)
     db.commit()
     return {
         "ok": True,
         "product_id": product_id,
         "managed_companies": _product_managed_companies(db, [product_id]).get(product_id, []),
+    }
+
+
+def _sync_product_fallback_npp_code(db: Session, product: ProductModel) -> None:
+    """Giữ Product._npp_code đồng bộ với mã NPP của MST chính (hoặc MST đầu tiên có gán mã NPP)."""
+    links = db.scalars(
+        select(ProductCompany)
+        .where(ProductCompany.product_id == product.id)
+        .order_by(
+            ProductCompany.is_primary.desc(),
+            ProductCompany.last_purchased_at.desc().nullslast(),
+            ProductCompany.id.asc(),
+        )
+    ).all()
+    if not links:
+        return
+    primary_code = next(((l.npp_code or "").strip().upper() for l in links if (l.npp_code or "").strip()), None)
+    product.npp_code = primary_code
+
+
+@router.patch("/{product_id}/companies/{company_id}/npp-code")
+def update_product_company_npp_code(
+    product_id: int,
+    company_id: int,
+    payload: ProductCompanyNppCodeUpdate,
+    db: Session = Depends(get_db),
+):
+    """Gán / cập nhật Mã NPP nội bộ riêng cho từng cặp (SKU CQT, MST đầu vào)."""
+    product = product_crud.get(db, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Không tìm thấy sản phẩm.")
+    link = db.scalar(
+        select(ProductCompany).where(
+            ProductCompany.product_id == product_id,
+            ProductCompany.company_id == company_id,
+        )
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Không tìm thấy liên kết SKU với MST đầu vào này.")
+
+    npp_val = (payload.npp_code or "").strip().upper() or None
+    link.npp_code = npp_val
+    db.flush()
+    _sync_product_fallback_npp_code(db, product)
+    db.commit()
+    return {
+        "ok": True,
+        "product_id": product_id,
+        "company_id": company_id,
+        "npp_code": npp_val,
+        "product_npp_code": product._npp_code,
     }
 
 

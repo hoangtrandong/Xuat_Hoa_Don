@@ -323,10 +323,17 @@ def sync_companies_from_purchase_invoices(
                 link = link_map.get((prod_id, comp_id))
                 if link is None:
                     is_primary = prod_id not in products_with_primary
+                    prod_obj = next((p for p in products_by_sku.values() if p.id == prod_id), None)
+                    inherited_npp = (
+                        (prod_obj._npp_code or "").strip().upper() or None
+                        if (is_primary and prod_obj is not None)
+                        else None
+                    )
                     link = ProductCompany(
                         product_id=prod_id,
                         company_id=comp_id,
                         role="MANAGER",
+                        npp_code=inherited_npp,
                         source="PURCHASE_INVOICE",
                         is_primary=is_primary,
                         last_purchased_at=stats["last_date"],

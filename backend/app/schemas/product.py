@@ -70,6 +70,7 @@ class ProductManagedCompany(BaseModel):
     invoice_item_mode: str = "TAX_INPUT"
     source: str = "MANUAL"
     is_primary: bool = False
+    npp_code: Optional[str] = None
     company_product_code: Optional[str] = None
     invoice_name_override: Optional[str] = None
     invoice_unit_name: Optional[str] = None
@@ -82,11 +83,16 @@ class ProductManagedCompany(BaseModel):
 class ProductCompanyConfigItem(BaseModel):
     company_id: int
     is_primary: bool = False
+    npp_code: Optional[str] = None
     company_product_code: Optional[str] = None
     invoice_name_override: Optional[str] = None
     invoice_unit_name: Optional[str] = None
     conversion_num: int = Field(default=1, ge=1)
     conversion_den: int = Field(default=1, ge=1)
+
+
+class ProductCompanyNppCodeUpdate(BaseModel):
+    npp_code: Optional[str] = None
 
 
 class ProductCompanyConfigsUpdate(BaseModel):
@@ -116,6 +122,18 @@ class Product(ProductBase):
     vat_rate_source: Optional[str] = None
     distributors: List[ProductDistributor] = Field(default_factory=list)
     managed_companies: List[ProductManagedCompany] = Field(default_factory=list)
+    # Thông tin dòng mở rộng theo từng MST đầu vào (khi 1 SKU thuộc nhiều MST)
+    row_key: Optional[str] = None
+    row_company_id: Optional[int] = None
+    row_company_code: Optional[str] = None
+    row_company_name: Optional[str] = None
+    row_company_short_name: Optional[str] = None
+    row_company_tax_code: Optional[str] = None
+    row_company_is_primary: Optional[bool] = None
+    row_company_npp_code: Optional[str] = None
+    row_company_purchased_qty: Optional[float] = None
+    row_company_has_conversion: Optional[bool] = None
+    mst_count: int = 0
 
 
 class ProductStats(BaseModel):

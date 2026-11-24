@@ -141,6 +141,7 @@ class ProductCompany(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(String(20), default="MANAGER")
+    npp_code: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     company_product_code: Mapped[str | None] = mapped_column(String(50))
     invoice_name_override: Mapped[str | None] = mapped_column(String(255))
     invoice_unit_name: Mapped[str | None] = mapped_column(String(50))

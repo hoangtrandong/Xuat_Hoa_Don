@@ -1,7 +1,7 @@
 import re
 import unicodedata
 from typing import Any, List, Optional
-from sqlalchemy import func, select, text, or_, and_, bindparam
+from sqlalchemy import case, func, select, text, or_, and_, bindparam
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -1273,6 +1273,346 @@ def list_paged(
     return products, total, stats_dict
 
 
+def list_paged_by_mst(
+    db: Session,
+    page: int = 1,
+    page_size: int = 50,
+    search: Optional[str] = None,
+    category_id: Optional[int] = None,
+    supplier: Optional[str] = None,
+    unit: Optional[str] = None,
+    status: Optional[str] = None,
+    distributor_code: Optional[str] = None,
+    company_id: Optional[int] = None,
+    company_tax_code: Optional[str] = None,
+    has_internal_code: Optional[bool] = None,
+    sort_field: str = "code",
+    sort_order: str = "asc",
+) -> tuple[list[tuple[Product, Any, Any]], int, dict[str, Any]]:
+    """Phân trang danh sách SKU mở rộng theo từng MST đầu vào (1 dòng / cặp SKU–MST).
+    SKU chưa gắn MST nào vẫn hiển thị 1 dòng với (pc_link=None, company=None).
+    """
+    from app.models.customer import Company as CompanyModel
+    from app.models.product import ProductCompany as ProductCompanyModel
+
+    conditions = [Product.sku.is_not(None), Product.sku != ""]
+
+    if category_id:
+        conditions.append(Product.category_id == category_id)
+
+    if supplier and supplier != "ALL":
+        conditions.append(Product.supplier == supplier)
+
+    if unit and unit != "ALL":
+        conditions.append(Product.unit.has(ProductUnit.name == unit))
+
+    if distributor_code and distributor_code.strip() and distributor_code.strip().upper() != "ALL":
+        from app.models.multi_tenant_invoice import (
+            Distributor as DistributorModel,
+            IssuedInvoice as IssuedInvoiceModel,
+            IssuedInvoiceItem as IssuedInvoiceItemModel,
+            PurchaseInvoice as PurchaseInvoiceModel,
+            PurchaseInvoiceItem as PurchaseInvoiceItemModel,
+        )
+        from app.models.vinamilk import VinamilkOrderSnapshot as SnapshotModel
+
+        clean_dist_code = distributor_code.strip().upper()
+        dist_obj = db.scalar(
+            select(DistributorModel).where(func.upper(DistributorModel.code) == clean_dist_code)
+        )
+        dist_filter_clauses = []
+        if dist_obj is not None:
+            # Cô lập dòng theo đúng phạm vi NPP khi đã gắn công ty
+            conditions.append(
+                or_(
+                    CompanyModel.id.is_(None),
+                    CompanyModel.distributor_id.is_(None),
+                    CompanyModel.distributor_id == dist_obj.id,
+                )
+            )
+            dist_filter_clauses.append(
+                Product.company_links.any(
+                    ProductCompanyModel.company.has(CompanyModel.distributor_id == dist_obj.id)
+                )
+            )
+            purch_subq = (
+                select(func.upper(func.trim(PurchaseInvoiceItemModel.product_code)))
+                .join(
+                    PurchaseInvoiceModel,
+                    PurchaseInvoiceModel.id == PurchaseInvoiceItemModel.purchase_invoice_id,
+                )
+                .where(
+                    PurchaseInvoiceModel.distributor_id == dist_obj.id,
+                    PurchaseInvoiceItemModel.product_code.is_not(None),
+                )
+            )
+            dist_filter_clauses.append(func.upper(Product.sku).in_(purch_subq))
+
+            issued_subq = (
+                select(func.upper(func.trim(IssuedInvoiceItemModel.product_code)))
+                .join(
+                    IssuedInvoiceModel,
+                    IssuedInvoiceModel.id == IssuedInvoiceItemModel.invoice_id,
+                )
+                .where(
+                    IssuedInvoiceModel.distributor_id == dist_obj.id,
+                    IssuedInvoiceItemModel.product_code.is_not(None),
+                )
+            )
+            dist_filter_clauses.append(func.upper(Product.sku).in_(issued_subq))
+
+        payload_dist_expr = SnapshotModel.raw_payload["Mã NPP"].as_string()
+        snap_subq = (
+            select(func.upper(func.trim(SnapshotModel.product_code)))
+            .where(
+                SnapshotModel.product_code.is_not(None),
+                or_(
+                    func.upper(SnapshotModel.performed_by) == clean_dist_code,
+                    func.upper(payload_dist_expr) == clean_dist_code,
+                ),
+            )
+        )
+        dist_filter_clauses.append(func.upper(Product.sku).in_(snap_subq))
+        dist_filter_clauses.append(func.upper(Product._npp_code).in_(snap_subq))
+        dist_filter_clauses.append(func.upper(ProductCompanyModel.npp_code).in_(snap_subq))
+        conditions.append(or_(*dist_filter_clauses))
+
+    if company_id is not None:
+        if company_id == 0:
+            conditions.append(ProductCompanyModel.id.is_(None))
+        else:
+            conditions.append(ProductCompanyModel.company_id == company_id)
+
+    if company_tax_code and company_tax_code.strip():
+        clean_mst = company_tax_code.strip()
+        conditions.append(CompanyModel.tax_code == clean_mst)
+
+    effective_npp_expr = case(
+        (ProductCompanyModel.id.is_not(None), ProductCompanyModel.npp_code),
+        else_=Product._npp_code,
+    )
+
+    if has_internal_code is True:
+        conditions.append(and_(effective_npp_expr.is_not(None), func.trim(effective_npp_expr) != ""))
+    elif has_internal_code is False:
+        conditions.append(or_(effective_npp_expr.is_(None), func.trim(effective_npp_expr) == ""))
+
+    if status and status != "ALL":
+        if status == "active":
+            conditions.append(Product.status == "active")
+        elif status == "inactive":
+            conditions.append(Product.status == "inactive")
+        elif status == "HAS_PRICE":
+            conditions.append(or_(Product.base_price > 0, Product.cost_price > 0))
+        elif status == "ZERO_PRICE":
+            conditions.append(
+                and_(
+                    or_(Product.base_price <= 0, Product.base_price.is_(None)),
+                    or_(Product.cost_price <= 0, Product.cost_price.is_(None)),
+                )
+            )
+
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        conditions.append(
+            or_(
+                func.lower(Product.sku).like(term),
+                func.lower(Product.name).like(term),
+                func.lower(Product._npp_code).like(term),
+                func.lower(ProductCompanyModel.npp_code).like(term),
+                func.lower(Product.internal_name).like(term),
+                func.lower(Product.supplier).like(term),
+                func.lower(CompanyModel.tax_code).like(term),
+                func.lower(CompanyModel.name).like(term),
+                func.lower(CompanyModel.short_name).like(term),
+            )
+        )
+
+    # 1. Đếm tổng số dòng (SKU, MST)
+    count_query = (
+        select(func.count())
+        .select_from(Product)
+        .outerjoin(ProductCompanyModel, ProductCompanyModel.product_id == Product.id)
+        .outerjoin(CompanyModel, CompanyModel.id == ProductCompanyModel.company_id)
+        .outerjoin(Product.category)
+        .outerjoin(Product.unit)
+        .where(*conditions)
+    )
+    total = db.scalar(count_query) or 0
+
+    # 2. Xử lý sắp xếp (luôn giữ các dòng cùng SKU nằm kề nhau theo MST)
+    sort_col_map = {
+        "code": Product.sku,
+        "nppCode": effective_npp_expr,
+        "name": Product.name,
+        "category": ProductCategory.name,
+        "unit": ProductUnit.name,
+        "boxes_per_carton": Product.boxes_per_carton,
+        "supplier": Product.supplier,
+        "price": Product.base_price,
+        "cost_price": Product.cost_price,
+    }
+    col = sort_col_map.get(sort_field, Product.sku)
+    primary_order = col.desc().nullslast() if sort_order == "desc" else col.asc().nullslast()
+    order_clauses = [
+        primary_order,
+        Product.sku.asc(),
+        CompanyModel.tax_code.asc().nullslast(),
+        ProductCompanyModel.id.asc().nullslast(),
+    ]
+
+    # 3. Phân trang
+    safe_page = max(1, page)
+    safe_page_size = min(500, max(1, page_size))
+    offset = (safe_page - 1) * safe_page_size
+
+    paged_query = (
+        select(Product, ProductCompanyModel, CompanyModel)
+        .options(joinedload(Product.category), joinedload(Product.unit))
+        .outerjoin(ProductCompanyModel, ProductCompanyModel.product_id == Product.id)
+        .outerjoin(CompanyModel, CompanyModel.id == ProductCompanyModel.company_id)
+        .outerjoin(Product.category)
+        .outerjoin(Product.unit)
+        .where(*conditions)
+        .order_by(*order_clauses)
+        .offset(offset)
+        .limit(safe_page_size)
+    )
+    raw_rows = list(db.execute(paged_query).all())
+
+    # 4. Thống kê tổng quan
+    stats_dict = {
+        "total": total,
+        "active_count": 0,
+        "priced_count": 0,
+        "zero_price_count": 0,
+        "supplier_count": 0,
+    }
+    try:
+        stats_row = db.execute(text("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE status = 'active') as active_count,
+                COUNT(*) FILTER (WHERE (base_price > 0 OR cost_price > 0)) as priced_count,
+                COUNT(*) FILTER (WHERE (base_price <= 0 OR base_price IS NULL) AND (cost_price <= 0 OR cost_price IS NULL)) as zero_price_count,
+                COUNT(DISTINCT supplier) as supplier_count
+            FROM products
+            WHERE sku IS NOT NULL AND sku <> ''
+        """)).mappings().first()
+        if stats_row:
+            stats_dict = dict(stats_row)
+    except Exception:
+        pass
+
+    if not raw_rows:
+        return [], total, stats_dict
+
+    # 5. Làm giàu dữ liệu CHỈ CHO các SKU duy nhất trên trang hiện tại
+    unique_products_by_id: dict[int, Product] = {}
+    for prod, _pc, _comp in raw_rows:
+        if prod.id not in unique_products_by_id:
+            unique_products_by_id[prod.id] = prod
+    unique_products = list(unique_products_by_id.values())
+    current_product_ids = list(unique_products_by_id.keys())
+
+    rep_rows = db.execute(
+        text(
+            "SELECT pgi.product_id, rp.sku AS rep_sku, rp.name AS rep_name "
+            "FROM product_group_items pgi "
+            "JOIN product_groups pg ON pg.id = pgi.product_group_id "
+            "JOIN products rp ON rp.id = pg.representative_product_id "
+            "WHERE pgi.product_id IN :pids"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": current_product_ids},
+    ).all()
+    rep_map = {row.product_id: (row.rep_sku, row.rep_name) for row in rep_rows}
+
+    relevant_codes: set[str] = set()
+    for prod, pc_link, _comp in raw_rows:
+        if prod.sku:
+            relevant_codes.add(prod.sku.strip().upper())
+        if prod._npp_code:
+            relevant_codes.add(prod._npp_code.strip().upper())
+        if pc_link is not None and pc_link.npp_code:
+            relevant_codes.add(pc_link.npp_code.strip().upper())
+    relevant_codes = {c for c in relevant_codes if c}
+
+    order_stats_map: dict[str, tuple[int, float]] = {}
+    try:
+        if relevant_codes:
+            snaps = db.execute(
+                select(
+                    func.upper(func.trim(VinamilkOrderSnapshot.product_code)),
+                    func.count(func.distinct(VinamilkOrderSnapshot.order_number)),
+                    func.count(VinamilkOrderSnapshot.id),
+                )
+                .where(
+                    VinamilkOrderSnapshot.product_code.is_not(None),
+                    func.upper(func.trim(VinamilkOrderSnapshot.product_code)).in_(relevant_codes),
+                )
+                .group_by(func.upper(func.trim(VinamilkOrderSnapshot.product_code)))
+            ).all()
+            for s_code, ord_cnt, line_cnt in snaps:
+                if s_code:
+                    order_stats_map[str(s_code)] = (int(ord_cnt or 0), float(line_cnt or 0))
+    except Exception:
+        pass
+
+    purchase_stats_map: dict[str, tuple[int, float]] = {}
+    try:
+        from app.models.multi_tenant_invoice import PurchaseInvoiceItem
+
+        if relevant_codes:
+            p_rows = db.execute(
+                select(
+                    func.upper(func.trim(PurchaseInvoiceItem.product_code)),
+                    func.count(func.distinct(PurchaseInvoiceItem.purchase_invoice_id)),
+                    func.sum(PurchaseInvoiceItem.quantity),
+                )
+                .where(
+                    PurchaseInvoiceItem.product_code.is_not(None),
+                    func.upper(func.trim(PurchaseInvoiceItem.product_code)).in_(relevant_codes),
+                )
+                .group_by(func.upper(func.trim(PurchaseInvoiceItem.product_code)))
+            ).all()
+            for p_code, inv_cnt, sum_qty in p_rows:
+                if p_code:
+                    purchase_stats_map[str(p_code)] = (int(inv_cnt or 0), round(float(sum_qty or 0.0), 2))
+    except Exception:
+        pass
+
+    npp_directory = NppDirectory(db)
+    for product in unique_products:
+        rep = rep_map.get(product.id)
+        product._rep_sku_cache = rep[0] if rep else None
+        product._rep_name_cache = rep[1] if rep else None
+        product._npp_code_cache = npp_directory.code(product.id, product.sku)
+
+        sku_key = (product.sku or "").strip().upper()
+        npp_key = (product._npp_code or "").strip().upper()
+        ord_cnt, ord_qty = order_stats_map.get(npp_key) or order_stats_map.get(sku_key) or (0, 0.0)
+        pur_cnt, pur_qty = purchase_stats_map.get(sku_key) or purchase_stats_map.get(npp_key) or (0, 0.0)
+
+        product.category_code = product.category.code if product.category else None
+        product.category_name = product.category.name if product.category else None
+        product.unit_code = product.unit.code if product.unit else None
+        product.unit_name = product.unit.name if product.unit else None
+        product.order_count = ord_cnt
+        product.total_ordered_qty = ord_qty
+        product.purchase_invoice_count = pur_cnt
+        product.total_purchased_qty = pur_qty
+        if ord_cnt > 0 and pur_cnt > 0:
+            product.sync_source = "DMS_AND_CQT"
+        elif ord_cnt > 0:
+            product.sync_source = "ORDER_SYNC"
+        elif pur_cnt > 0:
+            product.sync_source = "PURCHASE_INVOICE"
+        else:
+            product.sync_source = "MANUAL"
+
+    return [(prod, pc_link, comp) for prod, pc_link, comp in raw_rows], total, stats_dict
+
+
 def get_filter_options(db: Session) -> dict[str, Any]:
     from app.models.multi_tenant_invoice import Distributor
     supplier_rows = db.execute(text("""
@@ -1333,9 +1673,17 @@ def update(db: Session, product_id: int, obj_in) -> Optional[Product]:
         update_data["sku"] = update_data["sku"].upper()
 
     if "npp_code" in update_data:
+        from app.models.product import ProductCompany as ProductCompanyModel
+
         npp_raw = update_data.pop("npp_code")
         npp_val = str(npp_raw).strip().upper() if npp_raw and str(npp_raw).strip() else None
         product.npp_code = npp_val
+        # Nếu SKU chỉ gắn đúng 1 MST đầu vào thì đồng bộ luôn npp_code trên dòng ProductCompany đó
+        pc_links = db.scalars(
+            select(ProductCompanyModel).where(ProductCompanyModel.product_id == product.id)
+        ).all()
+        if len(pc_links) == 1:
+            pc_links[0].npp_code = npp_val
         # Đồng bộ ProductGroupCompany nếu SKU thuộc nhóm
         if product.group_items:
             group = product.group_items[0].group
@@ -1374,6 +1722,7 @@ class ProductCRUD:
     get = staticmethod(get)
     list_ = staticmethod(list_)
     list_paged = staticmethod(list_paged)
+    list_paged_by_mst = staticmethod(list_paged_by_mst)
     get_filter_options = staticmethod(get_filter_options)
     create = staticmethod(create)
     update = staticmethod(update)

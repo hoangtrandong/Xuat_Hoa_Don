@@ -98,7 +98,9 @@ def resolve_invoice_item_presentation(
     base_unit = (prod.unit.name if (prod and prod.unit) else None) or raw_unit or "THUNG"
 
     if prod is not None and mode == "INTERNAL":
-        internal_code = (prod._npp_code or "").strip()
+        internal_code = (
+            (link.npp_code or "").strip() if (link is not None and (link.npp_code or "").strip()) else (prod._npp_code or "").strip()
+        )
         if internal_code:
             resolved_code = internal_code
         else:
@@ -279,8 +281,11 @@ def consolidate_dms_orders_for_invoicing(
     ).all()
     prod_company_map: dict[tuple[int, int], ProductCompany] = {}
     prod_primary_company: dict[int, Company] = {}
+    prod_by_id = {p.id: p for p in all_products}
     for link in pc_links:
         prod_company_map[(link.product_id, link.company_id)] = link
+        if link.npp_code and link.product_id in prod_by_id:
+            prod_map.setdefault(link.npp_code.strip().upper(), prod_by_id[link.product_id])
         if link.company is not None and link.product_id not in prod_primary_company:
             if distributor_id is None or link.company.distributor_id in (None, distributor_id):
                 prod_primary_company[link.product_id] = link.company

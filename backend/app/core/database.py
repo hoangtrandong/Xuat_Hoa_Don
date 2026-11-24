@@ -73,6 +73,34 @@ def init_db() -> None:
         conn.execute(text("ALTER TABLE product_companies ADD COLUMN IF NOT EXISTS is_primary BOOLEAN DEFAULT FALSE;"))
         conn.execute(text("ALTER TABLE product_companies ADD COLUMN IF NOT EXISTS last_purchased_at TIMESTAMP;"))
         conn.execute(text("ALTER TABLE product_companies ADD COLUMN IF NOT EXISTS total_purchased_qty DOUBLE PRECISION DEFAULT 0;"))
+        # Thêm cột npp_code theo từng (SKU, MST) và backfill 1 lần từ products.npp_code nếu cột mới tạo
+        from sqlalchemy import inspect as sa_inspect
+        pc_cols = {col["name"] for col in sa_inspect(conn).get_columns("product_companies")}
+        if "npp_code" not in pc_cols:
+            conn.execute(text("ALTER TABLE product_companies ADD COLUMN npp_code VARCHAR(50);"))
+            if engine.dialect.name == "postgresql":
+                conn.execute(text("""
+                    UPDATE product_companies pc
+                    SET npp_code = UPPER(TRIM(p.npp_code))
+                    FROM products p
+                    WHERE pc.product_id = p.id
+                      AND pc.npp_code IS NULL
+                      AND p.npp_code IS NOT NULL
+                      AND TRIM(p.npp_code) <> ''
+                """))
+            else:
+                conn.execute(text("""
+                    UPDATE product_companies
+                    SET npp_code = (
+                        SELECT UPPER(TRIM(p.npp_code))
+                        FROM products p
+                        WHERE p.id = product_companies.product_id
+                          AND p.npp_code IS NOT NULL
+                          AND TRIM(p.npp_code) <> ''
+                    )
+                    WHERE npp_code IS NULL
+                """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_product_companies_npp_code_upper ON product_companies (UPPER(npp_code));"))
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS source_sku VARCHAR(80);"))
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS source_quantity DOUBLE PRECISION;"))
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS source_unit VARCHAR(50);"))

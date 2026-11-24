@@ -22,9 +22,17 @@ from app.schemas.product import (
     ProductStats,
     ProductCompanyConfigsUpdate,
     ProductCompanyNppCodeUpdate,
+    ProductInvoiceProductUpdate,
 )
 from app.models.customer import Company as CompanyModel
-from app.models.product import ProductCategory, ProductCompany, ProductUnit, ProductGroup, ProductGroupItem
+from app.models.product import (
+    InvoiceProduct,
+    ProductCategory,
+    ProductCompany,
+    ProductUnit,
+    ProductGroup,
+    ProductGroupItem,
+)
 from app.models.product import Product as ProductModel
 from app.models.multi_tenant_invoice import (
     Distributor,
@@ -402,6 +410,23 @@ def _product_managed_companies(db: Session, product_ids: list[int]) -> dict[int,
     return result
 
 
+def _invoice_products_by_id(db: Session, invoice_product_ids: set[int]) -> dict[int, InvoiceProduct]:
+    clean_ids = [i for i in invoice_product_ids if i]
+    if not clean_ids:
+        return {}
+    rows = db.scalars(select(InvoiceProduct).where(InvoiceProduct.id.in_(clean_ids))).all()
+    return {row.id: row for row in rows}
+
+
+def _enrich_invoice_product_fields(data: dict, prod: ProductModel, ip_map: dict[int, InvoiceProduct]) -> dict:
+    ip = ip_map.get(prod.invoice_product_id) if prod.invoice_product_id else None
+    data["invoice_product_id"] = prod.invoice_product_id
+    data["invoice_product_code"] = ip.code if ip else None
+    data["invoice_product_name"] = ip.name if ip else None
+    data["invoice_product_unit"] = ip.unit_name if ip else None
+    return data
+
+
 @router.get("/paged", response_model=ProductPagination)
 def list_products_paged(
     page: int = 1,
@@ -439,17 +464,22 @@ def list_products_paged(
         )
         distributor_map = _product_distributors(db, {product.sku.strip().upper() for product in items if product.sku})
         managed_companies_map = _product_managed_companies(db, [product.id for product in items])
+        ip_map = _invoice_products_by_id(db, {product.invoice_product_id for product in items if product.invoice_product_id})
         total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
 
         return {
             "items": [
-                {
-                    **Product.model_validate(product).model_dump(),
-                    "distributors": distributor_map.get(product.sku.strip().upper(), []),
-                    "managed_companies": managed_companies_map.get(product.id, []),
-                    "row_key": f"{product.id}:0",
-                    "mst_count": len(managed_companies_map.get(product.id, [])),
-                }
+                _enrich_invoice_product_fields(
+                    {
+                        **Product.model_validate(product).model_dump(),
+                        "distributors": distributor_map.get(product.sku.strip().upper(), []),
+                        "managed_companies": managed_companies_map.get(product.id, []),
+                        "row_key": f"{product.id}:0",
+                        "mst_count": len(managed_companies_map.get(product.id, [])),
+                    },
+                    product,
+                    ip_map,
+                )
                 for product in items
             ],
             "total": total,
@@ -479,6 +509,7 @@ def list_products_paged(
     unique_ids = list({prod.id for prod, _, _ in row_tuples})
     distributor_map = _product_distributors(db, unique_skus)
     managed_companies_map = _product_managed_companies(db, unique_ids)
+    ip_map = _invoice_products_by_id(db, {prod.invoice_product_id for prod, _, _ in row_tuples if prod.invoice_product_id})
     total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
 
     # Cache base product dump per product_id để tránh validate lặp khi 1 SKU có nhiều MST
@@ -486,7 +517,9 @@ def list_products_paged(
     serialized_items: list[dict] = []
     for prod, pc_link, comp in row_tuples:
         if prod.id not in base_dump_cache:
-            base_dump_cache[prod.id] = Product.model_validate(prod).model_dump()
+            base_dump_cache[prod.id] = _enrich_invoice_product_fields(
+                Product.model_validate(prod).model_dump(), prod, ip_map
+            )
         base_data = dict(base_dump_cache[prod.id])
         managed_list = managed_companies_map.get(prod.id, [])
         if pc_link is not None and comp is not None:
@@ -717,6 +750,50 @@ def update_product_company_npp_code(
         "company_id": company_id,
         "npp_code": npp_val,
         "product_npp_code": product._npp_code,
+    }
+
+
+@router.patch("/{product_id}/invoice-product")
+def assign_product_invoice_product(
+    product_id: int,
+    payload: ProductInvoiceProductUpdate,
+    db: Session = Depends(get_db),
+):
+    """Gán hoặc gỡ Sản phẩm xuất hóa đơn chuẩn cho 1 SKU đầu vào CQT."""
+    product = product_crud.get(db, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Không tìm thấy sản phẩm SKU.")
+
+    ip: InvoiceProduct | None = None
+    if payload.invoice_product_id is not None:
+        ip = db.get(InvoiceProduct, payload.invoice_product_id)
+        if not ip:
+            raise HTTPException(status_code=404, detail="Không tìm thấy Sản phẩm xuất hóa đơn.")
+        product.invoice_product_id = ip.id
+        product.npp_code = ip.code
+        product.internal_name = ip.name
+        product.internal_unit = ip.unit_name
+        # Đồng bộ luôn cho các liên kết ProductCompany để tương thích ngược
+        for pc in db.scalars(select(ProductCompany).where(ProductCompany.product_id == product.id)).all():
+            pc.npp_code = ip.code
+    else:
+        product.invoice_product_id = None
+        product.npp_code = None
+        product.internal_name = None
+        product.internal_unit = None
+        for pc in db.scalars(select(ProductCompany).where(ProductCompany.product_id == product.id)).all():
+            pc.npp_code = None
+
+    db.commit()
+    db.refresh(product)
+    return {
+        "ok": True,
+        "product_id": product.id,
+        "invoice_product_id": product.invoice_product_id,
+        "invoice_product_code": ip.code if ip else None,
+        "invoice_product_name": ip.name if ip else None,
+        "invoice_product_unit": ip.unit_name if ip else None,
+        "npp_code": product._npp_code,
     }
 
 

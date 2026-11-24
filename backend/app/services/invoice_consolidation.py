@@ -16,7 +16,7 @@ from xlutils.copy import copy as xl_copy
 
 from app.models.customer import Company, Customer, CustomerCompany
 from app.models.multi_tenant_invoice import Distributor, IssuedInvoice
-from app.models.product import DistributorProduct, Product, ProductCompany
+from app.models.product import DistributorProduct, InvoiceProduct, Product, ProductCompany
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.services.vinamilk_customer_code import is_vinamilk_supplier, normalize_vinamilk_customer_code
 
@@ -247,31 +247,65 @@ def consolidate_dms_orders_for_invoicing(
             customer_map[key] = c
 
     prod_map: dict[str, Product] = {}
-    all_products = db.scalars(select(Product).options(selectinload(Product.unit))).all()
+    all_products = db.scalars(
+        select(Product).options(
+            selectinload(Product.unit),
+            selectinload(Product.invoice_product),
+        )
+    ).all()
     for p in all_products:
         if p.sku:
             prod_map[p.sku.strip().upper()] = p
         if p._npp_code:
             prod_map[p._npp_code.strip().upper()] = p
 
+    # Nạp Danh mục Sản phẩm Xuất Hóa Đơn chuẩn (Single Source of Truth theo NPP)
+    ip_stmt = select(InvoiceProduct)
+    if distributor_id is not None:
+        ip_stmt = ip_stmt.where(
+            (InvoiceProduct.distributor_id == distributor_id)
+            | (InvoiceProduct.distributor_id.is_(None))
+        )
+    invoice_product_by_code: dict[str, InvoiceProduct] = {}
+    for ip in db.scalars(ip_stmt).all():
+        code_u = (ip.code or "").strip().upper()
+        if not code_u:
+            continue
+        if code_u not in invoice_product_by_code or (
+            distributor_id is not None and ip.distributor_id == distributor_id
+        ):
+            invoice_product_by_code[code_u] = ip
+
+    # Nạp Danh sách Mã SP DMS kèm liên kết SP xuất hóa đơn & tỷ lệ quy đổi
+    dms_product_map: dict[tuple[str, int | None], DistributorProduct] = {}
     distributor_invoice_profile_map: dict[tuple[str, int | None], tuple[str, str]] = {}
-    dp_stmt = select(DistributorProduct)
+    dp_stmt = select(DistributorProduct).options(selectinload(DistributorProduct.invoice_product))
     if distributor_id is not None:
         dp_stmt = dp_stmt.where(
             (DistributorProduct.distributor_id == distributor_id)
             | (DistributorProduct.distributor_id.is_(None))
         )
-    distributor_products = db.scalars(dp_stmt).all()
+    distributor_products = list(db.scalars(dp_stmt).all())
     # Ưu tiên bản ghi khớp chính xác distributor_id hơn bản ghi legacy (distributor_id=None)
     distributor_products.sort(key=lambda dp: 0 if dp.distributor_id is None else 1)
     for distributor_product in distributor_products:
         sku = (distributor_product.distributor_sku or "").strip().upper()
-        invoice_code = (distributor_product.invoice_product_code or "").strip().upper()
-        invoice_name = (distributor_product.invoice_product_name or "").strip()
+        invoice_code = (
+            distributor_product.invoice_product.code
+            if distributor_product.invoice_product
+            else (distributor_product.invoice_product_code or "")
+        ).strip().upper()
+        invoice_name = (
+            distributor_product.invoice_product.name
+            if distributor_product.invoice_product
+            else (distributor_product.invoice_product_name or "")
+        ).strip()
         if sku:
             key = (sku, distributor_product.company_id)
+            dms_product_map[key] = distributor_product
             distributor_invoice_profile_map[key] = (invoice_code, invoice_name)
-            # Giữ thêm fallback chung nếu chưa có dòng company_id=None
+            if distributor_product.company_id is not None and (sku, None) not in dms_product_map:
+                dms_product_map[(sku, None)] = distributor_product
             if distributor_product.company_id is not None and (sku, None) not in distributor_invoice_profile_map:
                 distributor_invoice_profile_map[(sku, None)] = (invoice_code, invoice_name)
 
@@ -432,6 +466,7 @@ def consolidate_dms_orders_for_invoicing(
                 "missing_companies": set(),
                 "missing_tax_or_cccd": set(),
                 "missing_products": {},  # raw_code -> product_name
+                "missing_invoice_products": {},  # dms_code -> product_name (chưa gán SP xuất HĐ)
                 "warnings": set(),
                 "company_invoice_item_mode": (comp.invoice_item_mode or "TAX_INPUT") if comp else "TAX_INPUT",
                 "items_acc": {},
@@ -458,45 +493,93 @@ def consolidate_dms_orders_for_invoicing(
             elif customer is not None:
                 grp["missing_companies"].add(f"{customer.code} ({customer.name})")
 
-        # Kiểm tra đăng ký Sản phẩm & cộng gộp dòng hàng theo quy tắc xuất HĐ của Công ty
-        if prod is None:
-            grp["missing_products"][raw_prod_code or "(Trống)"] = (
-                snap.product_name or "Sản phẩm chưa đặt tên"
-            )
-
-        pc_link = prod_company_map.get((prod.id, comp.id)) if (prod and comp) else None
+        # Tra cứu Mã SP DMS -> Sản phẩm xuất hóa đơn chuẩn (Single Source of Truth) + tỷ lệ quy đổi
         npp_lookup_sku = ((prod._npp_code or prod.sku) if prod else raw_prod_code).strip().upper()
-        dp_profile = None
+        dp_obj: DistributorProduct | None = None
         if comp is not None:
-            dp_profile = (
-                distributor_invoice_profile_map.get((npp_lookup_sku, comp.id))
-                or distributor_invoice_profile_map.get((raw_prod_code, comp.id))
+            dp_obj = (
+                dms_product_map.get((raw_prod_code, comp.id))
+                or dms_product_map.get((npp_lookup_sku, comp.id))
             )
-        if dp_profile is None:
-            dp_profile = (
-                distributor_invoice_profile_map.get((npp_lookup_sku, None))
-                or distributor_invoice_profile_map.get((raw_prod_code, None))
+        if dp_obj is None:
+            dp_obj = (
+                dms_product_map.get((raw_prod_code, None))
+                or dms_product_map.get((npp_lookup_sku, None))
             )
-        dp_inv_code = dp_profile[0] if dp_profile else None
-        dp_inv_name = dp_profile[1] if dp_profile else None
-        pres = resolve_invoice_item_presentation(
-            prod=prod,
-            comp=comp,
-            link=pc_link,
-            raw_code=raw_prod_code,
-            raw_name=snap.product_name or "",
-            raw_unit=str(raw.get("ĐVT") or raw.get("unit") or "THUNG").strip(),
-            distributor_invoice_code=dp_inv_code,
-            distributor_invoice_name=dp_inv_name,
-        )
-        if pres["warning"]:
-            grp["warnings"].add(pres["warning"])
 
-        cqt_sku = pres["product_code"]
-        cqt_name = pres["product_name"]
-        cqt_unit = pres["unit_name"]
-        conv_num = pres["conversion_num"]
-        conv_den = pres["conversion_den"]
+        resolved_ip: InvoiceProduct | None = None
+        if dp_obj is not None:
+            if dp_obj.invoice_product is not None:
+                resolved_ip = dp_obj.invoice_product
+            elif (dp_obj.invoice_product_code or "").strip():
+                resolved_ip = invoice_product_by_code.get(dp_obj.invoice_product_code.strip().upper())
+        if resolved_ip is None and prod is not None and prod.invoice_product is not None:
+            resolved_ip = prod.invoice_product
+        if resolved_ip is None and raw_prod_code:
+            resolved_ip = invoice_product_by_code.get(raw_prod_code)
+
+        raw_unit_str = (
+            (dp_obj.unit if (dp_obj and dp_obj.unit) else None)
+            or str(raw.get("ĐVT") or raw.get("unit") or "").strip()
+            or (prod.unit.name if (prod and prod.unit) else "THUNG")
+        )
+
+        if resolved_ip is not None:
+            conv_num = max(1, int(dp_obj.conversion_num or 1)) if dp_obj is not None else 1
+            conv_den = max(1, int(dp_obj.conversion_den or 1)) if dp_obj is not None else 1
+            cqt_sku = resolved_ip.code.strip().upper()
+            cqt_name = resolved_ip.name.strip()
+            cqt_unit = (resolved_ip.unit_name or "Hộp").strip() or "Hộp"
+            pres = {
+                "product_code": cqt_sku,
+                "product_name": cqt_name,
+                "unit_name": cqt_unit,
+                "source_unit": raw_unit_str,
+                "conversion_num": conv_num,
+                "conversion_den": conv_den,
+                "conversion_ratio": f"{conv_num}/{conv_den}" if conv_num != conv_den else None,
+                "is_converted": (conv_num != conv_den) or (cqt_unit.lower() != raw_unit_str.lower()),
+                "naming_mode": "INVOICE_PRODUCT",
+                "warning": None,
+            }
+        else:
+            # Chưa gán Mã SP xuất hóa đơn -> đánh dấu lỗi chặn xuất hóa đơn
+            grp["missing_invoice_products"][raw_prod_code or "(Trống)"] = (
+                (dp_obj.distributor_product_name if dp_obj else None)
+                or snap.product_name
+                or (prod.name if prod else "Sản phẩm chưa đặt tên")
+            )
+            pc_link = prod_company_map.get((prod.id, comp.id)) if (prod and comp) else None
+            dp_profile = None
+            if comp is not None:
+                dp_profile = (
+                    distributor_invoice_profile_map.get((npp_lookup_sku, comp.id))
+                    or distributor_invoice_profile_map.get((raw_prod_code, comp.id))
+                )
+            if dp_profile is None:
+                dp_profile = (
+                    distributor_invoice_profile_map.get((npp_lookup_sku, None))
+                    or distributor_invoice_profile_map.get((raw_prod_code, None))
+                )
+            dp_inv_code = dp_profile[0] if dp_profile else None
+            dp_inv_name = dp_profile[1] if dp_profile else None
+            pres = resolve_invoice_item_presentation(
+                prod=prod,
+                comp=comp,
+                link=pc_link,
+                raw_code=raw_prod_code,
+                raw_name=snap.product_name or "",
+                raw_unit=raw_unit_str,
+                distributor_invoice_code=dp_inv_code,
+                distributor_invoice_name=dp_inv_name,
+            )
+            if pres["warning"]:
+                grp["warnings"].add(pres["warning"])
+            cqt_sku = pres["product_code"]
+            cqt_name = pres["product_name"]
+            cqt_unit = pres["unit_name"]
+            conv_num = pres["conversion_num"]
+            conv_den = pres["conversion_den"]
 
         qty = _to_float(raw.get("Số lượng") or raw.get("quantity"), 0.0)
         promo_qty = _to_float(raw.get("Số lượng KM") or raw.get("promotionQuantity"), 0.0)
@@ -510,15 +593,19 @@ def consolidate_dms_orders_for_invoicing(
         if qty > 0 or raw_val > 0:
             line_amount = raw_val if raw_val > 0 else round(qty * price, 2)
             net_before_tax = max(0.0, round(line_amount - discount, 2))
-            # Lấy thuế suất VAT theo từng SKU (ưu tiên thuế suất đã học từ CQT / cấu hình trên SKU)
-            sku_vat = prod.vat_rate if (prod is not None and prod.vat_rate is not None) else None
+            # Lấy thuế suất VAT: ưu tiên trên SP xuất hóa đơn -> SKU CQT -> mặc định
+            sku_vat = (
+                resolved_ip.vat_rate
+                if (resolved_ip is not None and resolved_ip.vat_rate is not None)
+                else (prod.vat_rate if (prod is not None and prod.vat_rate is not None) else None)
+            )
             is_vat_exempt = sku_vat is not None and float(sku_vat) < 0
             line_vat_rate = 0.0 if is_vat_exempt else (float(sku_vat) if sku_vat is not None else float(default_vat_rate))
             item_key = f"{cqt_sku}::{cqt_unit}::{line_vat_rate}::SALE"
             if item_key not in grp["items_acc"]:
                 grp["items_acc"][item_key] = {
                     "product_code": cqt_sku,
-                    "source_product_code": prod.sku if prod else raw_prod_code,
+                    "source_product_code": raw_prod_code or (prod.sku if prod else ""),
                     "product_name": cqt_name,
                     "unit_name": cqt_unit,
                     "source_unit": pres["source_unit"],
@@ -527,7 +614,7 @@ def consolidate_dms_orders_for_invoicing(
                     "conversion_ratio": pres["conversion_ratio"],
                     "is_converted": pres["is_converted"],
                     "is_promo": False,
-                    "is_registered": prod is not None,
+                    "is_registered": resolved_ip is not None,
                     "source_quantity": 0.0,
                     "quantity": 0.0,
                     "discount_amount": 0.0,
@@ -608,6 +695,14 @@ def consolidate_dms_orders_for_invoicing(
             validation_errors.append(
                 f"Thiếu cả Mã số thuế (MST) và CCCD cho: {codes_str}"
             )
+        if grp["missing_invoice_products"]:
+            missing_flags.append("INVOICE_PRODUCT")
+            prods_str = ", ".join(
+                f"{code} ({name})" for code, name in sorted(grp["missing_invoice_products"].items())
+            )
+            validation_errors.append(
+                f"Mã SP DMS chưa gán Mã SP xuất hóa đơn (vui lòng gán tại Danh sách mã SP DMS trước khi xuất): {prods_str}"
+            )
         if grp["missing_products"]:
             missing_flags.append("PRODUCT")
             prods_str = ", ".join(
@@ -641,26 +736,26 @@ def consolidate_dms_orders_for_invoicing(
                     f"SKU {it['product_code']}: quy đổi {src_qty} {it.get('source_unit', '')} theo tỷ lệ {it.get('conversion_ratio')} ra số lẻ ({qty} {it['unit_name']})."
                 )
 
-            # Kiểm tra Tồn kho Thuế theo (MST Công ty xuất, SKU đầu vào CQT)
+            # Kiểm tra Tồn kho Thuế theo (MST Công ty xuất, Mã SP xuất hóa đơn) theo ĐVT nhỏ nhất đã quy đổi
             comp_mst = (grp.get("company_tax_code") or "").strip()
-            src_sku_upper = (it.get("source_product_code") or it["product_code"] or "").strip().upper()
+            inv_sku_upper = (it["product_code"] or it.get("source_product_code") or "").strip().upper()
             tax_balance_qty: float | None = None
             is_tax_negative = False
-            if comp_mst and src_sku_upper:
-                tax_balance_qty = tax_balance_lookup.get((comp_mst, src_sku_upper), 0.0)
-                projected_bal = round(tax_balance_qty - src_qty, 4)
+            if comp_mst and inv_sku_upper:
+                tax_balance_qty = tax_balance_lookup.get((comp_mst, inv_sku_upper), 0.0)
+                projected_bal = round(tax_balance_qty - qty, 4)
                 # Trừ lũy kế để các nhóm hóa đơn tiếp theo trong cùng đợt gom thấy đúng tồn còn lại
-                tax_balance_lookup[(comp_mst, src_sku_upper)] = projected_bal
+                tax_balance_lookup[(comp_mst, inv_sku_upper)] = projected_bal
                 if projected_bal < -1e-6:
                     is_tax_negative = True
                     others = [
                         f"{x['tax_code']} (+{x['balance_qty']})"
-                        for x in sku_positive_by_mst.get(src_sku_upper, [])
+                        for x in sku_positive_by_mst.get(inv_sku_upper, [])
                         if x["tax_code"] != comp_mst
                     ]
                     other_hint = f" | MST khác đang tồn: {', '.join(others[:2])}" if others else ""
                     grp["warnings"].add(
-                        f"Âm kho thuế MST {comp_mst} - SKU {src_sku_upper}: tồn khả dụng {tax_balance_qty}, sắp xuất {src_qty} (thiếu {round(abs(projected_bal), 4)}){other_hint}."
+                        f"Âm kho thuế MST {comp_mst} - Mã SP xuất HĐ {inv_sku_upper}: tồn khả dụng {tax_balance_qty}, sắp xuất {qty} {it['unit_name']} (thiếu {round(abs(projected_bal), 4)}){other_hint}."
                     )
 
             items_list.append(

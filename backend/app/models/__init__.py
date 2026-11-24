@@ -3,7 +3,7 @@ from app.models.customer import Customer, CustomerAddress, CustomerContact, Cust
 from app.models.product import (
     Product, ProductCategory, ProductUnit, PriceList, PriceListItem,
     ProductGroup, ProductGroupItem, ProductCompany, ProductGroupCompany,
-    DistributorProduct,
+    DistributorProduct, InvoiceProduct,
 )
 from app.models.inventory import (
     Warehouse, WarehouseLocation, InventoryLot, InventoryTransaction, DeliveryRequest, DeliveryRequestItem,
@@ -45,7 +45,7 @@ __all__ = [
     "Customer", "CustomerAddress", "CustomerContact", "CustomerCompany", "Store", "Company",
     "Product", "ProductCategory", "ProductUnit", "PriceList", "PriceListItem",
     "ProductGroup", "ProductGroupItem", "ProductCompany", "ProductGroupCompany",
-    "DistributorProduct", "SupplierDictionary",
+    "DistributorProduct", "InvoiceProduct", "SupplierDictionary",
     "Warehouse", "WarehouseLocation", "InventoryLot", "InventoryTransaction", "DeliveryRequest", "DeliveryRequestItem",
     "DeliveryAllocation", "InventoryTransfer", "InventoryTransferItem", "SupplierGoodsDiscrepancy",
     "SupplierGoodsDiscrepancySource", "SupplierGoodsDiscrepancyOffset", "DeliveryRequestEmployeeSummary",

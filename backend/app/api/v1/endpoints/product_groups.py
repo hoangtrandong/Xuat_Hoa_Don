@@ -19,7 +19,7 @@ from app.models.multi_tenant_invoice import Distributor
 from app.models.user import User
 from app.models.product import (
     Product, ProductCompany, ProductGroup, ProductGroupCompany, ProductGroupItem,
-    DistributorProduct,
+    DistributorProduct, InvoiceProduct,
 )
 from app.schemas.product_group import (
     ProductCompanyAssignmentView,
@@ -36,6 +36,7 @@ from app.schemas.product_group import (
     DistributorProductItem,
     DistributorProductCreate,
     DistributorProductUpdate,
+    DistributorProductInvoiceMappingUpdate,
     DistributorProductBulkDelete,
 )
 
@@ -386,17 +387,44 @@ def list_product_companies(product_id: int, db: Session = Depends(get_db)):
     ).all()
 
 
+def _serialize_distributor_product(item: DistributorProduct) -> DistributorProductItem:
+    ip = item.invoice_product
+    return DistributorProductItem(
+        id=item.id,
+        distributor_id=item.distributor_id,
+        distributor_name=item.distributor_name or "",
+        distributor_sku=item.distributor_sku,
+        distributor_product_name=item.distributor_product_name,
+        invoice_product_id=item.invoice_product_id,
+        invoice_product_code=(ip.code if ip else item.invoice_product_code),
+        invoice_product_name=(ip.name if ip else item.invoice_product_name),
+        invoice_product_unit=(ip.unit_name if ip else None),
+        invoice_product_vat_rate=(ip.vat_rate if ip else None),
+        conversion_num=max(1, int(item.conversion_num or 1)),
+        conversion_den=max(1, int(item.conversion_den or 1)),
+        supplier=item.supplier or "",
+        unit=item.unit or "HOP",
+        company_id=item.company_id,
+        company_code=item.company.code if item.company else None,
+        company_name=item.company.name if item.company else None,
+        status=item.status or "active",
+    )
+
+
 @router.get("/distributor-products", response_model=list[DistributorProductItem])
 def list_distributor_products(
     distributor_id: int | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Danh sách mã sản phẩm NPP nội bộ (cô lập theo Nhà phân phối)."""
+    """Danh sách mã sản phẩm DMS (cô lập theo Nhà phân phối)."""
     scoped_dist_id = resolve_distributor_scope(current_user, distributor_id)
     stmt = (
         select(DistributorProduct)
-        .options(joinedload(DistributorProduct.company))
+        .options(
+            joinedload(DistributorProduct.company),
+            joinedload(DistributorProduct.invoice_product),
+        )
         .order_by(DistributorProduct.id.desc())
     )
     if scoped_dist_id is not None:
@@ -405,24 +433,7 @@ def list_distributor_products(
             | (DistributorProduct.distributor_id.is_(None))
         )
     items = db.scalars(stmt).all()
-    return [
-        DistributorProductItem(
-            id=item.id,
-            distributor_id=item.distributor_id,
-            distributor_name=item.distributor_name or "",
-            distributor_sku=item.distributor_sku,
-            distributor_product_name=item.distributor_product_name,
-            invoice_product_code=item.invoice_product_code,
-            invoice_product_name=item.invoice_product_name,
-            supplier=item.supplier or "",
-            unit=item.unit or "HOP",
-            company_id=item.company_id,
-            company_code=item.company.code if item.company else None,
-            company_name=item.company.name if item.company else None,
-            status=item.status or "active",
-        )
-        for item in items
-    ]
+    return [_serialize_distributor_product(item) for item in items]
 
 
 @router.get("/products/company-links", response_model=list[ProductCompanyManagementView])
@@ -587,14 +598,37 @@ def create_distributor_product(
             resolved_dist_name = dist_obj.name
 
     clean_inv_code = (payload.invoice_product_code or "").strip().upper() or None
+    clean_inv_name = (payload.invoice_product_name or "").strip() or None
+    target_ip_id: int | None = None
+    if payload.invoice_product_id:
+        ip_obj = db.get(InvoiceProduct, payload.invoice_product_id)
+        if not ip_obj:
+            raise HTTPException(status_code=400, detail="Sản phẩm xuất hóa đơn không tồn tại.")
+        target_ip_id = ip_obj.id
+        clean_inv_code = ip_obj.code
+        clean_inv_name = ip_obj.name
+    elif clean_inv_code:
+        ip_q = select(InvoiceProduct).where(InvoiceProduct.code == clean_inv_code)
+        if scoped_dist_id is not None:
+            ip_q = ip_q.where(
+                (InvoiceProduct.distributor_id == scoped_dist_id) | (InvoiceProduct.distributor_id.is_(None))
+            )
+        ip_obj = db.scalar(ip_q)
+        if ip_obj:
+            target_ip_id = ip_obj.id
+            clean_inv_code = ip_obj.code
+            clean_inv_name = ip_obj.name
 
     new_prod = DistributorProduct(
         distributor_id=scoped_dist_id,
         distributor_name=resolved_dist_name,
         distributor_sku=clean_sku,
         distributor_product_name=payload.distributor_product_name.strip(),
+        invoice_product_id=target_ip_id,
         invoice_product_code=clean_inv_code,
-        invoice_product_name=(payload.invoice_product_name or "").strip() or None,
+        invoice_product_name=clean_inv_name,
+        conversion_num=max(1, int(payload.conversion_num or 1)),
+        conversion_den=max(1, int(payload.conversion_den or 1)),
         supplier=(payload.supplier or "").strip(),
         unit=(payload.unit or "HOP").strip().upper(),
         company_id=target_company_id,
@@ -604,21 +638,7 @@ def create_distributor_product(
     db.commit()
     db.refresh(new_prod)
 
-    return DistributorProductItem(
-        id=new_prod.id,
-        distributor_id=new_prod.distributor_id,
-        distributor_name=new_prod.distributor_name,
-        distributor_sku=new_prod.distributor_sku,
-        distributor_product_name=new_prod.distributor_product_name,
-        invoice_product_code=new_prod.invoice_product_code,
-        invoice_product_name=new_prod.invoice_product_name,
-        supplier=new_prod.supplier,
-        unit=new_prod.unit,
-        company_id=new_prod.company_id,
-        company_code=new_prod.company.code if new_prod.company else None,
-        company_name=new_prod.company.name if new_prod.company else None,
-        status=new_prod.status,
-    )
+    return _serialize_distributor_product(new_prod)
 
 
 @router.put("/distributor-products")
@@ -687,8 +707,25 @@ def update_distributor_product(
 
     if payload.distributor_product_name.strip():
         item.distributor_product_name = payload.distributor_product_name.strip()
-    item.invoice_product_code = (payload.invoice_product_code or "").strip().upper() or None
-    item.invoice_product_name = (payload.invoice_product_name or "").strip() or None
+
+    if "invoice_product_id" in payload.model_fields_set:
+        if payload.invoice_product_id:
+            ip_obj = db.get(InvoiceProduct, payload.invoice_product_id)
+            if not ip_obj:
+                raise HTTPException(status_code=400, detail="Sản phẩm xuất hóa đơn không tồn tại.")
+            item.invoice_product_id = ip_obj.id
+            item.invoice_product_code = ip_obj.code
+            item.invoice_product_name = ip_obj.name
+        else:
+            item.invoice_product_id = None
+            item.invoice_product_code = (payload.invoice_product_code or "").strip().upper() or None
+            item.invoice_product_name = (payload.invoice_product_name or "").strip() or None
+    else:
+        item.invoice_product_code = (payload.invoice_product_code or "").strip().upper() or None
+        item.invoice_product_name = (payload.invoice_product_name or "").strip() or None
+
+    item.conversion_num = max(1, int(payload.conversion_num or 1))
+    item.conversion_den = max(1, int(payload.conversion_den or 1))
     if payload.distributor_name:
         item.distributor_name = payload.distributor_name.strip()
     if payload.supplier:
@@ -715,17 +752,63 @@ def update_distributor_product(
 
     return {
         "success": True,
-        "message": f"Đã cập nhật mã sản phẩm NPP '{item.distributor_sku}' thành công.",
+        "message": f"Đã cập nhật mã sản phẩm DMS '{item.distributor_sku}' thành công.",
         "id": item.id,
         "distributor_id": item.distributor_id,
         "distributor_sku": item.distributor_sku,
         "distributor_product_name": item.distributor_product_name,
+        "invoice_product_id": item.invoice_product_id,
         "invoice_product_code": item.invoice_product_code,
         "invoice_product_name": item.invoice_product_name,
+        "conversion_num": item.conversion_num,
+        "conversion_den": item.conversion_den,
         "company_id": item.company_id,
         "company_code": item.company.code if item.company else None,
         "company_name": item.company.name if item.company else None,
     }
+
+
+@router.patch("/distributor-products/{item_id}/invoice-product", response_model=DistributorProductItem)
+def assign_dms_product_invoice_product(
+    item_id: int,
+    payload: DistributorProductInvoiceMappingUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Gán hoặc gỡ nhanh Sản phẩm xuất hóa đơn và tỷ lệ quy đổi cho 1 Mã SP DMS."""
+    item = db.scalar(
+        select(DistributorProduct)
+        .options(
+            joinedload(DistributorProduct.company),
+            joinedload(DistributorProduct.invoice_product),
+        )
+        .where(DistributorProduct.id == item_id)
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Không tìm thấy mã sản phẩm DMS.")
+    ensure_entity_in_distributor_scope(current_user, item.distributor_id)
+
+    if "invoice_product_id" in payload.model_fields_set:
+        if payload.invoice_product_id:
+            ip_obj = db.get(InvoiceProduct, payload.invoice_product_id)
+            if not ip_obj:
+                raise HTTPException(status_code=404, detail="Không tìm thấy Sản phẩm xuất hóa đơn.")
+            item.invoice_product_id = ip_obj.id
+            item.invoice_product_code = ip_obj.code
+            item.invoice_product_name = ip_obj.name
+        else:
+            item.invoice_product_id = None
+            item.invoice_product_code = None
+            item.invoice_product_name = None
+
+    if payload.conversion_num is not None:
+        item.conversion_num = max(1, int(payload.conversion_num))
+    if payload.conversion_den is not None:
+        item.conversion_den = max(1, int(payload.conversion_den))
+
+    db.commit()
+    db.refresh(item)
+    return _serialize_distributor_product(item)
 
 
 @router.delete("/distributor-products/{id_or_code}")
@@ -814,18 +897,19 @@ def bulk_delete_distributor_products(
 
 @router.get("/distributor-products/template")
 def download_distributor_product_template():
-    """Tải file Excel mẫu để thêm / cập nhật danh sách mã sản phẩm NPP chuẩn 9 cột (hỗ trợ nhiều Công ty QL cho cùng Mã SP NPP)."""
+    """Tải file Excel mẫu để thêm / cập nhật Danh sách mã sản phẩm DMS (hỗ trợ gán Mã SP Xuất HĐ & Tỷ lệ quy đổi)."""
     wb = Workbook()
     ws = wb.active
-    ws.title = "DS_Ma_SP_NPP"
+    ws.title = "DS_Ma_SP_DMS"
 
     headers = [
         "STT",
         "Nhà phân phối",
-        "Mã SP NPP",
-        "Tên Sản Phẩm NPP",
+        "Mã SP DMS",
+        "Tên Sản Phẩm DMS",
         "Mã SP Xuất Hóa Đơn",
         "Tên Sản Phẩm Xuất Hóa Đơn",
+        "Tỷ lệ quy đổi",
         "Nhà cung cấp",
         "Mã Công ty QL",
         "Tên Công ty QL",
@@ -833,45 +917,73 @@ def download_distributor_product_template():
     ws.append(headers)
 
     sample_rows = [
-        [1, "Nhà Phân Phối ABC", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "01TD03", "SỮA TƯƠI TIỆT TRÙNG 180ML (CT01)", "Vinamilk", "CT01", "Công ty TNHH Phân Phối A"],
-        [2, "Nhà Phân Phối ABC", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "01TD03-B", "SỮA TƯƠI TIỆT TRÙNG 180ML (CT02)", "Vinamilk", "CT02", "Công ty Cổ Phần Thương Mại B"],
-        [3, "Nhà Phân Phối ABC", "07KD12", "Sữa chua ăn lựu đỏ 100g", "07KD12", "SỮA CHUA ĂN 100G", "Vinamilk", "", ""],
-        [4, "Nhà Phân Phối ABC", "01SX11", "Sữa dinh dưỡng 110ml", "01SX11", "SỮA DINH DƯỠNG 110ML", "Vinamilk", "", ""],
+        [1, "Nhà Phân Phối ABC", "01TD03-THUNG", "Sữa tươi tiệt trùng có đường 180ml (Thùng 48 hộp)", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "48/1", "Vinamilk", "CT01", "Công ty TNHH Phân Phối A"],
+        [2, "Nhà Phân Phối ABC", "07KD12", "Sữa chua ăn lựu đỏ 100g", "07KD12", "Sữa chua ăn 100g", "1/1", "Vinamilk", "", ""],
+        [3, "Nhà Phân Phối ABC", "NZ001", "Nước giải khát Nazzy 330ml (Thùng 24 lon)", "NZ001", "Nước giải khát Nazzy 330ml", "24/1", "Nazzy", "", ""],
     ]
     for row in sample_rows:
         ws.append(row)
 
-    # Định dạng độ rộng cột
     ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 28
-    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 18
     ws.column_dimensions["D"].width = 40
     ws.column_dimensions["E"].width = 20
-    ws.column_dimensions["F"].width = 44
-    ws.column_dimensions["G"].width = 18
-    ws.column_dimensions["H"].width = 18
-    ws.column_dimensions["I"].width = 36
+    ws.column_dimensions["F"].width = 40
+    ws.column_dimensions["G"].width = 16
+    ws.column_dimensions["H"].width = 16
+    ws.column_dimensions["I"].width = 16
+    ws.column_dimensions["J"].width = 32
 
     output = BytesIO()
     wb.save(output)
     return Response(
         content=output.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="mau-danh-sach-ma-sp-npp.xlsx"'},
+        headers={"Content-Disposition": 'attachment; filename="mau-danh-sach-ma-sp-dms.xlsx"'},
     )
 
 
+def _parse_conversion_ratio(raw_val) -> tuple[int, int]:
+    if raw_val is None:
+        return 1, 1
+    s = str(raw_val).strip()
+    if not s:
+        return 1, 1
+    if "/" in s or ":" in s:
+        sep = "/" if "/" in s else ":"
+        parts = s.split(sep, 1)
+        try:
+            num = max(1, int(float(parts[0].strip())))
+            den = max(1, int(float(parts[1].strip())))
+            return num, den
+        except ValueError:
+            return 1, 1
+    try:
+        num = max(1, int(float(s.replace(",", "."))))
+        return num, 1
+    except ValueError:
+        return 1, 1
+
+
 @router.post("/distributor-products/upload")
-def upload_distributor_products(file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_distributor_products(
+    file: UploadFile = File(...),
+    distributor_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
-    Upload file Excel để thêm mới và chỉnh sửa hàng loạt danh sách mã sản phẩm NPP.
-    - Hỗ trợ nhiều Công ty quản lý trên cùng 1 Mã SP NPP (khóa upsert = (Mã SP NPP, Công ty QL)).
-    - Hỗ trợ cột Mã SP Xuất Hóa Đơn & Tên Sản Phẩm Xuất Hóa Đơn riêng theo từng Công ty QL.
+    Upload file Excel để thêm mới và chỉnh sửa hàng loạt Danh sách mã sản phẩm DMS.
+    - Hỗ trợ tự động nối với Danh sách SP xuất hóa đơn (`invoice_products`) theo `Mã SP Xuất Hóa Đơn`.
+    - Hỗ trợ cột `Tỷ lệ quy đổi` (VD: `48/1` hoặc `48`).
     """
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
         raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel định dạng .xlsx hoặc .xls.")
 
     from datetime import datetime
+
+    scoped_dist_id = resolve_distributor_scope(current_user, distributor_id)
 
     try:
         content = file.file.read()
@@ -881,14 +993,13 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
         if not rows or len(rows) < 2:
             raise HTTPException(status_code=400, detail="File Excel không có dữ liệu để xử lý.")
 
-        # Chuẩn hóa headers
         raw_headers = [str(c or "").strip().lower() for c in rows[0]]
 
-        # Tìm index các cột (kiểm tra Mã SP Xuất Hóa Đơn TRƯỚC Mã SP NPP để không bị nhầm substring)
         sku_idx = -1
         name_idx = -1
         invoice_code_idx = -1
         invoice_name_idx = -1
+        ratio_idx = -1
         dist_idx = -1
         supplier_idx = -1
         company_code_idx = -1
@@ -896,12 +1007,14 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
         for idx, h in enumerate(raw_headers):
             if any(k in h for k in ["mã sp xuất hóa đơn", "mã sản phẩm xuất hóa đơn", "mã xuất hóa đơn", "mã xuất hđ", "mã sp xuất hđ", "invoice_product_code", "invoice_code"]):
                 invoice_code_idx = idx
-            elif any(k in h for k in ["mã sp npp", "mã sp", "distributor_sku", "sku", "ma_sp", "mã sản phẩm"]):
+            elif any(k in h for k in ["mã sp dms", "mã sp npp", "mã sp", "distributor_sku", "sku", "ma_sp", "mã sản phẩm"]):
                 sku_idx = idx
             elif any(k in h for k in ["tên sản phẩm xuất hóa đơn", "tên sp xuất hóa đơn", "tên hóa đơn", "invoice_product_name", "invoice_name"]):
                 invoice_name_idx = idx
-            elif any(k in h for k in ["tên sản phẩm npp", "tên sản phẩm", "tên sp", "distributor_name", "distributor_product_name", "ten_sp"]):
+            elif any(k in h for k in ["tên sản phẩm dms", "tên sản phẩm npp", "tên sản phẩm", "tên sp", "distributor_name", "distributor_product_name", "ten_sp"]):
                 name_idx = idx
+            elif any(k in h for k in ["tỷ lệ quy đổi", "ty le quy doi", "quy đổi", "conversion", "ratio"]):
+                ratio_idx = idx
             elif any(k in h for k in ["nhà phân phối", "distributor", "npp"]):
                 dist_idx = idx
             elif any(k in h for k in ["nhà cung cấp", "supplier", "ncc"]):
@@ -914,23 +1027,39 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
         if name_idx == -1:
             name_idx = 3 if len(raw_headers) > 3 else 1
 
-        # Cache danh sách công ty quản lý theo Mã Công ty QL (case-insensitive)
         all_companies = db.scalars(select(Company)).all()
         companies_by_code: dict[str, Company] = {
             c.code.strip().upper(): c for c in all_companies if c.code
         }
 
-        # Cache danh sách sản phẩm NPP hiện có theo cặp (SKU, company_id)
+        ip_stmt = select(InvoiceProduct)
+        if scoped_dist_id is not None:
+            ip_stmt = ip_stmt.where(
+                (InvoiceProduct.distributor_id == scoped_dist_id)
+                | (InvoiceProduct.distributor_id.is_(None))
+            )
+        invoice_products_by_code: dict[str, InvoiceProduct] = {}
+        for ip in db.scalars(ip_stmt).all():
+            code_u = ip.code.strip().upper()
+            if code_u not in invoice_products_by_code or (scoped_dist_id is not None and ip.distributor_id == scoped_dist_id):
+                invoice_products_by_code[code_u] = ip
+
+        dp_stmt = select(DistributorProduct)
+        if scoped_dist_id is not None:
+            dp_stmt = dp_stmt.where(
+                (DistributorProduct.distributor_id == scoped_dist_id)
+                | (DistributorProduct.distributor_id.is_(None))
+            )
         existing_products: dict[tuple[str, int | None], DistributorProduct] = {
             (p.distributor_sku.strip().upper(), p.company_id): p
-            for p in db.scalars(select(DistributorProduct)).all()
+            for p in db.scalars(dp_stmt).all()
         }
 
         added = 0
         updated = 0
         now = datetime.utcnow()
 
-        for row_num, row in enumerate(rows[1:], start=2):
+        for row in rows[1:]:
             if not row or all(v is None or str(v).strip() == "" for v in row):
                 continue
 
@@ -954,23 +1083,29 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
                 else ""
             )
 
+            matched_ip = invoice_products_by_code.get(invoice_code_val) if invoice_code_val else None
+            if matched_ip is not None:
+                invoice_code_val = matched_ip.code
+                invoice_name_val = matched_ip.name
+
+            conv_num, conv_den = (
+                _parse_conversion_ratio(row[ratio_idx])
+                if ratio_idx != -1 and ratio_idx < len(row)
+                else (1, 1)
+            )
+
             dist_val = (
                 str(row[dist_idx] or "").strip()
                 if dist_idx != -1 and dist_idx < len(row) and row[dist_idx] is not None
-                else "Nhà Phân Phối Mai Gold"
+                else ""
             )
-            if not dist_val:
-                dist_val = "Nhà Phân Phối Mai Gold"
 
             supplier_val = (
                 str(row[supplier_idx] or "").strip()
                 if supplier_idx != -1 and supplier_idx < len(row) and row[supplier_idx] is not None
                 else "Vinamilk"
-            )
-            if not supplier_val:
-                supplier_val = "Vinamilk"
+            ) or "Vinamilk"
 
-            # Xử lý Mã Công ty QL: Khớp với bảng companies theo mã code
             company_id = None
             if company_code_idx != -1 and company_code_idx < len(row) and row[company_code_idx] is not None:
                 raw_code = str(row[company_code_idx] or "").strip().upper()
@@ -979,26 +1114,34 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
 
             upsert_key = (sku_val, company_id)
 
-            # Upsert theo cặp (distributor_sku, company_id)
             if upsert_key in existing_products:
                 item = existing_products[upsert_key]
                 item.distributor_product_name = name_val
                 if invoice_code_idx != -1:
+                    item.invoice_product_id = matched_ip.id if matched_ip else None
                     item.invoice_product_code = invoice_code_val or None
-                if invoice_name_idx != -1:
+                if invoice_name_idx != -1 or matched_ip is not None:
                     item.invoice_product_name = invoice_name_val or None
-                item.distributor_name = dist_val
+                if ratio_idx != -1:
+                    item.conversion_num = conv_num
+                    item.conversion_den = conv_den
+                if dist_val:
+                    item.distributor_name = dist_val
                 item.supplier = supplier_val
                 item.company_id = company_id
                 item.updated_at = now
                 updated += 1
             else:
                 new_item = DistributorProduct(
+                    distributor_id=scoped_dist_id,
                     distributor_name=dist_val,
                     distributor_sku=sku_val,
                     distributor_product_name=name_val,
+                    invoice_product_id=matched_ip.id if matched_ip else None,
                     invoice_product_code=invoice_code_val or None,
                     invoice_product_name=invoice_name_val or None,
+                    conversion_num=conv_num,
+                    conversion_den=conv_den,
                     supplier=supplier_val,
                     unit="HOP",
                     company_id=company_id,
@@ -1013,7 +1156,7 @@ def upload_distributor_products(file: UploadFile = File(...), db: Session = Depe
         db.commit()
         return {
             "success": True,
-            "message": f"Tải lên thành công: Đã thêm mới {added} mã và cập nhật {updated} mã sản phẩm NPP.",
+            "message": f"Tải lên thành công: Đã thêm mới {added} mã và cập nhật {updated} mã sản phẩm DMS.",
             "added": added,
             "updated": updated,
             "total_processed": added + updated,

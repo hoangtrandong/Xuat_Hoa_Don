@@ -174,6 +174,7 @@ type ProductRow = {
 };
 
 type NppProductOption = {
+  id?: number;
   code: string;
   name: string;
   supplier: string;
@@ -385,10 +386,12 @@ export default function ProductsPage() {
         effectiveDistributorId !== null
           ? `?limit=5000&distributor_id=${effectiveDistributorId}`
           : "?limit=5000";
-      const [categoryResponse, unitResponse, companyLinksResponse, companiesResponse] = await Promise.all([
+      const invoiceProdQuery =
+        effectiveDistributorId !== null ? `?distributor_id=${effectiveDistributorId}` : "";
+      const [categoryResponse, unitResponse, invoiceProductsResponse, companiesResponse] = await Promise.all([
         apiFetch(`${API_URL}/products/categories/`),
         apiFetch(`${API_URL}/products/units/`),
-        apiFetch(`${API_URL}/product-groups/products/company-links`).catch(() => null),
+        apiFetch(`${API_URL}/invoice-products${invoiceProdQuery}`).catch(() => null),
         apiFetch(`${API_URL}/companies/${companyQuery}`).catch(() => null),
       ]);
       if (companiesResponse && companiesResponse.ok) {
@@ -414,48 +417,23 @@ export default function ProductsPage() {
         }));
       }
 
-      if (companyLinksResponse && companyLinksResponse.ok) {
-        const rawLinks = (await companyLinksResponse.json().catch(() => [])) as Array<Record<string, unknown>>;
-        if (Array.isArray(rawLinks)) {
-          const nppByCode = new Map<string, NppProductOption>();
-          for (const item of rawLinks) {
-            const memberSkus = Array.isArray(item.member_skus) ? (item.member_skus as string[]) : [];
-            const memberNames = Array.isArray(item.member_names) ? (item.member_names as string[]) : [];
-            const companies = Array.isArray(item.companies) ? (item.companies as Array<Record<string, unknown>>) : [];
-            const code = (
-              memberSkus[0] ||
-              (companies[0]?.distributor_sku as string) ||
-              ""
-            )
-              .trim()
-              .toUpperCase();
-            if (!code) continue;
-            const name =
-              (item.group_name as string) ||
-              memberNames[0] ||
-              (companies[0]?.distributor_name as string) ||
-              "";
-            const repSku = (item.representative_sku as string) || "";
-            const compName = ((companies[0]?.company_name as string) || "").trim();
-            const existing = nppByCode.get(code);
-            if (!existing) {
-              nppByCode.set(code, {
-                code,
-                name,
-                supplier: ((item.supplier as string) || "Vinamilk").trim(),
-                unit: ((item.unit as string) || "").trim(),
-                unitPrice: Number(item.unit_price) || 0,
-                orderCount: Number(item.order_count) || 0,
-                mappedSku: repSku && repSku !== "Chưa gán SKU CQT" ? repSku : "",
-                companyName: compName,
-              });
-            } else if (compName && !existing.companyName.includes(compName)) {
-              existing.companyName = existing.companyName
-                ? `${existing.companyName}, ${compName}`
-                : compName;
-            }
-          }
-          setNppProductOptions(Array.from(nppByCode.values()));
+      if (invoiceProductsResponse && invoiceProductsResponse.ok) {
+        const rawIps = (await invoiceProductsResponse.json().catch(() => [])) as Array<Record<string, unknown>>;
+        if (Array.isArray(rawIps)) {
+          const opts: NppProductOption[] = rawIps
+            .filter((ip) => Boolean(ip.code))
+            .map((ip) => ({
+              id: Number(ip.id),
+              code: String(ip.code || "").trim().toUpperCase(),
+              name: String(ip.name || "").trim(),
+              supplier: String(ip.supplier || "").trim(),
+              unit: String(ip.unit_name || "Hộp").trim(),
+              unitPrice: 0,
+              orderCount: Number(ip.dms_product_count || 0),
+              mappedSku: Number(ip.cqt_sku_count || 0) > 0 ? `${ip.cqt_sku_count} SKU` : "",
+              companyName: "",
+            }));
+          setNppProductOptions(opts);
         }
       }
     } catch {
@@ -843,75 +821,55 @@ export default function ProductsPage() {
     }
     setSavingNppKey(product.rowKey);
     try {
-      if (product.rowCompanyId != null) {
-        const res = await apiFetch(
-          `${API_URL}/products/${product.id}/companies/${product.rowCompanyId}/npp-code`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ npp_code: formatted || null }),
-          }
+      const matchedIp = formatted
+        ? nppProductOptions.find((opt) => opt.code.trim().toUpperCase() === formatted)
+        : null;
+
+      if (formatted && !matchedIp?.id) {
+        throw new Error(
+          `Mã SP xuất hóa đơn "${formatted}" chưa có trong Danh sách SP xuất hóa đơn. Vui lòng tạo trước hoặc chọn từ danh sách gợi ý.`
         );
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.detail || "Không thể cập nhật Mã NPP cho MST này.");
-        }
-        setProducts((prev) =>
-          prev.map((p) => {
-            if (p.id !== product.id) return p;
-            const nextManaged = (p.managed_companies || []).map((mc) =>
-              mc.company_id === product.rowCompanyId
-                ? { ...mc, npp_code: formatted || null }
-                : mc
-            );
-            if (p.rowKey === product.rowKey) {
-              const updated = {
-                ...p,
-                nppCode: formatted,
-                managed_companies: nextManaged,
-              };
-              updated._searchKey = buildProductSearchKey(updated);
-              return updated;
-            }
-            return { ...p, managed_companies: nextManaged };
-          })
-        );
-        const mstLabel = product.rowCompanyTaxCode || product.rowCompanyCode || `#${product.rowCompanyId}`;
-        setBannerMsg({
-          type: "success",
-          text: `Đã cập nhật Mã NPP cho SKU ${product.code} (MST ${mstLabel}) thành "${formatted || "(trống)"}".`,
-        });
-      } else {
-        const res = await apiFetch(`${API_URL}/products/${product.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sku: product.code,
-            npp_code: formatted || null,
-          }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.detail || "Không thể cập nhật Mã NPP.");
-        }
-        setProducts((prev) =>
-          prev.map((p) => {
-            if (p.rowKey !== product.rowKey) return p;
-            const updated = { ...p, nppCode: formatted };
-            updated._searchKey = buildProductSearchKey(updated);
-            return updated;
-          })
-        );
-        setBannerMsg({
-          type: "success",
-          text: `Đã cập nhật Mã NPP cho sản phẩm ${product.code} thành "${formatted || "(trống)"}".`,
-        });
       }
+
+      const res = await apiFetch(`${API_URL}/products/${product.id}/invoice-product`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoice_product_id: matchedIp?.id ?? null }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Không thể gán Mã SP xuất hóa đơn cho SKU này.");
+      }
+
+      setProducts((prev) =>
+        prev.map((p) => {
+          if (p.id !== product.id) return p;
+          const nextManaged = (p.managed_companies || []).map((mc) => ({
+            ...mc,
+            npp_code: formatted || null,
+          }));
+          const updated = {
+            ...p,
+            nppCode: formatted,
+            internal_name: matchedIp?.name || "",
+            internal_unit: matchedIp?.unit || "",
+            managed_companies: nextManaged,
+          };
+          updated._searchKey = buildProductSearchKey(updated);
+          return updated;
+        })
+      );
+      setBannerMsg({
+        type: "success",
+        text: formatted
+          ? `Đã gán SKU ${product.code} → Mã SP xuất hóa đơn "${formatted}" (${matchedIp?.name || ""}).`
+          : `Đã gỡ Mã SP xuất hóa đơn khỏi SKU ${product.code}.`,
+      });
       setEditingNppKey(null);
     } catch (err) {
       setBannerMsg({
         type: "error",
-        text: err instanceof Error ? err.message : "Lỗi khi cập nhật Mã NPP.",
+        text: err instanceof Error ? err.message : "Lỗi khi cập nhật Mã SP xuất hóa đơn.",
       });
     } finally {
       setSavingNppKey(null);
@@ -1827,11 +1785,18 @@ export default function ProductsPage() {
               )}
 
               <Link
+                href="/products/invoice-products"
+                className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 transition-colors"
+              >
+                <FileText size={11} />
+                Danh sách SP xuất hóa đơn
+              </Link>
+              <Link
                 href="/products/company-management"
                 className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 hover:bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800 transition-colors"
               >
                 <Building2 size={11} />
-                Quản lý mã NPP nội bộ
+                Danh sách mã SP DMS
               </Link>
             </div>
           </div>
@@ -1870,9 +1835,9 @@ export default function ProductsPage() {
                     type="button"
                     onClick={() => handleSort("nppCode")}
                     className="inline-flex items-center gap-1 font-semibold uppercase text-slate-700 hover:text-sky-700"
-                    title="Mã sản phẩm nội bộ theo Nhà phân phối (cho phép sửa trực tiếp)"
+                    title="Mã sản phẩm xuất hóa đơn chuẩn (chọn trực tiếp từ Danh sách SP xuất hóa đơn)"
                   >
-                    Mã NPP {renderSortIcon("nppCode")}
+                    Mã SP xuất HĐ {renderSortIcon("nppCode")}
                   </button>
                 </th>
                 <th className="px-2.5 py-2">

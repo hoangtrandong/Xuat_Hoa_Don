@@ -95,6 +95,10 @@ class ProductCompanyNppCodeUpdate(BaseModel):
     npp_code: Optional[str] = None
 
 
+class ProductInvoiceProductUpdate(BaseModel):
+    invoice_product_id: Optional[int] = None
+
+
 class ProductCompanyConfigsUpdate(BaseModel):
     configs: List[ProductCompanyConfigItem] = Field(default_factory=list)
 
@@ -107,6 +111,10 @@ class Product(ProductBase):
     npp_code: Optional[str] = None
     internal_name: Optional[str] = None
     internal_unit: Optional[str] = None
+    invoice_product_id: Optional[int] = None
+    invoice_product_code: Optional[str] = None
+    invoice_product_name: Optional[str] = None
+    invoice_product_unit: Optional[str] = None
     representative_sku: Optional[str] = None
     representative_name: Optional[str] = None
     category_code: Optional[str] = None

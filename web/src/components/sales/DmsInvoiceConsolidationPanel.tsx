@@ -566,10 +566,22 @@ export default function DmsInvoiceConsolidationPanel({
               <Building2 size={12} /> Đăng ký Công ty quản lý <ExternalLink size={11} />
             </Link>
             <Link
+              href="/products/company-management"
+              className="inline-flex items-center gap-1 rounded border border-red-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-800 hover:bg-red-50"
+            >
+              <Package size={12} /> Gán Mã SP DMS → SP xuất HĐ <ExternalLink size={11} />
+            </Link>
+            <Link
+              href="/products/invoice-products"
+              className="inline-flex items-center gap-1 rounded border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
+            >
+              <Package size={12} /> Danh sách SP xuất hóa đơn <ExternalLink size={11} />
+            </Link>
+            <Link
               href="/products"
               className="inline-flex items-center gap-1 rounded border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
             >
-              <Package size={12} /> Đăng ký Sản phẩm (SKU CQT) <ExternalLink size={11} />
+              <Package size={12} /> Danh sách SKU (CQT) <ExternalLink size={11} />
             </Link>
           </div>
         </div>
@@ -845,7 +857,7 @@ export default function DmsInvoiceConsolidationPanel({
                                 <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600">
                                   <tr className="border-b border-slate-200">
                                     <th className="px-2 py-1.5 w-10 text-center">STT</th>
-                                    <th className="px-2 py-1.5">Mã SKU CQT</th>
+                                    <th className="px-2 py-1.5">Mã SP xuất HĐ</th>
                                     <th className="px-2 py-1.5">Tên hàng hóa / dịch vụ</th>
                                     <th className="px-2 py-1.5 text-center">ĐVT</th>
                                     <th className="px-2 py-1.5 text-center">SL</th>
@@ -866,9 +878,14 @@ export default function DmsInvoiceConsolidationPanel({
                                       <td className="px-2 py-1 text-center">{it.line_number}</td>
                                       <td className="px-2 py-1 font-mono font-semibold">
                                         {it.product_code}
+                                        {it.source_product_code && it.source_product_code !== it.product_code && (
+                                          <div className="text-[9px] font-normal text-slate-400">
+                                            DMS: {it.source_product_code}
+                                          </div>
+                                        )}
                                         {!it.is_registered && (
                                           <span className="ml-1.5 rounded bg-red-100 px-1 text-[9px] text-red-700">
-                                            Chưa đăng ký
+                                            Chưa gán SP xuất HĐ
                                           </span>
                                         )}
                                         {it.is_tax_stock_negative && (

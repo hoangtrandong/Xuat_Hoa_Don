@@ -8,7 +8,7 @@ import {
   UserCheck, CreditCard, Target, BarChart2, Settings, List, FolderOpen,
   Tag, MapPin, FileText, Receipt, RotateCcw, Boxes, PackagePlus,
   PackageMinus, ClipboardList, ClipboardCheck, ShieldCheck, ChevronDown, ChevronRight, X, Menu as MenuIcon,
-  Store, Building2, ArrowRightLeft,
+  Store, Building2, ArrowRightLeft, FileCheck2,
 } from "lucide-react";
 import { menuItems, MenuItem } from "@/lib/menu";
 import { cn } from "@/lib/utils";
@@ -18,7 +18,7 @@ const iconMap: Record<string, React.ElementType> = {
   UserCheck, CreditCard, Target, BarChart2, Settings, List, FolderOpen,
   Tag, MapPin, FileText, Receipt, RotateCcw, BoxesIcon: Boxes, PackagePlus,
   PackageMinus, ClipboardList, ClipboardCheck, ShieldCheck, Store, Building2,
-  ArrowRightLeft,
+  ArrowRightLeft, FileCheck2,
 };
 
 function NavIcon({ name }: { name: string }) {

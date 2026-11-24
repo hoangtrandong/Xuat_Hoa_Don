@@ -100,8 +100,13 @@ class DistributorProductItem(BaseModel):
     distributor_name: str
     distributor_sku: str
     distributor_product_name: str
+    invoice_product_id: Optional[int] = None
     invoice_product_code: Optional[str] = None
     invoice_product_name: Optional[str] = None
+    invoice_product_unit: Optional[str] = None
+    invoice_product_vat_rate: Optional[float] = None
+    conversion_num: int = 1
+    conversion_den: int = 1
     supplier: str
     unit: Optional[str] = "HOP"
     company_id: Optional[int] = None
@@ -115,8 +120,11 @@ class DistributorProductCreate(BaseModel):
     distributor_name: Optional[str] = ""
     distributor_sku: str
     distributor_product_name: str
+    invoice_product_id: Optional[int] = None
     invoice_product_code: Optional[str] = None
     invoice_product_name: Optional[str] = None
+    conversion_num: int = Field(default=1, ge=1)
+    conversion_den: int = Field(default=1, ge=1)
     supplier: Optional[str] = ""
     unit: Optional[str] = "HOP"
     company_id: Optional[int] = None
@@ -128,12 +136,21 @@ class DistributorProductUpdate(BaseModel):
     original_code: Optional[str] = None
     distributor_sku: str
     distributor_product_name: str
+    invoice_product_id: Optional[int] = None
     invoice_product_code: Optional[str] = None
     invoice_product_name: Optional[str] = None
+    conversion_num: int = Field(default=1, ge=1)
+    conversion_den: int = Field(default=1, ge=1)
     distributor_name: Optional[str] = ""
     supplier: Optional[str] = ""
     unit: Optional[str] = "HOP"
     company_id: Optional[int] = None
+
+
+class DistributorProductInvoiceMappingUpdate(BaseModel):
+    invoice_product_id: Optional[int] = None
+    conversion_num: Optional[int] = Field(default=None, ge=1)
+    conversion_den: Optional[int] = Field(default=None, ge=1)
 
 
 class DistributorProductBulkDelete(BaseModel):

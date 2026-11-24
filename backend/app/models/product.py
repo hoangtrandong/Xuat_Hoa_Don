@@ -50,12 +50,18 @@ class Product(Base):
     _npp_code: Mapped[str | None] = mapped_column("npp_code", String(50), nullable=True)
     internal_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     internal_unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    invoice_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("invoice_products.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     category: Mapped["ProductCategory"] = relationship(back_populates="products")
     unit: Mapped["ProductUnit"] = relationship(back_populates="products")
     price_list_items: Mapped[List["PriceListItem"]] = relationship(back_populates="product")
     group_items: Mapped[List["ProductGroupItem"]] = relationship(back_populates="product")
     company_links: Mapped[List["ProductCompany"]] = relationship(back_populates="product")
+    invoice_product: Mapped[Optional["InvoiceProduct"]] = relationship(
+        back_populates="cqt_products", foreign_keys=[invoice_product_id]
+    )
 
     @property
     def npp_code(self) -> str:
@@ -199,8 +205,38 @@ class PriceListItem(Base):
     product: Mapped["Product"] = relationship(back_populates="price_list_items")
 
 
+class InvoiceProduct(Base):
+    """Danh mục Sản phẩm Xuất Hóa Đơn chuẩn (Single Source of Truth theo từng Nhà phân phối, dùng chung cho mọi Công ty QL)."""
+
+    __tablename__ = "invoice_products"
+    __table_args__ = (
+        UniqueConstraint("distributor_id", "code", name="uq_invoice_products_dist_code"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    distributor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("distributors.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    code: Mapped[str] = mapped_column(String(60), index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    unit_name: Mapped[str] = mapped_column(String(50), default="Hộp")
+    vat_rate: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0, 5, 8, 10; -1 = KCT; None = default
+    supplier: Mapped[str] = mapped_column(String(120), default="")
+    note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    cqt_products: Mapped[List["Product"]] = relationship(
+        back_populates="invoice_product", foreign_keys="Product.invoice_product_id"
+    )
+    dms_products: Mapped[List["DistributorProduct"]] = relationship(
+        back_populates="invoice_product", foreign_keys="DistributorProduct.invoice_product_id"
+    )
+
+
 class DistributorProduct(Base):
-    """Mã sản phẩm Nhà Phân Phối nội bộ do người dùng quản lý / upload (cô lập theo distributor_id và hỗ trợ nhiều Công ty QL)."""
+    """Danh sách Mã sản phẩm DMS (Vinamilk, Nazzy, ...) do người dùng quản lý / upload, gán vào Mã SP xuất hóa đơn kèm tỷ lệ quy đổi."""
     __tablename__ = "distributor_products"
     __table_args__ = (
         UniqueConstraint("distributor_id", "distributor_sku", "company_id", name="uq_distributor_products_dist_sku_company"),
@@ -213,8 +249,13 @@ class DistributorProduct(Base):
     distributor_name: Mapped[str] = mapped_column(String(200), default="")
     distributor_sku: Mapped[str] = mapped_column(String(60), index=True)
     distributor_product_name: Mapped[str] = mapped_column(String(255))
+    invoice_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("invoice_products.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     invoice_product_code: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
     invoice_product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    conversion_num: Mapped[int] = mapped_column(Integer, default=1)
+    conversion_den: Mapped[int] = mapped_column(Integer, default=1)
     supplier: Mapped[str] = mapped_column(String(100), default="")
     unit: Mapped[str | None] = mapped_column(String(30), default="HOP")
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
@@ -223,3 +264,6 @@ class DistributorProduct(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     company: Mapped[Optional["Company"]] = relationship(foreign_keys=[company_id])
+    invoice_product: Mapped[Optional["InvoiceProduct"]] = relationship(
+        back_populates="dms_products", foreign_keys=[invoice_product_id]
+    )

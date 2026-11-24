@@ -62,6 +62,8 @@ interface TaxInventoryRow {
   company_name: string;
   sku: string;
   npp_code?: string;
+  invoice_product_id?: number | null;
+  has_invoice_product?: boolean;
   invoice_product_code?: string;
   invoice_product_codes?: string[];
   has_npp_code?: boolean;
@@ -106,6 +108,7 @@ interface TaxInventoryResponse {
     ok_count: number;
     chrono_negative_count: number;
     below_cost_count: number;
+    unmapped_invoice_product_count?: number;
     mst_count: number;
     total_opening_amount: number;
     total_input_amount: number;
@@ -229,7 +232,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
   const [searchInput, setSearchInput] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<
-    "" | "NEGATIVE" | "LOW" | "OK" | "CHRONO_NEGATIVE" | "BELOW_COST"
+    "" | "NEGATIVE" | "LOW" | "OK" | "CHRONO_NEGATIVE" | "BELOW_COST" | "UNMAPPED"
   >("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -750,8 +753,8 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
           <Building2 size={17} className="text-red-500" />
           <span className="text-xs font-bold uppercase tracking-wide text-white">
             {groupBy === "NPP_SKU"
-              ? "Sổ Tồn Kho Thuế Tổng Hợp Theo Mã Sản Phẩm Nội Bộ NPP (TK 156 & TK 632)"
-              : "Sổ Nhập – Xuất – Tồn Thuế Chi Tiết Theo Từng MST (TK 156 & TK 632)"}
+              ? "Sổ Tồn Kho Thuế Tổng Hợp Theo Mã SP Xuất Hóa Đơn (TK 156 & TK 632)"
+              : "Sổ Nhập – Xuất – Tồn Thuế Chi Tiết Theo Từng MST × Mã SP Xuất HĐ (TK 156 & TK 632)"}
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -766,7 +769,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                 groupBy === "NPP_SKU" ? "bg-sky-600 text-white" : "text-slate-200 hover:bg-white/10"
               }`}
             >
-              Gộp theo Mã NPP
+              Theo Mã SP xuất HĐ
             </button>
             <button
               type="button"
@@ -831,32 +834,57 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
       )}
 
       {/* Cảnh báo chất lượng dữ liệu đầu vào + Nút ánh xạ SKU ngay */}
-      {quality && (quality.missing_xml_invoices_count > 0 || quality.unmapped_sku_items_count > 0) && (
+      {((quality && (quality.missing_xml_invoices_count > 0 || quality.unmapped_sku_items_count > 0)) ||
+        (summary?.unmapped_invoice_product_count ?? 0) > 0) && (
         <div className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-900 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
             <span className="inline-flex items-center gap-1 font-bold text-amber-800">
               <AlertTriangle size={13} className="text-amber-600" /> Lưu ý dữ liệu đầu vào CQT:
             </span>
-            {quality.missing_xml_invoices_count > 0 && (
+            {(summary?.unmapped_invoice_product_count ?? 0) > 0 && (
+              <span>
+                Có <b>{formatNumber(summary?.unmapped_invoice_product_count ?? 0)}</b> SKU đầu vào chưa gán <strong>Mã SP xuất hóa đơn</strong>.
+              </span>
+            )}
+            {quality && quality.missing_xml_invoices_count > 0 && (
               <span>
                 Có <b>{formatNumber(quality.missing_xml_invoices_count)}</b> HĐ mua vào chưa tải XML.
               </span>
             )}
-            {quality.unmapped_sku_items_count > 0 && (
+            {quality && quality.unmapped_sku_items_count > 0 && (
               <span>
                 Có <b>{formatNumber(quality.unmapped_sku_items_count)}</b> dòng hàng mua vào thiếu mã SKU (MHHDVu trống).
               </span>
             )}
           </div>
-          {quality.unmapped_sku_items_count > 0 && (
-            <button
-              type="button"
-              onClick={() => void openUnmappedModal()}
-              className="inline-flex items-center gap-1 rounded bg-amber-700 hover:bg-amber-800 px-2 py-0.5 text-[10px] font-semibold text-white"
-            >
-              <Link2 size={11} /> Ánh xạ SKU ngay
-            </button>
-          )}
+          <div className="flex items-center gap-1.5">
+            {(summary?.unmapped_invoice_product_count ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setStatusFilter(statusFilter === "UNMAPPED" ? "" : ("UNMAPPED" as typeof statusFilter));
+                  setPage(1);
+                }}
+                className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold ${
+                  statusFilter === "UNMAPPED"
+                    ? "bg-red-700 text-white"
+                    : "bg-orange-600 hover:bg-orange-700 text-white"
+                }`}
+              >
+                <Link2 size={11} />{" "}
+                {statusFilter === "UNMAPPED" ? "Đang lọc: Chưa gán SP xuất HĐ (Bỏ lọc)" : "Lọc SKU chưa gán SP xuất HĐ"}
+              </button>
+            )}
+            {quality && quality.unmapped_sku_items_count > 0 && (
+              <button
+                type="button"
+                onClick={() => void openUnmappedModal()}
+                className="inline-flex items-center gap-1 rounded bg-amber-700 hover:bg-amber-800 px-2 py-0.5 text-[10px] font-semibold text-white"
+              >
+                <Link2 size={11} /> Ánh xạ SKU ngay
+              </button>
+            )}
+          </div>
         </div>
       )}
 

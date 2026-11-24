@@ -9,6 +9,7 @@ class InvoiceProductBase(BaseModel):
     unit_name: str = Field(default="Hộp", max_length=50)
     vat_rate: Optional[float] = None
     supplier: Optional[str] = Field(default="", max_length=120)
+    default_company_id: Optional[int] = None
     note: Optional[str] = Field(default=None, max_length=300)
     status: str = Field(default="active", max_length=20)
 
@@ -23,6 +24,7 @@ class InvoiceProductUpdate(BaseModel):
     unit_name: Optional[str] = Field(default=None, max_length=50)
     vat_rate: Optional[float] = None
     supplier: Optional[str] = Field(default=None, max_length=120)
+    default_company_id: Optional[int] = None
     note: Optional[str] = Field(default=None, max_length=300)
     status: Optional[str] = Field(default=None, max_length=20)
 
@@ -37,6 +39,9 @@ class InvoiceProductItem(BaseModel):
     unit_name: str = "Hộp"
     vat_rate: Optional[float] = None
     supplier: str = ""
+    default_company_id: Optional[int] = None
+    default_company_code: Optional[str] = None
+    default_company_name: Optional[str] = None
     note: Optional[str] = None
     status: str = "active"
     cqt_sku_count: int = 0
@@ -47,3 +52,8 @@ class InvoiceProductItem(BaseModel):
 
 class InvoiceProductBulkDelete(BaseModel):
     ids: List[int] = Field(default_factory=list)
+
+
+class InvoiceProductBulkAssignCompany(BaseModel):
+    ids: List[int] = Field(default_factory=list)
+    company_id: Optional[int] = None

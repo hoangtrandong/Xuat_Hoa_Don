@@ -222,11 +222,15 @@ class InvoiceProduct(Base):
     unit_name: Mapped[str] = mapped_column(String(50), default="Hộp")
     vat_rate: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0, 5, 8, 10; -1 = KCT; None = default
     supplier: Mapped[str] = mapped_column(String(120), default="")
+    default_company_id: Mapped[int | None] = mapped_column(
+        ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     note: Mapped[str | None] = mapped_column(String(300), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    default_company: Mapped[Optional["Company"]] = relationship(foreign_keys=[default_company_id])
     cqt_products: Mapped[List["Product"]] = relationship(
         back_populates="invoice_product", foreign_keys="Product.invoice_product_id"
     )

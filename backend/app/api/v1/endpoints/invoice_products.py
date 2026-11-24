@@ -5,7 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.auth import (
     ensure_entity_in_distributor_scope,
@@ -13,9 +13,11 @@ from app.core.auth import (
     resolve_distributor_scope,
 )
 from app.core.database import get_db
+from app.models.customer import Company
 from app.models.product import DistributorProduct, InvoiceProduct, Product, ProductCompany
 from app.models.user import User
 from app.schemas.invoice_product import (
+    InvoiceProductBulkAssignCompany,
     InvoiceProductBulkDelete,
     InvoiceProductCreate,
     InvoiceProductItem,
@@ -69,6 +71,9 @@ def _serialize_invoice_products(db: Session, items: list[InvoiceProduct]) -> lis
             unit_name=it.unit_name or "Hộp",
             vat_rate=it.vat_rate,
             supplier=it.supplier or "",
+            default_company_id=it.default_company_id,
+            default_company_code=it.default_company.code if it.default_company else None,
+            default_company_name=(it.default_company.short_name or it.default_company.name) if it.default_company else None,
             note=it.note,
             status=it.status or "active",
             cqt_sku_count=int(cqt_counts.get(it.id, 0)),
@@ -91,7 +96,11 @@ def list_invoice_products(
 ):
     """Danh sách Sản phẩm xuất hóa đơn (dùng chung cho mọi Công ty QL thuộc 1 Nhà phân phối)."""
     scoped_dist_id = resolve_distributor_scope(current_user, distributor_id)
-    stmt = select(InvoiceProduct).order_by(InvoiceProduct.code.asc(), InvoiceProduct.id.desc())
+    stmt = (
+        select(InvoiceProduct)
+        .options(joinedload(InvoiceProduct.default_company))
+        .order_by(InvoiceProduct.code.asc(), InvoiceProduct.id.desc())
+    )
     if scoped_dist_id is not None:
         stmt = stmt.where(
             (InvoiceProduct.distributor_id == scoped_dist_id)
@@ -132,6 +141,13 @@ def create_invoice_product(
     if db.scalar(dup_stmt):
         raise HTTPException(status_code=400, detail=f"Mã SP xuất hóa đơn '{clean_code}' đã tồn tại.")
 
+    target_company_id = payload.default_company_id if (payload.default_company_id and payload.default_company_id > 0) else None
+    if target_company_id is not None:
+        comp = db.get(Company, target_company_id)
+        if not comp:
+            raise HTTPException(status_code=400, detail="Công ty quản lý không tồn tại.")
+        ensure_entity_in_distributor_scope(current_user, comp.distributor_id)
+
     item = InvoiceProduct(
         distributor_id=scoped_dist_id,
         code=clean_code,
@@ -139,6 +155,7 @@ def create_invoice_product(
         unit_name=(payload.unit_name or "Hộp").strip() or "Hộp",
         vat_rate=payload.vat_rate,
         supplier=(payload.supplier or "").strip(),
+        default_company_id=target_company_id,
         note=(payload.note or "").strip() or None,
         status=(payload.status or "active").strip() or "active",
     )
@@ -187,6 +204,15 @@ def update_invoice_product(
         item.vat_rate = payload.vat_rate
     if payload.supplier is not None:
         item.supplier = payload.supplier.strip()
+    if "default_company_id" in payload.model_fields_set:
+        if payload.default_company_id and payload.default_company_id > 0:
+            comp = db.get(Company, payload.default_company_id)
+            if not comp:
+                raise HTTPException(status_code=400, detail="Công ty quản lý không tồn tại.")
+            ensure_entity_in_distributor_scope(current_user, comp.distributor_id)
+            item.default_company_id = comp.id
+        else:
+            item.default_company_id = None
     if "note" in payload.model_fields_set:
         item.note = (payload.note or "").strip() or None
     if payload.status is not None:
@@ -270,6 +296,49 @@ def bulk_delete_invoice_products(
         "success": True,
         "deleted_count": len(items),
         "message": f"Đã xóa {len(items)} sản phẩm xuất hóa đơn.",
+    }
+
+
+@router.post("/bulk-assign-company")
+def bulk_assign_company_to_invoice_products(
+    payload: InvoiceProductBulkAssignCompany,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Gán (hoặc gỡ) Công ty quản lý mặc định hàng loạt cho danh sách Sản phẩm XHĐ."""
+    if not payload.ids:
+        raise HTTPException(status_code=400, detail="Chưa chọn sản phẩm XHĐ nào.")
+
+    target_comp: Company | None = None
+    if payload.company_id is not None and payload.company_id > 0:
+        target_comp = db.get(Company, payload.company_id)
+        if not target_comp:
+            raise HTTPException(status_code=404, detail="Không tìm thấy Công ty quản lý.")
+        ensure_entity_in_distributor_scope(current_user, target_comp.distributor_id)
+
+    stmt = select(InvoiceProduct).where(InvoiceProduct.id.in_(payload.ids))
+    if current_user.distributor_id is not None:
+        stmt = stmt.where(
+            (InvoiceProduct.distributor_id == current_user.distributor_id)
+            | (InvoiceProduct.distributor_id.is_(None))
+        )
+    items = list(db.scalars(stmt).all())
+    now = datetime.utcnow()
+    for it in items:
+        it.default_company_id = target_comp.id if target_comp else None
+        it.updated_at = now
+    db.commit()
+
+    return {
+        "success": True,
+        "updated_count": len(items),
+        "company_id": target_comp.id if target_comp else None,
+        "company_name": (target_comp.short_name or target_comp.name) if target_comp else None,
+        "message": (
+            f"Đã gán Công ty QL '{target_comp.short_name or target_comp.name}' cho {len(items)} Sản phẩm XHĐ."
+            if target_comp
+            else f"Đã gỡ Công ty QL mặc định khỏi {len(items)} Sản phẩm XHĐ."
+        ),
     }
 
 

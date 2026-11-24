@@ -18,6 +18,7 @@ import {
   Plus,
   Receipt,
   Link2,
+  Building2,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { API_URL, apiFetch } from "@/lib/api";
@@ -36,10 +37,20 @@ type InvoiceProductRow = {
   unit_name: string;
   vat_rate: number | null;
   supplier: string;
+  default_company_id: number | null;
+  default_company_code: string | null;
+  default_company_name: string | null;
   note: string | null;
   status: string;
   cqt_sku_count: number;
   dms_product_count: number;
+};
+
+type CompanyOption = {
+  id: number;
+  code: string;
+  name: string;
+  short_name?: string | null;
 };
 
 type ExcelPreviewRow = {
@@ -62,16 +73,20 @@ function formatVatLabel(vat: number | null): string {
 export default function InvoiceProductsPage() {
   const { effectiveDistributorId: activeDistributorId } = useDistributorContext();
   const [rows, setRows] = useState<InvoiceProductRow[]>([]);
+  const [companies, setCompanies] = useState<CompanyOption[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
   const [toastMessage, setToastMessage] = useState<string>("");
 
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [supplierFilter, setSupplierFilter] = useState<string>("ALL");
+  const [companyFilter, setCompanyFilter] = useState<string>("ALL");
   const [mappingFilter, setMappingFilter] = useState<"ALL" | "MAPPED_BOTH" | "UNMAPPED_CQT" | "UNMAPPED_DMS">("ALL");
   const [pageSize, setPageSize] = useState<number>(25);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [bulkCompanyId, setBulkCompanyId] = useState<string>("");
+  const [bulkAssigning, setBulkAssigning] = useState<boolean>(false);
 
   // Modal Thêm / Sửa
   const [formModalOpen, setFormModalOpen] = useState<boolean>(false);
@@ -81,6 +96,7 @@ export default function InvoiceProductsPage() {
   const [formUnit, setFormUnit] = useState<string>("Hộp");
   const [formVat, setFormVat] = useState<string>("");
   const [formSupplier, setFormSupplier] = useState<string>("");
+  const [formCompanyId, setFormCompanyId] = useState<string>("");
   const [formNote, setFormNote] = useState<string>("");
   const [savingForm, setSavingForm] = useState<boolean>(false);
   const [formError, setFormError] = useState<string>("");
@@ -111,11 +127,26 @@ export default function InvoiceProductsPage() {
       if (activeDistributorId !== null) {
         qs.set("distributor_id", String(activeDistributorId));
       }
-      const res = await apiFetch(`${API_URL}/invoice-products?${qs.toString()}`);
+      const compQs = activeDistributorId !== null ? `?limit=5000&distributor_id=${activeDistributorId}` : "?limit=5000";
+      const [res, resComp] = await Promise.all([
+        apiFetch(`${API_URL}/invoice-products?${qs.toString()}`),
+        apiFetch(`${API_URL}/companies/${compQs}`).catch(() => null),
+      ]);
       if (!res.ok) throw new Error("Không thể tải danh sách sản phẩm xuất hóa đơn.");
       const data = (await res.json()) as InvoiceProductRow[];
       setRows(data);
       setSelectedIds([]);
+      if (resComp && resComp.ok) {
+        const compList = (await resComp.json().catch(() => [])) as Array<Record<string, unknown>>;
+        setCompanies(
+          compList.map((c) => ({
+            id: Number(c.id),
+            code: String(c.code ?? ""),
+            name: String(c.name ?? ""),
+            short_name: c.short_name ? String(c.short_name) : null,
+          }))
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Lỗi khi tải dữ liệu.");
     } finally {
@@ -139,6 +170,11 @@ export default function InvoiceProductsPage() {
     const q = searchQuery.trim().toLowerCase();
     return rows.filter((r) => {
       if (supplierFilter !== "ALL" && r.supplier !== supplierFilter) return false;
+      if (companyFilter === "ASSIGNED" && !r.default_company_id) return false;
+      if (companyFilter === "UNASSIGNED" && r.default_company_id) return false;
+      if (companyFilter !== "ALL" && companyFilter !== "ASSIGNED" && companyFilter !== "UNASSIGNED") {
+        if (String(r.default_company_id) !== companyFilter) return false;
+      }
       if (mappingFilter === "MAPPED_BOTH" && (r.cqt_sku_count === 0 || r.dms_product_count === 0)) return false;
       if (mappingFilter === "UNMAPPED_CQT" && r.cqt_sku_count > 0) return false;
       if (mappingFilter === "UNMAPPED_DMS" && r.dms_product_count > 0) return false;
@@ -148,12 +184,14 @@ export default function InvoiceProductsPage() {
           r.name.toLowerCase().includes(q) ||
           (r.unit_name || "").toLowerCase().includes(q) ||
           (r.supplier || "").toLowerCase().includes(q) ||
+          (r.default_company_code || "").toLowerCase().includes(q) ||
+          (r.default_company_name || "").toLowerCase().includes(q) ||
           (r.note || "").toLowerCase().includes(q);
         if (!hit) return false;
       }
       return true;
     });
-  }, [rows, searchQuery, supplierFilter, mappingFilter]);
+  }, [rows, searchQuery, supplierFilter, companyFilter, mappingFilter]);
 
   const stats = useMemo(() => {
     let mappedCqt = 0;
@@ -184,6 +222,7 @@ export default function InvoiceProductsPage() {
     setFormUnit("Hộp");
     setFormVat("");
     setFormSupplier("");
+    setFormCompanyId("");
     setFormNote("");
     setFormError("");
     setFormModalOpen(true);
@@ -196,9 +235,38 @@ export default function InvoiceProductsPage() {
     setFormUnit(row.unit_name || "Hộp");
     setFormVat(row.vat_rate === null || row.vat_rate === undefined ? "" : String(row.vat_rate));
     setFormSupplier(row.supplier || "");
+    setFormCompanyId(row.default_company_id ? String(row.default_company_id) : "");
     setFormNote(row.note || "");
     setFormError("");
     setFormModalOpen(true);
+  };
+
+  const handleBulkAssignCompany = async () => {
+    if (selectedIds.length === 0) return;
+    setBulkAssigning(true);
+    setError("");
+    try {
+      const targetCompId = bulkCompanyId === "__CLEAR__" ? null : (bulkCompanyId ? Number(bulkCompanyId) : null);
+      if (bulkCompanyId === "") {
+        setError("Vui lòng chọn Công ty quản lý trước khi bấm gán hàng loạt.");
+        setBulkAssigning(false);
+        return;
+      }
+      const res = await apiFetch(`${API_URL}/invoice-products/bulk-assign-company`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selectedIds, company_id: targetCompId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Không thể gán Công ty QL hàng loạt.");
+      showToast(data.message || "Đã gán Công ty QL thành công.");
+      setBulkCompanyId("");
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Lỗi khi gán Công ty QL hàng loạt.");
+    } finally {
+      setBulkAssigning(false);
+    }
   };
 
   const handleSaveForm = async (e: React.FormEvent) => {
@@ -217,6 +285,7 @@ export default function InvoiceProductsPage() {
         unit_name: formUnit.trim() || "Hộp",
         vat_rate: Number.isNaN(parsedVat) ? null : parsedVat,
         supplier: formSupplier.trim(),
+        default_company_id: formCompanyId ? Number(formCompanyId) : null,
         note: formNote.trim() || null,
       };
       if (!editingRow && activeDistributorId !== null) {
@@ -312,6 +381,8 @@ export default function InvoiceProductsPage() {
       "ĐVT Xuất HĐ": r.unit_name,
       "Thuế suất VAT (%)": formatVatLabel(r.vat_rate),
       "Nhà cung cấp": r.supplier,
+      "Mã Công ty QL": r.default_company_code || "",
+      "Công ty QL mặc định": r.default_company_name || "",
       "Số SKU CQT đã gán": r.cqt_sku_count,
       "Số Mã DMS đã gán": r.dms_product_count,
       "Ghi chú": r.note || "",
@@ -539,6 +610,23 @@ export default function InvoiceProductsPage() {
           ))}
         </select>
         <select
+          value={companyFilter}
+          onChange={(e) => {
+            setCompanyFilter(e.target.value);
+            setCurrentPage(1);
+          }}
+          className={`${inputCls} w-auto min-w-[170px]`}
+        >
+          <option value="ALL">Tất cả Công ty QL</option>
+          <option value="ASSIGNED">Đã gán Công ty QL</option>
+          <option value="UNASSIGNED">Chưa gán Công ty QL</option>
+          {companies.map((c) => (
+            <option key={c.id} value={String(c.id)}>
+              [{c.code}] {c.short_name || c.name}
+            </option>
+          ))}
+        </select>
+        <select
           value={mappingFilter}
           onChange={(e) => {
             setMappingFilter(e.target.value as typeof mappingFilter);
@@ -552,14 +640,38 @@ export default function InvoiceProductsPage() {
           <option value="UNMAPPED_DMS">Chưa có Mã DMS gán vào</option>
         </select>
         {selectedIds.length > 0 && (
-          <button
-            type="button"
-            disabled={bulkDeleting}
-            onClick={() => void handleBulkDelete()}
-            className="inline-flex items-center gap-1 rounded bg-red-700 px-2.5 py-1 text-xs font-semibold text-white hover:bg-red-800 disabled:bg-slate-300"
-          >
-            <Trash2 size={12} /> Xóa ({selectedIds.length})
-          </button>
+          <div className="flex flex-wrap items-center gap-1.5 rounded border border-sky-300 bg-sky-50 px-2 py-1">
+            <select
+              value={bulkCompanyId}
+              onChange={(e) => setBulkCompanyId(e.target.value)}
+              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800"
+            >
+              <option value="">-- Chọn Công ty QL gán nhanh --</option>
+              {companies.map((c) => (
+                <option key={c.id} value={String(c.id)}>
+                  [{c.code}] {c.short_name || c.name}
+                </option>
+              ))}
+              <option value="__CLEAR__">Gỡ Công ty QL mặc định</option>
+            </select>
+            <button
+              type="button"
+              disabled={bulkAssigning || !bulkCompanyId}
+              onClick={() => void handleBulkAssignCompany()}
+              className="inline-flex items-center gap-1 rounded bg-sky-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-sky-700 disabled:bg-slate-300"
+            >
+              {bulkAssigning ? <Loader2 size={12} className="animate-spin" /> : <Building2 size={12} />}
+              Gán Công ty ({selectedIds.length})
+            </button>
+            <button
+              type="button"
+              disabled={bulkDeleting}
+              onClick={() => void handleBulkDelete()}
+              className="inline-flex items-center gap-1 rounded bg-red-700 px-2.5 py-1 text-xs font-semibold text-white hover:bg-red-800 disabled:bg-slate-300"
+            >
+              <Trash2 size={12} /> Xóa ({selectedIds.length})
+            </button>
+          </div>
         )}
       </div>
 
@@ -582,6 +694,7 @@ export default function InvoiceProductsPage() {
                 <th className="px-2 py-2 text-center">ĐVT chuẩn</th>
                 <th className="px-2 py-2 text-center">VAT</th>
                 <th className="px-2 py-2">Nhà cung cấp</th>
+                <th className="px-2 py-2">Công ty QL mặc định</th>
                 <th className="px-2 py-2 text-center">SKU CQT gán</th>
                 <th className="px-2 py-2 text-center">Mã DMS gán</th>
                 <th className="px-2 py-2">Ghi chú</th>
@@ -626,6 +739,16 @@ export default function InvoiceProductsPage() {
                       </span>
                     </td>
                     <td className="px-2 py-1.5 text-slate-600">{row.supplier || "—"}</td>
+                    <td className="px-2 py-1.5">
+                      {row.default_company_code ? (
+                        <span className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-800">
+                          <span className="font-mono font-bold">{row.default_company_code}</span>
+                          <span className="max-w-[140px] truncate">{row.default_company_name}</span>
+                        </span>
+                      ) : (
+                        <span className="text-[10px] italic text-slate-400">Chưa gán</span>
+                      )}
+                    </td>
                     <td className="px-2 py-1.5 text-center">
                       <span
                         className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
@@ -816,6 +939,23 @@ export default function InvoiceProductsPage() {
                     placeholder="VD: Vinamilk, Nazzy..."
                     className={inputCls}
                   />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                    Công ty quản lý xuất HĐ mặc định (dùng khi NPP phân bổ theo Sản phẩm)
+                  </label>
+                  <select
+                    value={formCompanyId}
+                    onChange={(e) => setFormCompanyId(e.target.value)}
+                    className={inputCls}
+                  >
+                    <option value="">[-- Chưa gán (lấy theo Khách hàng hoặc gán sau) --]</option>
+                    {companies.map((c) => (
+                      <option key={c.id} value={String(c.id)}>
+                        [{c.code}] {c.short_name || c.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div className="sm:col-span-2">
                   <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">

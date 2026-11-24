@@ -259,8 +259,8 @@ def consolidate_dms_orders_for_invoicing(
         if p._npp_code:
             prod_map[p._npp_code.strip().upper()] = p
 
-    # Nạp Danh mục Sản phẩm Xuất Hóa Đơn chuẩn (Single Source of Truth theo NPP)
-    ip_stmt = select(InvoiceProduct)
+    # Nạp Danh mục Sản phẩm Xuất Hóa Đơn chuẩn (Single Source of Truth theo NPP, kèm Công ty QL mặc định)
+    ip_stmt = select(InvoiceProduct).options(selectinload(InvoiceProduct.default_company))
     if distributor_id is not None:
         ip_stmt = ip_stmt.where(
             (InvoiceProduct.distributor_id == distributor_id)
@@ -276,10 +276,13 @@ def consolidate_dms_orders_for_invoicing(
         ):
             invoice_product_by_code[code_u] = ip
 
-    # Nạp Danh sách Mã SP DMS kèm liên kết SP xuất hóa đơn & tỷ lệ quy đổi
+    # Nạp Danh sách Mã SP DMS kèm liên kết SP xuất hóa đơn, Công ty QL & tỷ lệ quy đổi
     dms_product_map: dict[tuple[str, int | None], DistributorProduct] = {}
     distributor_invoice_profile_map: dict[tuple[str, int | None], tuple[str, str]] = {}
-    dp_stmt = select(DistributorProduct).options(selectinload(DistributorProduct.invoice_product))
+    dp_stmt = select(DistributorProduct).options(
+        selectinload(DistributorProduct.invoice_product).selectinload(InvoiceProduct.default_company),
+        selectinload(DistributorProduct.company),
+    )
     if distributor_id is not None:
         dp_stmt = dp_stmt.where(
             (DistributorProduct.distributor_id == distributor_id)
@@ -372,9 +375,26 @@ def consolidate_dms_orders_for_invoicing(
 
         raw_prod_code = (snap.product_code or "").strip().upper()
         prod = prod_map.get(raw_prod_code)
+        npp_lookup_sku = ((prod._npp_code or prod.sku) if prod else raw_prod_code).strip().upper()
+
+        # Phân giải trước Sản phẩm XHĐ (để lấy Công ty QL mặc định gắn trên Sản phẩm XHĐ khi chế độ BY_PRODUCT / HYBRID)
+        pre_dp: DistributorProduct | None = (
+            dms_product_map.get((raw_prod_code, company_id))
+            or dms_product_map.get((raw_prod_code, None))
+            or dms_product_map.get((npp_lookup_sku, None))
+        )
+        pre_ip: InvoiceProduct | None = None
+        if pre_dp is not None:
+            if pre_dp.invoice_product is not None:
+                pre_ip = pre_dp.invoice_product
+            elif (pre_dp.invoice_product_code or "").strip():
+                pre_ip = invoice_product_by_code.get(pre_dp.invoice_product_code.strip().upper())
+        if pre_ip is None and prod is not None and prod.invoice_product is not None:
+            pre_ip = prod.invoice_product
+        if pre_ip is None and raw_prod_code:
+            pre_ip = invoice_product_by_code.get(raw_prod_code)
 
         # Phân giải Công ty quản lý theo chiến lược của Nhà phân phối (BY_CUSTOMER | BY_PRODUCT | HYBRID)
-        # Hỗ trợ 1 khách hàng thuộc nhiều công ty quản lý: ưu tiên công ty trùng bộ lọc company_id hoặc trùng prod_comp.
         cust_companies: list[Company] = []
         if customer:
             seen_cids: set[int] = set()
@@ -384,7 +404,13 @@ def consolidate_dms_orders_for_invoicing(
                     cust_companies.append(link.company)
             if customer.company is not None and customer.company.id not in seen_cids:
                 cust_companies.insert(0, customer.company)
-        prod_comp: Company | None = prod_primary_company.get(prod.id) if prod else None
+
+        # Công ty theo Sản phẩm: ưu tiên Công ty QL mặc định trên Sản phẩm XHĐ -> ProductCompany -> DistributorProduct.company
+        prod_comp: Company | None = (
+            (pre_ip.default_company if (pre_ip and pre_ip.default_company) else None)
+            or (prod_primary_company.get(prod.id) if prod else None)
+            or (pre_dp.company if (pre_dp and pre_dp.company) else None)
+        )
         cust_comp: Company | None = None
         if cust_companies:
             if company_id is not None:
@@ -393,14 +419,32 @@ def consolidate_dms_orders_for_invoicing(
                 cust_comp = next((c for c in cust_companies if c.id == prod_comp.id), None)
             if cust_comp is None:
                 cust_comp = cust_companies[0]
+
+        allocation_source = "UNASSIGNED"
         if allocation_mode == "BY_PRODUCT":
-            comp = prod_comp or cust_comp
+            comp = prod_comp
+            allocation_source = "BY_PRODUCT" if prod_comp else "UNASSIGNED"
         elif allocation_mode == "HYBRID_PRODUCT_FIRST":
-            comp = prod_comp or cust_comp
+            if prod_comp is not None:
+                comp = prod_comp
+                allocation_source = "BY_PRODUCT"
+            elif cust_comp is not None:
+                comp = cust_comp
+                allocation_source = "BY_CUSTOMER"
+            else:
+                comp = None
         elif allocation_mode == "HYBRID_CUSTOMER_FIRST":
-            comp = cust_comp or prod_comp
+            if cust_comp is not None:
+                comp = cust_comp
+                allocation_source = "BY_CUSTOMER"
+            elif prod_comp is not None:
+                comp = prod_comp
+                allocation_source = "BY_PRODUCT"
+            else:
+                comp = None
         else:
             comp = cust_comp
+            allocation_source = "BY_CUSTOMER" if cust_comp else "UNASSIGNED"
         comp_id = comp.id if comp else None
 
         if company_id is not None and comp_id != company_id:
@@ -468,6 +512,7 @@ def consolidate_dms_orders_for_invoicing(
                 "missing_products": {},  # raw_code -> product_name
                 "missing_invoice_products": {},  # dms_code -> product_name (chưa gán SP xuất HĐ)
                 "warnings": set(),
+                "allocation_sources": set(),
                 "company_invoice_item_mode": (comp.invoice_item_mode or "TAX_INPUT") if comp else "TAX_INPUT",
                 "items_acc": {},
             }
@@ -477,6 +522,8 @@ def consolidate_dms_orders_for_invoicing(
             grp["customer_codes"].add(cust_code_effective)
         grp["order_numbers"].add(order_num)
         grp["suppliers"].add(sup)
+        if allocation_source != "UNASSIGNED":
+            grp["allocation_sources"].add(allocation_source)
 
         # Kiểm tra điều kiện đăng ký Khách hàng & Công ty quản lý (theo chế độ phân bổ của NPP)
         if customer is None:
@@ -821,6 +868,11 @@ def consolidate_dms_orders_for_invoicing(
                 "company_id": grp["company_id"],
                 "company_code": grp["company_code"],
                 "company_invoice_item_mode": grp["company_invoice_item_mode"],
+                "allocation_source": (
+                    sorted(grp["allocation_sources"])[0]
+                    if len(grp["allocation_sources"]) == 1
+                    else ("HYBRID" if len(grp["allocation_sources"]) > 1 else "UNASSIGNED")
+                ),
                 "company_name": grp["company_name"],
                 "company_tax_code": grp["company_tax_code"],
                 "identity_type": grp["identity_type"],
@@ -858,6 +910,7 @@ def consolidate_dms_orders_for_invoicing(
         "to_date": to_date.isoformat(),
         "date_field": date_field,
         "distributor_id": distributor_id,
+        "company_allocation_mode": allocation_mode,
         "default_vat_rate": float(default_vat_rate),
         "summary": {
             "total_groups": len(result_groups),

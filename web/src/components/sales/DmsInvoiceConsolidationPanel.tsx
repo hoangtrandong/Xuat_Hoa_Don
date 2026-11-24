@@ -60,6 +60,7 @@ interface ConsolidatedGroup {
   missing_flags: string[];
   require_bank_transfer?: boolean;
   company_invoice_item_mode?: string;
+  allocation_source?: "BY_PRODUCT" | "BY_CUSTOMER" | "HYBRID" | "UNASSIGNED";
   company_id: number | null;
   company_code: string;
   company_name: string;
@@ -102,6 +103,7 @@ interface ConsolidationResponse {
   to_date: string;
   date_field: string;
   distributor_id: number | null;
+  company_allocation_mode?: string;
   default_vat_rate: number;
   summary: {
     total_groups: number;
@@ -726,10 +728,27 @@ export default function DmsInvoiceConsolidationPanel({
                         <td className="px-2.5 py-2">
                           {grp.company_code ? (
                             <div>
-                              <span className="font-mono text-[10px] font-bold text-sky-800 bg-sky-50 border border-sky-200 rounded px-1 py-0.5">
-                                {grp.company_code}
-                              </span>
-                              <p className="text-[11px] text-slate-700 font-medium truncate max-w-[180px]">
+                              <div className="flex flex-wrap items-center gap-1">
+                                <span className="font-mono text-[10px] font-bold text-sky-800 bg-sky-50 border border-sky-200 rounded px-1 py-0.5">
+                                  {grp.company_code}
+                                </span>
+                                {grp.allocation_source === "BY_PRODUCT" && (
+                                  <span className="rounded bg-violet-100 px-1 py-0.5 text-[9px] font-semibold text-violet-800">
+                                    Theo SP XHĐ
+                                  </span>
+                                )}
+                                {grp.allocation_source === "BY_CUSTOMER" && (
+                                  <span className="rounded bg-emerald-100 px-1 py-0.5 text-[9px] font-semibold text-emerald-800">
+                                    Theo KH
+                                  </span>
+                                )}
+                                {grp.allocation_source === "HYBRID" && (
+                                  <span className="rounded bg-amber-100 px-1 py-0.5 text-[9px] font-semibold text-amber-800">
+                                    Hỗn hợp
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-slate-700 font-medium truncate max-w-[180px] mt-0.5">
                                 {grp.company_name}
                               </p>
                             </div>

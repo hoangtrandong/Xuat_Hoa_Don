@@ -212,3 +212,88 @@ def test_vinamilk_customer_code_normalized_to_last_3_chars(seeded_db):
     assert grp_0cr["is_valid"] is True
     assert grp_0cr["customer_codes"] == ["0CR"]
     assert grp_0cr["buyer_name"] == "Cửa hàng 0CR"
+
+
+def test_migrate_legacy_vinamilk_customer_codes_merges_and_renames(seeded_db):
+    from app.services.vinamilk_customer_code import migrate_vinamilk_customer_codes_to_3_chars
+
+    db, dist, d = seeded_db
+    comp1 = db.query(Company).filter(Company.code == "CT01").first()
+
+    # Trường hợp 1: Đã có bản ghi "0CR" (có MST + Công ty) VÀ tồn tại bản ghi cũ "MG200310CR" (chưa có MST)
+    c_short = Customer(
+        distributor_id=dist.id,
+        code="0CR",
+        name="Chị Hằng",
+        type="RETAIL",
+        tax_code="040194010250",
+        company_id=comp1.id,
+    )
+    c_long_dup = Customer(
+        distributor_id=dist.id,
+        code="MG200310CR",
+        name="Chị Hằng",
+        type="RETAIL",
+        phone="0912345678",
+    )
+    # Trường hợp 2: Bản ghi cũ "MG200310AB" chưa có bản ghi 3 ký tự -> đổi tên thẳng sang "0AB"
+    c_long_only = Customer(
+        distributor_id=dist.id,
+        code="MG200310AB",
+        name="Cửa hàng AB",
+        type="RETAIL",
+        tax_code="0111222333",
+        company_id=comp1.id,
+    )
+    db.add_all([c_short, c_long_dup, c_long_only])
+    db.flush()
+    db.add(
+        VinamilkOrderSnapshot(
+            remote_key="k_mig_1",
+            order_number="ORD_MIG_01",
+            customer_code="MG200310CR",
+            customer_name="Chị Hằng",
+            product_code="SKU001",
+            product_name="Sữa tươi 180ml",
+            order_created_date=d,
+            delivery_date=d,
+            synced_from=d,
+            synced_to=d,
+            raw_payload={"Mã KH": "MG200310CR", "Nhà cung cấp": "VINAMILK", "Số lượng": 1, "Giá bán": 100000, "Thành tiền": 100000},
+        )
+    )
+    db.commit()
+
+    stats = migrate_vinamilk_customer_codes_to_3_chars(db, commit=True)
+    assert stats["snapshots_updated"] == 1
+    assert stats["customers_merged"] == 1
+    assert stats["customers_renamed"] == 1
+
+    # Bản ghi MG200310CR đã bị gộp & xóa; 0CR giữ nguyên MST/Công ty và nhận thêm SĐT từ bản ghi cũ
+    assert db.query(Customer).filter(Customer.code == "MG200310CR").first() is None
+    merged_0cr = db.query(Customer).filter(Customer.code == "0CR").first()
+    assert merged_0cr is not None
+    assert merged_0cr.tax_code == "040194010250"
+    assert merged_0cr.phone == "0912345678"
+    assert merged_0cr.company_id == comp1.id
+
+    # Bản ghi MG200310AB đã đổi sang 0AB; mã KH01 không bị đụng tới
+    assert db.query(Customer).filter(Customer.code == "0AB").first() is not None
+    assert db.query(Customer).filter(Customer.code == "KH01").first() is not None
+
+    # Snapshot cũng đã chuyển về "0CR" và gom hóa đơn hợp lệ 100%
+    snap = db.query(VinamilkOrderSnapshot).filter(VinamilkOrderSnapshot.remote_key == "k_mig_1").first()
+    assert snap.customer_code == "0CR"
+    assert snap.raw_payload["Mã KH"] == "0CR"
+
+    res = consolidate_dms_orders_for_invoicing(
+        db,
+        from_date=d,
+        to_date=d,
+        distributor_id=dist.id,
+        default_vat_rate=8.0,
+    )
+    grp_hang = next((g for g in res["groups"] if g["buyer_tax_code"] == "040194010250"), None)
+    assert grp_hang is not None
+    assert grp_hang["is_valid"] is True
+    assert grp_hang["customer_codes"] == ["0CR"]

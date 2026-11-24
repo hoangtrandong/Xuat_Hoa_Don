@@ -130,3 +130,9 @@ def init_db() -> None:
             product_crud.ensure_default_categories_and_units(db, commit=True)
         except Exception:
             db.rollback()
+        try:
+            from app.services.vinamilk_customer_code import migrate_vinamilk_customer_codes_to_3_chars
+
+            migrate_vinamilk_customer_codes_to_3_chars(db, commit=True)
+        except Exception:
+            db.rollback()

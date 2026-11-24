@@ -350,17 +350,38 @@ def consolidate_dms_orders_for_invoicing(
             continue
 
         cust_code_raw = (snap.customer_code or "").strip()
+        is_vnm = is_vinamilk_supplier(sup)
         cust_code_normalized = normalize_vinamilk_customer_code(cust_code_raw, sup) if cust_code_raw else ""
         cust_code_key = cust_code_raw.upper()
         cust_code_norm_key = cust_code_normalized.upper()
-        customer = customer_map.get(cust_code_key) if cust_code_key else None
+
+        # Với Vinamilk: LUÔN ưu tiên tra bản ghi mã 3 ký tự cuối (VD: MG200310CR -> 0CR) trước
+        # để không bị dính vào bản ghi mã dài cũ thiếu MST/CCCD.
+        customer: Customer | None = None
+        if is_vnm and cust_code_norm_key:
+            customer = customer_map.get(cust_code_norm_key)
+        if customer is None and cust_code_key:
+            customer = customer_map.get(cust_code_key)
         if customer is None and cust_code_norm_key and cust_code_norm_key != cust_code_key:
             customer = customer_map.get(cust_code_norm_key)
-        # Mã KH hiển thị/gom: ưu tiên mã đã khớp trong danh mục, hoặc 3 ký tự cuối nếu là nguồn Vinamilk
+        # Nếu tìm thấy bản ghi mã dài nhưng thiếu MST & CCCD, thử kiểm tra bản ghi 3 ký tự cuối xem có đủ thông tin hơn không
+        if (
+            customer is not None
+            and len(cust_code_key) > 3
+            and cust_code_norm_key
+            and cust_code_norm_key != cust_code_key
+            and not (customer.tax_code or "").strip()
+            and not (customer.citizen_id or "").strip()
+        ):
+            short_cust = customer_map.get(cust_code_norm_key)
+            if short_cust is not None and ((short_cust.tax_code or "").strip() or (short_cust.citizen_id or "").strip()):
+                customer = short_cust
+
+        # Mã KH hiển thị/gom: với Vinamilk luôn chuẩn hóa 3 ký tự cuối
         cust_code_effective = (
-            customer.code
-            if customer is not None
-            else (cust_code_normalized if is_vinamilk_supplier(sup) else cust_code_raw)
+            cust_code_normalized
+            if (is_vnm and cust_code_normalized)
+            else (customer.code if customer is not None else cust_code_raw)
         )
 
         # Nếu lọc theo distributor_id và dòng snapshot không có "Mã NPP" thì kiểm tra qua customer.distributor_id

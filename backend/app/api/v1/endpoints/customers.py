@@ -205,7 +205,7 @@ def download_customer_template():
 def upload_customers(
     file: UploadFile = File(...),
     distributor_id: int | None = Query(None),
-    company_update_mode: Literal["replace", "append"] = Query("replace"),
+    company_update_mode: Literal["append", "replace"] = Query("append"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -428,14 +428,14 @@ def upload_customers(
                     existing.store_id = store_obj.id
 
                 if resolved_company_ids:
-                    if company_update_mode == "append":
+                    if company_update_mode == "replace":
+                        crud.sync_customer_companies(db, existing, resolved_company_ids)
+                    else:
                         next_company_ids = list(existing.company_ids)
                         for cid in resolved_company_ids:
                             if cid not in next_company_ids:
                                 next_company_ids.append(cid)
                         crud.sync_customer_companies(db, existing, next_company_ids)
-                    else:
-                        crud.sync_customer_companies(db, existing, resolved_company_ids)
 
                 if entry["invoice_address"]:
                     default_addr = next(

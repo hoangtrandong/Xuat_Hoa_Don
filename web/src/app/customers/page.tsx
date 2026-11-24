@@ -39,6 +39,13 @@ interface CompanyOption {
   name: string;
 }
 
+type CustomerTableRow = Customer & {
+  rowKey: string;
+  rowCompanyId: string;
+  rowCompanyCode: string;
+  rowCompanyName: string;
+};
+
 const emptyForm = {
   distributor_id: "",
   code: "",
@@ -51,6 +58,7 @@ const emptyForm = {
   status: "active",
   store_id: "",
   store_route: "",
+  company_id: "",
   company_ids: [] as string[],
   manager_code: "",
 };
@@ -135,11 +143,13 @@ export default function CustomersPage() {
   const [companyFilter, setCompanyFilter] = useState("ALL");
   const [bulkCompanyId, setBulkCompanyId] = useState("");
   const [bulkAssigning, setBulkAssigning] = useState(false);
-  const [selected, setSelected] = useState<Customer | null>(null);
+  const [selected, setSelected] = useState<CustomerTableRow | null>(null);
   const [customerRows, setCustomerRows] = useState<Customer[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingRowCompanyId, setEditingRowCompanyId] = useState<string>("");
+  const [editingOriginalCompanyIds, setEditingOriginalCompanyIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState("");
   const [createMessage, setCreateMessage] = useState("");
@@ -148,7 +158,6 @@ export default function CustomersPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadDistId, setUploadDistId] = useState<string>("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadCompanyMode, setUploadCompanyMode] = useState<"replace" | "append">("replace");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
@@ -238,7 +247,6 @@ export default function CustomersPage() {
   function openUploadModal() {
     setUploadError("");
     setUploadFile(null);
-    setUploadCompanyMode("replace");
     setUploadDistId(effectiveDistributorId !== null ? String(effectiveDistributorId) : "");
     setUploadOpen(true);
   }
@@ -263,7 +271,7 @@ export default function CustomersPage() {
       const body = new FormData();
       body.append("file", uploadFile);
       const response = await apiFetch(
-        `${API_URL}/customers/upload?distributor_id=${targetDistId}&company_update_mode=${uploadCompanyMode}`,
+        `${API_URL}/customers/upload?distributor_id=${targetDistId}`,
         { method: "POST", body },
       );
       const result = (await response.json()) as {
@@ -311,7 +319,23 @@ export default function CustomersPage() {
     }
     setSaving(true);
     try {
-      const companyIdsNum = form.company_ids.map((id) => Number(id)).filter((n) => Number.isFinite(n));
+      let nextCompanyIdsStr: string[];
+      if (editingId) {
+        // Khi sửa 1 dòng: chỉ cập nhật công ty quản lý của dòng đang chọn, giữ nguyên các dòng công ty khác của KH
+        if (editingRowCompanyId) {
+          nextCompanyIdsStr = editingOriginalCompanyIds
+            .map((cid) => (cid === editingRowCompanyId ? form.company_id : cid))
+            .filter(Boolean);
+        } else {
+          nextCompanyIdsStr = form.company_id
+            ? [...editingOriginalCompanyIds, form.company_id]
+            : [...editingOriginalCompanyIds];
+        }
+        nextCompanyIdsStr = Array.from(new Set(nextCompanyIdsStr));
+      } else {
+        nextCompanyIdsStr = Array.from(new Set(form.company_ids.filter(Boolean)));
+      }
+      const companyIdsNum = nextCompanyIdsStr.map((id) => Number(id)).filter((n) => Number.isFinite(n));
       const response = await apiFetch(`${API_URL}/customers/${editingId ? editingId : ""}`, {
         method: editingId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
@@ -358,47 +382,53 @@ export default function CustomersPage() {
 
   function openCreate() {
     setEditingId(null);
+    setEditingRowCompanyId("");
+    setEditingOriginalCompanyIds([]);
+    const defaultCompId = companyFilter !== "ALL" && companyFilter !== "UNASSIGNED" ? companyFilter : "";
     setForm({
       ...emptyForm,
       distributor_id: effectiveDistributorId !== null ? String(effectiveDistributorId) : "",
-      company_ids:
-        companyFilter !== "ALL" && companyFilter !== "UNASSIGNED" ? [companyFilter] : [],
+      company_id: defaultCompId,
+      company_ids: defaultCompId ? [defaultCompId] : [],
     });
     setCreateError("");
     setCreateOpen(true);
   }
 
-  function openEdit(customer: Customer) {
-    setEditingId(customer.id);
+  function openEdit(row: CustomerTableRow) {
+    setEditingId(row.id);
     const existingCompanyIds =
-      customer.companyIds && customer.companyIds.length > 0
-        ? customer.companyIds
-        : customer.companyId
-          ? [customer.companyId]
+      row.companyIds && row.companyIds.length > 0
+        ? row.companyIds
+        : row.companyId
+          ? [row.companyId]
           : [];
+    setEditingRowCompanyId(row.rowCompanyId);
+    setEditingOriginalCompanyIds(existingCompanyIds);
     setForm({
       distributor_id:
-        customer.distributorId ||
+        row.distributorId ||
         (effectiveDistributorId !== null ? String(effectiveDistributorId) : ""),
-      code: customer.code,
-      name: customer.name,
+      code: row.code,
+      name: row.name,
       type:
-        customer.type === "Cửa hàng"
+        row.type === "Cửa hàng"
           ? "RETAIL"
-          : customer.type === "Đại lý"
+          : row.type === "Đại lý"
             ? "WHOLESALE"
-            : customer.type === "Nhà phân phối"
+            : row.type === "Nhà phân phối"
               ? "DISTRIBUTOR"
               : "HORECA",
-      tier: customer.tier,
-      email: customer.email,
-      citizen_id: customer.citizenId ?? "",
-      tax_code: customer.taxCode ?? "",
-      status: customer.status,
-      store_id: customer.storeId ?? "",
-      store_route: customer.storeRoute ?? "",
+      tier: row.tier,
+      email: row.email,
+      citizen_id: row.citizenId ?? "",
+      tax_code: row.taxCode ?? "",
+      status: row.status,
+      store_id: row.storeId ?? "",
+      store_route: row.storeRoute ?? "",
+      company_id: row.rowCompanyId,
       company_ids: existingCompanyIds,
-      manager_code: customer.managerCode ?? "",
+      manager_code: row.managerCode ?? "",
     });
     setSelected(null);
     setCreateError("");
@@ -415,30 +445,71 @@ export default function CustomersPage() {
     setCreateMessage("Đã xóa khách hàng.");
   }
 
+  // Nếu 1 khách hàng có N công ty quản lý thì tách thành N dòng riêng biệt trên bảng & khi xuất Excel
+  const expandedRows = useMemo<CustomerTableRow[]>(() => {
+    const out: CustomerTableRow[] = [];
+    for (const c of customerRows) {
+      const comps = c.companies && c.companies.length > 0 ? c.companies : [];
+      if (comps.length > 0) {
+        for (const comp of comps) {
+          out.push({
+            ...c,
+            rowKey: `${c.id}::${comp.id}`,
+            rowCompanyId: comp.id,
+            rowCompanyCode: comp.code,
+            rowCompanyName: comp.name,
+            companyId: comp.id,
+            companyCode: comp.code,
+            companyName: comp.name,
+          });
+        }
+      } else {
+        out.push({
+          ...c,
+          rowKey: `${c.id}::none`,
+          rowCompanyId: "",
+          rowCompanyCode: "",
+          rowCompanyName: "",
+          companyId: "",
+          companyCode: "",
+          companyName: "",
+        });
+      }
+    }
+    return out;
+  }, [customerRows]);
+
   const filtered = useMemo(
     () =>
-      customerRows.filter((c) => {
-        if (typeFilter !== "Tất cả" && c.type !== typeFilter) return false;
-        if (statusFilter !== "Tất cả" && c.status !== statusFilter) return false;
-        const cIds =
-          c.companyIds && c.companyIds.length > 0
-            ? c.companyIds
-            : c.companyId
-              ? [c.companyId]
-              : [];
+      expandedRows.filter((row) => {
+        if (typeFilter !== "Tất cả" && row.type !== typeFilter) return false;
+        if (statusFilter !== "Tất cả" && row.status !== statusFilter) return false;
         if (companyFilter === "UNASSIGNED") {
-          if (cIds.length > 0) return false;
-        } else if (companyFilter !== "ALL" && !cIds.includes(companyFilter)) {
+          if (row.rowCompanyId) return false;
+        } else if (companyFilter !== "ALL" && row.rowCompanyId !== companyFilter) {
           return false;
         }
         return true;
       }),
-    [customerRows, typeFilter, statusFilter, companyFilter],
+    [expandedRows, typeFilter, statusFilter, companyFilter],
   );
 
-  const activeCount = filtered.filter((c) => c.status === "active").length;
-  const debtCount = filtered.filter((c) => c.debitBalance > 0).length;
-  const totalDebt = filtered.reduce((s, c) => s + c.debitBalance, 0);
+  // Thống kê KPI tính theo khách hàng duy nhất (tránh cộng đúp công nợ khi 1 KH có nhiều công ty quản lý)
+  const uniqueFilteredCustomers = useMemo(() => {
+    const seen = new Set<string>();
+    const list: CustomerTableRow[] = [];
+    for (const row of filtered) {
+      if (!seen.has(row.id)) {
+        seen.add(row.id);
+        list.push(row);
+      }
+    }
+    return list;
+  }, [filtered]);
+
+  const activeCount = uniqueFilteredCustomers.filter((c) => c.status === "active").length;
+  const debtCount = uniqueFilteredCustomers.filter((c) => c.debitBalance > 0).length;
+  const totalDebt = uniqueFilteredCustomers.reduce((s, c) => s + c.debitBalance, 0);
 
   function exportCustomers() {
     downloadExcel(
@@ -466,8 +537,8 @@ export default function CustomersPage() {
     );
   }
 
-  const columns = useMemo<Column<Customer>[]>(() => {
-    const cols: Column<Customer>[] = [];
+  const columns = useMemo<Column<CustomerTableRow>[]>(() => {
+    const cols: Column<CustomerTableRow>[] = [];
     if (isAllDistributorsMode) {
       cols.push({
         key: "distributorCode",
@@ -566,25 +637,12 @@ export default function CustomersPage() {
         key: "companyName",
         title: "Công ty quản lý",
         sortable: true,
-        render: (_, row) => {
-          const list = row.companies && row.companies.length > 0 ? row.companies : null;
-          if (list) {
-            return (
-              <div className="flex flex-wrap gap-1 max-w-[260px]">
-                {list.map((comp) => (
-                  <Badge key={comp.id} variant="info">
-                    {comp.name || comp.code}
-                  </Badge>
-                ))}
-              </div>
-            );
-          }
-          return row.companyName ? (
-            <Badge variant="info">{row.companyName}</Badge>
+        render: (_, row) =>
+          row.rowCompanyName ? (
+            <Badge variant="info">{row.rowCompanyName}</Badge>
           ) : (
             <Badge variant="default">Chưa gán</Badge>
-          );
-        },
+          ),
       },
       {
         key: "debitBalance",
@@ -669,7 +727,7 @@ export default function CustomersPage() {
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Tổng khách hàng" value={filtered.length} icon={<Users size={20} />} color="bg-sky-50 text-sky-600" />
+        <StatCard label="Tổng khách hàng" value={uniqueFilteredCustomers.length} icon={<Users size={20} />} color="bg-sky-50 text-sky-600" />
         <StatCard label="Đang hoạt động" value={activeCount} icon={<CheckCircle2 size={20} />} color="bg-emerald-50 text-emerald-600" />
         <StatCard label="Khách đang nợ" value={debtCount} icon={<AlertTriangle size={20} />} color="bg-amber-50 text-amber-600" />
         <StatCard label="Tổng công nợ" value={formatVND(totalDebt)} icon={<Wallet size={20} />} color="bg-rose-50 text-rose-600" />
@@ -678,6 +736,7 @@ export default function CustomersPage() {
       <DataTable
         data={filtered}
         columns={columns}
+        getRowKey={(row) => row.rowKey}
         searchKeys={[
           "code",
           "name",
@@ -731,7 +790,7 @@ export default function CustomersPage() {
                     const comp = companyOptions.find((c) => c.id === bulkCompanyId);
                     if (
                       !window.confirm(
-                        `Thêm Công ty quản lý "${comp?.name || bulkCompanyId}" cho ${filtered.length} khách hàng đang hiển thị? (Giữ nguyên các công ty đã gán trước đó)`,
+                        `Thêm Công ty quản lý "${comp?.name || bulkCompanyId}" cho ${uniqueFilteredCustomers.length} khách hàng đang hiển thị? (Giữ nguyên các công ty đã gán trước đó)`,
                       )
                     ) {
                       return;
@@ -744,14 +803,14 @@ export default function CustomersPage() {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
-                          customer_ids: filtered.map((c) => Number(c.id)),
+                          customer_ids: uniqueFilteredCustomers.map((c) => Number(c.id)),
                           company_id: Number(bulkCompanyId),
                           mode: "add",
                         }),
                       });
                       const data = (await resp.json().catch(() => ({}))) as { updated?: number; detail?: string };
                       if (!resp.ok) throw new Error(data.detail || "Không thể gán công ty hàng loạt.");
-                      setCreateMessage(`Đã gán công ty quản lý cho ${data.updated ?? filtered.length} khách hàng.`);
+                      setCreateMessage(`Đã gán công ty quản lý cho ${data.updated ?? uniqueFilteredCustomers.length} khách hàng.`);
                       setBulkCompanyId("");
                       loadCustomersAndCompanies();
                     } catch (e) {
@@ -762,7 +821,7 @@ export default function CustomersPage() {
                   }}
                   className="rounded bg-sky-600 hover:bg-sky-700 disabled:bg-slate-300 px-2.5 py-1 text-xs font-semibold text-white whitespace-nowrap transition-colors"
                 >
-                  {bulkAssigning ? "Đang gán..." : `Gán (${filtered.length} KH)`}
+                  {bulkAssigning ? "Đang gán..." : `Gán (${uniqueFilteredCustomers.length} KH)`}
                 </button>
               </div>
             )}
@@ -823,6 +882,7 @@ export default function CustomersPage() {
                   setForm({
                     ...form,
                     distributor_id: e.target.value,
+                    company_id: "",
                     company_ids: [], // Reset Công ty quản lý khi đổi NPP để chống gắn chéo Tenant
                   })
                 }
@@ -892,86 +952,103 @@ export default function CustomersPage() {
             />
           </div>
 
-          <div>
-            <div className="flex items-center justify-between mb-0.5">
-              <label className="text-[10px] font-semibold text-slate-600 block">
-                Công ty quản lý / Xuất hóa đơn (chọn nhiều, thuộc NPP đang chọn)
+          {editingId ? (
+            <div>
+              <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                Công ty quản lý / Xuất hóa đơn (dòng đang chọn)
               </label>
-              {form.company_ids.length > 0 && (
-                <span className="text-[10px] font-semibold text-sky-700">
-                  Đã chọn {form.company_ids.length}
-                </span>
-              )}
+              <select
+                value={form.company_id}
+                onChange={(e) => setForm({ ...form, company_id: e.target.value })}
+                className={inputCls}
+              >
+                <option value="">— Chưa gán / Gỡ công ty của dòng này —</option>
+                {formCompanyOptions.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.code} · {c.name}
+                  </option>
+                ))}
+              </select>
             </div>
-            {form.company_ids.length > 0 && (
-              <div className="flex flex-wrap gap-1 mb-1.5">
-                {form.company_ids.map((cid, idx) => {
-                  const comp = companyOptions.find((c) => c.id === cid);
-                  return (
-                    <span
-                      key={cid}
-                      className="inline-flex items-center gap-1 rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 text-[10px] font-medium text-sky-800"
-                    >
-                      <span>
-                        {comp ? `${comp.code} · ${comp.name}` : `#${cid}`}
-                        {idx === 0 && form.company_ids.length > 1 ? " (Chính)" : ""}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setForm((prev) => ({
-                            ...prev,
-                            company_ids: prev.company_ids.filter((id) => id !== cid),
-                          }))
-                        }
-                        className="text-sky-600 hover:text-red-600"
-                        aria-label="Bỏ công ty"
-                      >
-                        <X size={10} />
-                      </button>
-                    </span>
-                  );
-                })}
+          ) : (
+            <div>
+              <div className="flex items-center justify-between mb-0.5">
+                <label className="text-[10px] font-semibold text-slate-600 block">
+                  Công ty quản lý / Xuất hóa đơn (chọn nhiều, thuộc NPP đang chọn)
+                </label>
+                {form.company_ids.length > 0 && (
+                  <span className="text-[10px] font-semibold text-sky-700">
+                    Đã chọn {form.company_ids.length}
+                  </span>
+                )}
               </div>
-            )}
-            <div className="max-h-36 overflow-y-auto rounded border border-slate-300 bg-white divide-y divide-slate-100">
-              {formCompanyOptions.length === 0 ? (
-                <p className="px-2 py-2 text-[11px] text-slate-400">
-                  Chưa có công ty quản lý nào thuộc Nhà phân phối này.
-                </p>
-              ) : (
-                formCompanyOptions.map((c) => {
-                  const checked = form.company_ids.includes(c.id);
-                  return (
-                    <label
-                      key={c.id}
-                      className={cn(
-                        "flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer hover:bg-sky-50/60",
-                        checked && "bg-sky-50/50",
-                      )}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) => {
-                          const isChecked = e.target.checked;
-                          setForm((prev) => ({
-                            ...prev,
-                            company_ids: isChecked
-                              ? [...prev.company_ids, c.id]
-                              : prev.company_ids.filter((id) => id !== c.id),
-                          }));
-                        }}
-                        className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                      />
-                      <span className="font-mono text-[11px] font-semibold text-slate-700">{c.code}</span>
-                      <span className="text-slate-700 truncate">{c.name}</span>
-                    </label>
-                  );
-                })
+              {form.company_ids.length > 0 && (
+                <div className="flex flex-wrap gap-1 mb-1.5">
+                  {form.company_ids.map((cid) => {
+                    const comp = companyOptions.find((c) => c.id === cid);
+                    return (
+                      <span
+                        key={cid}
+                        className="inline-flex items-center gap-1 rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 text-[10px] font-medium text-sky-800"
+                      >
+                        <span>{comp ? `${comp.code} · ${comp.name}` : `#${cid}`}</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setForm((prev) => ({
+                              ...prev,
+                              company_ids: prev.company_ids.filter((id) => id !== cid),
+                            }))
+                          }
+                          className="text-sky-600 hover:text-red-600"
+                          aria-label="Bỏ công ty"
+                        >
+                          <X size={10} />
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
               )}
+              <div className="max-h-36 overflow-y-auto rounded border border-slate-300 bg-white divide-y divide-slate-100">
+                {formCompanyOptions.length === 0 ? (
+                  <p className="px-2 py-2 text-[11px] text-slate-400">
+                    Chưa có công ty quản lý nào thuộc Nhà phân phối này.
+                  </p>
+                ) : (
+                  formCompanyOptions.map((c) => {
+                    const checked = form.company_ids.includes(c.id);
+                    return (
+                      <label
+                        key={c.id}
+                        className={cn(
+                          "flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer hover:bg-sky-50/60",
+                          checked && "bg-sky-50/50",
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const isChecked = e.target.checked;
+                            setForm((prev) => ({
+                              ...prev,
+                              company_ids: isChecked
+                                ? [...prev.company_ids, c.id]
+                                : prev.company_ids.filter((id) => id !== c.id),
+                            }));
+                          }}
+                          className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                        />
+                        <span className="font-mono text-[11px] font-semibold text-slate-700">{c.code}</span>
+                        <span className="text-slate-700 truncate">{c.name}</span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="grid grid-cols-2 gap-2.5">
             <div>
@@ -1167,20 +1244,6 @@ export default function CustomersPage() {
 
               <div>
                 <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                  Xử lý cột Công ty quản lý khi cập nhật KH đã có
-                </label>
-                <select
-                  value={uploadCompanyMode}
-                  onChange={(e) => setUploadCompanyMode(e.target.value as "replace" | "append")}
-                  className={inputCls}
-                >
-                  <option value="replace">Cập nhật danh sách công ty đúng theo file upload (Mặc định)</option>
-                  <option value="append">Giữ nguyên công ty hiện có & bổ sung thêm công ty mới từ file</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                   File Excel (.xlsx, .xlsm) <span className="text-red-600">*</span>
                 </label>
                 <input
@@ -1197,10 +1260,10 @@ export default function CustomersPage() {
                   • <strong>Chưa có Mã KH</strong>: Tự động thêm mới khách hàng.
                 </p>
                 <p>
-                  • <strong>Đã có Mã KH</strong>: Tự động cập nhật các trường có dữ liệu theo file upload.
+                  • <strong>Đã có Mã KH</strong>: Tự động cập nhật thông tin theo file upload; giữ nguyên các công ty quản lý cũ và bổ sung công ty mới nếu có.
                 </p>
                 <p>
-                  • <strong>Nhiều công ty quản lý</strong>: Nhập nhiều mã cách nhau bởi dấu <code className="font-mono">,</code> hoặc <code className="font-mono">;</code> (VD: <code className="font-mono">CT001, CT002</code>), hoặc tách thành nhiều dòng cùng Mã KH.
+                  • <strong>Nhiều công ty quản lý</strong>: Tách nhiều dòng cùng Mã KH hoặc nhập nhiều mã cách nhau bởi dấu <code className="font-mono">,</code> / <code className="font-mono">;</code>.
                 </p>
               </div>
 

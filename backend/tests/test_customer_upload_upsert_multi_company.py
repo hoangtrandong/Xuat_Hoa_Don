@@ -94,8 +94,9 @@ def test_upload_upsert_and_multi_company(db_session):
     assert comps_map["CT002"].customer_count == 1
     assert comps_map["CT003"].customer_count == 1
 
-    # 2. Lần upload thứ 2 (mặc định replace):
-    #    - KH-001 đã tồn tại -> cập nhật tên, loại (tiếng Việt), trạng thái (tiếng Việt), giữ nguyên email (ô trống), thay đổi công ty thành CT003
+    # 2. Lần upload thứ 2 (mặc định append — giữ công ty cũ và bổ sung công ty mới):
+    #    - KH-001 đã tồn tại (đang có CT001, CT002) -> cập nhật tên, loại (tiếng Việt), trạng thái (tiếng Việt),
+    #      giữ nguyên email (ô trống), và bổ sung thêm CT003 -> thành [CT001, CT002, CT003]
     #    - KH-003 chưa tồn tại -> thêm mới với 2 công ty (CT002; CT003)
     file2 = _make_excel_upload([
         ["Mã KH", "Tên khách hàng", "Loại", "Email", "Mã số thuế", "Trạng thái", "Mã công ty quản lý"],
@@ -105,7 +106,6 @@ def test_upload_upsert_and_multi_company(db_session):
     res2 = upload_customers(
         file=file2,
         distributor_id=dist_a.id,
-        company_update_mode="replace",
         db=db,
         current_user=user_a,
     )
@@ -120,23 +120,22 @@ def test_upload_upsert_and_multi_company(db_session):
     assert kh1.status == "inactive"
     assert kh1.tax_code == "8000000099"
     assert kh1.email == "mailinh@example.com"  # ô trống không xóa dữ liệu cũ
-    assert kh1.company_ids == [comp3.id]
+    assert kh1.company_ids == [comp1.id, comp2.id, comp3.id]
 
     kh3 = custs["KH-003"]
     assert kh3.type == "RETAIL"
     assert kh3.status == "active"
     assert set(kh3.company_ids) == {comp2.id, comp3.id}
 
-    # 3. Lần upload thứ 3 (company_update_mode="append"):
-    #    - KH-001 đang có [CT003], upload thêm CT001 -> thành [CT003, CT001]
+    # 3. Lần upload thứ 3 (chỉ 2 cột Mã KH + Mã công ty quản lý, mặc định append):
+    #    - KH-003 đang có [CT002, CT003], upload thêm CT001 -> thành [CT002, CT003, CT001]
     file3 = _make_excel_upload([
         ["Mã KH", "Mã công ty quản lý"],
-        ["KH-001", "CT001"],
+        ["KH-003", "CT001"],
     ])
     res3 = upload_customers(
         file=file3,
         distributor_id=dist_a.id,
-        company_update_mode="append",
         db=db,
         current_user=user_a,
     )
@@ -144,7 +143,7 @@ def test_upload_upsert_and_multi_company(db_session):
     assert res3["updated"] == 1
 
     custs = {c.code: c for c in list_customers(distributor_id=None, company_id=None, q=None, db=db, current_user=user_a)}
-    assert custs["KH-001"].company_ids == [comp3.id, comp1.id]
+    assert custs["KH-003"].company_ids == [comp2.id, comp3.id, comp1.id]
 
 
 def test_crud_and_bulk_assign_multi_company_and_tenant_isolation(db_session):

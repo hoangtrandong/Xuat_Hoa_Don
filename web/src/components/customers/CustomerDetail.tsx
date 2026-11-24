@@ -56,9 +56,11 @@ export default function CustomerDetail({ customer, onCreateOrder, onEdit, onDele
           icon={<Building2 size={14} />}
           label="Công ty quản lý"
           value={
-            customer.companies && customer.companies.length > 0
-              ? customer.companies.map((c) => `${c.code} · ${c.name}`).join("; ")
-              : customer.companyName || "Chưa gán"
+            customer.companyName
+              ? customer.companyCode
+                ? `${customer.companyCode} · ${customer.companyName}`
+                : customer.companyName
+              : "Chưa gán"
           }
         />
         <InfoRow icon={<Store size={14} />} label="Cửa hàng" value={customer.storeCode ? `${customer.storeName} (${customer.storeCode})` : "—"} />

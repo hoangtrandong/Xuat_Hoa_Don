@@ -75,6 +75,10 @@ type ApiProductItem = {
   npp_code?: string | null;
   internal_name?: string | null;
   internal_unit?: string | null;
+  invoice_product_id?: number | null;
+  invoice_product_code?: string | null;
+  invoice_product_name?: string | null;
+  invoice_product_unit?: string | null;
   representative_sku?: string | null;
   representative_name?: string | null;
   order_count?: number;
@@ -767,9 +771,13 @@ export default function ProductsPage() {
         reorder_level: Math.max(0, Number(editForm.reorder_level) || 20),
         status: editForm.status,
       };
-      // Nếu dòng chưa gắn MST nào thì lưu npp_code trực tiếp trên SKU; ngược lại lưu riêng theo cặp (SKU, MST)
-      if (editingProduct.rowCompanyId == null) {
-        patchBody.npp_code = formattedNpp;
+      const matchedIp = formattedNpp
+        ? nppProductOptions.find((opt) => opt.code.trim().toUpperCase() === formattedNpp)
+        : null;
+      if (formattedNpp && !matchedIp?.id) {
+        throw new Error(
+          `Mã SP XHĐ "${formattedNpp}" chưa có trong danh mục Sản phẩm XHĐ. Vui lòng chọn từ danh sách.`
+        );
       }
 
       const response = await apiFetch(`${API_URL}/products/${editingProduct.id}`, {
@@ -780,19 +788,18 @@ export default function ProductsPage() {
       const result = (await response.json()) as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể cập nhật SKU.");
 
-      if (editingProduct.rowCompanyId != null) {
-        const nppResp = await apiFetch(
-          `${API_URL}/products/${editingProduct.id}/companies/${editingProduct.rowCompanyId}/npp-code`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ npp_code: formattedNpp }),
-          }
-        );
-        if (!nppResp.ok) {
-          const errData = (await nppResp.json().catch(() => ({}))) as { detail?: string };
-          throw new Error(errData.detail ?? "Không thể cập nhật Mã NPP cho MST này.");
+      // Gán / gỡ Sản phẩm XHĐ chuẩn (dùng chung toàn NPP)
+      const ipResp = await apiFetch(
+        `${API_URL}/products/${editingProduct.id}/invoice-product`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ invoice_product_id: matchedIp?.id ?? null }),
         }
+      );
+      if (!ipResp.ok) {
+        const errData = (await ipResp.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(errData.detail ?? "Không thể gán Mã SP XHĐ cho SKU này.");
       }
 
       const updatedSku = editForm.sku.trim().toUpperCase();
@@ -1229,7 +1236,7 @@ export default function ProductsPage() {
           "MST đầu vào (CQT)": product.row_company_tax_code || product.row_company_code || "",
           "Công ty quản lý": product.row_company_short_name || product.row_company_name || "",
           "Mã SKU": product.sku,
-          "Mã NPP nội bộ": (product.row_company_id != null ? product.row_company_npp_code : product.npp_code) || "",
+          "Mã SP XHĐ": (product.invoice_product_code || (product.row_company_id != null ? product.row_company_npp_code : product.npp_code)) || "",
           "Tên sản phẩm": product.name,
           "Mã danh mục": product.category_code || catObj?.code || "",
           "Danh mục ngành hàng": product.category_name || catObj?.name || "Chưa phân loại",
@@ -1489,7 +1496,7 @@ export default function ProductsPage() {
           <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-6">
             <div className="sm:col-span-2 xl:col-span-2">
               <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                Tìm kiếm Mã sản phẩm (SKU) / Tên hàng hóa / Mã NPP
+                Tìm kiếm Mã sản phẩm (SKU) / Tên hàng hóa / Mã SP XHĐ
               </label>
               <div className="relative">
                 <Search
@@ -2029,7 +2036,7 @@ export default function ProductsPage() {
                                 }
                               }}
                               disabled={savingNppKey === row.rowKey}
-                              placeholder="Mã NPP"
+                              placeholder="Mã SP XHĐ"
                               className="h-6 w-28 rounded border border-sky-400 bg-white px-1.5 font-mono text-[11px] font-bold uppercase text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500"
                             />
                             <button
@@ -2037,7 +2044,7 @@ export default function ProductsPage() {
                               disabled={savingNppKey === row.rowKey}
                               onClick={() => void handleSaveNppCode(row, inlineNppCode)}
                               className="rounded bg-sky-600 p-1 text-white hover:bg-sky-700 disabled:bg-slate-300"
-                              title="Lưu mã NPP (Enter)"
+                              title="Lưu Mã SP XHĐ (Enter)"
                             >
                               {savingNppKey === row.rowKey ? (
                                 <Loader2 size={12} className="animate-spin" />
@@ -2060,11 +2067,7 @@ export default function ProductsPage() {
                             {row.nppCode ? (
                               <span
                                 className="rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] font-bold text-emerald-800"
-                                title={
-                                  row.rowCompanyTaxCode
-                                    ? `Mã NPP nội bộ cho MST ${row.rowCompanyTaxCode}: ${row.nppCode}`
-                                    : `Mã NPP nội bộ: ${row.nppCode}`
-                                }
+                                title={`Mã SP XHĐ: ${row.nppCode}`}
                               >
                                 {row.nppCode}
                               </span>
@@ -2078,11 +2081,7 @@ export default function ProductsPage() {
                                 setInlineNppCode(row.nppCode || "");
                               }}
                               className="rounded p-0.5 text-slate-400 opacity-60 hover:bg-sky-50 hover:text-sky-700 hover:opacity-100 group-hover:opacity-100 transition-opacity"
-                              title={
-                                row.rowCompanyTaxCode
-                                  ? `Gán / sửa Mã NPP nội bộ cho MST ${row.rowCompanyTaxCode}`
-                                  : "Chỉnh sửa mã NPP nội bộ"
-                              }
+                              title="Gán / sửa Mã SP XHĐ"
                             >
                               <Pencil size={11} />
                             </button>
@@ -2347,7 +2346,7 @@ export default function ProductsPage() {
               <section className="border-b border-slate-200 bg-slate-50/40 p-4">
                 <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5 mb-3">
                   <Layers size={13} className="text-sky-600" />
-                  <span>1. Định danh sản phẩm & Ghép nối Mã SP NPP</span>
+                  <span>1. Định danh sản phẩm & Gán Sản phẩm XHĐ</span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5">
@@ -2368,19 +2367,19 @@ export default function ProductsPage() {
                     </span>
                   </div>
 
-                  {/* Combobox Mã SP NPP chuyên nghiệp */}
+                  {/* Combobox Sản phẩm XHĐ */}
                   <div className="md:col-span-8" ref={createNppContainerRef}>
                     <div className="flex items-center justify-between mb-1">
                       <label className="text-[10px] font-semibold text-slate-600 flex items-center gap-1.5">
                         <Link2 size={12} className="text-sky-600" />
-                        <span>Mã SP NPP (Nội bộ / Web NCC)</span>
+                        <span>Mã Sản phẩm XHĐ (Chuẩn xuất hóa đơn)</span>
                       </label>
                       <span className="text-[10px] text-slate-500">
-                        {nppProductOptions.length} mã NPP trong hệ thống
+                        {nppProductOptions.length} SP XHĐ trong hệ thống
                       </span>
                     </div>
 
-                    {/* TRƯỜNG HỢP 1: ĐÃ CHỌN MÃ NPP */}
+                    {/* TRƯỜNG HỢP 1: ĐÃ CHỌN MÃ SP XHĐ */}
                     {form.npp_code ? (
                       <div className="flex items-center justify-between gap-3 rounded border border-sky-300 bg-sky-50/80 p-2 shadow-sm">
                         <div className="min-w-0 flex-1">
@@ -2390,7 +2389,7 @@ export default function ProductsPage() {
                               {form.npp_code}
                             </span>
                             <span className="font-semibold text-xs text-slate-800 truncate">
-                              {selectedCreateNppItem?.name || "Sản phẩm NPP nội bộ"}
+                              {selectedCreateNppItem?.name || "Sản phẩm XHĐ"}
                             </span>
                           </div>
                           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-slate-600">
@@ -2398,16 +2397,8 @@ export default function ProductsPage() {
                               Nhà cung cấp: <strong className="text-slate-800">{selectedCreateNppItem?.supplier || "—"}</strong>
                             </span>
                             <span>
-                              ĐVT: <strong className="text-slate-800">{selectedCreateNppItem?.unit || "—"}</strong>
+                              ĐVT xuất HĐ: <strong className="text-slate-800">{selectedCreateNppItem?.unit || "—"}</strong>
                             </span>
-                            {selectedCreateNppItem?.unitPrice ? (
-                              <span>
-                                Đơn giá NCC:{" "}
-                                <strong className="text-emerald-700">
-                                  {formatNumber(selectedCreateNppItem.unitPrice)} đ
-                                </strong>
-                              </span>
-                            ) : null}
                           </div>
                         </div>
 
@@ -2426,14 +2417,14 @@ export default function ProductsPage() {
                             type="button"
                             onClick={() => setForm({ ...form, npp_code: "" })}
                             className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors"
-                            title="Bỏ liên kết mã NPP"
+                            title="Bỏ gắn Sản phẩm XHĐ"
                           >
                             <X size={11} /> Bỏ gắn
                           </button>
                         </div>
                       </div>
                     ) : (
-                      /* TRƯỜNG HỢP 2: CHƯA CHỌN MÃ NPP */
+                      /* TRƯỜNG HỢP 2: CHƯA CHỌN MÃ SP XHĐ */
                       <div className="relative">
                         <Search
                           size={13}
@@ -2447,7 +2438,7 @@ export default function ProductsPage() {
                             setShowCreateNppDropdown(true);
                           }}
                           onFocus={() => setShowCreateNppDropdown(true)}
-                          placeholder="Tìm kiếm theo mã NPP nội bộ hoặc tên sản phẩm để gắn vào SKU..."
+                          placeholder="Tìm kiếm theo Mã SP XHĐ hoặc tên sản phẩm để gán vào SKU đầu vào..."
                           className={cn(inputCls, "pl-8 pr-24 text-xs font-medium")}
                         />
                         <button
@@ -2461,7 +2452,7 @@ export default function ProductsPage() {
                       </div>
                     )}
 
-                    {/* POPUP DROPDOWN TÌM KIẾM MÃ NPP */}
+                    {/* POPUP DROPDOWN TÌM KIẾM MÃ SP XHĐ */}
                     <div className={cn("relative", !showCreateNppDropdown && "hidden")}>
                       <div className="absolute left-0 right-0 top-1.5 z-[70] rounded-md border border-slate-300 bg-white shadow-2xl overflow-hidden flex flex-col">
                         <div className="p-2 border-b border-slate-200 bg-slate-50 space-y-1.5">
@@ -2475,7 +2466,7 @@ export default function ProductsPage() {
                               type="text"
                               value={createNppSearchQuery}
                               onChange={(e) => setCreateNppSearchQuery(e.target.value)}
-                              placeholder="Gõ mã hoặc tên sản phẩm NPP để lọc nhanh..."
+                              placeholder="Gõ Mã SP XHĐ hoặc tên sản phẩm để lọc nhanh..."
                               className="w-full rounded border border-slate-300 bg-white pl-8 pr-7 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
                             />
                               {createNppSearchQuery && (
@@ -2631,7 +2622,7 @@ export default function ProductsPage() {
                           </div>
 
                           <div className="p-1.5 border-t border-slate-200 bg-slate-50 text-[10px] text-slate-500 flex items-center justify-between px-3">
-                            <span>Nhấn vào dòng bất kỳ để chọn mã NPP</span>
+                            <span>Nhấn vào dòng bất kỳ để chọn Mã SP XHĐ</span>
                             <button
                               type="button"
                               onClick={() => setShowCreateNppDropdown(false)}
@@ -2889,7 +2880,7 @@ export default function ProductsPage() {
               <section className="border-b border-slate-200 bg-slate-50/40 p-4">
                 <div className="text-[11px] font-bold text-sky-800 uppercase flex items-center gap-1.5 mb-3">
                   <Layers size={13} className="text-sky-600" />
-                  <span>1. Định danh sản phẩm & Ghép nối Mã SP NPP</span>
+                  <span>1. Định danh sản phẩm & Gán Sản phẩm XHĐ</span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5">
@@ -2911,24 +2902,19 @@ export default function ProductsPage() {
                     </span>
                   </div>
 
-                  {/* Combobox Mã SP NPP chuyên nghiệp */}
+                  {/* Combobox Sản phẩm XHĐ */}
                   <div className="md:col-span-8" ref={editNppContainerRef}>
                     <div className="flex items-center justify-between mb-1">
                       <label className="text-[10px] font-semibold text-slate-600 flex items-center gap-1.5">
                         <Link2 size={12} className="text-sky-600" />
-                        <span>
-                          Mã SP NPP nội bộ
-                          {editingProduct.rowCompanyTaxCode
-                            ? ` (cho MST ${editingProduct.rowCompanyTaxCode})`
-                            : " (Nội bộ / Web NCC)"}
-                        </span>
+                        <span>Mã Sản phẩm XHĐ (Dùng chung toàn NPP)</span>
                       </label>
                       <span className="text-[10px] text-slate-500">
-                        {nppProductOptions.length} mã NPP trong hệ thống
+                        {nppProductOptions.length} SP XHĐ trong hệ thống
                       </span>
                     </div>
 
-                    {/* TRƯỜNG HỢP 1: ĐÃ CHỌN MÃ NPP -> HIỂN THỊ THẺ CHỌN CHUYÊN NGHIỆP */}
+                    {/* TRƯỜNG HỢP 1: ĐÃ CHỌN SP XHĐ */}
                     {editForm.npp_code ? (
                       <div className="flex items-center justify-between gap-3 rounded border border-sky-300 bg-sky-50/80 p-2 shadow-sm">
                         <div className="min-w-0 flex-1">
@@ -2938,7 +2924,7 @@ export default function ProductsPage() {
                               {editForm.npp_code}
                             </span>
                             <span className="font-semibold text-xs text-slate-800 truncate">
-                              {selectedEditNppItem?.name || "Sản phẩm NPP nội bộ"}
+                              {selectedEditNppItem?.name || "Sản phẩm XHĐ"}
                             </span>
                           </div>
                           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-slate-600">
@@ -2946,21 +2932,13 @@ export default function ProductsPage() {
                               Nhà cung cấp: <strong className="text-slate-800">{selectedEditNppItem?.supplier || "—"}</strong>
                             </span>
                             <span>
-                              ĐVT: <strong className="text-slate-800">{selectedEditNppItem?.unit || "—"}</strong>
+                              ĐVT xuất HĐ: <strong className="text-slate-800">{selectedEditNppItem?.unit || "—"}</strong>
                             </span>
-                            {selectedEditNppItem?.unitPrice ? (
-                              <span>
-                                Đơn giá NCC:{" "}
-                                <strong className="text-emerald-700">
-                                  {formatNumber(selectedEditNppItem.unitPrice)} đ
-                                </strong>
-                              </span>
-                            ) : null}
                             {selectedEditNppItem?.orderCount ? (
                               <span>
-                                Đơn đặt DMS:{" "}
+                                Mã DMS đã gán:{" "}
                                 <strong className="text-sky-800">
-                                  {selectedEditNppItem.orderCount} đơn
+                                  {selectedEditNppItem.orderCount} mã
                                 </strong>
                               </span>
                             ) : null}
@@ -2982,14 +2960,14 @@ export default function ProductsPage() {
                             type="button"
                             onClick={() => setEditForm({ ...editForm, npp_code: "" })}
                             className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors"
-                            title="Bỏ liên kết mã NPP"
+                            title="Bỏ gắn Sản phẩm XHĐ"
                           >
                             <X size={11} /> Bỏ gắn
                           </button>
                         </div>
                       </div>
                     ) : (
-                      /* TRƯỜNG HỢP 2: CHƯA CHỌN MÃ NPP -> KHUNG TÌM KIẾM TÍCH HỢP */
+                      /* TRƯỜNG HỢP 2: CHƯA CHỌN SP XHĐ -> KHUNG TÌM KIẾM TÍCH HỢP */
                       <div className="relative">
                         <Search
                           size={13}
@@ -3003,7 +2981,7 @@ export default function ProductsPage() {
                             setShowEditNppDropdown(true);
                           }}
                           onFocus={() => setShowEditNppDropdown(true)}
-                          placeholder="Tìm kiếm theo mã NPP nội bộ hoặc tên sản phẩm để gắn vào SKU..."
+                          placeholder="Tìm kiếm theo Mã SP XHĐ hoặc tên sản phẩm để gán vào SKU đầu vào..."
                           className={cn(inputCls, "pl-8 pr-24 text-xs font-medium")}
                         />
                         <button
@@ -3200,7 +3178,7 @@ export default function ProductsPage() {
 
                           {/* Footer dropdown */}
                           <div className="p-1.5 border-t border-slate-200 bg-slate-50 text-[10px] text-slate-500 flex items-center justify-between px-3">
-                            <span>Nhấn vào dòng bất kỳ để chọn mã NPP</span>
+                            <span>Nhấn vào dòng bất kỳ để chọn Mã SP XHĐ</span>
                             <button
                               type="button"
                               onClick={() => setShowEditNppDropdown(false)}

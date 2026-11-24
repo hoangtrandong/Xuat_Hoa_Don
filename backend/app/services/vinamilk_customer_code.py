@@ -12,7 +12,12 @@ _PRESERVE_EXACT = {"NVBH", "KH_LE", "KH-LE", "DEFAULT"}
 def is_vinamilk_supplier(supplier_code: str | None) -> bool:
     """Kiểm tra nguồn dữ liệu có phải Vinamilk không (mặc định True nếu rỗng/None)."""
     sup = (supplier_code or "VINAMILK").strip().upper()
-    return sup == "VINAMILK" or "VINAMILK" in sup
+    return (
+        sup == "VINAMILK"
+        or "VINAMILK" in sup
+        or sup == "VNM"
+        or sup.startswith(("VNM-", "VNM_", "VNM "))
+    )
 
 
 def normalize_vinamilk_customer_code(

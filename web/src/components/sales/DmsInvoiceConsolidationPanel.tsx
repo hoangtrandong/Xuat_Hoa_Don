@@ -583,7 +583,7 @@ export default function DmsInvoiceConsolidationPanel({
               href="/products"
               className="inline-flex items-center gap-1 rounded border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
             >
-              <Package size={12} /> Sản phẩm đầu vào <ExternalLink size={11} />
+              <Package size={12} /> Sản phẩm CQT <ExternalLink size={11} />
             </Link>
           </div>
         </div>

@@ -1277,7 +1277,7 @@ export default function ProductsPage() {
           <div className="flex items-center gap-2">
             <Package size={17} className="text-red-500" />
             <h1 className="text-xs font-bold uppercase tracking-wide text-white">
-              Sản Phẩm Đầu Vào (SKU Đồng Bộ Từ CQT)
+              Sản Phẩm CQT (SKU Đồng Bộ Từ Hóa Đơn Đầu Vào)
             </h1>
             <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
               {stats.total} SKU

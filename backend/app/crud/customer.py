@@ -2,7 +2,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from typing import Any, List, Optional
 
-from app.models.customer import Company, Customer, CustomerAddress, Store
+from app.models.customer import Company, Customer, CustomerAddress, CustomerCompany, Store
 from app.models.employee import Employee
 from app.models.vinamilk import VinamilkOrderSnapshot
 from app.schemas.customer import CustomerCreate, CustomerUpdate
@@ -114,6 +114,7 @@ def get(db: Session, customer_id: int) -> Optional[Customer]:
             selectinload(Customer.distributor),
             selectinload(Customer.store),
             selectinload(Customer.company),
+            selectinload(Customer.company_links).selectinload(CustomerCompany.company),
             selectinload(Customer.addresses),
         )
         .where(Customer.id == customer_id)
@@ -153,6 +154,7 @@ def list_(
             selectinload(Customer.distributor),
             selectinload(Customer.store),
             selectinload(Customer.company),
+            selectinload(Customer.company_links).selectinload(CustomerCompany.company),
             selectinload(Customer.addresses),
         )
         .order_by(Customer.distributor_id, Customer.code)
@@ -162,7 +164,12 @@ def list_(
     if distributor_id is not None:
         stmt = stmt.where(Customer.distributor_id == distributor_id)
     if company_id is not None:
-        stmt = stmt.where(Customer.company_id == company_id)
+        stmt = stmt.where(
+            or_(
+                Customer.company_id == company_id,
+                Customer.company_links.any(CustomerCompany.company_id == company_id),
+            )
+        )
     if status:
         stmt = stmt.where(Customer.status == status)
     if q and q.strip():
@@ -178,15 +185,79 @@ def list_(
     return list(db.execute(stmt).scalars().all())
 
 
+def _normalize_company_ids(
+    company_ids: Optional[List[int]],
+    company_id: Optional[int],
+) -> List[int]:
+    """Chuẩn hóa danh sách company_ids (giữ thứ tự, bỏ trùng). Nếu company_id có mặt thì ưu tiên đứng đầu."""
+    ordered: list[int] = []
+    seen: set[int] = set()
+    if company_ids is not None:
+        for cid in company_ids:
+            if cid is not None and cid not in seen:
+                seen.add(cid)
+                ordered.append(int(cid))
+        if company_id is not None and company_id not in seen:
+            ordered.insert(0, int(company_id))
+        elif company_id is not None and company_id in seen:
+            ordered = [int(company_id)] + [cid for cid in ordered if cid != int(company_id)]
+    elif company_id is not None:
+        ordered.append(int(company_id))
+    return ordered
+
+
+def sync_customer_companies(
+    db: Session,
+    customer: Customer,
+    company_ids: List[int],
+) -> None:
+    """Đồng bộ bảng customer_companies và cột customer.company_id (công ty chính)."""
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for cid in company_ids:
+        if cid is not None and cid not in seen:
+            seen.add(int(cid))
+            deduped.append(int(cid))
+
+    primary_id = deduped[0] if deduped else None
+    customer.company_id = primary_id
+
+    existing_links = list(
+        db.scalars(select(CustomerCompany).where(CustomerCompany.customer_id == customer.id)).all()
+    )
+    existing_by_cid = {link.company_id: link for link in existing_links}
+    desired_set = set(deduped)
+
+    for link in existing_links:
+        if link.company_id not in desired_set:
+            db.delete(link)
+
+    for cid in deduped:
+        is_primary = cid == primary_id
+        if cid in existing_by_cid:
+            existing_by_cid[cid].is_primary = is_primary
+        else:
+            db.add(
+                CustomerCompany(
+                    customer_id=customer.id,
+                    company_id=cid,
+                    is_primary=is_primary,
+                )
+            )
+    db.flush()
+
+
 def validate_customer_links(
     db: Session,
     distributor_id: Optional[int],
     company_id: Optional[int],
     store_id: Optional[int],
+    company_ids: Optional[List[int]] = None,
 ) -> None:
     """Ngăn chặn liên kết chéo Tenant (KH thuộc NPP A gắn Công ty/Cửa hàng của NPP B)."""
-    if company_id is not None:
-        comp = db.get(Company, company_id)
+    all_company_ids = _normalize_company_ids(company_ids, company_id)
+    for cid in all_company_ids:
+        comp = db.get(Company, cid)
         if comp is None:
             raise ValueError("Công ty quản lý không tồn tại.")
         if distributor_id is not None and comp.distributor_id is not None and comp.distributor_id != distributor_id:
@@ -214,12 +285,24 @@ def resolve_manager_assignment(db: Session, manager_code: str | None) -> tuple[s
 def create(db: Session, obj_in: CustomerCreate) -> Customer:
     data = obj_in.model_dump()
     store_route = data.pop("store_route", None)
-    validate_customer_links(db, data.get("distributor_id"), data.get("company_id"), data.get("store_id"))
+    raw_company_ids = data.pop("company_ids", None)
+    resolved_company_ids = _normalize_company_ids(raw_company_ids, data.get("company_id"))
+    data["company_id"] = resolved_company_ids[0] if resolved_company_ids else None
+    validate_customer_links(
+        db,
+        data.get("distributor_id"),
+        data.get("company_id"),
+        data.get("store_id"),
+        company_ids=resolved_company_ids,
+    )
     manager_code, manager_name = resolve_manager_assignment(db, data.get("manager_code"))
     data["manager_code"] = manager_code
     data["manager_name"] = manager_name
     customer = Customer(**data)
     db.add(customer)
+    db.flush()
+    if resolved_company_ids:
+        sync_customer_companies(db, customer, resolved_company_ids)
     if customer.store_id and store_route is not None:
         store = db.get(Store, customer.store_id)
         if store:
@@ -232,14 +315,38 @@ def create(db: Session, obj_in: CustomerCreate) -> Customer:
 def update(db: Session, customer: Customer, obj_in: CustomerUpdate) -> Customer:
     data = obj_in.model_dump(exclude_unset=True)
     store_route = data.pop("store_route", None)
+    has_company_ids = "company_ids" in data
+    raw_company_ids = data.pop("company_ids", None)
+    has_company_id = "company_id" in data
+
     next_dist_id = data.get("distributor_id", customer.distributor_id)
-    next_company_id = data.get("company_id", customer.company_id)
     next_store_id = data.get("store_id", customer.store_id)
-    validate_customer_links(db, next_dist_id, next_company_id, next_store_id)
+
+    if has_company_ids:
+        resolved_company_ids = _normalize_company_ids(
+            raw_company_ids or [],
+            data.get("company_id") if has_company_id else None,
+        )
+        data["company_id"] = resolved_company_ids[0] if resolved_company_ids else None
+    elif has_company_id:
+        cid = data.get("company_id")
+        resolved_company_ids = [int(cid)] if cid is not None else []
+    else:
+        resolved_company_ids = None
+
+    validate_customer_links(
+        db,
+        next_dist_id,
+        data.get("company_id", customer.company_id),
+        next_store_id,
+        company_ids=resolved_company_ids if resolved_company_ids is not None else customer.company_ids,
+    )
     if "manager_code" in data:
         data["manager_code"], data["manager_name"] = resolve_manager_assignment(db, data["manager_code"])
     for field, value in data.items():
         setattr(customer, field, value)
+    if resolved_company_ids is not None:
+        sync_customer_companies(db, customer, resolved_company_ids)
     if customer.store_id and store_route is not None:
         store = db.get(Store, customer.store_id)
         if store:
@@ -265,6 +372,7 @@ class CustomerCRUD:
     delete = staticmethod(delete)
     sync_customers_from_snapshots = staticmethod(sync_customers_from_snapshots)
     resolve_manager_assignment = staticmethod(resolve_manager_assignment)
+    sync_customer_companies = staticmethod(sync_customer_companies)
 
 
 customer = CustomerCRUD()

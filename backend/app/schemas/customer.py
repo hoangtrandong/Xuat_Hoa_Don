@@ -1,6 +1,14 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional
+
+
+class CustomerCompanySummary(BaseModel):
+    id: int
+    code: str
+    name: str
+    tax_code: Optional[str] = None
+    is_primary: bool = False
 
 
 class CustomerBase(BaseModel):
@@ -9,6 +17,7 @@ class CustomerBase(BaseModel):
     name: str
     type: str = "RETAIL"
     tier: str = "B"
+    phone: Optional[str] = None
     email: Optional[str] = None
     citizen_id: Optional[str] = None
     tax_code: Optional[str] = None
@@ -19,13 +28,14 @@ class CustomerBase(BaseModel):
     staff_name: Optional[str] = None
     manager_code: Optional[str] = None
     manager_name: Optional[str] = None
-    # Phase 2: thuộc cửa hàng + công ty quản lý / xuất hóa đơn
+    # Phase 2: thuộc cửa hàng + công ty quản lý / xuất hóa đơn (hỗ trợ nhiều công ty)
     store_id: Optional[int] = None
     company_id: Optional[int] = None
 
 
 class CustomerCreate(CustomerBase):
     store_route: Optional[str] = None
+    company_ids: Optional[List[int]] = None
 
 
 class CustomerUpdate(BaseModel):
@@ -33,6 +43,7 @@ class CustomerUpdate(BaseModel):
     name: Optional[str] = None
     type: Optional[str] = None
     tier: Optional[str] = None
+    phone: Optional[str] = None
     email: Optional[str] = None
     citizen_id: Optional[str] = None
     tax_code: Optional[str] = None
@@ -43,6 +54,7 @@ class CustomerUpdate(BaseModel):
     manager_code: Optional[str] = None
     store_id: Optional[int] = None
     company_id: Optional[int] = None
+    company_ids: Optional[List[int]] = None
     store_route: Optional[str] = None
 
 
@@ -59,4 +71,6 @@ class Customer(CustomerBase):
     store_route: Optional[str] = None
     company_code: Optional[str] = None
     company_name: Optional[str] = None
+    company_ids: List[int] = Field(default_factory=list)
+    companies: List[CustomerCompanySummary] = Field(default_factory=list)
     address: Optional[str] = None

@@ -114,6 +114,17 @@ def init_db() -> None:
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_issued_items_product_code_upper ON issued_invoice_items (UPPER(product_code));"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_products_sku_upper ON products (UPPER(sku));"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_products_npp_code_upper ON products (UPPER(npp_code));"))
+        # Backfill liên kết N-N khách hàng <-> công ty quản lý từ customers.company_id hiện có
+        conn.execute(text("""
+            INSERT INTO customer_companies (customer_id, company_id, is_primary, created_at)
+            SELECT c.id, c.company_id, TRUE, CURRENT_TIMESTAMP
+            FROM customers c
+            WHERE c.company_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM customer_companies cc
+                  WHERE cc.customer_id = c.id AND cc.company_id = c.company_id
+              )
+        """))
     with SessionLocal() as db:
         try:
             product_crud.ensure_default_categories_and_units(db, commit=True)

@@ -34,7 +34,8 @@ class Customer(Base):
     staff_name: Mapped[str | None] = mapped_column(String(160))
     manager_code: Mapped[str | None] = mapped_column(String(50), index=True)
     manager_name: Mapped[str | None] = mapped_column(String(160))
-    # Phát sinh Phase 2: 1 cửa hàng → nhiều mã KH; mã KH quản lý bởi 1 công ty xuất hóa đơn.
+    # Phát sinh Phase 2: 1 cửa hàng → nhiều mã KH; 1 mã KH có thể thuộc nhiều công ty quản lý (qua customer_companies).
+    # company_id giữ vai trò công ty quản lý chính / mặc định để tương thích ngược.
     store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id", ondelete="SET NULL"), index=True)
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -46,6 +47,11 @@ class Customer(Base):
     sales_orders: Mapped[List["SalesOrder"]] = relationship(back_populates="customer")
     store: Mapped["Store | None"] = relationship(back_populates="customers")
     company: Mapped["Company | None"] = relationship(back_populates="customers")
+    company_links: Mapped[List["CustomerCompany"]] = relationship(
+        back_populates="customer",
+        cascade="all, delete-orphan",
+        order_by="CustomerCompany.is_primary.desc(), CustomerCompany.id.asc()",
+    )
 
     @property
     def distributor_code(self) -> str | None:
@@ -68,12 +74,58 @@ class Customer(Base):
         return self.store.route if self.store else None
 
     @property
+    def companies(self) -> list[dict]:
+        seen: set[int] = set()
+        result: list[dict] = []
+        for link in self.company_links or []:
+            comp = link.company
+            if comp is None or comp.id in seen:
+                continue
+            seen.add(comp.id)
+            result.append({
+                "id": comp.id,
+                "code": comp.code,
+                "name": comp.name,
+                "tax_code": comp.tax_code,
+                "is_primary": bool(link.is_primary or comp.id == self.company_id),
+            })
+        if self.company is not None and self.company.id not in seen:
+            result.insert(0, {
+                "id": self.company.id,
+                "code": self.company.code,
+                "name": self.company.name,
+                "tax_code": self.company.tax_code,
+                "is_primary": True,
+            })
+        return result
+
+    @property
+    def company_ids(self) -> list[int]:
+        if self.company_links:
+            seen: set[int] = set()
+            ids: list[int] = []
+            for link in self.company_links:
+                if link.company_id not in seen:
+                    seen.add(link.company_id)
+                    ids.append(link.company_id)
+            if self.company_id is not None and self.company_id not in seen:
+                ids.insert(0, self.company_id)
+            return ids
+        return [self.company_id] if self.company_id is not None else []
+
+    @property
     def company_code(self) -> str | None:
-        return self.company.code if self.company else None
+        if self.company:
+            return self.company.code
+        comps = self.companies
+        return comps[0]["code"] if comps else None
 
     @property
     def company_name(self) -> str | None:
-        return self.company.name if self.company else None
+        if self.company:
+            return self.company.name
+        comps = self.companies
+        return comps[0]["name"] if comps else None
 
     @property
     def address(self) -> str | None:
@@ -152,6 +204,9 @@ class Company(Base):
 
     distributor: Mapped["Distributor | None"] = relationship("Distributor")
     customers: Mapped[List["Customer"]] = relationship(back_populates="company")
+    customer_links: Mapped[List["CustomerCompany"]] = relationship(
+        back_populates="company", cascade="all, delete-orphan"
+    )
     product_links: Mapped[List["ProductCompany"]] = relationship(back_populates="company")
     product_group_links: Mapped[List["ProductGroupCompany"]] = relationship(back_populates="company")
 
@@ -197,3 +252,22 @@ class CustomerContact(Base):
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
 
     customer: Mapped["Customer"] = relationship(back_populates="contacts")
+
+
+class CustomerCompany(Base):
+    """Bảng liên kết N-N: 1 Khách hàng có thể được nhiều Công ty quản lý / xuất hóa đơn."""
+
+    __tablename__ = "customer_companies"
+    __table_args__ = (
+        UniqueConstraint("customer_id", "company_id", name="uq_customer_companies_customer_company"),
+        Index("ix_customer_companies_company_id", "company_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"))
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    customer: Mapped["Customer"] = relationship(back_populates="company_links")
+    company: Mapped["Company"] = relationship(back_populates="customer_links")

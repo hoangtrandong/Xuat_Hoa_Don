@@ -1,5 +1,5 @@
 from app.models.user import User, Role, Permission, AuditLog
-from app.models.customer import Customer, CustomerAddress, CustomerContact, Store, Company
+from app.models.customer import Customer, CustomerAddress, CustomerContact, CustomerCompany, Store, Company
 from app.models.product import (
     Product, ProductCategory, ProductUnit, PriceList, PriceListItem,
     ProductGroup, ProductGroupItem, ProductCompany, ProductGroupCompany,
@@ -42,7 +42,7 @@ from app.models.supplier_dictionary import SupplierDictionary
 
 __all__ = [
     "User", "Role", "Permission", "AuditLog",
-    "Customer", "CustomerAddress", "CustomerContact", "Store", "Company",
+    "Customer", "CustomerAddress", "CustomerContact", "CustomerCompany", "Store", "Company",
     "Product", "ProductCategory", "ProductUnit", "PriceList", "PriceListItem",
     "ProductGroup", "ProductGroupItem", "ProductCompany", "ProductGroupCompany",
     "DistributorProduct", "SupplierDictionary",

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 import xlrd
 from xlutils.copy import copy as xl_copy
 
-from app.models.customer import Company, Customer
+from app.models.customer import Company, Customer, CustomerCompany
 from app.models.multi_tenant_invoice import Distributor, IssuedInvoice
 from app.models.product import DistributorProduct, Product, ProductCompany
 from app.models.vinamilk import VinamilkOrderSnapshot
@@ -223,9 +223,10 @@ def consolidate_dms_orders_for_invoicing(
                     if num:
                         invoiced_orders.add(str(num).strip())
 
-    # 3. Nạp danh mục Khách hàng (kèm Công ty quản lý & Địa chỉ) và Sản phẩm (zero N+1)
+    # 3. Nạp danh mục Khách hàng (kèm Công ty quản lý N-N & Địa chỉ) và Sản phẩm (zero N+1)
     cust_stmt = select(Customer).options(
         selectinload(Customer.company),
+        selectinload(Customer.company_links).selectinload(CustomerCompany.company),
         selectinload(Customer.addresses),
         selectinload(Customer.store),
     )
@@ -328,8 +329,25 @@ def consolidate_dms_orders_for_invoicing(
         prod = prod_map.get(raw_prod_code)
 
         # Phân giải Công ty quản lý theo chiến lược của Nhà phân phối (BY_CUSTOMER | BY_PRODUCT | HYBRID)
-        cust_comp: Company | None = customer.company if customer else None
+        # Hỗ trợ 1 khách hàng thuộc nhiều công ty quản lý: ưu tiên công ty trùng bộ lọc company_id hoặc trùng prod_comp.
+        cust_companies: list[Company] = []
+        if customer:
+            seen_cids: set[int] = set()
+            for link in customer.company_links or []:
+                if link.company is not None and link.company.id not in seen_cids:
+                    seen_cids.add(link.company.id)
+                    cust_companies.append(link.company)
+            if customer.company is not None and customer.company.id not in seen_cids:
+                cust_companies.insert(0, customer.company)
         prod_comp: Company | None = prod_primary_company.get(prod.id) if prod else None
+        cust_comp: Company | None = None
+        if cust_companies:
+            if company_id is not None:
+                cust_comp = next((c for c in cust_companies if c.id == company_id), None)
+            if cust_comp is None and prod_comp is not None:
+                cust_comp = next((c for c in cust_companies if c.id == prod_comp.id), None)
+            if cust_comp is None:
+                cust_comp = cust_companies[0]
         if allocation_mode == "BY_PRODUCT":
             comp = prod_comp or cust_comp
         elif allocation_mode == "HYBRID_PRODUCT_FIRST":

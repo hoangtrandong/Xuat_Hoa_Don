@@ -13,7 +13,7 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Badge from "@/components/ui/Badge";
 import Drawer from "@/components/ui/Drawer";
 import CustomerDetail from "@/components/customers/CustomerDetail";
-import type { Customer } from "@/lib/mock-customers";
+import type { Customer, CustomerCompanyInfo } from "@/lib/mock-customers";
 import { formatCustomerCode, formatVND } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { API_URL, apiFetch } from "@/lib/api";
@@ -51,9 +51,74 @@ const emptyForm = {
   status: "active",
   store_id: "",
   store_route: "",
-  company_id: "",
+  company_ids: [] as string[],
   manager_code: "",
 };
+
+function mapApiCustomer(row: Record<string, unknown>): Customer {
+  const rawCompanies = Array.isArray(row.companies)
+    ? (row.companies as Array<Record<string, unknown>>)
+    : [];
+  const companies: CustomerCompanyInfo[] = rawCompanies.map((c) => ({
+    id: String(c.id),
+    code: String(c.code ?? ""),
+    name: String(c.name ?? ""),
+    taxCode: c.tax_code ? String(c.tax_code) : undefined,
+    isPrimary: Boolean(c.is_primary),
+  }));
+  if (companies.length === 0 && row.company_id != null) {
+    companies.push({
+      id: String(row.company_id),
+      code: String(row.company_code ?? ""),
+      name: String(row.company_name ?? ""),
+      isPrimary: true,
+    });
+  }
+  const companyIds = companies.map((c) => c.id);
+  const companyCodeJoined = companies.map((c) => c.code).filter(Boolean).join(", ");
+  const companyNameJoined = companies.map((c) => c.name).filter(Boolean).join(", ");
+
+  return {
+    id: String(row.id),
+    distributorId: row.distributor_id != null ? String(row.distributor_id) : "",
+    distributorCode: String(row.distributor_code ?? ""),
+    distributorName: String(row.distributor_name ?? ""),
+    code: String(row.code ?? ""),
+    name: String(row.name ?? ""),
+    type:
+      row.type === "DISTRIBUTOR"
+        ? "Nhà phân phối"
+        : row.type === "WHOLESALE"
+          ? "Đại lý"
+          : row.type === "HORECA"
+            ? "HORECA"
+            : "Cửa hàng",
+    tier: String(row.tier ?? "B") as Customer["tier"],
+    contactName: "",
+    email: String(row.email ?? ""),
+    citizenId: String(row.citizen_id ?? ""),
+    taxCode: String(row.tax_code ?? ""),
+    address: String(row.address ?? ""),
+    district: "",
+    status: row.status === "inactive" ? "inactive" : "active",
+    debitBalance: Number(row.current_debt ?? 0),
+    totalSpend: 0,
+    createdAt: String(row.created_at ?? ""),
+    staffCode: String(row.staff_code ?? ""),
+    staffName: String(row.staff_name ?? ""),
+    managerCode: String(row.manager_code ?? ""),
+    managerName: String(row.manager_name ?? ""),
+    storeId: row.store_id != null ? String(row.store_id) : "",
+    companyId: companyIds[0] ?? (row.company_id != null ? String(row.company_id) : ""),
+    companyIds,
+    companies,
+    storeCode: String(row.store_code ?? ""),
+    storeName: String(row.store_name ?? ""),
+    storeRoute: String(row.store_route ?? ""),
+    companyCode: companyCodeJoined || String(row.company_code ?? ""),
+    companyName: companyNameJoined || String(row.company_name ?? ""),
+  };
+}
 
 export default function CustomersPage() {
   const router = useRouter();
@@ -83,6 +148,7 @@ export default function CustomersPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadDistId, setUploadDistId] = useState<string>("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadCompanyMode, setUploadCompanyMode] = useState<"replace" | "append">("replace");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
@@ -111,48 +177,7 @@ export default function CustomersPage() {
         if (!response.ok) throw new Error("Không thể tải danh sách khách hàng.");
         return response.json() as Promise<Array<Record<string, unknown>>>;
       })
-      .then((rows) =>
-        setCustomerRows(
-          rows.map((row) => ({
-            id: String(row.id),
-            distributorId: row.distributor_id != null ? String(row.distributor_id) : "",
-            distributorCode: String(row.distributor_code ?? ""),
-            distributorName: String(row.distributor_name ?? ""),
-            code: String(row.code ?? ""),
-            name: String(row.name ?? ""),
-            type:
-              row.type === "DISTRIBUTOR"
-                ? "Nhà phân phối"
-                : row.type === "WHOLESALE"
-                  ? "Đại lý"
-                  : row.type === "HORECA"
-                    ? "HORECA"
-                    : "Cửa hàng",
-            tier: String(row.tier ?? "B") as Customer["tier"],
-            contactName: "",
-            email: String(row.email ?? ""),
-            citizenId: String(row.citizen_id ?? ""),
-            taxCode: String(row.tax_code ?? ""),
-            address: String(row.address ?? ""),
-            district: "",
-            status: row.status === "inactive" ? "inactive" : "active",
-            debitBalance: Number(row.current_debt ?? 0),
-            totalSpend: 0,
-            createdAt: String(row.created_at ?? ""),
-            staffCode: String(row.staff_code ?? ""),
-            staffName: String(row.staff_name ?? ""),
-            managerCode: String(row.manager_code ?? ""),
-            managerName: String(row.manager_name ?? ""),
-            storeId: row.store_id != null ? String(row.store_id) : "",
-            companyId: row.company_id != null ? String(row.company_id) : "",
-            storeCode: String(row.store_code ?? ""),
-            storeName: String(row.store_name ?? ""),
-            storeRoute: String(row.store_route ?? ""),
-            companyCode: String(row.company_code ?? ""),
-            companyName: String(row.company_name ?? ""),
-          })),
-        ),
-      )
+      .then((rows) => setCustomerRows(rows.map(mapApiCustomer)))
       .catch((error: unknown) =>
         setCreateError(error instanceof Error ? error.message : "Không thể tải khách hàng."),
       );
@@ -213,6 +238,7 @@ export default function CustomersPage() {
   function openUploadModal() {
     setUploadError("");
     setUploadFile(null);
+    setUploadCompanyMode("replace");
     setUploadDistId(effectiveDistributorId !== null ? String(effectiveDistributorId) : "");
     setUploadOpen(true);
   }
@@ -237,13 +263,22 @@ export default function CustomersPage() {
       const body = new FormData();
       body.append("file", uploadFile);
       const response = await apiFetch(
-        `${API_URL}/customers/upload?distributor_id=${targetDistId}`,
+        `${API_URL}/customers/upload?distributor_id=${targetDistId}&company_update_mode=${uploadCompanyMode}`,
         { method: "POST", body },
       );
-      const result = (await response.json()) as { imported?: number; detail?: string };
+      const result = (await response.json()) as {
+        imported?: number;
+        created?: number;
+        updated?: number;
+        detail?: string;
+      };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tải danh sách khách hàng.");
       const distLabel = distributors.find((d) => d.id === targetDistId)?.name || `NPP #${targetDistId}`;
-      setCreateMessage(`Đã nhập ${result.imported ?? 0} khách hàng vào ${distLabel}.`);
+      const createdCount = result.created ?? result.imported ?? 0;
+      const updatedCount = result.updated ?? 0;
+      setCreateMessage(
+        `Đã xử lý file Excel vào ${distLabel}: thêm mới ${createdCount} khách hàng, cập nhật ${updatedCount} khách hàng.`,
+      );
       setUploadOpen(false);
       loadCustomersAndCompanies();
     } catch (e) {
@@ -276,6 +311,7 @@ export default function CustomersPage() {
     }
     setSaving(true);
     try {
+      const companyIdsNum = form.company_ids.map((id) => Number(id)).filter((n) => Number.isFinite(n));
       const response = await apiFetch(`${API_URL}/customers/${editingId ? editingId : ""}`, {
         method: editingId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
@@ -284,74 +320,14 @@ export default function CustomersPage() {
           distributor_id: targetDistId,
           store_id: form.store_id ? Number(form.store_id) : null,
           store_route: form.store_id ? form.store_route : null,
-          company_id: form.company_id ? Number(form.company_id) : null,
+          company_id: companyIdsNum[0] ?? null,
+          company_ids: companyIdsNum,
           manager_name: managerOptions.find((employee) => employee.code === form.manager_code)?.name ?? null,
         }),
       });
-      const result = (await response.json()) as {
-        detail?: string;
-        id: number;
-        distributor_id?: number | null;
-        distributor_code?: string | null;
-        distributor_name?: string | null;
-        code: string;
-        name: string;
-        type: string;
-        tier: "A" | "B" | "C";
-        email: string | null;
-        citizen_id: string | null;
-        tax_code: string | null;
-        status: "active" | "inactive";
-        current_debt: number;
-        created_at: string;
-        manager_code?: string | null;
-        manager_name?: string | null;
-        store_id: number | null;
-        company_id: number | null;
-        store_code: string | null;
-        store_name: string | null;
-        store_route: string | null;
-        company_code: string | null;
-        company_name: string | null;
-      };
+      const result = (await response.json()) as Record<string, unknown> & { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể tạo khách hàng.");
-      const typeLabel: Customer["type"] =
-        result.type === "DISTRIBUTOR"
-          ? "Nhà phân phối"
-          : result.type === "WHOLESALE"
-            ? "Đại lý"
-            : result.type === "HORECA"
-              ? "HORECA"
-              : "Cửa hàng";
-      const mapped: Customer = {
-        id: String(result.id),
-        distributorId: result.distributor_id != null ? String(result.distributor_id) : "",
-        distributorCode: result.distributor_code ?? "",
-        distributorName: result.distributor_name ?? "",
-        code: result.code,
-        name: result.name,
-        type: typeLabel,
-        tier: result.tier,
-        contactName: "",
-        email: result.email ?? "",
-        citizenId: result.citizen_id ?? "",
-        taxCode: result.tax_code ?? "",
-        address: "",
-        district: "",
-        status: result.status,
-        debitBalance: result.current_debt,
-        totalSpend: 0,
-        createdAt: result.created_at,
-        managerCode: result.manager_code ?? "",
-        managerName: result.manager_name ?? "",
-        storeId: result.store_id != null ? String(result.store_id) : "",
-        companyId: result.company_id != null ? String(result.company_id) : "",
-        storeCode: result.store_code ?? "",
-        storeName: result.store_name ?? "",
-        storeRoute: result.store_route ?? "",
-        companyCode: result.company_code ?? "",
-        companyName: result.company_name ?? "",
-      };
+      const mapped = mapApiCustomer(result);
       setCustomerRows((current) => {
         const next = editingId
           ? current.map((item) => (item.id === editingId ? { ...item, ...mapped } : item))
@@ -385,7 +361,8 @@ export default function CustomersPage() {
     setForm({
       ...emptyForm,
       distributor_id: effectiveDistributorId !== null ? String(effectiveDistributorId) : "",
-      company_id: companyFilter !== "ALL" ? companyFilter : "",
+      company_ids:
+        companyFilter !== "ALL" && companyFilter !== "UNASSIGNED" ? [companyFilter] : [],
     });
     setCreateError("");
     setCreateOpen(true);
@@ -393,6 +370,12 @@ export default function CustomersPage() {
 
   function openEdit(customer: Customer) {
     setEditingId(customer.id);
+    const existingCompanyIds =
+      customer.companyIds && customer.companyIds.length > 0
+        ? customer.companyIds
+        : customer.companyId
+          ? [customer.companyId]
+          : [];
     setForm({
       distributor_id:
         customer.distributorId ||
@@ -414,7 +397,7 @@ export default function CustomersPage() {
       status: customer.status,
       store_id: customer.storeId ?? "",
       store_route: customer.storeRoute ?? "",
-      company_id: customer.companyId ?? "",
+      company_ids: existingCompanyIds,
       manager_code: customer.managerCode ?? "",
     });
     setSelected(null);
@@ -437,9 +420,15 @@ export default function CustomersPage() {
       customerRows.filter((c) => {
         if (typeFilter !== "Tất cả" && c.type !== typeFilter) return false;
         if (statusFilter !== "Tất cả" && c.status !== statusFilter) return false;
+        const cIds =
+          c.companyIds && c.companyIds.length > 0
+            ? c.companyIds
+            : c.companyId
+              ? [c.companyId]
+              : [];
         if (companyFilter === "UNASSIGNED") {
-          if (c.companyId) return false;
-        } else if (companyFilter !== "ALL" && c.companyId !== companyFilter) {
+          if (cIds.length > 0) return false;
+        } else if (companyFilter !== "ALL" && !cIds.includes(companyFilter)) {
           return false;
         }
         return true;
@@ -577,12 +566,25 @@ export default function CustomersPage() {
         key: "companyName",
         title: "Công ty quản lý",
         sortable: true,
-        render: (_, row) =>
-          row.companyName ? (
+        render: (_, row) => {
+          const list = row.companies && row.companies.length > 0 ? row.companies : null;
+          if (list) {
+            return (
+              <div className="flex flex-wrap gap-1 max-w-[260px]">
+                {list.map((comp) => (
+                  <Badge key={comp.id} variant="info">
+                    {comp.name || comp.code}
+                  </Badge>
+                ))}
+              </div>
+            );
+          }
+          return row.companyName ? (
             <Badge variant="info">{row.companyName}</Badge>
           ) : (
             <Badge variant="default">Chưa gán</Badge>
-          ),
+          );
+        },
       },
       {
         key: "debitBalance",
@@ -729,7 +731,7 @@ export default function CustomersPage() {
                     const comp = companyOptions.find((c) => c.id === bulkCompanyId);
                     if (
                       !window.confirm(
-                        `Gán Công ty quản lý "${comp?.name || bulkCompanyId}" cho ${filtered.length} khách hàng đang hiển thị?`,
+                        `Thêm Công ty quản lý "${comp?.name || bulkCompanyId}" cho ${filtered.length} khách hàng đang hiển thị? (Giữ nguyên các công ty đã gán trước đó)`,
                       )
                     ) {
                       return;
@@ -744,6 +746,7 @@ export default function CustomersPage() {
                         body: JSON.stringify({
                           customer_ids: filtered.map((c) => Number(c.id)),
                           company_id: Number(bulkCompanyId),
+                          mode: "add",
                         }),
                       });
                       const data = (await resp.json().catch(() => ({}))) as { updated?: number; detail?: string };
@@ -820,7 +823,7 @@ export default function CustomersPage() {
                   setForm({
                     ...form,
                     distributor_id: e.target.value,
-                    company_id: "", // Reset Công ty quản lý khi đổi NPP để chống gắn chéo Tenant
+                    company_ids: [], // Reset Công ty quản lý khi đổi NPP để chống gắn chéo Tenant
                   })
                 }
                 className={inputCls}
@@ -890,21 +893,84 @@ export default function CustomersPage() {
           </div>
 
           <div>
-            <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-              Công ty quản lý / Xuất hóa đơn (thuộc NPP đang chọn)
-            </label>
-            <select
-              value={form.company_id}
-              onChange={(e) => setForm({ ...form, company_id: e.target.value })}
-              className={inputCls}
-            >
-              <option value="">— Chọn công ty quản lý (tùy chọn) —</option>
-              {formCompanyOptions.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.code} · {c.name}
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center justify-between mb-0.5">
+              <label className="text-[10px] font-semibold text-slate-600 block">
+                Công ty quản lý / Xuất hóa đơn (chọn nhiều, thuộc NPP đang chọn)
+              </label>
+              {form.company_ids.length > 0 && (
+                <span className="text-[10px] font-semibold text-sky-700">
+                  Đã chọn {form.company_ids.length}
+                </span>
+              )}
+            </div>
+            {form.company_ids.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-1.5">
+                {form.company_ids.map((cid, idx) => {
+                  const comp = companyOptions.find((c) => c.id === cid);
+                  return (
+                    <span
+                      key={cid}
+                      className="inline-flex items-center gap-1 rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 text-[10px] font-medium text-sky-800"
+                    >
+                      <span>
+                        {comp ? `${comp.code} · ${comp.name}` : `#${cid}`}
+                        {idx === 0 && form.company_ids.length > 1 ? " (Chính)" : ""}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setForm((prev) => ({
+                            ...prev,
+                            company_ids: prev.company_ids.filter((id) => id !== cid),
+                          }))
+                        }
+                        className="text-sky-600 hover:text-red-600"
+                        aria-label="Bỏ công ty"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            <div className="max-h-36 overflow-y-auto rounded border border-slate-300 bg-white divide-y divide-slate-100">
+              {formCompanyOptions.length === 0 ? (
+                <p className="px-2 py-2 text-[11px] text-slate-400">
+                  Chưa có công ty quản lý nào thuộc Nhà phân phối này.
+                </p>
+              ) : (
+                formCompanyOptions.map((c) => {
+                  const checked = form.company_ids.includes(c.id);
+                  return (
+                    <label
+                      key={c.id}
+                      className={cn(
+                        "flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer hover:bg-sky-50/60",
+                        checked && "bg-sky-50/50",
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const isChecked = e.target.checked;
+                          setForm((prev) => ({
+                            ...prev,
+                            company_ids: isChecked
+                              ? [...prev.company_ids, c.id]
+                              : prev.company_ids.filter((id) => id !== c.id),
+                          }));
+                        }}
+                        className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                      />
+                      <span className="font-mono text-[11px] font-semibold text-slate-700">{c.code}</span>
+                      <span className="text-slate-700 truncate">{c.name}</span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-2.5">
@@ -1101,6 +1167,20 @@ export default function CustomersPage() {
 
               <div>
                 <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                  Xử lý cột Công ty quản lý khi cập nhật KH đã có
+                </label>
+                <select
+                  value={uploadCompanyMode}
+                  onChange={(e) => setUploadCompanyMode(e.target.value as "replace" | "append")}
+                  className={inputCls}
+                >
+                  <option value="replace">Cập nhật danh sách công ty đúng theo file upload (Mặc định)</option>
+                  <option value="append">Giữ nguyên công ty hiện có & bổ sung thêm công ty mới từ file</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
                   File Excel (.xlsx, .xlsm) <span className="text-red-600">*</span>
                 </label>
                 <input
@@ -1112,6 +1192,18 @@ export default function CustomersPage() {
                 />
               </div>
 
+              <div className="rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] text-slate-600 space-y-0.5">
+                <p>
+                  • <strong>Chưa có Mã KH</strong>: Tự động thêm mới khách hàng.
+                </p>
+                <p>
+                  • <strong>Đã có Mã KH</strong>: Tự động cập nhật các trường có dữ liệu theo file upload.
+                </p>
+                <p>
+                  • <strong>Nhiều công ty quản lý</strong>: Nhập nhiều mã cách nhau bởi dấu <code className="font-mono">,</code> hoặc <code className="font-mono">;</code> (VD: <code className="font-mono">CT001, CT002</code>), hoặc tách thành nhiều dòng cùng Mã KH.
+                </p>
+              </div>
+
               {uploadError && (
                 <div className="rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs text-red-700">
                   {uploadError}
@@ -1121,7 +1213,7 @@ export default function CustomersPage() {
 
             <div className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
               <span className="text-[10px] text-slate-500">
-                Mã công ty quản lý & cửa hàng trong file sẽ tự liên kết trong cùng NPP.
+                Hỗ trợ thêm mới, cập nhật & gán nhiều công ty quản lý trong cùng NPP.
               </span>
               <div className="flex items-center gap-2">
                 <button

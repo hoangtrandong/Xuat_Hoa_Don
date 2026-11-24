@@ -2,8 +2,28 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional
 
-from app.models.customer import Company, Customer
+from app.models.customer import Company, Customer, CustomerCompany
 from app.schemas.company import CompanyCreate, CompanyUpdate
+
+
+def _count_customers_for_companies(db: Session, company_ids: list[int]) -> dict[int, int]:
+    """Đếm số lượng khách hàng duy nhất thuộc từng công ty (hỗ trợ cả bảng customer_companies N-N và cột legacy company_id)."""
+    if not company_ids:
+        return {}
+    sets: dict[int, set[int]] = {int(cid): set() for cid in company_ids}
+    for cid, cust_id in db.execute(
+        select(CustomerCompany.company_id, CustomerCompany.customer_id).where(
+            CustomerCompany.company_id.in_(company_ids)
+        )
+    ).all():
+        if cid is not None and cust_id is not None:
+            sets.setdefault(int(cid), set()).add(int(cust_id))
+    for cid, cust_id in db.execute(
+        select(Customer.company_id, Customer.id).where(Customer.company_id.in_(company_ids))
+    ).all():
+        if cid is not None and cust_id is not None:
+            sets.setdefault(int(cid), set()).add(int(cust_id))
+    return {cid: len(cust_ids) for cid, cust_ids in sets.items()}
 
 
 def get(db: Session, company_id: int) -> Optional[Company]:
@@ -13,9 +33,7 @@ def get(db: Session, company_id: int) -> Optional[Company]:
         .where(Company.id == company_id)
     )
     if comp is not None:
-        comp._customer_count = db.scalar(
-            select(func.count(Customer.id)).where(Customer.company_id == comp.id)
-        ) or 0
+        comp._customer_count = _count_customers_for_companies(db, [comp.id]).get(comp.id, 0)
     return comp
 
 
@@ -63,21 +81,14 @@ def list_(
     companies = list(db.execute(stmt).scalars().all())
     if companies:
         ids = [c.id for c in companies]
-        count_rows = db.execute(
-            select(Customer.company_id, func.count(Customer.id))
-            .where(Customer.company_id.in_(ids))
-            .group_by(Customer.company_id)
-        ).all()
-        counts = {int(cid): int(cnt) for cid, cnt in count_rows if cid is not None}
+        counts = _count_customers_for_companies(db, ids)
         for c in companies:
             c._customer_count = counts.get(c.id, 0)
     return companies
 
 
 def customer_count(db: Session, company: Company) -> int:
-    return int(
-        db.scalar(select(func.count(Customer.id)).where(Customer.company_id == company.id)) or 0
-    )
+    return _count_customers_for_companies(db, [company.id]).get(company.id, 0)
 
 
 def create(db: Session, obj_in: CompanyCreate) -> Company:
@@ -105,8 +116,17 @@ def customers_of_company(db: Session, company_id: int) -> List[Customer]:
     return list(
         db.execute(
             select(Customer)
-            .options(selectinload(Customer.store))
-            .where(Customer.company_id == company_id)
+            .options(
+                selectinload(Customer.store),
+                selectinload(Customer.company),
+                selectinload(Customer.company_links).selectinload(CustomerCompany.company),
+            )
+            .where(
+                or_(
+                    Customer.company_id == company_id,
+                    Customer.company_links.any(CustomerCompany.company_id == company_id),
+                )
+            )
             .order_by(Customer.code)
         ).scalars().all()
     )

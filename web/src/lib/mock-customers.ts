@@ -4,6 +4,14 @@
 export type CustomerType = "Đại lý" | "Cửa hàng" | "Nhà phân phối" | "HORECA";
 export type CustomerTier = "A" | "B" | "C";
 
+export interface CustomerCompanyInfo {
+  id: string;
+  code: string;
+  name: string;
+  taxCode?: string;
+  isPrimary?: boolean;
+}
+
 export interface Customer {
   id: string;
   code: string;
@@ -28,9 +36,11 @@ export interface Customer {
   distributorId?: string;
   distributorCode?: string;
   distributorName?: string;
-  // Phase 2: cửa hàng & công ty quản lý
+  // Phase 2: cửa hàng & công ty quản lý (hỗ trợ nhiều công ty)
   storeId?: string;
   companyId?: string;
+  companyIds?: string[];
+  companies?: CustomerCompanyInfo[];
   storeCode?: string;
   storeName?: string;
   storeRoute?: string;

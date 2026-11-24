@@ -610,8 +610,8 @@ export default function CustomersPage() {
         sortable: true,
         render: (val) => <Badge variant={typeVariant(String(val))}>{String(val)}</Badge>,
       },
-      { key: "citizenId", title: "CCCD" },
-      { key: "taxCode", title: "Mã số thuế" },
+      { key: "citizenId", title: "CCCD", sortable: true },
+      { key: "taxCode", title: "Mã số thuế", sortable: true },
       {
         key: "storeName",
         title: "Cửa hàng",
@@ -740,6 +740,8 @@ export default function CustomersPage() {
         searchKeys={[
           "code",
           "name",
+          "taxCode",
+          "citizenId",
           "managerCode",
           "managerName",
           "district",

@@ -57,7 +57,7 @@ export const menuItems: MenuItem[] = [
   },
   {
     key: "system-config",
-    label: "Đa NPP & Nguồn NCC",
+    label: "Cấu hình Hệ thống",
     icon: "Settings",
     href: "/sales/supplier-configs",
   },

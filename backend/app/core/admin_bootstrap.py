@@ -14,7 +14,7 @@ RESOURCES = (
     "delivery-requests", "sync", "users",
     "employee-debts", "store-debts", "cash-receipts", "debt-transfers",
     "delivery-returns", "bank-receipts", "employee-borrowing", "promotions",
-    "einvoice", "supplier-dictionaries",
+    "einvoice", "supplier-dictionaries", "invoice-products",
 )
 ENVIRONMENT_VARIABLES = (
     "INITIAL_ADMIN_USERNAME",
@@ -114,6 +114,7 @@ def sync_default_roles() -> None:
             [(r, "read") for r in RESOURCES if r != "users"] + [
                 ("customers", "write"), ("stores", "write"), ("sales-orders", "write"),
                 ("delivery-requests", "write"), ("sync", "write"), ("einvoice", "write"),
+                ("invoice-products", "write"), ("product-groups", "write"),
             ]
         )
         # Kế toán: Quản lý công nợ, thu tiền và chuyển công nợ trực tiếp
@@ -124,6 +125,7 @@ def sync_default_roles() -> None:
                 ("employee-debts", "write"), ("store-debts", "write"),
                 ("debt-transfers", "write"),
                 ("bank-receipts", "write"), ("einvoice", "write"),
+                ("invoice-products", "write"), ("products", "write"), ("product-groups", "write"),
             ]
         )
         # Thủ kho: Quản lý tồn kho, lô FEFO, nhận hàng trả

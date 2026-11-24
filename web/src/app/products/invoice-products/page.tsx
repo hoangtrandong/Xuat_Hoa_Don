@@ -425,7 +425,7 @@ export default function InvoiceProductsPage() {
           <Receipt size={18} className="text-red-500" />
           <div>
             <h1 className="text-xs font-bold uppercase tracking-wide">
-              Danh sách sản phẩm xuất hóa đơn (Chuẩn trung tâm)
+              Sản phẩm XHĐ (Chuẩn trung tâm)
             </h1>
             <p className="text-[10px] text-slate-300">
               Dùng chung cho toàn bộ Công ty quản lý thuộc NPP • Làm chuẩn ánh xạ từ SKU CQT đầu vào, Mã SP DMS đầu ra &amp; quản lý Tồn kho Thuế

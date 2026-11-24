@@ -569,19 +569,19 @@ export default function DmsInvoiceConsolidationPanel({
               href="/products/company-management"
               className="inline-flex items-center gap-1 rounded border border-red-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-red-800 hover:bg-red-50"
             >
-              <Package size={12} /> Gán Mã SP DMS → SP xuất HĐ <ExternalLink size={11} />
+              <Package size={12} /> Sản phẩm DMS (Gán SP XHĐ) <ExternalLink size={11} />
             </Link>
             <Link
               href="/products/invoice-products"
               className="inline-flex items-center gap-1 rounded border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
             >
-              <Package size={12} /> Danh sách SP xuất hóa đơn <ExternalLink size={11} />
+              <Package size={12} /> Sản phẩm XHĐ <ExternalLink size={11} />
             </Link>
             <Link
               href="/products"
               className="inline-flex items-center gap-1 rounded border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
             >
-              <Package size={12} /> Danh sách SKU (CQT) <ExternalLink size={11} />
+              <Package size={12} /> Sản phẩm đầu vào <ExternalLink size={11} />
             </Link>
           </div>
         </div>

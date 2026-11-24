@@ -637,7 +637,7 @@ export default function DmsProductCatalogPage() {
             <Building2 size={17} className="text-red-500" />
             <div>
               <h1 className="text-xs font-bold uppercase tracking-wide text-white">
-                Danh Sách Mã Sản Phẩm DMS (Vinamilk, Nazzy...)
+                Sản phẩm DMS (Vinamilk, Nazzy...)
               </h1>
               <p className="text-[10px] text-slate-300">
                 Gán Mã SP DMS → Mã SP xuất hóa đơn chuẩn &amp; cấu hình tỷ lệ quy đổi về đơn vị nhỏ nhất

@@ -37,9 +37,9 @@ export const menuItems: MenuItem[] = [
     icon: "Package",
     href: "/products",
     children: [
-      { key: "products-invoice", label: "Danh sách SP xuất hóa đơn", icon: "FileCheck2", href: "/products/invoice-products" },
-      { key: "products-list", label: "Danh sách SKU (CQT)", icon: "List", href: "/products" },
-      { key: "products-company-management", label: "Danh sách mã sản phẩm DMS", icon: "Building2", href: "/products/company-management" },
+      { key: "products-invoice", label: "Sản phẩm XHĐ", icon: "FileCheck2", href: "/products/invoice-products" },
+      { key: "products-list", label: "Sản phẩm đầu vào", icon: "List", href: "/products" },
+      { key: "products-company-management", label: "Sản phẩm DMS", icon: "Building2", href: "/products/company-management" },
       { key: "products-suppliers", label: "Từ điển Nhà cung cấp", icon: "Boxes", href: "/products/suppliers" },
       { key: "products-categories", label: "Danh mục", icon: "FolderOpen", href: "/products/categories" },
       { key: "products-price", label: "Bảng giá", icon: "Tag", href: "/products/price-lists" },

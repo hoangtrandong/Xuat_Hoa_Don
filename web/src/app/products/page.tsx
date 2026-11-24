@@ -1268,7 +1268,7 @@ export default function ProductsPage() {
           <div className="flex items-center gap-2">
             <Package size={17} className="text-red-500" />
             <h1 className="text-xs font-bold uppercase tracking-wide text-white">
-              Danh Mục Hàng Hóa & Mã Sản Phẩm Đồng Bộ Hệ Thống (SKU)
+              Sản Phẩm Đầu Vào (SKU Đồng Bộ Từ CQT)
             </h1>
             <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
               {stats.total} SKU
@@ -1789,14 +1789,14 @@ export default function ProductsPage() {
                 className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 transition-colors"
               >
                 <FileText size={11} />
-                Danh sách SP xuất hóa đơn
+                Sản phẩm XHĐ
               </Link>
               <Link
                 href="/products/company-management"
                 className="inline-flex items-center gap-1 rounded border border-sky-200 bg-sky-50 hover:bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800 transition-colors"
               >
                 <Building2 size={11} />
-                Danh sách mã SP DMS
+                Sản phẩm DMS
               </Link>
             </div>
           </div>

@@ -475,6 +475,7 @@ export default function ProductsPage() {
         params.set("distributor_code", distributorFilter);
       }
 
+      params.set("expand_by_mst", "false");
       const res = await apiFetch(`${API_URL}/products/paged?${params.toString()}`);
       if (!res.ok) throw new Error("Không thể tải danh sách SKU.");
       const data = await res.json();
@@ -496,7 +497,7 @@ export default function ProductsPage() {
           rowKey: product.row_key || `${product.id}:${rowCompanyId ?? 0}`,
           id: product.id,
           code: product.sku,
-          nppCode: (rowCompanyId != null ? product.row_company_npp_code : product.npp_code) || "",
+          nppCode: (product.invoice_product_code || (rowCompanyId != null ? product.row_company_npp_code : product.npp_code)) || "",
           internal_name: product.internal_name || "",
           internal_unit: product.internal_unit || "",
           name: product.name,
@@ -1209,6 +1210,7 @@ export default function ProductsPage() {
         params.set("distributor_code", distributorFilter);
       }
 
+      params.set("expand_by_mst", "false");
       const res = await apiFetch(`${API_URL}/products/paged?${params.toString()}`);
       if (!res.ok) throw new Error("Không thể tải toàn bộ danh sách sản phẩm theo bộ lọc.");
       const data = await res.json();
@@ -1975,33 +1977,30 @@ export default function ProductsPage() {
                         })()}
                       </td>
 
-                      {/* CỘT CÔNG TY QUẢN LÝ / MST ĐẦU VÀO (MỖI MST LÀ 1 DÒNG RIÊNG BIỆT) */}
-                      <td className="px-2.5 py-1.5 max-w-[220px]">
-                        {row.rowCompanyId != null ? (
-                          <div
-                            className="min-w-0"
-                            title={`${row.rowCompanyTaxCode || row.rowCompanyCode} - ${row.rowCompanyName}${
-                              row.rowCompanyPurchasedQty > 0
-                                ? ` (Nhập CQT: ${formatNumber(row.rowCompanyPurchasedQty)})`
-                                : ""
-                            }`}
-                          >
-                            <div className="flex items-center gap-1">
-                              <span className="font-mono text-[11px] font-bold text-slate-800">
-                                {row.rowCompanyTaxCode || row.rowCompanyCode}
-                              </span>
-                              {row.rowCompanyHasConversion && (
-                                <span
-                                  className="rounded bg-sky-100 border border-sky-200 px-1 py-0 text-[9px] font-bold text-sky-800"
-                                  title="Dòng MST này có cấu hình đổi quy cách / tên riêng khi xuất HĐ"
-                                >
-                                  QĐ
+                      {/* CỘT MST ĐẦU VÀO (GỘP 1 SKU = 1 DÒNG, CÁC MST HIỂN THỊ DẠNG BADGE) */}
+                      <td className="px-2.5 py-1.5 max-w-[240px]">
+                        {row.managed_companies && row.managed_companies.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {row.managed_companies.map((mc) => (
+                              <span
+                                key={mc.company_id}
+                                className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-700"
+                                title={`${mc.tax_code || mc.company_code} - ${mc.company_name}${
+                                  (mc.total_purchased_qty ?? 0) > 0
+                                    ? ` (Nhập CQT: ${formatNumber(mc.total_purchased_qty ?? 0)})`
+                                    : ""
+                                }`}
+                              >
+                                <span className="font-mono font-bold text-slate-800">
+                                  {mc.tax_code || mc.company_code}
                                 </span>
-                              )}
-                            </div>
-                            <div className="truncate text-[10px] text-slate-500">
-                              {row.rowCompanyShortName || row.rowCompanyName}
-                            </div>
+                                {(mc.total_purchased_qty ?? 0) > 0 && (
+                                  <span className="text-[9px] font-semibold text-sky-700">
+                                    ({formatNumber(mc.total_purchased_qty ?? 0)})
+                                  </span>
+                                )}
+                              </span>
+                            ))}
                           </div>
                         ) : (
                           <span className="text-[10px] italic text-slate-400">—</span>

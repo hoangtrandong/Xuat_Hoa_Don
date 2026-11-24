@@ -1388,6 +1388,57 @@ def compute_tax_inventory_by_mst(
     }
 
 
+def _resolve_target_invoice_product_codes(
+    db: Session,
+    target_code: str,
+    distributor_id: int | None = None,
+) -> tuple[InvoiceProduct | None, set[str]]:
+    """Tìm Sản phẩm XHĐ ứng với target_code và trả về tập toàn bộ mã liên quan (Mã SP XHĐ + các SKU CQT + các Mã DMS)."""
+    clean = (target_code or "").strip().upper()
+    if not clean:
+        return None, set()
+
+    ip_stmt = select(InvoiceProduct).where(func.upper(InvoiceProduct.code) == clean)
+    if distributor_id is not None:
+        ip_stmt = ip_stmt.where(
+            (InvoiceProduct.distributor_id == distributor_id)
+            | (InvoiceProduct.distributor_id.is_(None))
+        )
+    ip = db.scalar(ip_stmt)
+
+    if ip is None:
+        prod_ip_id = db.scalar(
+            select(Product.invoice_product_id).where(
+                func.upper(Product.sku) == clean,
+                Product.invoice_product_id.is_not(None),
+            )
+        )
+        if prod_ip_id:
+            ip = db.get(InvoiceProduct, prod_ip_id)
+
+    codes: set[str] = {clean}
+    if ip is not None:
+        codes.add((ip.code or "").strip().upper())
+        for p_sku in db.scalars(
+            select(Product.sku).where(Product.invoice_product_id == ip.id)
+        ).all():
+            if p_sku:
+                codes.add(p_sku.strip().upper())
+        dp_q = select(DistributorProduct.distributor_sku).where(
+            DistributorProduct.invoice_product_id == ip.id
+        )
+        if distributor_id is not None:
+            dp_q = dp_q.where(
+                (DistributorProduct.distributor_id == distributor_id)
+                | (DistributorProduct.distributor_id.is_(None))
+            )
+        for d_sku in db.scalars(dp_q).all():
+            if d_sku:
+                codes.add(d_sku.strip().upper())
+    codes.discard("")
+    return ip, codes
+
+
 def get_tax_inventory_card_detail(
     db: Session,
     *,
@@ -1398,11 +1449,17 @@ def get_tax_inventory_card_detail(
     to_date: date | None = None,
     include_draft: bool = True,
 ) -> dict[str, Any]:
-    """Lấy Thẻ kho thuế chi tiết (Sổ chi tiết N-X-T) theo trục thời gian cho 1 cặp (MST, SKU)."""
+    """Lấy Thẻ kho thuế chi tiết (Sổ chi tiết N-X-T) theo trục thời gian cho 1 cặp (MST, Mã SP XHĐ / SKU)."""
     target_mst = (tax_code or "").strip()
     target_sku = (sku or "").strip().upper()
     if not target_mst or not target_sku:
         raise ValueError("Thiếu MST hoặc mã SKU để xem thẻ kho thuế.")
+
+    target_ip, match_codes = _resolve_target_invoice_product_codes(
+        db, target_sku, distributor_id=distributor_id
+    )
+    if target_ip is not None:
+        target_sku = target_ip.code.strip().upper()
 
     dist_mst_by_id: dict[int, str] = {
         d_id: d_mst.strip()
@@ -1413,9 +1470,14 @@ def get_tax_inventory_card_detail(
         db, distributor_id=distributor_id, to_date=to_date
     )
     mst_cutoffs = _build_mst_cutoff_dates(opening_map)
-    ob = opening_map.get((target_mst, target_sku))
-    opening_qty = ob["opening_qty"] if ob else ZERO
-    opening_as_of = (ob["as_of_date"] if ob else None) or mst_cutoffs.get(target_mst)
+    opening_qty = ZERO
+    opening_as_of: date | None = mst_cutoffs.get(target_mst)
+    for code_key in match_codes:
+        ob = opening_map.get((target_mst, code_key))
+        if ob is not None:
+            opening_qty += ob["opening_qty"]
+            if ob["as_of_date"] and (opening_as_of is None or ob["as_of_date"] > opening_as_of):
+                opening_as_of = ob["as_of_date"]
 
     # 1. Lấy danh sách hóa đơn mua vào hợp lệ (đã loại thay thế/hủy)
     purch_hdr_stmt = (
@@ -1477,7 +1539,7 @@ def get_tax_inventory_card_detail(
                     PurchaseInvoiceItem.amount_before_tax,
                 ).where(
                     PurchaseInvoiceItem.purchase_invoice_id.in_(batch_ids),
-                    func.upper(func.trim(PurchaseInvoiceItem.product_code)) == target_sku,
+                    func.upper(func.trim(PurchaseInvoiceItem.product_code)).in_(match_codes),
                 )
             ).all()
             for p_inv_id, item_nature, _p_code, p_name, u_name, qty_raw, price_raw, amt_raw in item_rows:
@@ -1546,8 +1608,9 @@ def get_tax_inventory_card_detail(
             continue
         if (row[12] or "NORMAL").upper() not in ("NORMAL", "PROMOTION", "ADJUSTMENT"):
             continue
-        item_sku = (row[13] or row[14] or "").strip().upper()
-        if item_sku != target_sku:
+        src_code = (row[13] or "").strip().upper()
+        out_code = (row[14] or "").strip().upper()
+        if out_code not in match_codes and src_code not in match_codes:
             continue
         is_draft = (row[3] or "").upper() == "DRAFT"
         if is_draft and not include_draft:
@@ -1557,7 +1620,8 @@ def get_tax_inventory_card_detail(
             continue
         if opening_as_of is not None and tx_date is not None and tx_date < opening_as_of:
             continue
-        qty_dec = _to_dec(row[17]) if row[17] is not None else _to_dec(row[18])
+        # Đầu ra lấy theo ĐVT nhỏ nhất sau quy đổi (quantity)
+        qty_dec = _to_dec(row[18]) if row[18] is not None else _to_dec(row[17])
         if from_date is not None and tx_date is not None and tx_date < from_date:
             opening_qty -= qty_dec
             continue
@@ -1643,106 +1707,42 @@ def get_daily_tax_inventory_ledger(
     if target_mst.upper() == "ALL":
         target_mst = ""
 
-    # Giải mã danh sách (cqt_sku -> conversion_factor) thuộc target_code & ưu tiên Tên sản phẩm xuất hóa đơn
+    # Giải mã toàn bộ mã liên quan theo Sản phẩm XHĐ (InvoiceProduct) -> SKU CQT (1:1) & Mã DMS
     sku_conv_map: dict[str, Decimal] = {}
-    resolved_product_name = ""
-    resolved_unit_name = ""
-
-    dp_target = db.scalar(
-        select(DistributorProduct).where(func.upper(DistributorProduct.distributor_sku) == target_code)
+    resolved_ip, ip_match_codes = _resolve_target_invoice_product_codes(
+        db, target_code, distributor_id=distributor_id
     )
-    dp_inv_name = (dp_target.invoice_product_name or "").strip() if dp_target else ""
-    dp_fallback_name = (dp_target.distributor_product_name or "").strip() if dp_target else ""
-    dp_fallback_unit = (dp_target.unit or "").strip() if dp_target else ""
+    resolved_product_name = (resolved_ip.name or "").strip() if resolved_ip else ""
+    resolved_unit_name = (resolved_ip.unit_name or "").strip() if resolved_ip else ""
+    if ip_match_codes:
+        for c in ip_match_codes:
+            sku_conv_map[c] = Decimal("1")
+        if resolved_ip is not None:
+            target_code = resolved_ip.code.strip().upper()
 
-    if target_mst:
-        # Chế độ xem riêng 1 MST + 1 mã SKU CQT gốc
-        sku_conv_map[target_code] = Decimal("1")
+    if not resolved_product_name:
+        dp_target = db.scalar(
+            select(DistributorProduct).where(func.upper(DistributorProduct.distributor_sku) == target_code)
+        )
+        dp_inv_name = (dp_target.invoice_product_name or "").strip() if dp_target else ""
+        dp_fallback_name = (dp_target.distributor_product_name or "").strip() if dp_target else ""
+        dp_fallback_unit = (dp_target.unit or "").strip() if dp_target else ""
         p = db.scalar(select(Product).options(selectinload(Product.unit)).where(func.upper(Product.sku) == target_code))
-        mst_override = ""
-        if p:
-            p_npp_u = (p.npp_code or target_code).strip().upper()
-            if not dp_inv_name and p_npp_u != target_code:
-                dp_by_npp = db.scalar(
-                    select(DistributorProduct).where(func.upper(DistributorProduct.distributor_sku) == p_npp_u)
-                )
-                if dp_by_npp:
-                    dp_inv_name = (dp_by_npp.invoice_product_name or "").strip()
-                    dp_fallback_name = dp_fallback_name or (dp_by_npp.distributor_product_name or "").strip()
-                    dp_fallback_unit = dp_fallback_unit or (dp_by_npp.unit or "").strip()
-            mst_override = (
-                db.scalar(
-                    select(ProductCompany.invoice_name_override)
-                    .join(Company, ProductCompany.company_id == Company.id)
-                    .where(
-                        ProductCompany.product_id == p.id,
-                        Company.tax_code == target_mst,
-                        ProductCompany.invoice_name_override.is_not(None),
-                    )
-                )
-                or ""
-            ).strip()
-            resolved_product_name = (
-                dp_inv_name
-                or mst_override
-                or (p.internal_name or "").strip()
-                or dp_fallback_name
-                or p.npp_name
-                or p.name
-                or ""
-            )
-            resolved_unit_name = (p.internal_unit or "").strip() or dp_fallback_unit or (p.unit.name if p.unit else "")
-        else:
-            resolved_product_name = dp_inv_name or dp_fallback_name
-            resolved_unit_name = dp_fallback_unit
-    else:
-        # Chế độ xem gộp theo Mã SP nội bộ NPP (tìm tất cả mã CQT map về target_code kèm conversion_factor)
-        all_prods = db.scalars(
-            select(Product).options(
-                selectinload(Product.unit),
-                selectinload(Product.group_items)
-                .selectinload(ProductGroupItem.group)
-                .selectinload(ProductGroup.company_links),
-                selectinload(Product.group_items)
-                .selectinload(ProductGroupItem.group)
-                .selectinload(ProductGroup.representative_product),
-            )
-        ).all()
-        matched_prod_ids: list[int] = []
-        for p in all_prods:
-            p_sku_u = (p.sku or "").strip().upper()
-            p_npp_u = (p.npp_code or p_sku_u).strip().upper()
-            if p_npp_u == target_code or p_sku_u == target_code:
-                matched_prod_ids.append(p.id)
-                cf = 1
-                if p.group_items and p.group_items[0].conversion_factor and int(p.group_items[0].conversion_factor) > 0:
-                    cf = int(p.group_items[0].conversion_factor)
-                sku_conv_map[p_sku_u] = Decimal(str(cf))
-                if not resolved_product_name:
-                    resolved_product_name = (p.internal_name or "").strip() or p.npp_name or p.name or ""
-                if not resolved_unit_name:
-                    resolved_unit_name = (p.internal_unit or "").strip() or dp_fallback_unit or (p.unit.name if p.unit else "")
-        pc_override = ""
-        if matched_prod_ids and not dp_inv_name:
-            pc_override = (
-                db.scalar(
-                    select(ProductCompany.invoice_name_override)
-                    .where(
-                        ProductCompany.product_id.in_(matched_prod_ids),
-                        ProductCompany.invoice_name_override.is_not(None),
-                    )
-                    .order_by(
-                        ProductCompany.is_primary.desc(),
-                        ProductCompany.last_purchased_at.desc().nullslast(),
-                    )
-                    .limit(1)
-                )
-                or ""
-            ).strip()
-        resolved_product_name = dp_inv_name or pc_override or resolved_product_name or dp_fallback_name
-        resolved_unit_name = resolved_unit_name or dp_fallback_unit
-        if not sku_conv_map:
-            sku_conv_map[target_code] = Decimal("1")
+        resolved_product_name = (
+            dp_inv_name
+            or ((p.internal_name or "").strip() if p else "")
+            or dp_fallback_name
+            or (p.name if p else "")
+            or ""
+        )
+        resolved_unit_name = (
+            resolved_unit_name
+            or ((p.internal_unit or "").strip() if p else "")
+            or dp_fallback_unit
+            or (p.unit.name if (p and p.unit) else "")
+        )
+    if not sku_conv_map:
+        sku_conv_map[target_code] = Decimal("1")
 
     target_skus = set(sku_conv_map.keys())
 
@@ -2618,15 +2618,37 @@ def export_sku_mapping_explanation_excel(
     ws["A2"].font = sub_font
     ws["A2"].alignment = Alignment(horizontal="center")
 
+    # Nạp ánh xạ Mã SP DMS -> SP XHĐ kèm tỷ lệ quy đổi để đưa vào Bảng giải trình 3 tầng
+    dms_by_ip_id: dict[int, list[str]] = {}
+    dp_q = select(
+        DistributorProduct.invoice_product_id,
+        DistributorProduct.distributor_sku,
+        DistributorProduct.unit,
+        DistributorProduct.conversion_num,
+        DistributorProduct.conversion_den,
+    ).where(DistributorProduct.invoice_product_id.is_not(None))
+    if distributor_id is not None:
+        dp_q = dp_q.where(
+            (DistributorProduct.distributor_id == distributor_id)
+            | (DistributorProduct.distributor_id.is_(None))
+        )
+    for d_ip_id, d_sku, d_unit, c_num, c_den in db.execute(dp_q).all():
+        if not d_ip_id or not d_sku:
+            continue
+        cn = max(1, int(c_num or 1))
+        cd = max(1, int(c_den or 1))
+        ratio_txt = f" ({d_unit or 'DMS'} x{cn}/{cd})" if cn != cd else (f" ({d_unit})" if d_unit else "")
+        dms_by_ip_id.setdefault(int(d_ip_id), []).append(f"{d_sku.strip().upper()}{ratio_txt}")
+
     headers = [
         "STT",
-        "Mã SP nội bộ NPP (Master SKU)",
-        "Tên xuất hóa đơn chuẩn (Đầu ra)",
-        "ĐVT chuẩn",
-        "Mã SKU gốc (HĐ mua CQT)",
+        "Mã SP XHĐ (Chuẩn)",
+        "Tên SP XHĐ (Đầu ra)",
+        "ĐVT XHĐ (Nhỏ nhất)",
+        "Mã SKU CQT (Đầu vào)",
         "Tên hàng gốc (HĐ mua CQT)",
-        "ĐVT đầu vào CQT",
-        "Hệ số quy đổi",
+        "ĐVT CQT",
+        "Mã SP DMS & Tỷ lệ quy đổi",
         "Thuế suất VAT",
         "Các MST phát sinh",
         "Kiểm tra tuân thủ",
@@ -2647,6 +2669,9 @@ def export_sku_mapping_explanation_excel(
         npp_code = grp.get("npp_code") or grp["sku"]
         npp_name = grp.get("product_name") or ""
         npp_unit = grp.get("unit_name") or ""
+        ip_id = grp.get("invoice_product_id")
+        has_ip = bool(grp.get("has_invoice_product"))
+        dms_str = ", ".join(sorted(set(dms_by_ip_id.get(int(ip_id), [])))) if ip_id else ""
         has_vat_warn = bool(grp.get("has_vat_mismatch"))
         has_unit_warn = bool(grp.get("has_unit_mismatch"))
 
@@ -2669,22 +2694,23 @@ def export_sku_mapping_explanation_excel(
 
         for c_sku, info in sorted(by_cqt_sku.items()):
             stt += 1
-            cf = info["conversion_factor"]
             vat_v = info["vat_rate"]
             vat_str = "" if vat_v is None else ("KCT" if vat_v < 0 else f"{vat_v:g}%")
             checks: list[str] = []
+            if not has_ip:
+                checks.append("CẢNH BÁO: SKU CQT chưa gán Sản phẩm XHĐ!")
             if has_vat_warn:
                 checks.append("CẢNH BÁO: Lệch thuế suất VAT trong nhóm!")
             if has_unit_warn:
-                checks.append("CẢNH BÁO: Khác ĐVT nhưng chưa cài hệ số quy đổi!")
+                checks.append("CẢNH BÁO: Khác ĐVT!")
             check_str = " | ".join(checks) if checks else "Hợp lệ"
 
-            if c_sku == npp_code and cf == 1:
-                reason = "Khớp trực tiếp mã & quy cách đầu vào CQT"
-            elif cf > 1:
-                reason = f"Cùng bản chất hàng hóa, quy đổi 1 {info['unit_name'] or 'ĐVT nhập'} = {cf} {npp_unit or 'ĐVT chuẩn'}"
+            if not has_ip:
+                reason = "Chưa gán vào danh mục Sản phẩm XHĐ"
+            elif c_sku == npp_code:
+                reason = "Khớp trực tiếp Mã SP XHĐ & ĐVT nhỏ nhất đầu vào CQT"
             else:
-                reason = "Cùng bản chất hàng hóa (khác mã NCC/phiên bản bao bì), quy về mã chuẩn NPP"
+                reason = f"Cùng bản chất hàng hóa, gán về Mã SP XHĐ chuẩn {npp_code} (ĐVT: {npp_unit})"
 
             row_vals = [
                 stt,
@@ -2694,7 +2720,7 @@ def export_sku_mapping_explanation_excel(
                 c_sku,
                 info["product_name"],
                 info["unit_name"],
-                cf,
+                dms_str or "—",
                 vat_str,
                 ", ".join(sorted(info["msts"])),
                 check_str,

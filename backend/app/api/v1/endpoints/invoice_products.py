@@ -356,14 +356,15 @@ def download_invoice_product_template():
         "ĐVT Xuất HĐ",
         "Thuế suất VAT (%)",
         "Nhà cung cấp",
+        "Mã Công ty QL",
         "Ghi chú",
     ]
     ws.append(headers)
 
     sample_rows = [
-        [1, "01TD03", "Sữa tươi tiệt trùng có đường Vinamilk 180ml", "Hộp", 8, "Vinamilk", "Đơn vị nhỏ nhất"],
-        [2, "07KD12", "Sữa chua ăn Vinamilk có đường 100g", "Hộp", 8, "Vinamilk", ""],
-        [3, "NZ001", "Nước giải khát Nazzy 330ml", "Lon", 10, "Nazzy", ""],
+        [1, "01TD03", "Sữa tươi tiệt trùng có đường Vinamilk 180ml", "Hộp", 8, "Vinamilk", "CT01", "Đơn vị nhỏ nhất"],
+        [2, "07KD12", "Sữa chua ăn Vinamilk có đường 100g", "Hộp", 8, "Vinamilk", "CT01", ""],
+        [3, "NZ001", "Nước giải khát Nazzy 330ml", "Lon", 10, "Nazzy", "CT02", ""],
     ]
     for row in sample_rows:
         ws.append(row)
@@ -374,7 +375,8 @@ def download_invoice_product_template():
     ws.column_dimensions["D"].width = 16
     ws.column_dimensions["E"].width = 18
     ws.column_dimensions["F"].width = 20
-    ws.column_dimensions["G"].width = 28
+    ws.column_dimensions["G"].width = 18
+    ws.column_dimensions["H"].width = 28
 
     output = BytesIO()
     wb.save(output)
@@ -412,10 +414,14 @@ def upload_invoice_products(
         unit_idx = -1
         vat_idx = -1
         supplier_idx = -1
+        company_code_idx = -1
         note_idx = -1
 
         for idx, h in enumerate(raw_headers):
-            if any(k in h for k in ["mã sp xuất hóa đơn", "mã sản phẩm xuất hóa đơn", "mã sp xuất hđ", "mã sp", "code", "sku", "mã hàng"]):
+            if any(k in h for k in ["mã công ty ql", "mã công ty", "company_code", "ma_cty", "mã cty"]):
+                if company_code_idx == -1:
+                    company_code_idx = idx
+            elif any(k in h for k in ["mã sp xuất hóa đơn", "mã sản phẩm xuất hóa đơn", "mã sp xuất hđ", "mã sp", "code", "sku", "mã hàng"]):
                 if code_idx == -1:
                     code_idx = idx
             elif any(k in h for k in ["tên sp xuất hóa đơn", "tên sản phẩm xuất hóa đơn", "tên sp", "tên sản phẩm", "tên hàng", "name"]):
@@ -438,6 +444,15 @@ def upload_invoice_products(
             code_idx = 1 if len(raw_headers) > 1 else 0
         if name_idx == -1:
             name_idx = 2 if len(raw_headers) > 2 else 1
+
+        comp_stmt = select(Company)
+        if scoped_dist_id is not None:
+            comp_stmt = comp_stmt.where(
+                (Company.distributor_id == scoped_dist_id) | (Company.distributor_id.is_(None))
+            )
+        companies_by_code = {
+            c.code.strip().upper(): c for c in db.scalars(comp_stmt).all() if c.code
+        }
 
         existing_stmt = select(InvoiceProduct)
         if scoped_dist_id is not None:
@@ -470,6 +485,11 @@ def upload_invoice_products(
                 if supplier_idx != -1 and supplier_idx < len(row) and row[supplier_idx] is not None
                 else ""
             )
+            default_comp_id = None
+            if company_code_idx != -1 and company_code_idx < len(row) and row[company_code_idx] is not None:
+                raw_comp_code = str(row[company_code_idx] or "").strip().upper()
+                if raw_comp_code and raw_comp_code in companies_by_code:
+                    default_comp_id = companies_by_code[raw_comp_code].id
             note_val = (
                 str(row[note_idx] or "").strip() or None
                 if note_idx != -1 and note_idx < len(row) and row[note_idx] is not None
@@ -485,6 +505,8 @@ def upload_invoice_products(
                     item.vat_rate = vat_val
                 if supplier_idx != -1 and supplier_val:
                     item.supplier = supplier_val
+                if company_code_idx != -1 and default_comp_id is not None:
+                    item.default_company_id = default_comp_id
                 if note_idx != -1:
                     item.note = note_val
                 item.updated_at = now
@@ -497,6 +519,7 @@ def upload_invoice_products(
                     unit_name=unit_val,
                     vat_rate=vat_val,
                     supplier=supplier_val,
+                    default_company_id=default_comp_id,
                     note=note_val,
                     status="active",
                     created_at=now,

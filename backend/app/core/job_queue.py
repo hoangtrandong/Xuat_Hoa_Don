@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 
-STALE_RUNNING_MINUTES = 20
+STALE_RUNNING_MINUTES = 5
 
 
 class JobInfo(BaseModel):
@@ -293,6 +293,33 @@ class JobQueueManager:
             self._push_log(job, f"Lỗi: {error_detail}", level="error")
             job.updated_at = datetime.now(timezone.utc)
             self._persist(job)
+
+    def fail_orphaned_jobs_on_startup(self) -> int:
+        """Thu hồi toàn bộ job PENDING/RUNNING mồ côi khi backend khởi động lại."""
+        factory = self._get_session_factory()
+        if factory is None:
+            return 0
+        now_naive = _to_naive_utc(datetime.now(timezone.utc))
+        reason = "Tiến trình bị gián đoạn do máy chủ vừa khởi động lại. Vui lòng bấm đồng bộ lại."
+        recovered = 0
+        try:
+            from app.models.multi_tenant_invoice import BackgroundJob
+
+            with factory() as db:
+                rows = db.scalars(
+                    select(BackgroundJob).where(BackgroundJob.status.in_(("PENDING", "RUNNING")))
+                ).all()
+                for row in rows:
+                    row.status = "FAILED"
+                    row.error_detail = reason
+                    row.message = f"Thất bại: {reason}"
+                    row.updated_at = now_naive
+                    recovered += 1
+                if recovered > 0:
+                    db.commit()
+        except Exception:
+            return 0
+        return recovered
 
     def get_job(self, job_id: str) -> Optional[JobInfo]:
         return self._load(job_id)

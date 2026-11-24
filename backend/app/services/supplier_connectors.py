@@ -357,9 +357,18 @@ def fetch_vinamilk_orders(
     config: DistributorSupplierConfig,
     from_date: date,
     to_date: date,
+    *,
+    progress_cb: Any = None,
 ) -> list[dict[str, Any]]:
     """Fetch Vinamilk DMS orders using its authenticated Excel-export flow."""
     from scripts.vinamilk_login import login_and_get_cookie
+
+    def _report(msg: str, count: int = 0) -> None:
+        if callable(progress_cb):
+            try:
+                progress_cb(msg, count)
+            except Exception:
+                pass
 
     endpoint = "https://vinamilk.dmsone.vn/sale-product/search-sale/export-excel"
     cookie = decrypt_supplier_secret(config.session_cookie)
@@ -373,6 +382,7 @@ def fetch_vinamilk_orders(
                 "Thiếu tài khoản hoặc mật khẩu Vinamilk DMS trong cấu hình nguồn. "
                 "Vui lòng cập nhật thông tin đăng nhập rồi thử lại."
             )
+        _report("Đang đăng nhập cổng Vinamilk DMS...")
         cookie = login_and_get_cookie(username, password)
 
     from_date_text = from_date.strftime("%d/%m/%Y")
@@ -416,11 +426,13 @@ def fetch_vinamilk_orders(
                 "Phiên đăng nhập Vinamilk đã hết hạn; cấu hình chưa có đủ "
                 "tài khoản/mật khẩu để đăng nhập lại."
             )
+        _report("Phiên đăng nhập hết hạn, đang đăng nhập lại Vinamilk DMS...")
         refreshed_cookie = login_and_get_cookie(username, password)
         config.session_cookie = encrypt_supplier_secret(refreshed_cookie)
         return refreshed_cookie
 
     def parse_workbook(content: bytes) -> list[dict[str, Any]]:
+        _report("Đang đọc & chuẩn hóa file Excel đơn hàng Vinamilk...")
         try:
             workbook = load_workbook(BytesIO(content), data_only=True)
         except Exception as exc:
@@ -440,7 +452,8 @@ def fetch_vinamilk_orders(
             )
         return rows
 
-    with httpx.Client(timeout=60.0, headers=headers, follow_redirects=True) as client:
+    vinamilk_timeout = httpx.Timeout(connect=15.0, read=45.0, write=15.0, pool=15.0)
+    with httpx.Client(timeout=vinamilk_timeout, headers=headers, follow_redirects=True) as client:
         max_attempts = 3
         for attempt in range(max_attempts):
             cookie_values = {
@@ -450,7 +463,20 @@ def fetch_vinamilk_orders(
             }
             client.cookies.clear()
             client.cookies.update(cookie_values)
-            response = client.post(endpoint, data=export_form)
+            _report(
+                f"Đang yêu cầu Vinamilk DMS xuất đơn ({from_date_text} → {to_date_text})..."
+                if attempt == 0
+                else f"Đang thử xuất lại đơn Vinamilk ({from_date_text} → {to_date_text})..."
+            )
+            try:
+                response = client.post(endpoint, data=export_form)
+            except httpx.TimeoutException as exc:
+                raise RuntimeError(
+                    "Hết thời gian chờ phản hồi từ Vinamilk DMS khi xuất đơn hàng (timeout). "
+                    "Vui lòng thử lại hoặc thu hẹp khoảng ngày."
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Lỗi kết nối mạng tới Vinamilk DMS: {exc}") from exc
             response_headers = getattr(response, "headers", {})
             content_type = response_headers.get("content-type", "").lower()
             needs_login = (
@@ -499,7 +525,15 @@ def fetch_vinamilk_orders(
                 if str(file_path).startswith("http")
                 else f"https://vinamilk.dmsone.vn{file_path}"
             )
-            download_response = client.get(file_url)
+            _report("Đang tải file Excel đơn hàng từ Vinamilk DMS...")
+            try:
+                download_response = client.get(file_url)
+            except httpx.TimeoutException as exc:
+                raise RuntimeError(
+                    "Hết thời gian tải file Excel từ Vinamilk DMS (timeout)."
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Lỗi mạng khi tải file từ Vinamilk DMS: {exc}") from exc
             if download_response.status_code != 200:
                 raise RuntimeError(
                     "Không thể tải file đơn hàng từ Vinamilk DMS "
@@ -1439,7 +1473,7 @@ class RestApiSupplierConnector(BaseSupplierConnector):
             or "vinamilk.dmsone.vn" in (config.api_endpoint_url or "").lower()
         )
         if is_vinamilk:
-            return fetch_vinamilk_orders(config, from_date, to_date)
+            return fetch_vinamilk_orders(config, from_date, to_date, progress_cb=progress_cb)
 
         # Tự động ưu tiên xử lý chuyên biệt cho Nazzy DMS (NPP Mai Gold)
         is_nazzy = (

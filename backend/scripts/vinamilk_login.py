@@ -131,7 +131,8 @@ def login_and_get_cookie(
         "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
     }
 
-    with httpx.Client(timeout=30.0, headers=login_headers, follow_redirects=True) as client:
+    login_timeout = httpx.Timeout(connect=12.0, read=25.0, write=12.0, pool=12.0)
+    with httpx.Client(timeout=login_timeout, headers=login_headers, follow_redirects=True) as client:
         # Bước 1: Khởi tạo phiên và lấy token CSRF
         try:
             init_res = client.get(LOGIN_URL)

@@ -126,6 +126,11 @@ async def lifespan(_: FastAPI):
                 sync_default_roles()
                 admin_status = bootstrap_administrator_from_environment()
                 logger.info("Initial administrator bootstrap: %s.", admin_status)
+                from app.core.job_queue import job_manager
+
+                recovered_jobs = job_manager.fail_orphaned_jobs_on_startup()
+                if recovered_jobs > 0:
+                    logger.info("Recovered %d orphaned background sync jobs on startup.", recovered_jobs)
             except Exception as role_exc:
                 logger.warning("Startup role/admin bootstrap warning: %s", role_exc)
         finally:

@@ -51,7 +51,6 @@ export const menuItems: MenuItem[] = [
     icon: "Users",
     href: "/customers",
     children: [
-      { key: "customers-stores", label: "Cửa hàng", icon: "Store", href: "/customers/stores" },
       { key: "customers-list", label: "Khách hàng", icon: "List", href: "/customers" },
       { key: "customers-companies", label: "Công ty quản lý", icon: "Building2", href: "/customers/companies" },
     ],

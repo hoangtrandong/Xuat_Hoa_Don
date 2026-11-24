@@ -527,6 +527,7 @@ export default function SalesOrdersPage() {
   const [serverDeliveryStatuses, setServerDeliveryStatuses] = useState<string[]>([]);
   const [serverSuppliers, setServerSuppliers] = useState<string[]>([]);
   const listRequestVersion = useRef(0);
+  const listAbortRef = useRef<AbortController | null>(null);
   const detailRequestVersion = useRef(0);
   const [remoteError, setRemoteError] = useState("");
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -535,6 +536,11 @@ export default function SalesOrdersPage() {
   const [customerFilter, setCustomerFilter] = useState("");
   const [staffFilter, setStaffFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
+  // Debounced text filters để gõ phím mượt (không gọi API & không re-fetch liên tục khi đang gõ)
+  const [debouncedOrderFilter, setDebouncedOrderFilter] = useState("");
+  const [debouncedCustomerFilter, setDebouncedCustomerFilter] = useState("");
+  const [debouncedStaffFilter, setDebouncedStaffFilter] = useState("");
+  const [debouncedProductFilter, setDebouncedProductFilter] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("Tất cả");
   const [statusFilter, setStatusFilter] = useState("Tất cả");
   const [deliveryStatusFilter, setDeliveryStatusFilter] = useState("Tất cả");
@@ -692,12 +698,26 @@ export default function SalesOrdersPage() {
     return allRows.map(normalizeRemoteOrder).map(addProcessingStatus);
   }, [fromDate, toDate]);
 
+  // Debounce 280ms riêng cho 4 ô nhập text; các bộ lọc dropdown/ngày/phân trang phản hồi ngay 0ms
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedOrderFilter(orderFilter);
+      setDebouncedCustomerFilter(customerFilter);
+      setDebouncedStaffFilter(staffFilter);
+      setDebouncedProductFilter(productFilter);
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [orderFilter, customerFilter, staffFilter, productFilter]);
+
   const loadLocalOrders = useCallback(async () => {
     const version = ++listRequestVersion.current;
+    listAbortRef.current?.abort();
+    const controller = new AbortController();
+    listAbortRef.current = controller;
     setListLoading(true);
     const params = new URLSearchParams({
       from_date: fromDate, to_date: toDate, skip: String((listPage - 1) * pageSize), limit: String(pageSize),
-      order_search: orderFilter, customer: customerFilter, staff: staffFilter, product: productFilter,
+      order_search: debouncedOrderFilter, customer: debouncedCustomerFilter, staff: debouncedStaffFilter, product: debouncedProductFilter,
       supplier: supplierFilter === "Tất cả" ? "" : supplierFilter,
       processing_status: statusFilter === "Tất cả" ? "" : statusFilter,
       delivery_status: deliveryStatusFilter === "Tất cả" ? "" : deliveryStatusFilter,
@@ -706,7 +726,9 @@ export default function SalesOrdersPage() {
       params.set("distributor_code", activeDistributorCode);
     }
     try {
-      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/grouped?${params}`);
+      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/grouped?${params}`, {
+        signal: controller.signal,
+      });
       const payload = await response.json() as {
         rows?: RemoteOrder[]; total?: number; all_total?: number; total_value?: number;
         total_discount?: number; confirmed?: number; statuses?: string[]; delivery_statuses?: string[];
@@ -727,18 +749,25 @@ export default function SalesOrdersPage() {
       setServerSuppliers(payload.suppliers ?? []);
       setLastSyncedAt(payload.last_synced_at ?? null);
       setRemoteError("");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      throw error;
     } finally {
       if (version === listRequestVersion.current) setListLoading(false);
     }
+  }, [fromDate, toDate, listPage, pageSize, debouncedOrderFilter, debouncedCustomerFilter, debouncedStaffFilter, debouncedProductFilter, supplierFilter, statusFilter, deliveryStatusFilter, activeDistributorCode]);
+
+  useEffect(() => {
     void loadSplitApprovalRequests();
-  }, [fromDate, toDate, listPage, pageSize, orderFilter, customerFilter, staffFilter, productFilter, supplierFilter, statusFilter, deliveryStatusFilter, activeDistributorCode, loadSplitApprovalRequests]);
+  }, [loadSplitApprovalRequests]);
 
   useEffect(() => {
     const requestVersion = listRequestVersion;
-    const timer = window.setTimeout(() => {
-      loadLocalOrders().catch((error) => setRemoteError(error instanceof Error ? error.message : "Không thể tải dữ liệu."));
-    }, 250);
-    return () => { window.clearTimeout(timer); requestVersion.current++; };
+    loadLocalOrders().catch((error) => setRemoteError(error instanceof Error ? error.message : "Không thể tải dữ liệu."));
+    return () => {
+      requestVersion.current++;
+      listAbortRef.current?.abort();
+    };
   }, [loadLocalOrders]);
 
   async function openOrderDetail(order: RemoteOrder) {
@@ -1793,6 +1822,7 @@ return Array.from(map.values());
       setToast(
         `Đã gửi yêu cầu tách đơn ${result.source_order_number ?? selectedSplitOrderGroup.orderNumber} (Mã YC #${result.id}) chờ Kế toán xác nhận.`
       );
+      void loadSplitApprovalRequests();
       await loadLocalOrders();
     } catch (error) {
       setSplitError(error instanceof Error ? error.message : "Không thể gửi yêu cầu tách đơn hàng.");
@@ -2674,29 +2704,33 @@ return Array.from(map.values());
     { key: "Số sản phẩm", title: "Số sản phẩm", sortable: true, align: "right", width: "8rem" },
     ...remoteColumns.filter((column) => ["Giá trị", "Số tiền CK", "Thành tiền"].includes(column.title)),
   ];
-  const deliveryRequestOrderOptions = Array.from(
-    workflowOrders.filter(matchesFilters).reduce((orders, row) => {
-      const orderNumber = displayRemoteValue(row["Số đơn hàng"]).trim();
-      if (
-        !orderNumber ||
-        orders.has(orderNumber) ||
-        displayRemoteValue(row["Tình trạng xử lý đơn hàng"]).trim() === "Đã Hủy"
-      ) return orders;
-      orders.set(orderNumber, {
-        order_number: orderNumber,
-        order_date: displayRemoteValue(row["_order_created_date"]).trim()
-          || displayRemoteValue(row["Ngày tạo"]).trim(),
-        customer_code: displayRemoteValue(row["Mã KH"]).trim(),
-        customer_name: displayRemoteValue(row["Tên KH"]).trim(),
-        original_status: displayRemoteValue(row["Trạng thái"]).trim(),
-        delivery_employee_code: displayRemoteValue(row["Mã NVGH"]).trim(),
-        manager_code: displayRemoteValue(row["Mã NVQL"]).trim(),
-        is_split_or_merge: row["_replacement_type"] === "SPLIT" || row["_replacement_type"] === "MERGE",
-      });
-      return orders;
-    }, new Map<string, DeliveryRequestOrderOption>())
-      .values()
-  );
+  const deliveryRequestOrderOptions = useMemo(() => {
+    if (!isDeliveryRequestDrawerOpen) return [] as DeliveryRequestOrderOption[];
+    return Array.from(
+      workflowOrders.filter(matchesFilters).reduce((orders, row) => {
+        const orderNumber = displayRemoteValue(row["Số đơn hàng"]).trim();
+        if (
+          !orderNumber ||
+          orders.has(orderNumber) ||
+          displayRemoteValue(row["Tình trạng xử lý đơn hàng"]).trim() === "Đã Hủy"
+        ) return orders;
+        orders.set(orderNumber, {
+          order_number: orderNumber,
+          order_date: displayRemoteValue(row["_order_created_date"]).trim()
+            || displayRemoteValue(row["Ngày tạo"]).trim(),
+          customer_code: displayRemoteValue(row["Mã KH"]).trim(),
+          customer_name: displayRemoteValue(row["Tên KH"]).trim(),
+          original_status: displayRemoteValue(row["Trạng thái"]).trim(),
+          delivery_employee_code: displayRemoteValue(row["Mã NVGH"]).trim(),
+          manager_code: displayRemoteValue(row["Mã NVQL"]).trim(),
+          is_split_or_merge: row["_replacement_type"] === "SPLIT" || row["_replacement_type"] === "MERGE",
+        });
+        return orders;
+      }, new Map<string, DeliveryRequestOrderOption>())
+        .values()
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDeliveryRequestDrawerOpen, workflowOrders, orderFilter, customerFilter, staffFilter, productFilter, supplierFilter, statusFilter, deliveryStatusFilter]);
   const filteredDeliveryRequestOrders = deliveryRequestOrderOptions.filter((order) => {
     const search = deliveryRequestSearch.trim().toLocaleLowerCase("vi");
     if (!search) return true;
@@ -3065,6 +3099,10 @@ return Array.from(map.values());
     setCustomerFilter("");
     setStaffFilter("");
     setProductFilter("");
+    setDebouncedOrderFilter("");
+    setDebouncedCustomerFilter("");
+    setDebouncedStaffFilter("");
+    setDebouncedProductFilter("");
     setSupplierFilter("Tất cả");
     setStatusFilter("Tất cả");
     setDeliveryStatusFilter("Tất cả");
@@ -3419,7 +3457,6 @@ return Array.from(map.values());
 
       {remoteColumns.length > 0 ? (
         <DataTable
-          key={`${orderFilter}|${customerFilter}|${staffFilter}|${productFilter}|${supplierFilter}|${statusFilter}|${deliveryStatusFilter}|${pageSize}`}
           data={orderSummaries}
           columns={summaryColumns.map((column) => ({ ...column, sortable: false }))}
           searchable={false}

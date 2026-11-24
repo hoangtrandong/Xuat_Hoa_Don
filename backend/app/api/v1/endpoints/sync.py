@@ -1947,6 +1947,7 @@ def list_local_vinamilk_orders(
     current_user: User | None = Depends(get_current_user),
     order_number: str | None = None,
     distributor_code: str | None = None,
+    include_product_lookup: bool = True,
 ):
     filters = [
         VinamilkOrderSnapshot.order_created_date >= from_date,
@@ -2101,37 +2102,27 @@ def list_local_vinamilk_orders(
     )
     customer_manager_by_code: dict[str, tuple[str | None, str | None]] = {}
     customer_managers_by_suffix: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
-    if rows:
-        customer_assignments = db.execute(
-            select(Customer.code, Customer.manager_code, Customer.manager_name).where(
-                customer_match,
-                or_(
-                    Customer.manager_code.is_not(None),
-                    Customer.manager_name.is_not(None),
-                ),
-            )
-        ).all()
-        for customer_code, manager_code, manager_name in customer_assignments:
-            normalized_code = (customer_code or "").strip().upper()
-            assignment = (manager_code, manager_name)
-            if normalized_code:
-                customer_manager_by_code[normalized_code] = assignment
-                if len(normalized_code) >= 3:
-                    customer_managers_by_suffix[normalized_code[-3:]].append(assignment)
     customers_by_code: dict[str, str | None] = {}
     customers_by_suffix: dict[str, list[str | None]] = defaultdict(list)
     if customer_codes:
+        # Gộp truy vấn Customer + Store thành 1 query duy nhất (tránh quét bảng customers 2 lần)
         customer_rows = db.execute(
-            select(Customer.code, Store.name)
+            select(Customer.code, Customer.manager_code, Customer.manager_name, Store.name)
             .outerjoin(Store, Customer.store_id == Store.id)
             .where(customer_match)
         ).all()
-        for customer_code, store_name in customer_rows:
+        for customer_code, manager_code, manager_name, store_name in customer_rows:
             normalized_code = (customer_code or "").strip().upper()
-            if normalized_code:
-                customers_by_code[normalized_code] = store_name
+            if not normalized_code:
+                continue
+            customers_by_code[normalized_code] = store_name
+            if len(normalized_code) >= 3:
+                customers_by_suffix[normalized_code[-3:]].append(store_name)
+            if manager_code is not None or manager_name is not None:
+                assignment = (manager_code, manager_name)
+                customer_manager_by_code[normalized_code] = assignment
                 if len(normalized_code) >= 3:
-                    customers_by_suffix[normalized_code[-3:]].append(store_name)
+                    customer_managers_by_suffix[normalized_code[-3:]].append(assignment)
     output_rows: list[dict[str, Any]] = []
     replaced_by: dict[str, list[str]] = defaultdict(list)
     replaced_order_for: dict[str, str] = {}
@@ -2178,27 +2169,33 @@ def list_local_vinamilk_orders(
         if (row.product_code or "").strip()
     }
     products_by_sku = {}
-    product_stmt = select(Product)
-    if product_codes:
-        product_stmt = product_stmt.where(
+    if include_product_lookup and product_codes:
+        product_stmt = select(Product).where(
             or_(
                 func.upper(Product.sku).in_(product_codes),
                 func.upper(Product._npp_code).in_(product_codes),
             )
         )
-    else:
-        product_stmt = product_stmt.where(Product.id == -1)
-    for product in db.scalars(product_stmt):
-        if product.sku:
-            products_by_sku[product.sku.strip().upper()] = product
-        if product.npp_code:
-            products_by_sku[product.npp_code.strip().upper()] = product
+        for product in db.scalars(product_stmt):
+            if product.sku:
+                products_by_sku[product.sku.strip().upper()] = product
+            # Dùng _npp_code trực tiếp để tránh N+1 lazy load group_items/company_links
+            if product._npp_code:
+                products_by_sku[product._npp_code.strip().upper()] = product
 
     order_delivery_status: dict[str, str] = {}
+    delivery_assignments: dict[tuple[str, date | None], dict[str, str]] = defaultdict(dict)
     try:
-        dr_rows = (
-            db.execute(
-                select(DeliveryRequestOrder.order_number, DeliveryRequest.status)
+        if order_numbers:
+            # Gộp 2 truy vấn DeliveryRequestOrder + DeliveryRequest thành 1 query duy nhất
+            dr_rows = db.execute(
+                select(
+                    DeliveryRequestOrder.order_number,
+                    DeliveryRequestOrder.order_date,
+                    DeliveryRequestOrder.employee_code,
+                    DeliveryRequestOrder.employee_name,
+                    DeliveryRequest.status,
+                )
                 .join(
                     DeliveryRequest,
                     DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id,
@@ -2210,47 +2207,29 @@ def list_local_vinamilk_orders(
                 )
                 .order_by(DeliveryRequest.created_at.desc(), DeliveryRequest.id.desc())
             ).all()
-            if order_numbers
-            else []
-        )
-        delivery_status_labels = {
-            "DRAFT": "Chờ Admin duyệt",
-            "SUBMITTED": "Đã duyệt - chờ kho nhận",
-            "RECEIVED": "Đã nhận - đang xuất kho",
-            "COMPLETED": "Đã xuất kho",
-            "CANCELLED": "Đã hủy yêu cầu",
-        }
-        for o_num, req_status in dr_rows:
-            if not o_num:
-                continue
-            key = o_num.strip().upper()
-            if key not in order_delivery_status:
-                order_delivery_status[key] = delivery_status_labels.get(req_status, "Chưa yêu cầu")
+            delivery_status_labels = {
+                "DRAFT": "Chờ Admin duyệt",
+                "SUBMITTED": "Đã duyệt - chờ kho nhận",
+                "RECEIVED": "Đã nhận - đang xuất kho",
+                "COMPLETED": "Đã xuất kho",
+                "CANCELLED": "Đã hủy yêu cầu",
+            }
+            for o_num, order_date, emp_code, emp_name, req_status in dr_rows:
+                if not o_num:
+                    continue
+                key = o_num.strip().upper()
+                if key not in order_delivery_status:
+                    order_delivery_status[key] = delivery_status_labels.get(req_status, "Chưa yêu cầu")
+                if req_status in ("SUBMITTED", "RECEIVED", "COMPLETED"):
+                    normalized_code = (emp_code or "").strip()
+                    if normalized_code:
+                        employees = delivery_assignments[(key, order_date)]
+                        employee_code = normalized_code.upper()
+                        employee_name = (emp_name or "").strip()
+                        if employee_code not in employees or employee_name:
+                            employees[employee_code] = employee_name
     except Exception:
         pass
-    delivery_assignments: dict[tuple[str, date | None], dict[str, str]] = defaultdict(dict)
-    if order_numbers:
-        assignments = db.execute(
-            select(
-                DeliveryRequestOrder.order_number,
-                DeliveryRequestOrder.order_date,
-                DeliveryRequestOrder.employee_code,
-                DeliveryRequestOrder.employee_name,
-            )
-            .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
-            .where(
-                func.upper(func.trim(DeliveryRequestOrder.order_number)).in_(order_numbers),
-                DeliveryRequest.status.in_(("SUBMITTED", "RECEIVED", "COMPLETED")),
-            )
-        ).all()
-        for number, order_date, code, name in assignments:
-            normalized_code = (code or "").strip()
-            if normalized_code:
-                employees = delivery_assignments[(number.strip().upper(), order_date)]
-                employee_code = normalized_code.upper()
-                employee_name = (name or "").strip()
-                if employee_code not in employees or employee_name:
-                    employees[employee_code] = employee_name
     for row in rows:
         order_num = row.order_number or ""
         rep_order = replaced_order_for.get(order_num)
@@ -2525,6 +2504,7 @@ def list_grouped_vinamilk_orders(
             from_date=from_date, to_date=to_date, source="sync", search=None,
             status=None, skip=offset, limit=10_000, db=db, current_user=current_user,
             distributor_code=distributor_code,
+            include_product_lookup=False,
         )
         last_synced_at = page["last_synced_at"]
         for row in page["rows"]:
@@ -2548,11 +2528,11 @@ def list_grouped_vinamilk_orders(
             return status
         return " · ".join(part for part in (kind, "" if status == "Đơn Tự Tạo" else status) if part)
 
-    def includes(value: str, query: str) -> bool:
-        return not query or query.strip().casefold() in value.casefold()
+    def includes(value: str, query_cf: str) -> bool:
+        return not query_cf or query_cf in value.casefold()
 
-    order_search, customer, staff, product, supplier = (
-        value.strip() for value in (order_search, customer, staff, product, supplier)
+    order_search_cf, customer_cf, staff_cf, product_cf, supplier_cf = (
+        value.strip().casefold() for value in (order_search, customer, staff, product, supplier)
     )
     summaries = []
     statuses = set()
@@ -2598,23 +2578,33 @@ def list_grouped_vinamilk_orders(
 
         statuses.add(status)
         delivery_statuses.add(delivery)
-        related = " ".join(str(item or "") for item in (
-            key, row.get("_replacement_display"), row.get("_replaced_order_number"),
-            *(row.get("_replaced_by_order_numbers") or []),
-        ))
-        if not includes(related, order_search):
+        if order_search_cf:
+            related = " ".join(str(item or "") for item in (
+                key, row.get("_replacement_display"), row.get("_replaced_order_number"),
+                *(row.get("_replaced_by_order_numbers") or []),
+            ))
+            if not includes(related, order_search_cf):
+                continue
+        if customer_cf and not any(
+            includes(field(line, ("customerCode", "shopCode", "Mã KH")), customer_cf)
+            or includes(field(line, ("customerName", "shopName", "Tên KH")), customer_cf)
+            for line in lines
+        ):
             continue
-        if not any(includes(field(line, ("customerCode", "shopCode", "Mã KH")), customer) or
-                   includes(field(line, ("customerName", "shopName", "Tên KH")), customer) for line in lines):
+        if staff_cf and not any(
+            includes(field(line, ("staffCode", "salesStaffCode", "Mã NVBH")), staff_cf)
+            or includes(field(line, ("staffName", "salesStaffName", "Tên NVBH")), staff_cf)
+            for line in lines
+        ):
             continue
-        if not any(includes(field(line, ("staffCode", "salesStaffCode", "Mã NVBH")), staff) or
-                   includes(field(line, ("staffName", "salesStaffName", "Tên NVBH")), staff) for line in lines):
+        if product_cf and not any(
+            includes(field(line, ("productCode", "itemCode", "sku", "Mã sản phẩm")), product_cf)
+            or includes(field(line, ("productName", "itemName", "product", "Sản phẩm")), product_cf)
+            or includes(field(line, ("Nhà cung cấp",)), product_cf)
+            for line in lines
+        ):
             continue
-        if not any(includes(field(line, ("productCode", "itemCode", "sku", "Mã sản phẩm")), product) or
-                   includes(field(line, ("productName", "itemName", "product", "Sản phẩm")), product) or
-                   includes(field(line, ("Nhà cung cấp",)), product) for line in lines):
-            continue
-        if supplier and supplier.casefold() not in order_supplier_candidates:
+        if supplier_cf and supplier_cf not in order_supplier_candidates:
             continue
         if processing_status and status != processing_status:
             continue

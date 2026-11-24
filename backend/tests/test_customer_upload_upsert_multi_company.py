@@ -195,3 +195,57 @@ def test_crud_and_bulk_assign_multi_company_and_tenant_isolation(db_session):
             current_user=user_a,
         )
     assert exc.value.status_code == 400
+
+
+def test_upload_exported_customer_sheet_with_numeric_company_codes(db_session):
+    db, dist_a, _ = db_session
+    user_a = _user(dist_a.id)
+
+    comp1 = create_company(
+        CompanyCreate(code="2902292227", name="CÔNG TY TNHH TRUNG ĐÔNG VINAGOLD", tax_code="2902292227"),
+        db=db,
+        current_user=user_a,
+    )
+    comp2 = create_company(
+        CompanyCreate(code="2902227676", name="CÔNG TY TNHH MAI GOLD", tax_code="2902227676"),
+        db=db,
+        current_user=user_a,
+    )
+
+    file = _make_excel_upload([
+        [
+            "Mã NPP", "Tên NPP", "Mã KH", "Tên khách hàng", "Mã NVQL", "Tên NVQL",
+            "Loại", "Hạng", "CCCD", "Mã số thuế", "Cửa hàng", "Mã cửa hàng",
+            "Tuyến", "Công ty quản lý", "Mã công ty", "Công nợ", "Trạng thái",
+        ],
+        [
+            "NPP-MAIGOLD", "Nhà Phân Phối Mai Gold", "00J", "Châu Hà", "", "",
+            "Cửa hàng", "B", "", "040194010250", "", "",
+            "", "CÔNG TY TNHH TRUNG ĐÔNG VINAGOLD", 2902292227.0, 0, "Hoạt động",
+        ],
+        [
+            "NPP-MAIGOLD", "Nhà Phân Phối Mai Gold", "00O", "Tuấn Hữu", "", "",
+            "Cửa hàng", "B", "", "040081028702", "", "",
+            "", "CÔNG TY TNHH TRUNG ĐÔNG VINAGOLD", 2902292227, 0, "Hoạt động",
+        ],
+        [
+            "NPP-MAIGOLD", "Nhà Phân Phối Mai Gold", "00J", "Châu Hà", "", "",
+            "Cửa hàng", "B", "", "040194010250", "", "",
+            "", "CÔNG TY TNHH MAI GOLD", 2902227676.0, 0, "Hoạt động",
+        ],
+        [
+            "NPP-MAIGOLD", "Nhà Phân Phối Mai Gold", "00O", "Tuấn Hữu", "", "",
+            "Cửa hàng", "B", "", "040081028702", "", "",
+            "", "CÔNG TY TNHH MAI GOLD", 2902227676, 0, "Hoạt động",
+        ],
+    ])
+    res = upload_customers(file=file, distributor_id=dist_a.id, db=db, current_user=user_a)
+    assert res["created"] == 2
+    assert res["updated"] == 0
+
+    custs = {c.code: c for c in list_customers(distributor_id=None, company_id=None, q=None, db=db, current_user=user_a)}
+    assert custs["00J"].company_ids == [comp1.id, comp2.id]
+    assert custs["00O"].company_ids == [comp1.id, comp2.id]
+    assert custs["00J"].type == "RETAIL"
+    assert custs["00J"].status == "active"
+

@@ -75,8 +75,18 @@ def _canonical_customer_headers(headers: list[str]) -> list[str]:
     return [CUSTOMER_HEADER_ALIASES.get(header, header) for header in headers]
 
 
+def _cell_to_str(raw: object) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, bool):
+        return "1" if raw else "0"
+    if isinstance(raw, float) and raw.is_integer():
+        return str(int(raw))
+    return str(raw).strip()
+
+
 def _parse_company_codes(raw: object) -> list[str]:
-    text = str(raw or "").strip()
+    text = _cell_to_str(raw)
     if not text:
         return []
     tokens = re.split(r"[,;|\r\n]+", text)
@@ -221,8 +231,8 @@ def upload_customers(
             if not any(value is not None and str(value).strip() for value in values):
                 continue
             data = dict(zip(headers, values))
-            code = str(data.get("code") or "").strip()
-            name = str(data.get("name") or "").strip()
+            code = _cell_to_str(data.get("code"))
+            name = _cell_to_str(data.get("name"))
             # Bỏ qua dòng hướng dẫn phụ nếu giữ nguyên dòng 2 mẫu
             if "Bắt buộc" in code or "VD: KH-0001" in code or "Tên khách hàng" in name:
                 continue
@@ -246,20 +256,20 @@ def upload_customers(
                     "code": code,
                     "name": name,
                     "type": row_type,
-                    "tier": str(data.get("tier") or "").strip().upper() or None,
-                    "phone": str(data.get("phone") or "").strip() or None,
-                    "email": str(data.get("email") or "").strip() or None,
-                    "citizen_id": str(data.get("citizen_id") or "").strip() or None,
-                    "tax_code": str(data.get("tax_code") or "").strip() or None,
-                    "staff_code": str(data.get("staff_code") or "").strip() or None,
-                    "staff_name": str(data.get("staff_name") or "").strip() or None,
-                    "manager_code": str(data.get("manager_code") or "").strip() or None,
+                    "tier": _cell_to_str(data.get("tier")).upper() or None,
+                    "phone": _cell_to_str(data.get("phone")) or None,
+                    "email": _cell_to_str(data.get("email")) or None,
+                    "citizen_id": _cell_to_str(data.get("citizen_id")) or None,
+                    "tax_code": _cell_to_str(data.get("tax_code")) or None,
+                    "staff_code": _cell_to_str(data.get("staff_code")) or None,
+                    "staff_name": _cell_to_str(data.get("staff_name")) or None,
+                    "manager_code": _cell_to_str(data.get("manager_code")) or None,
                     "credit_limit": row_credit_limit,
                     "status": row_status,
-                    "store_code": str(data.get("store_code") or "").strip() or None,
-                    "store_route": str(data.get("store_route") or "").strip() or None,
-                    "invoice_name": str(data.get("invoice_name") or "").strip() or None,
-                    "invoice_address": str(data.get("invoice_address") or "").strip() or None,
+                    "store_code": _cell_to_str(data.get("store_code")) or None,
+                    "store_route": _cell_to_str(data.get("store_route")) or None,
+                    "invoice_name": _cell_to_str(data.get("invoice_name")) or None,
+                    "invoice_address": _cell_to_str(data.get("invoice_address")) or None,
                     "company_codes": list(row_company_codes),
                 }
             else:
@@ -267,20 +277,20 @@ def upload_customers(
                 scalar_updates = {
                     "name": name or None,
                     "type": row_type,
-                    "tier": str(data.get("tier") or "").strip().upper() or None,
-                    "phone": str(data.get("phone") or "").strip() or None,
-                    "email": str(data.get("email") or "").strip() or None,
-                    "citizen_id": str(data.get("citizen_id") or "").strip() or None,
-                    "tax_code": str(data.get("tax_code") or "").strip() or None,
-                    "staff_code": str(data.get("staff_code") or "").strip() or None,
-                    "staff_name": str(data.get("staff_name") or "").strip() or None,
-                    "manager_code": str(data.get("manager_code") or "").strip() or None,
+                    "tier": _cell_to_str(data.get("tier")).upper() or None,
+                    "phone": _cell_to_str(data.get("phone")) or None,
+                    "email": _cell_to_str(data.get("email")) or None,
+                    "citizen_id": _cell_to_str(data.get("citizen_id")) or None,
+                    "tax_code": _cell_to_str(data.get("tax_code")) or None,
+                    "staff_code": _cell_to_str(data.get("staff_code")) or None,
+                    "staff_name": _cell_to_str(data.get("staff_name")) or None,
+                    "manager_code": _cell_to_str(data.get("manager_code")) or None,
                     "credit_limit": row_credit_limit,
                     "status": row_status,
-                    "store_code": str(data.get("store_code") or "").strip() or None,
-                    "store_route": str(data.get("store_route") or "").strip() or None,
-                    "invoice_name": str(data.get("invoice_name") or "").strip() or None,
-                    "invoice_address": str(data.get("invoice_address") or "").strip() or None,
+                    "store_code": _cell_to_str(data.get("store_code")) or None,
+                    "store_route": _cell_to_str(data.get("store_route")) or None,
+                    "invoice_name": _cell_to_str(data.get("invoice_name")) or None,
+                    "invoice_address": _cell_to_str(data.get("invoice_address")) or None,
                 }
                 for key_name, val in scalar_updates.items():
                     if val is not None:
@@ -319,6 +329,9 @@ def upload_customers(
         ).all()
         companies_by_code = {
             (c.code or "").strip().upper(): c for c in companies_all if c.code
+        }
+        companies_by_tax_code = {
+            (c.tax_code or "").strip().upper(): c for c in companies_all if c.tax_code
         }
         companies_by_name = {
             (c.name or "").strip().upper(): c for c in companies_all if c.name
@@ -363,7 +376,11 @@ def upload_customers(
             resolved_company_ids: list[int] = []
             for comp_token in entry["company_codes"]:
                 comp_key = comp_token.upper()
-                comp_obj = companies_by_code.get(comp_key) or companies_by_name.get(comp_key)
+                comp_obj = (
+                    companies_by_code.get(comp_key)
+                    or companies_by_tax_code.get(comp_key)
+                    or companies_by_name.get(comp_key)
+                )
                 if comp_obj is None:
                     comp_obj = CompanyModel(
                         distributor_id=effective_dist_id,

@@ -224,14 +224,18 @@ def compute_tax_inventory_by_mst(
     low_thresh_dec = _to_dec(low_threshold)
 
     # 1. Nạp danh mục Công ty & NPP (chỉ lấy cột cần thiết)
-    comp_stmt = select(Company.tax_code, Company.short_name, Company.name)
+    comp_stmt = select(Company.id, Company.tax_code, Company.short_name, Company.name)
     if distributor_id is not None:
         comp_stmt = comp_stmt.where(Company.distributor_id == distributor_id)
     company_name_by_mst: dict[str, str] = {}
-    for tax_code, short_name, full_name in db.execute(comp_stmt).all():
+    company_by_id: dict[int, tuple[str, str]] = {}
+    for c_id, tax_code, short_name, full_name in db.execute(comp_stmt).all():
         mst = (tax_code or "").strip()
+        cname = (short_name or full_name or "").strip()
+        if c_id:
+            company_by_id[int(c_id)] = (mst, cname)
         if mst and mst not in company_name_by_mst:
-            company_name_by_mst[mst] = short_name or full_name
+            company_name_by_mst[mst] = cname or f"MST {mst}"
 
     dist_mst_by_id: dict[int, str] = {}
     for d_id, d_mst in db.execute(select(Distributor.id, Distributor.tax_code)).all():
@@ -1134,17 +1138,49 @@ def compute_tax_inventory_by_mst(
             grp["mst_breakdown"].sort(
                 key=lambda b: (0 if b["status"] == "NEGATIVE" else 1, b["tax_code"], b["sku"])
             )
+            ip_obj = ip_by_id.get(grp["invoice_product_id"]) if grp.get("invoice_product_id") else None
+            def_comp = company_by_id.get(ip_obj.default_company_id) if (ip_obj and ip_obj.default_company_id) else None
+            def_comp_mst = def_comp[0] if def_comp else ""
+            def_comp_name = def_comp[1] if def_comp else ""
+
+            seen_mst_map: dict[str, str] = {}
+            for b in grp["mst_breakdown"]:
+                b_mst = (b.get("tax_code") or "").strip()
+                if b_mst and b_mst not in seen_mst_map:
+                    seen_mst_map[b_mst] = b.get("company_name") or company_name_by_mst.get(b_mst, f"MST {b_mst}")
+            mst_list = [
+                {"tax_code": m_code, "company_name": seen_mst_map[m_code]}
+                for m_code in sorted(seen_mst_map.keys(), key=lambda x: (0 if def_comp_mst and x == def_comp_mst else 1, x))
+            ]
+            if not mst_list and def_comp_mst:
+                mst_list = [{"tax_code": def_comp_mst, "company_name": def_comp_name or f"MST {def_comp_mst}"}]
+
+            display_tax_code = (
+                mst_list[0]["tax_code"]
+                if len(mst_list) == 1
+                else (", ".join(x["tax_code"] for x in mst_list) if mst_list else "")
+            )
+            display_company_name = (
+                mst_list[0]["company_name"]
+                if len(mst_list) == 1
+                else (", ".join(x["company_name"] for x in mst_list) if mst_list else "")
+            )
+            inv_code_display = inv_codes_sorted[0] if inv_codes_sorted else npp_code
             has_vat_mismatch = len(grp["vat_rates_seen"]) > 1
             has_unit_mismatch = len(grp["raw_units_seen"]) > 1 and not grp["has_conversion"]
             rows.append(
                 {
-                    "tax_code": "ALL",
-                    "company_name": f"{len(grp['msts'])} MST",
+                    "tax_code": display_tax_code,
+                    "company_name": display_company_name,
+                    "mst_list": mst_list,
+                    "default_company_tax_code": def_comp_mst or None,
+                    "default_company_name": def_comp_name or None,
                     "sku": npp_code,
                     "npp_code": npp_code,
                     "invoice_product_id": grp.get("invoice_product_id"),
                     "has_invoice_product": bool(grp.get("has_invoice_product")),
-                    "invoice_product_code": inv_codes_sorted[0] if len(inv_codes_sorted) == 1 else (inv_codes_sorted[0] if inv_codes_sorted else npp_code),
+                    "invoice_product_code": inv_code_display,
+                    "invoice_product_name": grp["product_name"],
                     "invoice_product_codes": inv_codes_sorted,
                     "has_npp_code": grp["has_npp_code"],
                     "cqt_skus": cqt_skus_sorted,
@@ -1226,14 +1262,21 @@ def compute_tax_inventory_by_mst(
             dp_mst_inv_name = (dp_mst_entry[1] if dp_mst_entry else "")
             dp_default_inv_name = (dp_entry[0] if dp_entry else "")
             mst_inv_override = prod_mst_invoice_override.get((p_id, mst), "") if p_id else ""
-            pname = (
-                dp_mst_inv_name
-                or mst_inv_override
-                or dp_default_inv_name
-                or (p_meta[0] if p_meta else "")
-                or rec["product_name"]
+            if rec.get("has_invoice_product") and rec.get("product_name"):
+                pname = rec["product_name"]
+            else:
+                pname = (
+                    dp_mst_inv_name
+                    or mst_inv_override
+                    or dp_default_inv_name
+                    or (p_meta[0] if p_meta else "")
+                    or rec["product_name"]
+                )
+            pvat = (
+                rec.get("invoice_product_vat_rate")
+                if rec.get("invoice_product_vat_rate") is not None
+                else (p_meta[1] if p_meta else None)
             )
-            pvat = p_meta[1] if p_meta else None
 
             if search_term and not (
                 search_term in sku.lower()
@@ -1296,11 +1339,13 @@ def compute_tax_inventory_by_mst(
                 {
                     "tax_code": mst,
                     "company_name": rec["company_name"],
+                    "mst_list": [{"tax_code": mst, "company_name": rec["company_name"]}],
                     "sku": sku,
                     "npp_code": sku,
                     "invoice_product_id": rec.get("invoice_product_id"),
                     "has_invoice_product": bool(rec.get("has_invoice_product")),
                     "invoice_product_code": sku,
+                    "invoice_product_name": pname,
                     "invoice_product_codes": [sku],
                     "has_npp_code": bool(rec.get("has_invoice_product")),
                     "cqt_skus": sorted(rec.get("cqt_skus") or [sku]),
@@ -2431,51 +2476,26 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
     )
 
     is_npp_mode = (data.get("group_by") or "MST_SKU").upper() == "NPP_SKU"
-    headers = (
-        [
-            "STT",
-            "Mã SP nội bộ NPP",
-            "Mã SKU CQT gộp",
-            "Số MST",
-            "Tên hàng hóa",
-            "ĐVT",
-            "VAT (%)",
-            "Tồn đầu kỳ (SL)",
-            "Giá trị đầu kỳ TK 156",
-            "Nhập CQT (SL)",
-            "Giá trị Nhập (VND)",
-            "Xuất HĐĐT (SL)",
-            "Doanh thu Xuất (VND)",
-            "Đơn giá vốn BQ",
-            "Giá vốn xuất (TK 632)",
-            "Tồn cuối kỳ (SL)",
-            "Trị giá tồn cuối kỳ (TK 156)",
-            "Trạng thái",
-            "Cảnh báo thanh tra thuế",
-        ]
-        if is_npp_mode
-        else [
-            "STT",
-            "MST Pháp nhân",
-            "Tên Công ty quản lý",
-            "Mã SKU (CQT)",
-            "Tên hàng hóa",
-            "ĐVT",
-            "VAT (%)",
-            "Tồn đầu kỳ (SL)",
-            "Giá trị đầu kỳ TK 156",
-            "Nhập CQT (SL)",
-            "Giá trị Nhập (VND)",
-            "Xuất HĐĐT (SL)",
-            "Doanh thu Xuất (VND)",
-            "Đơn giá vốn BQ",
-            "Giá vốn xuất (TK 632)",
-            "Tồn cuối kỳ (SL)",
-            "Trị giá tồn cuối kỳ (TK 156)",
-            "Trạng thái",
-            "Cảnh báo thanh tra thuế",
-        ]
-    )
+    headers = [
+        "STT",
+        "Mã SP XHĐ",
+        "Tên SP XHĐ",
+        "MST",
+        "Tên công ty quản lý",
+        "Mã SKU CQT gộp" if is_npp_mode else "Mã SKU CQT",
+        "ĐVT",
+        "VAT (%)",
+        "Tồn đầu kỳ (SL)",
+        "Giá trị đầu kỳ TK 156",
+        "Nhập CQT (SL)",
+        "Giá trị Nhập (VND)",
+        "Xuất HĐĐT (SL)",
+        "Doanh thu Xuất (VND)",
+        "Tồn cuối kỳ (SL)",
+        "Trị giá tồn cuối kỳ (TK 156)",
+        "Trạng thái",
+        "Cảnh báo thanh tra thuế",
+    ]
     ws.append(headers)
     for col_idx in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -2489,7 +2509,6 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
     tot_open_amt = 0.0
     tot_in_amt = 0.0
     tot_out_amt = 0.0
-    tot_cogs_amt = 0.0
     tot_end_val = 0.0
 
     for idx, r in enumerate(items, start=1):
@@ -2507,10 +2526,11 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
 
         row_vals = [
             idx,
-            r.get("npp_code") or r["sku"] if is_npp_mode else r["tax_code"],
-            ", ".join(r.get("cqt_skus") or [r["sku"]]) if is_npp_mode else r["company_name"],
-            r.get("mst_count", 1) if is_npp_mode else r["sku"],
-            r["product_name"],
+            r.get("invoice_product_code") or r.get("npp_code") or r["sku"],
+            r.get("invoice_product_name") or r["product_name"],
+            r.get("tax_code") or "",
+            r.get("company_name") or "",
+            ", ".join(r.get("cqt_skus") or [r["sku"]]),
             r["unit_name"],
             vat_str,
             r.get("opening_qty", 0),
@@ -2519,8 +2539,6 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
             r["input_amount"],
             r["output_qty"],
             r["output_amount"],
-            r.get("avg_unit_cost", 0),
-            r.get("cogs_amount", 0),
             r["balance_qty"],
             r.get("ending_inventory_value", 0),
             status_label,
@@ -2530,17 +2548,16 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
         tot_open_amt += float(r.get("opening_amount") or 0)
         tot_in_amt += float(r.get("input_amount") or 0)
         tot_out_amt += float(r.get("output_amount") or 0)
-        tot_cogs_amt += float(r.get("cogs_amount") or 0)
         tot_end_val += float(r.get("ending_inventory_value") or 0)
 
         row_num = idx + 1
         for c_i in range(1, len(headers) + 1):
             c = ws.cell(row=row_num, column=c_i)
             c.border = thin_border
-            if c_i in (8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
+            if c_i in (9, 10, 11, 12, 13, 14, 15, 16):
                 c.number_format = "#,##0.##"
                 c.alignment = Alignment(horizontal="right")
-            if c_i == 16:
+            if c_i == 15:
                 if r["status"] == "NEGATIVE":
                     c.font = red_font
                 elif r["status"] == "LOW":
@@ -2549,11 +2566,10 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
     tot_row = len(items) + 2
     ws.cell(row=tot_row, column=1, value="TỔNG CỘNG").font = bold_font
     for col_idx, val in [
-        (9, tot_open_amt),
-        (11, tot_in_amt),
-        (13, tot_out_amt),
-        (15, tot_cogs_amt),
-        (17, tot_end_val),
+        (10, tot_open_amt),
+        (12, tot_in_amt),
+        (14, tot_out_amt),
+        (16, tot_end_val),
     ]:
         cell = ws.cell(row=tot_row, column=col_idx, value=round(val, 2))
         cell.font = bold_font
@@ -2561,7 +2577,7 @@ def export_tax_inventory_excel(data: dict[str, Any]) -> BytesIO:
     for c_i in range(1, len(headers) + 1):
         ws.cell(row=tot_row, column=c_i).border = thin_border
 
-    widths = [6, 16, 26, 15, 34, 9, 8, 13, 18, 13, 18, 13, 18, 15, 18, 13, 20, 14, 30]
+    widths = [6, 18, 34, 18, 28, 18, 9, 8, 13, 18, 13, 18, 13, 18, 13, 20, 14, 30]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
 

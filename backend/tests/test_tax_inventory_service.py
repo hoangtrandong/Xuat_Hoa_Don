@@ -1163,5 +1163,119 @@ def test_multiple_companies_per_distributor_sku_with_distinct_invoice_codes_and_
     assert mst_rows[comp_b.tax_code]["product_name"] == "Creamer đặc NSPN 1284g (Công ty B)"
 
 
+def test_tax_inventory_displays_invoice_product_mst_company_and_excel_drops_cogs(db_session):
+    """Tồn kho thuế (NPP_SKU & MST_SKU) hiển thị Mã SP XHĐ, Tên SP XHĐ, MST, Tên công ty quản lý; Excel bỏ cột giá vốn."""
+    from openpyxl import load_workbook
+    from app.models.product import InvoiceProduct, Product, ProductCategory, ProductUnit
+
+    dist, comp_a, comp_b = _seed_distributor_and_companies(db_session)
+    cat = ProductCategory(code="SUA4", name="Sua")
+    unit = ProductUnit(code="HOP4", name="Hộp")
+    db_session.add_all([cat, unit])
+    db_session.flush()
+
+    ip = InvoiceProduct(
+        distributor_id=dist.id,
+        code="XHD-ST180",
+        name="Sữa tươi tiệt trùng 180ml (SP XHĐ)",
+        unit_name="Hộp",
+        vat_rate=8.0,
+        default_company_id=comp_a.id,
+    )
+    db_session.add(ip)
+    db_session.flush()
+
+    p = Product(
+        sku="CQT-0180",
+        name="Ten Goc CQT",
+        category_id=cat.id,
+        unit_id=unit.id,
+        invoice_product_id=ip.id,
+    )
+    db_session.add(p)
+    db_session.flush()
+
+    db_session.add_all([
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0009301",
+            invoice_date=datetime(2026, 11, 10),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code=comp_a.tax_code,
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="CQT-0180",
+                    product_name="Ten XML CQT",
+                    unit_name="Hộp",
+                    quantity=48,
+                    unit_price=8000,
+                    amount_before_tax=384_000,
+                )
+            ],
+        ),
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TBB",
+            invoice_number="0009302",
+            invoice_date=datetime(2026, 11, 11),
+            seller_tax_code="0300000001",
+            seller_name="NCC A",
+            buyer_tax_code=comp_b.tax_code,
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="CQT-0180",
+                    product_name="Ten XML CQT",
+                    unit_name="Hộp",
+                    quantity=24,
+                    unit_price=8000,
+                    amount_before_tax=192_000,
+                )
+            ],
+        ),
+    ])
+    db_session.commit()
+
+    # 1. Chế độ NPP_SKU (gộp theo SP XHĐ)
+    npp_res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id, group_by="NPP_SKU")
+    assert len(npp_res["items"]) == 1
+    row = npp_res["items"][0]
+    assert row["invoice_product_code"] == "XHD-ST180"
+    assert row["invoice_product_name"] == "Sữa tươi tiệt trùng 180ml (SP XHĐ)"
+    assert row["product_name"] == "Sữa tươi tiệt trùng 180ml (SP XHĐ)"
+    assert comp_a.tax_code in row["tax_code"] and comp_b.tax_code in row["tax_code"]
+    assert comp_a.name in row["company_name"] and comp_b.name in row["company_name"]
+    assert row["mst_list"][0]["tax_code"] == comp_a.tax_code  # default_company prioritized
+
+    # 2. Chế độ MST_SKU (tách theo MST)
+    mst_res = compute_tax_inventory_by_mst(db_session, distributor_id=dist.id, group_by="MST_SKU")
+    assert len(mst_res["items"]) == 2
+    by_mst = {r["tax_code"]: r for r in mst_res["items"]}
+    assert by_mst[comp_a.tax_code]["invoice_product_code"] == "XHD-ST180"
+    assert by_mst[comp_a.tax_code]["invoice_product_name"] == "Sữa tươi tiệt trùng 180ml (SP XHĐ)"
+    assert by_mst[comp_a.tax_code]["company_name"] == comp_a.name
+
+    # 3. Xuất Excel: có Mã SP XHĐ, Tên SP XHĐ, MST, Tên công ty quản lý và KHÔNG có cột Giá vốn
+    buf = export_tax_inventory_excel(npp_res)
+    wb = load_workbook(buf)
+    ws = wb.active
+    headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+    assert "Mã SP XHĐ" in headers
+    assert "Tên SP XHĐ" in headers
+    assert "MST" in headers
+    assert "Tên công ty quản lý" in headers
+    assert not any("Giá vốn" in str(h or "") or "giá vốn" in str(h or "") for h in headers)
+
+
+
 
 

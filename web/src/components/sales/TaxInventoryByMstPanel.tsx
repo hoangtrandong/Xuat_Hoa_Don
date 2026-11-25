@@ -60,11 +60,15 @@ interface MstBreakdownItem {
 interface TaxInventoryRow {
   tax_code: string;
   company_name: string;
+  mst_list?: Array<{ tax_code: string; company_name: string }>;
+  default_company_tax_code?: string | null;
+  default_company_name?: string | null;
   sku: string;
   npp_code?: string;
   invoice_product_id?: number | null;
   has_invoice_product?: boolean;
   invoice_product_code?: string;
+  invoice_product_name?: string;
   invoice_product_codes?: string[];
   has_npp_code?: boolean;
   cqt_skus?: string[];
@@ -753,8 +757,8 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
           <Building2 size={17} className="text-red-500" />
           <span className="text-xs font-bold uppercase tracking-wide text-white">
             {groupBy === "NPP_SKU"
-              ? "Sổ Tồn Kho Thuế Tổng Hợp Theo Mã SP Xuất Hóa Đơn (TK 156 & TK 632)"
-              : "Sổ Nhập – Xuất – Tồn Thuế Chi Tiết Theo Từng MST × Mã SP Xuất HĐ (TK 156 & TK 632)"}
+              ? "Sổ Tồn Kho Thuế Tổng Hợp Theo Mã SP Xuất Hóa Đơn (TK 156)"
+              : "Sổ Nhập – Xuất – Tồn Thuế Chi Tiết Theo Từng MST × Mã SP Xuất HĐ (TK 156)"}
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -990,8 +994,8 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
           <div className="text-sm font-bold text-emerald-800 truncate" title={formatVND(summary?.total_ending_inventory_value ?? 0)}>
             {formatVND(summary?.total_ending_inventory_value ?? 0)}
           </div>
-          <div className="text-[10px] text-emerald-700 truncate" title={formatVND(summary?.total_cogs_amount ?? 0)}>
-            TK 632: {formatVND(summary?.total_cogs_amount ?? 0)}
+          <div className="text-[10px] text-emerald-700 truncate" title={formatVND(summary?.total_input_amount ?? 0)}>
+            Tổng nhập: {formatVND(summary?.total_input_amount ?? 0)}
           </div>
         </div>
       </div>
@@ -1000,14 +1004,14 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
       <div className="border-b border-slate-200 px-3 py-2.5 grid gap-x-3 gap-y-2 sm:grid-cols-2 xl:grid-cols-5 items-end">
         <div>
           <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-            Tìm theo Mã SKU / Tên hàng / MST
+            Tìm theo Mã SP XHĐ / Tên SP XHĐ / MST / Công ty
           </label>
           <div className="relative">
             <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Nhập SKU, tên sản phẩm hoặc MST..."
+              placeholder="Nhập mã SP XHĐ, tên SP XHĐ, MST hoặc tên công ty..."
               className={`${inputCls} pl-6`}
             />
           </div>
@@ -1134,14 +1138,14 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
         <table className="w-full border-collapse text-left">
           <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase">
             <tr className="border-b border-slate-200">
-              {groupBy === "MST_SKU" && <th className="px-2.5 py-2">MST / Công ty</th>}
-              <th className="px-2.5 py-2">{groupBy === "NPP_SKU" ? "Mã SP nội bộ NPP" : "Mã SKU"}</th>
-              <th className="px-2.5 py-2">Tên hàng hóa</th>
+              <th className="px-2.5 py-2">Mã SP XHĐ</th>
+              <th className="px-2.5 py-2">Tên SP XHĐ</th>
+              <th className="px-2.5 py-2">MST</th>
+              <th className="px-2.5 py-2">Tên công ty quản lý</th>
               <th className="px-2 py-2 text-center">ĐVT/VAT</th>
               {showOpeningCol && <th className="px-2.5 py-2 text-right">Đầu kỳ</th>}
               <th className="px-2.5 py-2 text-right">Nhập CQT</th>
               <th className="px-2.5 py-2 text-right">Xuất HĐĐT</th>
-              <th className="px-2.5 py-2 text-right">Giá vốn (TK 632)</th>
               <th className="px-2.5 py-2 text-right">Tồn / TK 156</th>
               <th className="px-2.5 py-2">Trạng thái &amp; Cảnh báo</th>
               <th className="px-2 py-2 text-center">{groupBy === "NPP_SKU" ? "Theo MST" : "Thẻ kho"}</th>
@@ -1150,22 +1154,45 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={(groupBy === "MST_SKU" ? 10 : 9) + (showOpeningCol ? 1 : 0)} className="px-4 py-8 text-center text-xs text-slate-500">
+                <td colSpan={10 + (showOpeningCol ? 1 : 0)} className="px-4 py-8 text-center text-xs text-slate-500">
                   <span className="inline-flex items-center gap-2">
-                    <Loader2 size={14} className="animate-spin text-sky-600" /> Đang tính tồn kho thuế &amp; giá vốn TK 156...
+                    <Loader2 size={14} className="animate-spin text-sky-600" /> Đang tính tồn kho thuế (TK 156)...
                   </span>
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={(groupBy === "MST_SKU" ? 10 : 9) + (showOpeningCol ? 1 : 0)} className="px-4 py-8 text-center text-xs text-slate-500">
+                <td colSpan={10 + (showOpeningCol ? 1 : 0)} className="px-4 py-8 text-center text-xs text-slate-500">
                   Chưa có dữ liệu Nhập – Xuất Thuế khớp với bộ lọc.
                 </td>
               </tr>
             ) : (
-              rows.map((r, idx) => (
+              rows.map((r, idx) => {
+                const displayCode = r.invoice_product_code || r.npp_code || r.sku;
+                const displayName = r.invoice_product_name || r.product_name;
+                let mstItems: Array<{ tax_code: string; company_name: string }> = [];
+                if (r.mst_list && r.mst_list.length > 0) {
+                  mstItems = r.mst_list;
+                } else if (r.mst_breakdown && r.mst_breakdown.length > 0) {
+                  const seen = new Map<string, string>();
+                  for (const b of r.mst_breakdown) {
+                    const tc = (b.tax_code || "").trim();
+                    if (tc && !seen.has(tc)) {
+                      seen.set(tc, (b.company_name || "").trim() || `MST ${tc}`);
+                    }
+                  }
+                  mstItems = Array.from(seen.entries()).map(([tax_code, company_name]) => ({
+                    tax_code,
+                    company_name,
+                  }));
+                } else if (r.tax_code && r.tax_code !== "ALL") {
+                  mstItems = [{ tax_code: r.tax_code, company_name: r.company_name }];
+                }
+                const allMstsTooltip = mstItems.map((m) => `${m.tax_code} - ${m.company_name}`).join("\n");
+
+                return (
                 <tr
-                  key={`${groupBy}::${r.tax_code}::${r.npp_code || r.sku}::${r.sku}::${idx}`}
+                  key={`${groupBy}::${r.tax_code}::${displayCode}::${r.sku}::${idx}`}
                   onClick={() => {
                     if (groupBy === "NPP_SKU") {
                       setSelectedNppRow(r);
@@ -1175,50 +1202,51 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                   }}
                   className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/60 text-[11px] cursor-pointer"
                 >
-                  {groupBy === "MST_SKU" && (
-                    <td className="px-2.5 py-1.5 max-w-[175px]">
-                      <div className="font-mono font-bold text-slate-800">{r.tax_code}</div>
-                      <div className="truncate text-[10px] text-slate-500" title={r.company_name}>
-                        {r.company_name}
-                      </div>
-                    </td>
-                  )}
                   <td className="px-2.5 py-1.5 whitespace-nowrap">
-                    <div className="font-mono font-bold text-sky-800">
-                      {groupBy === "MST_SKU"
-                        ? r.invoice_product_code || r.npp_code || r.sku
-                        : r.npp_code || r.sku}
-                    </div>
-                    {groupBy === "MST_SKU" && r.invoice_product_code && r.invoice_product_code !== r.sku && (
-                      <div className="text-[10px] font-mono text-slate-400">
-                        CQT: {r.sku}
-                      </div>
-                    )}
-                    {groupBy === "NPP_SKU" && (
-                      <div className="text-[10px] text-slate-500">
-                        {r.mst_count ?? 1} MST
-                        {r.invoice_product_codes &&
-                          r.invoice_product_codes.length > 0 &&
-                          !(r.invoice_product_codes.length === 1 && r.invoice_product_codes[0] === (r.npp_code || r.sku)) && (
-                            <span
-                              className="ml-1 font-mono font-semibold text-violet-700"
-                              title={`Mã SP xuất HĐ: ${r.invoice_product_codes.join(", ")}`}
-                            >
-                              · HĐ: {r.invoice_product_codes.slice(0, 2).join(", ")}
-                              {r.invoice_product_codes.length > 2 ? ` +${r.invoice_product_codes.length - 2}` : ""}
-                            </span>
-                          )}
-                        {r.cqt_skus && r.cqt_skus.length > 0 && !(r.cqt_skus.length === 1 && r.cqt_skus[0] === (r.npp_code || r.sku)) && (
-                          <span className="ml-1 font-mono text-slate-400" title={`Mã CQT gộp: ${r.cqt_skus.join(", ")}`}>
-                            · CQT: {r.cqt_skus.slice(0, 2).join(", ")}
-                            {r.cqt_skus.length > 2 ? ` +${r.cqt_skus.length - 2}` : ""}
-                          </span>
-                        )}
-                      </div>
+                    <div className="font-mono font-bold text-sky-800">{displayCode}</div>
+                    {r.cqt_skus &&
+                      r.cqt_skus.length > 0 &&
+                      !(r.cqt_skus.length === 1 && r.cqt_skus[0] === displayCode) && (
+                        <div
+                          className="text-[10px] font-mono text-slate-400"
+                          title={`Mã CQT: ${r.cqt_skus.join(", ")}`}
+                        >
+                          CQT: {r.cqt_skus.slice(0, 2).join(", ")}
+                          {r.cqt_skus.length > 2 ? ` +${r.cqt_skus.length - 2}` : ""}
+                        </div>
+                      )}
+                    {r.has_invoice_product === false && (
+                      <div className="text-[9px] font-semibold text-amber-700">Chưa gán SP XHĐ</div>
                     )}
                   </td>
-                  <td className="px-2.5 py-1.5 text-slate-800 font-medium max-w-[260px] truncate" title={r.product_name}>
-                    {r.product_name}
+                  <td className="px-2.5 py-1.5 text-slate-800 font-medium max-w-[260px] truncate" title={displayName}>
+                    {displayName}
+                  </td>
+                  <td className="px-2.5 py-1.5 whitespace-nowrap" title={allMstsTooltip}>
+                    {mstItems.length > 0 ? (
+                      <div className="space-y-0.5">
+                        {mstItems.map((m) => (
+                          <div key={m.tax_code} className="font-mono font-bold text-slate-800 leading-tight">
+                            {m.tax_code}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="font-mono text-slate-400">{r.default_company_tax_code || "—"}</span>
+                    )}
+                  </td>
+                  <td className="px-2.5 py-1.5 max-w-[220px]" title={allMstsTooltip}>
+                    {mstItems.length > 0 ? (
+                      <div className="space-y-0.5">
+                        {mstItems.map((m) => (
+                          <div key={m.tax_code} className="truncate text-slate-700 font-medium leading-tight">
+                            {m.company_name}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-slate-400">{r.default_company_name || "—"}</span>
+                    )}
                   </td>
                   <td className="px-2 py-1.5 text-center whitespace-nowrap">
                     <span className="font-semibold text-slate-700">{r.unit_name || "—"}</span>
@@ -1249,12 +1277,6 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                     {r.adjustment_qty !== 0 && (
                       <div className="text-[9px] text-sky-600">ĐC trả: {formatNumber(r.adjustment_qty)}</div>
                     )}
-                  </td>
-                  <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
-                    <div className="font-medium text-slate-700">{formatVND(r.cogs_amount)}</div>
-                    <div className="text-[10px] text-slate-400" title="Đơn giá vốn bình quân gia quyền">
-                      BQ: {formatVND(r.avg_unit_cost)}
-                    </div>
                   </td>
                   <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
                     <div
@@ -1343,9 +1365,9 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                         onClick={(e) => {
                           e.stopPropagation();
                           openDailyModal({
-                            sku: groupBy === "NPP_SKU" ? r.npp_code || r.sku : r.sku,
+                            sku: displayCode,
                             tax_code: groupBy === "NPP_SKU" ? "ALL" : r.tax_code,
-                            product_name: r.product_name,
+                            product_name: displayName,
                             unit_name: r.unit_name,
                           });
                         }}
@@ -1379,13 +1401,14 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                     </div>
                   </td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
           {rows.length > 0 && (
             <tfoot className="border-t border-slate-200 bg-slate-50 text-[10px] font-semibold text-slate-600">
               <tr>
-                <td colSpan={(groupBy === "MST_SKU" ? 4 : 3) + (showOpeningCol ? 1 : 0)} className="px-2.5 py-2 text-right uppercase">
+                <td colSpan={5 + (showOpeningCol ? 1 : 0)} className="px-2.5 py-2 text-right uppercase">
                   Tổng bộ lọc ({formatNumber(summary?.filtered_records ?? rows.length)} dòng):
                 </td>
                 <td className="px-2.5 py-2 text-right">
@@ -1395,9 +1418,6 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                 <td className="px-2.5 py-2 text-right">
                   <div className="text-slate-700 font-bold">{formatNumber(pageTotalOutputQty)}</div>
                   <div>{formatVND(summary?.total_output_amount ?? 0)}</div>
-                </td>
-                <td className="px-2.5 py-2 text-right font-bold text-slate-800">
-                  {formatVND(summary?.total_cogs_amount ?? 0)}
                 </td>
                 <td className="px-2.5 py-2 text-right font-bold text-emerald-800">
                   {formatVND(summary?.total_ending_inventory_value ?? 0)}
@@ -1455,7 +1475,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
               <div className="flex items-center gap-2">
                 <Building2 size={17} className="text-red-500" />
                 <span className="text-xs font-bold uppercase tracking-wide text-white">
-                  Chi Tiết Tồn Kho Thuế Theo Từng MST · Mã NPP {selectedNppRow.npp_code || selectedNppRow.sku}
+                  Chi Tiết Tồn Kho Thuế Theo Từng MST · Mã SP XHĐ {selectedNppRow.invoice_product_code || selectedNppRow.npp_code || selectedNppRow.sku}
                 </span>
               </div>
               <button
@@ -1469,7 +1489,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
 
             <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
               <div className="font-bold text-sky-900">
-                {selectedNppRow.product_name} ({selectedNppRow.unit_name || "ĐVT"})
+                {selectedNppRow.invoice_product_name || selectedNppRow.product_name} ({selectedNppRow.unit_name || "ĐVT"})
               </div>
               <div className="flex flex-wrap items-center gap-4 font-semibold text-slate-700">
                 <span>Tổng Nhập: {formatNumber(selectedNppRow.input_qty)}</span>
@@ -1479,7 +1499,7 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                     selectedNppRow.balance_qty < 0 ? "text-red-700 font-bold" : "text-emerald-700 font-bold"
                   }
                 >
-                  Tổng Tồn NPP: {formatNumber(selectedNppRow.balance_qty)} ({formatVND(selectedNppRow.ending_inventory_value)})
+                  Tổng Tồn: {formatNumber(selectedNppRow.balance_qty)} ({formatVND(selectedNppRow.ending_inventory_value)})
                 </span>
               </div>
             </div>
@@ -1489,8 +1509,9 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                 <table className="w-full border-collapse text-left">
                   <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 uppercase sticky top-0">
                     <tr className="border-b border-slate-200">
-                      <th className="px-2.5 py-2">MST / Công ty quản lý</th>
-                      <th className="px-2.5 py-2">Mã SKU CQT</th>
+                      <th className="px-2.5 py-2">MST</th>
+                      <th className="px-2.5 py-2">Tên công ty quản lý</th>
+                      <th className="px-2.5 py-2">Mã SP XHĐ</th>
                       <th className="px-2.5 py-2 text-right">Đầu kỳ</th>
                       <th className="px-2.5 py-2 text-right">Nhập CQT</th>
                       <th className="px-2.5 py-2 text-right">Xuất HĐĐT</th>
@@ -1505,11 +1526,11 @@ export default function TaxInventoryByMstPanel({ distributorId }: { distributorI
                         key={`${b.tax_code}::${b.sku}`}
                         className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/60 text-[11px]"
                       >
-                        <td className="px-2.5 py-1.5 max-w-[220px]">
-                          <div className="font-mono font-bold text-slate-800">{b.tax_code}</div>
-                          <div className="truncate text-[10px] text-slate-500" title={b.company_name}>
-                            {b.company_name}
-                          </div>
+                        <td className="px-2.5 py-1.5 font-mono font-bold text-slate-800 whitespace-nowrap">
+                          {b.tax_code}
+                        </td>
+                        <td className="px-2.5 py-1.5 max-w-[220px] truncate text-slate-700 font-medium" title={b.company_name}>
+                          {b.company_name}
                         </td>
                         <td className="px-2.5 py-1.5 font-mono font-bold text-sky-800 whitespace-nowrap">
                           <div>{b.invoice_product_code || b.sku}</div>

@@ -24,12 +24,14 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = (
         "http://localhost:3000,http://localhost:3001,"
         "http://127.0.0.1:3000,http://127.0.0.1:3001,"
+        "https://trungdong.com.vn,https://www.trungdong.com.vn,"
         "http://103.90.225.142.sslip.io,https://103.90.225.142.sslip.io,"
         "http://web.103.90.225.142.sslip.io,https://web.103.90.225.142.sslip.io,"
         "http://app.103.90.225.142.sslip.io,https://app.103.90.225.142.sslip.io"
     )
     ALLOWED_ORIGIN_REGEX: str = (
-        r"^https?://([a-z0-9-]+\.)?103\.90\.225\.142\.sslip\.io(:\d+)?$"
+        r"^https?://([a-z0-9-]+\.)?trungdong\.com\.vn(:\d+)?$"
+        r"|^https?://([a-z0-9-]+\.)?103\.90\.225\.142\.sslip\.io(:\d+)?$"
         r"|^https?://103\.90\.225\.142(:\d+)?$"
     )
     ALLOW_MOCK_EINVOICE: bool = False

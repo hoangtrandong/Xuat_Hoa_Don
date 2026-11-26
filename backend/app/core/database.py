@@ -101,6 +101,45 @@ def init_db() -> None:
                     WHERE npp_code IS NULL
                 """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_product_companies_npp_code_upper ON product_companies (UPPER(npp_code));"))
+        # Thêm cột invoice_product_id theo từng (SKU, MST) và backfill 1 lần từ products.invoice_product_id nếu cột mới tạo
+        if "invoice_product_id" not in pc_cols:
+            if engine.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        "ALTER TABLE product_companies ADD COLUMN IF NOT EXISTS invoice_product_id INTEGER "
+                        "REFERENCES invoice_products(id) ON DELETE SET NULL;"
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        UPDATE product_companies pc
+                        SET invoice_product_id = p.invoice_product_id
+                        FROM products p
+                        WHERE pc.product_id = p.id
+                          AND pc.invoice_product_id IS NULL
+                          AND p.invoice_product_id IS NOT NULL
+                        """
+                    )
+                )
+            else:
+                conn.execute(text("ALTER TABLE product_companies ADD COLUMN invoice_product_id INTEGER;"))
+                conn.execute(
+                    text(
+                        """
+                        UPDATE product_companies
+                        SET invoice_product_id = (
+                            SELECT p.invoice_product_id
+                            FROM products p
+                            WHERE p.id = product_companies.product_id
+                              AND p.invoice_product_id IS NOT NULL
+                        )
+                        WHERE invoice_product_id IS NULL
+                        """
+                    )
+                )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_product_companies_invoice_product_id ON product_companies (invoice_product_id);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_product_companies_company_ip ON product_companies (company_id, invoice_product_id);"))
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS source_sku VARCHAR(80);"))
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS source_quantity DOUBLE PRECISION;"))
         conn.execute(text("ALTER TABLE issued_invoice_items ADD COLUMN IF NOT EXISTS source_unit VARCHAR(50);"))

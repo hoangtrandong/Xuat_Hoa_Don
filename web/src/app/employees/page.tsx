@@ -411,7 +411,7 @@ export default function EmployeesPage() {
           <div className="flex items-center gap-2">
             <Users size={17} className="text-red-500" />
             <h1 className="text-xs font-bold uppercase tracking-wide text-white">
-              Danh Mục Nhân Viên & Nhân Viên Giao Hàng (Master)
+              Danh Mục Nhân Viên
             </h1>
             <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
               {formatNumber(rows.length)} nhân viên
@@ -796,7 +796,7 @@ export default function EmployeesPage() {
                 <h2 className="text-xs font-bold uppercase tracking-wide text-white">
                   {editingRow
                     ? `Cập Nhật Nhân Viên · ${editingRow.code}`
-                    : "Thêm Mới Nhân Viên / Nhân Viên Giao Hàng"}
+                    : "Thêm Mới Nhân Viên"}
                 </h2>
               </div>
               <button

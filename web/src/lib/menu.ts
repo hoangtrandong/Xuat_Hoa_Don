@@ -57,7 +57,7 @@ export const menuItems: MenuItem[] = [
   },
   {
     key: "employees",
-    label: "Nhân viên & Giao hàng",
+    label: "Nhân viên",
     icon: "Users",
     href: "/employees",
   },

@@ -3593,6 +3593,97 @@ def update_manual_order(
     )
 
 
+class BulkDeleteOrderTarget(BaseModel):
+    order_number: str = Field(min_length=1)
+    distributor_code: str | None = None
+
+
+class BulkDeleteOrdersRequest(BaseModel):
+    orders: list[BulkDeleteOrderTarget] = Field(min_length=1)
+
+
+def _bulk_delete_orders(db: Session, payload: BulkDeleteOrdersRequest) -> dict[str, Any]:
+    targets: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in payload.orders:
+        num = (item.order_number or "").strip()
+        if not num:
+            continue
+        dist = (item.distributor_code or "").strip().upper()
+        key = (num.upper(), dist)
+        if key not in seen:
+            seen.add(key)
+            targets.append((num, dist))
+    if not targets:
+        raise HTTPException(status_code=400, detail="Vui lòng chọn ít nhất 1 đơn hàng để xóa.")
+
+    target_upper_nums = sorted({num.upper() for num, _ in targets})
+    locked_nums = db.scalars(
+        select(DeliveryRequestOrder.order_number)
+        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
+        .where(
+            func.upper(DeliveryRequestOrder.order_number).in_(target_upper_nums),
+            DeliveryRequest.status != "CANCELLED",
+        )
+        .distinct()
+    ).all()
+    if locked_nums:
+        locked_list = ", ".join(sorted({str(n) for n in locked_nums if n}))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Không thể xóa vì các đơn sau đã nằm trong yêu cầu xuất hàng: {locked_list}.",
+        )
+
+    candidates = db.scalars(
+        select(VinamilkOrderSnapshot).where(
+            func.upper(VinamilkOrderSnapshot.order_number).in_(target_upper_nums)
+        )
+    ).all()
+
+    delete_ids: list[int] = []
+    deleted_order_numbers: set[str] = set()
+    for snap in candidates:
+        snap_num_upper = (snap.order_number or "").strip().upper()
+        snap_raw = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+        snap_dist = (
+            str(snap_raw.get("Mã NPP") or snap_raw.get("_distributor_code") or "").strip().upper()
+            or (snap.performed_by or "").strip().upper()
+        )
+        matched = False
+        for num, dist in targets:
+            if snap_num_upper != num.upper():
+                continue
+            if not dist or snap_dist == dist or (snap.performed_by or "").strip().upper() == dist:
+                matched = True
+                break
+        if matched:
+            delete_ids.append(snap.id)
+            if snap.order_number:
+                deleted_order_numbers.add(snap.order_number)
+
+    if not delete_ids:
+        raise HTTPException(status_code=404, detail="Không tìm thấy đơn hàng nào khớp để xóa.")
+
+    result = db.execute(
+        delete(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.id.in_(delete_ids))
+    )
+    db.commit()
+    return {
+        "deleted_orders": sorted(deleted_order_numbers),
+        "deleted_count": len(deleted_order_numbers),
+        "deleted_lines": result.rowcount or len(delete_ids),
+    }
+
+
+@router.post("/vinamilk-orders/bulk-delete")
+def bulk_delete_orders(
+    payload: BulkDeleteOrdersRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _bulk_delete_orders(db, payload)
+
+
 @router.delete("/vinamilk-orders/manual/{order_number}")
 def delete_manual_order(
     order_number: str,

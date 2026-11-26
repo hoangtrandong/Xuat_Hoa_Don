@@ -511,6 +511,8 @@ export default function SalesOrdersPage() {
   const [isCreateOrderOpen, setIsCreateOrderOpen] = useState(false);
   const [editingManualOrderNumber, setEditingManualOrderNumber] = useState<string | null>(null);
   const [deletingManualOrder, setDeletingManualOrder] = useState(false);
+  const [selectedSummaryKeys, setSelectedSummaryKeys] = useState<Set<string>>(new Set());
+  const [isBulkDeletingOrders, setIsBulkDeletingOrders] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
   const defaultDateRange = getDefaultDateRange();
@@ -621,6 +623,10 @@ export default function SalesOrdersPage() {
     const created = window.sessionStorage.getItem("dms-order-created");
     if (created) window.sessionStorage.removeItem("dms-order-created");
   }, []);
+
+  useEffect(() => {
+    setSelectedSummaryKeys(new Set());
+  }, [remoteOrders]);
 
   useEffect(() => {
     if (!isCreateOrderOpen && editingManualOrderNumber === null) return;
@@ -2708,6 +2714,29 @@ return Array.from(map.values());
     ...remoteColumns.filter((column) => [
       "Ngày tạo", "Nhà phân phối", "Nguồn đồng bộ", "Nhà cung cấp", "Mã KH", "Tên KH",
     ].includes(column.title)),
+    {
+      key: "Tên NVBH",
+      title: "Nhân viên bán hàng",
+      sortable: true,
+      width: "13rem",
+      render: (_value, order) => {
+        const staffName = displayRemoteValue(order["Tên NVBH"] || order["staffName"] || order["salesStaffName"]).trim();
+        const staffCode = displayRemoteValue(order["Mã NVBH"] || order["staffCode"] || order["salesStaffCode"]).trim();
+        if (!staffName && !staffCode) {
+          return <span className="text-slate-400">—</span>;
+        }
+        return (
+          <div className="flex flex-col leading-tight">
+            <span className="truncate font-medium text-slate-800" title={staffName || staffCode}>
+              {staffName || staffCode}
+            </span>
+            {staffCode && staffName && (
+              <span className="font-mono text-[10px] text-slate-500">{staffCode}</span>
+            )}
+          </div>
+        );
+      },
+    },
     { key: "Số sản phẩm", title: "Số sản phẩm", sortable: true, align: "right", width: "8rem" },
     ...remoteColumns.filter((column) => ["Giá trị", "Số tiền CK", "Thành tiền"].includes(column.title)),
   ];
@@ -3479,6 +3508,74 @@ return Array.from(map.values());
           searchable={false}
           pageSize={500}
           hidePagination
+          selectable
+          selectedKeys={selectedSummaryKeys}
+          onSelectedKeysChange={setSelectedSummaryKeys}
+          toolbar={
+            selectedSummaryKeys.size > 0 ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-slate-700">
+                  Đã chọn <span className="text-sky-700">{selectedSummaryKeys.size}</span> đơn hàng
+                </span>
+                <button
+                  type="button"
+                  disabled={isBulkDeletingOrders}
+                  onClick={async () => {
+                    const selectedRows = orderSummaries.filter((order) =>
+                      selectedSummaryKeys.has(displayRemoteValue(order["_summary_key"]))
+                    );
+                    const targets = selectedRows
+                      .map((order) => ({
+                        order_number: displayRemoteValue(order["Số đơn hàng"]).trim(),
+                        distributor_code: displayRemoteValue(order["_distributor_code"]).trim() || null,
+                      }))
+                      .filter((item) => item.order_number);
+                    if (targets.length === 0) return;
+                    const previewList = targets.slice(0, 5).map((t) => t.order_number).join(", ");
+                    const moreText = targets.length > 5 ? ` và ${targets.length - 5} đơn khác` : "";
+                    if (!window.confirm(`Xác nhận xóa ${targets.length} đơn hàng đã chọn (${previewList}${moreText})?`)) {
+                      return;
+                    }
+                    setIsBulkDeletingOrders(true);
+                    setRemoteError("");
+                    try {
+                      const res = await apiFetch(`${API_URL}/sync/vinamilk-orders/bulk-delete`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ orders: targets }),
+                      });
+                      const data = (await res.json().catch(() => ({}))) as {
+                        deleted_count?: number;
+                        detail?: string;
+                      };
+                      if (!res.ok) {
+                        throw new Error(data.detail || "Không thể xóa các đơn hàng đã chọn.");
+                      }
+                      setSelectedSummaryKeys(new Set());
+                      setToast(`Đã xóa ${data.deleted_count ?? targets.length} đơn hàng.`);
+                      await loadLocalOrders();
+                    } catch (error) {
+                      setRemoteError(error instanceof Error ? error.message : "Không thể xóa các đơn hàng đã chọn.");
+                    } finally {
+                      setIsBulkDeletingOrders(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {isBulkDeletingOrders ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                  Xóa đơn đã chọn ({selectedSummaryKeys.size})
+                </button>
+                <button
+                  type="button"
+                  disabled={isBulkDeletingOrders}
+                  onClick={() => setSelectedSummaryKeys(new Set())}
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50"
+                >
+                  Bỏ chọn
+                </button>
+              </div>
+            ) : undefined
+          }
           emptyMessage="Không có đơn hàng trong khoảng ngày đã chọn"
           getRowKey={(order) => displayRemoteValue(order["_summary_key"])}
           fitColumns

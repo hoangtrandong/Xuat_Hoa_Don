@@ -10,6 +10,8 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  (đăng ký toàn bộ model)
 from app.api.v1.endpoints.sync import (
+    BulkDeleteOrderTarget,
+    BulkDeleteOrdersRequest,
     ManualOrderLine,
     ManualOrderRequest,
     MergeOrdersRequest,
@@ -17,6 +19,7 @@ from app.api.v1.endpoints.sync import (
     SplitOrderRequest,
     SplitOrderTarget,
     _approve_split_order_request,
+    _bulk_delete_orders,
     _create_split_order_request,
     _create_manual_order,
     _delete_manual_order,
@@ -688,6 +691,60 @@ def test_get_and_update_manual_order(db):
     with pytest.raises(HTTPException) as locked_err:
         _update_manual_order(db, order_number, _payload())
     assert locked_err.value.status_code == 400
+
+
+def test_bulk_delete_orders_deletes_selected_and_blocks_active_delivery(db):
+    day = date(2026, 11, 4)
+    manual = _create_manual_order(db, _payload(), performed_by="admin")
+    db.add_all([
+        VinamilkOrderSnapshot(
+            remote_key="bulk-del-1",
+            order_number="DMS-WRONG-01",
+            customer_code="0MD",
+            product_code="01VD41",
+            order_created_date=day,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"Số đơn hàng": "DMS-WRONG-01"},
+        ),
+        VinamilkOrderSnapshot(
+            remote_key="bulk-del-2",
+            order_number="DMS-LOCKED-02",
+            customer_code="0MD",
+            product_code="01VD41",
+            order_created_date=day,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"Số đơn hàng": "DMS-LOCKED-02"},
+        ),
+    ])
+    warehouse = Warehouse(code="WH-BULK-DEL", name="Kho", location="HN")
+    db.add(warehouse)
+    db.flush()
+    req = DeliveryRequest(code="YC-BULK-DEL", warehouse_id=warehouse.id, status="DRAFT")
+    db.add(req)
+    db.flush()
+    db.add(DeliveryRequestOrder(delivery_request_id=req.id, order_number="DMS-LOCKED-02", employee_code="NV001"))
+    db.commit()
+
+    # Chặn nếu trong danh sách chọn có đơn đang nằm trong YCXH
+    with pytest.raises(HTTPException) as err:
+        _bulk_delete_orders(db, BulkDeleteOrdersRequest(orders=[
+            BulkDeleteOrderTarget(order_number="DMS-WRONG-01"),
+            BulkDeleteOrderTarget(order_number="DMS-LOCKED-02"),
+        ]))
+    assert err.value.status_code == 400
+    assert "DMS-LOCKED-02" in str(err.value.detail)
+
+    # Xóa thành công cả đơn tự tạo lẫn đơn đồng bộ sai
+    res = _bulk_delete_orders(db, BulkDeleteOrdersRequest(orders=[
+        BulkDeleteOrderTarget(order_number=manual["order_number"]),
+        BulkDeleteOrderTarget(order_number="DMS-WRONG-01"),
+    ]))
+    assert res["deleted_count"] == 2
+    assert set(res["deleted_orders"]) == {manual["order_number"], "DMS-WRONG-01"}
+    remaining = db.scalars(select(VinamilkOrderSnapshot.order_number)).all()
+    assert remaining == ["DMS-LOCKED-02"]
 
 
 def test_manual_order_defaults_staff_to_current_user_and_records_delivery_employee(db):

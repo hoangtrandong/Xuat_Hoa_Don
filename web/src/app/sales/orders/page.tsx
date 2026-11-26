@@ -3662,64 +3662,69 @@ return Array.from(map.values());
         title={`Chi tiết đơn hàng ${detailOrderNumber ?? ""}`}
         subtitle={detailLoading ? "Đang tải chi tiết..." : `${detailOrderLines.length} dòng sản phẩm`}
         footer={
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {detailOrderNumber?.toUpperCase().startsWith("TC-") && !detailLoading && detailOrderLines.length > 0 && (
-              <>
-                <button
-                  type="button"
-                  disabled={deletingManualOrder}
-                  onClick={async () => {
-                    if (!detailOrderNumber) return;
-                    if (!window.confirm(`Xác nhận xóa đơn hàng tự tạo ${detailOrderNumber}?`)) return;
-                    setDeletingManualOrder(true);
-                    setDetailError("");
-                    try {
-                      const res = await apiFetch(
-                        `${API_URL}/sync/vinamilk-orders/manual/${encodeURIComponent(detailOrderNumber)}`,
-                        { method: "DELETE" }
-                      );
-                      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-                      if (!res.ok) throw new Error(data.detail || "Không thể xóa đơn hàng.");
-                      const deletedNumber = detailOrderNumber;
+          <div className="flex items-center justify-between gap-3">
+            <p className="hidden text-[10px] text-slate-500 sm:block">
+              Kiểm tra thông tin đơn hàng trước khi thực hiện tác vụ.
+            </p>
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              {detailOrderNumber?.toUpperCase().startsWith("TC-") && !detailLoading && detailOrderLines.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    disabled={deletingManualOrder}
+                    onClick={async () => {
+                      if (!detailOrderNumber) return;
+                      if (!window.confirm(`Xác nhận xóa đơn hàng tự tạo ${detailOrderNumber}?`)) return;
+                      setDeletingManualOrder(true);
+                      setDetailError("");
+                      try {
+                        const res = await apiFetch(
+                          `${API_URL}/sync/vinamilk-orders/manual/${encodeURIComponent(detailOrderNumber)}`,
+                          { method: "DELETE" }
+                        );
+                        const data = (await res.json().catch(() => ({}))) as { detail?: string };
+                        if (!res.ok) throw new Error(data.detail || "Không thể xóa đơn hàng.");
+                        const deletedNumber = detailOrderNumber;
+                        detailRequestVersion.current++;
+                        setDetailOrderNumber(null);
+                        setToast(`Đã xóa đơn hàng tự tạo ${deletedNumber}.`);
+                        void loadLocalOrders().catch((error) => {
+                          setRemoteError(error instanceof Error ? error.message : "Không thể tải lại danh sách đơn hàng.");
+                        });
+                      } catch (error) {
+                        setDetailError(error instanceof Error ? error.message : "Không thể xóa đơn hàng.");
+                      } finally {
+                        setDeletingManualOrder(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {deletingManualOrder ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                    Xóa đơn
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deletingManualOrder}
+                    onClick={() => {
+                      const targetOrder = detailOrderNumber;
                       detailRequestVersion.current++;
                       setDetailOrderNumber(null);
-                      setToast(`Đã xóa đơn hàng tự tạo ${deletedNumber}.`);
-                      void loadLocalOrders().catch((error) => {
-                        setRemoteError(error instanceof Error ? error.message : "Không thể tải lại danh sách đơn hàng.");
-                      });
-                    } catch (error) {
-                      setDetailError(error instanceof Error ? error.message : "Không thể xóa đơn hàng.");
-                    } finally {
-                      setDeletingManualOrder(false);
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {deletingManualOrder ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                  Xóa đơn
-                </button>
-                <button
-                  type="button"
-                  disabled={deletingManualOrder}
-                  onClick={() => {
-                    const targetOrder = detailOrderNumber;
-                    detailRequestVersion.current++;
-                    setDetailOrderNumber(null);
-                    setIsCreateOrderOpen(false);
-                    setEditingManualOrderNumber(targetOrder);
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
-                >
-                  <Pencil size={13} />
-                  Sửa đơn
-                </button>
-              </>
-            )}
-            <button type="button" onClick={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }} className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800">Đóng</button>
+                      setIsCreateOrderOpen(false);
+                      setEditingManualOrderNumber(targetOrder);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    <Pencil size={13} />
+                    Sửa đơn
+                  </button>
+                </>
+              )}
+              <button type="button" onClick={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }} className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800">Đóng</button>
+            </div>
           </div>
         }
       >
-        <div className="space-y-3 p-3 sm:p-4">
+        <div className="space-y-2.5 bg-slate-50/60 p-3">
           {detailError && <p role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700">{detailError}</p>}
           {detailLoading && (
             <div className="flex items-center gap-2 py-6 text-xs text-slate-500">

@@ -32,7 +32,7 @@ function OpenOrderActionModal({ onClose, title, subtitle, children, footer }: Om
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
-      className="fixed inset-0 m-auto h-[100dvh] max-h-none w-full max-w-[1500px] overflow-hidden border border-slate-400 bg-white p-0 shadow-lg backdrop:bg-slate-950/50 sm:h-[96dvh] sm:w-[calc(100%-2rem)] sm:rounded-xl"
+      className="fixed inset-0 m-auto h-[100dvh] max-h-none w-full max-w-[1500px] overflow-hidden border border-slate-400 bg-white p-0 shadow-lg backdrop:bg-slate-950/50 sm:h-[96dvh] sm:w-[calc(100%-2rem)] sm:rounded"
     >
       <div className="flex h-full min-h-0 flex-col">
         <div className="flex shrink-0 items-center justify-between gap-3 bg-[#14263d] px-3 py-2 text-white">

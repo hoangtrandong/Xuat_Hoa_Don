@@ -9,14 +9,19 @@ const UPSTREAM_API_URL = (
 export const dynamic = "force-dynamic";
 
 async function proxyRequest(request: NextRequest) {
-  // Preserve exact path (including trailing slash if present) and query string
+  // Preserve exact path (restore trailing slash via _ts=1 flag so Next.js 308 stripping never breaks FastAPI routes)
   const prefix = "/api/proxy";
   const rawPathname = request.nextUrl.pathname;
-  const subPath = rawPathname.startsWith(prefix)
+  let subPath = rawPathname.startsWith(prefix)
     ? rawPathname.slice(prefix.length)
     : rawPathname;
-  const search = request.nextUrl.search || "";
-  const targetUrl = `${UPSTREAM_API_URL}${subPath}${search}`;
+  const params = new URLSearchParams(request.nextUrl.searchParams);
+  if (params.get("_ts") === "1") {
+    params.delete("_ts");
+    if (!subPath.endsWith("/")) subPath += "/";
+  }
+  const qs = params.toString();
+  const targetUrl = `${UPSTREAM_API_URL}${subPath}${qs ? `?${qs}` : ""}`;
 
   const forwardHeaders = new Headers();
   const allowedRequestHeaders = [

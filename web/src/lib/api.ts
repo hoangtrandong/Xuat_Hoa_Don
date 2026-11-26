@@ -41,7 +41,18 @@ function shouldUseSameOriginProxy(requestUrl: string): boolean {
 
 export function resolveApiRequestUrl(url: string): string {
   if (shouldUseSameOriginProxy(url)) {
-    return `/api/proxy${url.slice(API_URL.length)}`;
+    const rest = url.slice(API_URL.length);
+    const qIdx = rest.indexOf("?");
+    const rawPath = qIdx >= 0 ? rest.slice(0, qIdx) : rest;
+    const rawSearch = qIdx >= 0 ? rest.slice(qIdx + 1) : "";
+    const hadTrailingSlash = rawPath.length > 1 && rawPath.endsWith("/");
+    const cleanPath = hadTrailingSlash ? rawPath.slice(0, -1) : rawPath;
+    const params = new URLSearchParams(rawSearch);
+    if (hadTrailingSlash) {
+      params.set("_ts", "1");
+    }
+    const qs = params.toString();
+    return `/api/proxy${cleanPath}${qs ? `?${qs}` : ""}`;
   }
   return url;
 }

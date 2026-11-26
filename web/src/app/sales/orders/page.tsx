@@ -21,6 +21,8 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import PageHeader from "@/components/ui/PageHeader";
@@ -507,6 +509,8 @@ export default function SalesOrdersPage() {
 
   const [toast, setToast] = useState("");
   const [isCreateOrderOpen, setIsCreateOrderOpen] = useState(false);
+  const [editingManualOrderNumber, setEditingManualOrderNumber] = useState<string | null>(null);
+  const [deletingManualOrder, setDeletingManualOrder] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null);
   const defaultDateRange = getDefaultDateRange();
@@ -619,13 +623,16 @@ export default function SalesOrdersPage() {
   }, []);
 
   useEffect(() => {
-    if (!isCreateOrderOpen) return;
+    if (!isCreateOrderOpen && editingManualOrderNumber === null) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setIsCreateOrderOpen(false);
+      if (event.key === "Escape") {
+        setIsCreateOrderOpen(false);
+        setEditingManualOrderNumber(null);
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isCreateOrderOpen]);
+  }, [isCreateOrderOpen, editingManualOrderNumber]);
 
   useEffect(() => {
     apiFetch(`${API_URL}/auth/me`)
@@ -3234,24 +3241,34 @@ return Array.from(map.values());
 
   return (
     <div className="space-y-6">
-      {isCreateOrderOpen && (
+      {(isCreateOrderOpen || editingManualOrderNumber !== null) && (
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 p-2 sm:p-4"
           onClick={(event) => {
-            if (event.target === event.currentTarget) setIsCreateOrderOpen(false);
+            if (event.target === event.currentTarget) {
+              setIsCreateOrderOpen(false);
+              setEditingManualOrderNumber(null);
+            }
           }}
         >
           <div
             role="dialog"
             aria-modal="true"
-            aria-label="Tạo đơn hàng"
+            aria-label={editingManualOrderNumber ? `Chỉnh sửa đơn hàng ${editingManualOrderNumber}` : "Tạo đơn hàng"}
             className="max-h-[96vh] w-full max-w-[1500px] overflow-y-auto"
           >
             <CreateOrderForm
-              onClose={() => setIsCreateOrderOpen(false)}
-              onSaved={(orderNumber) => {
+              key={editingManualOrderNumber ?? "create"}
+              editOrderNumber={editingManualOrderNumber}
+              onClose={() => {
                 setIsCreateOrderOpen(false);
-                setToast(`Đơn hàng ${orderNumber} đã được tạo.`);
+                setEditingManualOrderNumber(null);
+              }}
+              onSaved={(orderNumber) => {
+                const wasEdit = editingManualOrderNumber !== null;
+                setIsCreateOrderOpen(false);
+                setEditingManualOrderNumber(null);
+                setToast(wasEdit ? `Đơn hàng ${orderNumber} đã được cập nhật.` : `Đơn hàng ${orderNumber} đã được tạo.`);
                 void loadLocalOrders().catch((error) => {
                   setRemoteError(error instanceof Error ? error.message : "Không thể tải lại danh sách đơn hàng.");
                 });
@@ -3547,7 +3564,63 @@ return Array.from(map.values());
         onClose={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }}
         title={`Chi tiết đơn hàng ${detailOrderNumber ?? ""}`}
         subtitle={detailLoading ? "Đang tải chi tiết..." : `${detailOrderLines.length} dòng sản phẩm`}
-        footer={<div className="flex justify-end"><button type="button" onClick={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }} className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800">Đóng</button></div>}
+        footer={
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {detailOrderNumber?.toUpperCase().startsWith("TC-") && !detailLoading && detailOrderLines.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  disabled={deletingManualOrder}
+                  onClick={async () => {
+                    if (!detailOrderNumber) return;
+                    if (!window.confirm(`Xác nhận xóa đơn hàng tự tạo ${detailOrderNumber}?`)) return;
+                    setDeletingManualOrder(true);
+                    setDetailError("");
+                    try {
+                      const res = await apiFetch(
+                        `${API_URL}/sync/vinamilk-orders/manual/${encodeURIComponent(detailOrderNumber)}`,
+                        { method: "DELETE" }
+                      );
+                      const data = (await res.json().catch(() => ({}))) as { detail?: string };
+                      if (!res.ok) throw new Error(data.detail || "Không thể xóa đơn hàng.");
+                      const deletedNumber = detailOrderNumber;
+                      detailRequestVersion.current++;
+                      setDetailOrderNumber(null);
+                      setToast(`Đã xóa đơn hàng tự tạo ${deletedNumber}.`);
+                      void loadLocalOrders().catch((error) => {
+                        setRemoteError(error instanceof Error ? error.message : "Không thể tải lại danh sách đơn hàng.");
+                      });
+                    } catch (error) {
+                      setDetailError(error instanceof Error ? error.message : "Không thể xóa đơn hàng.");
+                    } finally {
+                      setDeletingManualOrder(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deletingManualOrder ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                  Xóa đơn
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingManualOrder}
+                  onClick={() => {
+                    const targetOrder = detailOrderNumber;
+                    detailRequestVersion.current++;
+                    setDetailOrderNumber(null);
+                    setIsCreateOrderOpen(false);
+                    setEditingManualOrderNumber(targetOrder);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  <Pencil size={13} />
+                  Sửa đơn
+                </button>
+              </>
+            )}
+            <button type="button" onClick={() => { detailRequestVersion.current++; setDetailOrderNumber(null); }} className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800">Đóng</button>
+          </div>
+        }
       >
         <div className="space-y-4 p-3 sm:p-5">
           {detailError && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-700">{detailError}</p>}

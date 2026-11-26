@@ -141,13 +141,43 @@ function normalizeText(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").toLowerCase();
 }
 
+interface ManualOrderDetailResponse {
+  order_number: string;
+  customer_code: string;
+  order_type: string;
+  order_date: string;
+  entry_date: string;
+  delivery_date: string;
+  sales_route: string;
+  staff_code: string;
+  staff_name: string;
+  delivery_employee_code: string;
+  delivery_employee_name: string;
+  note: string;
+  can_edit: boolean;
+  edit_blocked_reason: string | null;
+  lines: Array<{
+    product_code: string;
+    quantity: number;
+    cartons: number | null;
+    boxes: number | null;
+    promo_quantity: number;
+    unit_price: number;
+    discount_amount: number;
+    promotion_id: number | null;
+  }>;
+}
+
 export default function CreateOrderForm({
+  editOrderNumber,
   onClose,
   onSaved,
 }: {
+  editOrderNumber?: string | null;
   onClose?: () => void;
   onSaved?: (orderNumber: string) => void;
 }) {
+  const isEditMode = Boolean(editOrderNumber);
   const router = useRouter();
   const [customers, setCustomers] = useState<SystemCustomer[]>([]);
   const [products, setProducts] = useState<SystemProduct[]>([]);
@@ -158,6 +188,7 @@ export default function CreateOrderForm({
   const [stockLoading, setStockLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [editBlockedReason, setEditBlockedReason] = useState("");
 
   const [customerQuery, setCustomerQuery] = useState("");
   const [customerOpen, setCustomerOpen] = useState(false);
@@ -173,7 +204,7 @@ export default function CreateOrderForm({
   const [entryDate, setEntryDate] = useState(todayStr());
   const [deliveryDate, setDeliveryDate] = useState(todayStr());
   const [salesRoute, setSalesRoute] = useState("");
-  const [orderNumber, setOrderNumber] = useState("");
+  const [orderNumber, setOrderNumber] = useState(editOrderNumber ?? "");
   const [orderNumberError, setOrderNumberError] = useState("");
   const [promotions, setPromotions] = useState<PromotionOption[]>([]);
   const [promotionError, setPromotionError] = useState("");
@@ -193,30 +224,41 @@ export default function CreateOrderForm({
     let cancelled = false;
     async function load() {
       try {
-        const [custRes, prodRes, unitRes, whRes, meRes, empRes] = await Promise.all([
+        const requests: Array<Promise<Response>> = [
           apiFetch(`${API_URL}/customers/?limit=5000`),
           apiFetch(`${API_URL}/products/?limit=10000`),
           apiFetch(`${API_URL}/products/units/`),
           apiFetch(`${API_URL}/inventory/warehouses/`),
           apiFetch(`${API_URL}/auth/me`),
           apiFetch(`${API_URL}/employees/?status=active&limit=1000`),
-        ]);
+        ];
+        if (editOrderNumber) {
+          requests.push(apiFetch(`${API_URL}/sync/vinamilk-orders/manual/${encodeURIComponent(editOrderNumber)}`));
+        }
+        const [custRes, prodRes, unitRes, whRes, meRes, empRes, editRes] = await Promise.all(requests);
         if (!custRes.ok) throw new Error("Không thể tải danh sách khách hàng.");
         if (!prodRes.ok) throw new Error("Không thể tải Danh sách SKU.");
         if (!whRes.ok) throw new Error("Không thể tải danh sách kho.");
+        if (editOrderNumber && editRes && !editRes.ok) {
+          const errPayload = (await editRes.json().catch(() => ({}))) as { detail?: string };
+          throw new Error(errPayload.detail || `Không thể tải thông tin đơn ${editOrderNumber}.`);
+        }
         const custRows = (await custRes.json()) as Array<Record<string, unknown>>;
         const prodRows = (await prodRes.json()) as Array<Record<string, unknown>>;
         const unitRows = unitRes.ok ? ((await unitRes.json()) as Array<{ id: number; name: string }>) : [];
         const whRows = (await whRes.json()) as Array<{ id: number; name: string }>;
         const me = meRes.ok ? ((await meRes.json()) as CurrentUser) : null;
         const empRows = empRes.ok ? ((await empRes.json()) as EmployeeOption[]) : [];
+        const editDetail = editOrderNumber && editRes ? ((await editRes.json()) as ManualOrderDetailResponse) : null;
         if (cancelled) return;
         // NVBH mac dinh = nhan vien gan voi tai khoan dang dang nhap.
         // Tai khoan quan tri (vd: admin) khong gan nhan vien -> NVBH lay theo khach hang khi chon KH.
         if (me?.employee_code) {
           hasOwnStaffRef.current = true;
-          setStaffCode(me.employee_code);
-          setStaffName(me.employee_name ?? "");
+          if (!editDetail) {
+            setStaffCode(me.employee_code);
+            setStaffName(me.employee_name ?? "");
+          }
         }
         setCreatedBy(me?.full_name || me?.username || "");
         // NVGH: nhan vien dang hoat dong co ma bat dau bang NV (giong man hinh Yeu cau xuat hang)
@@ -240,27 +282,72 @@ export default function CreateOrderForm({
             storeName: String(row.store_name ?? ""),
             salesRoute: String(row.store_route ?? ""),
           }));
+        const loadedProducts: SystemProduct[] = prodRows
+          .filter((row) => row.status !== "inactive")
+          .map((row) => ({
+            id: Number(row.id),
+            sku: String(row.sku ?? ""),
+            nppCode: String(row.npp_code ?? row.sku ?? ""),
+            name: String(row.name ?? ""),
+            unit: unitName.get(Number(row.unit_id)) ?? "",
+            supplier: String(row.supplier ?? ""),
+            basePrice: Number(row.base_price ?? 0),
+            boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
+          }));
         setCustomers(loadedCustomers);
-        setProducts(
-          prodRows
-            .filter((row) => row.status !== "inactive")
-            .map((row) => ({
-              id: Number(row.id),
-              sku: String(row.sku ?? ""),
-              nppCode: String(row.npp_code ?? row.sku ?? ""),
-              name: String(row.name ?? ""),
-              unit: unitName.get(Number(row.unit_id)) ?? "",
-              supplier: String(row.supplier ?? ""),
-              basePrice: Number(row.base_price ?? 0),
-              boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
-            }))
-        );
+        setProducts(loadedProducts);
         setWarehouses(whRows.map((w) => ({ id: w.id, name: w.name })));
         if (whRows.length > 0) setWarehouseId(whRows[0].id);
-        const key = new URLSearchParams(window.location.search).get("customer");
-        if (key) {
-          const c = loadedCustomers.find((x) => x.code === key);
-          if (c) selectCustomer(c);
+
+        if (editDetail) {
+          setOrderNumber(editDetail.order_number);
+          setOrderType(editDetail.order_type || "001-Xuất hàng");
+          setOrderDate(editDetail.order_date || todayStr());
+          setEntryDate(editDetail.entry_date || todayStr());
+          setDeliveryDate(editDetail.delivery_date || todayStr());
+          setSalesRoute(editDetail.sales_route || "");
+          setStaffCode(editDetail.staff_code || "");
+          setStaffName(editDetail.staff_name || "");
+          setDeliveryEmployeeCode(editDetail.delivery_employee_code || "");
+          setNote(editDetail.note || "");
+          setEditBlockedReason(editDetail.can_edit ? "" : (editDetail.edit_blocked_reason || "Đơn hàng này hiện không thể chỉnh sửa."));
+          const matchedCustomer = loadedCustomers.find(
+            (c) => c.code.trim().toUpperCase() === editDetail.customer_code.trim().toUpperCase()
+          );
+          if (matchedCustomer) setSelectedCustomer(matchedCustomer);
+          const productBySku = new Map(loadedProducts.map((p) => [p.sku.trim().toUpperCase(), p]));
+          const restoredLines: Line[] = [];
+          for (const rawLine of editDetail.lines) {
+            const matchedProduct = productBySku.get(rawLine.product_code.trim().toUpperCase());
+            if (!matchedProduct) continue;
+            const qty = Math.max(0, Number(rawLine.quantity ?? 0));
+            const bpc = matchedProduct.boxesPerCarton;
+            const cartons = rawLine.cartons != null ? Math.max(0, Number(rawLine.cartons)) : (bpc > 1 ? Math.floor(qty / bpc) : 0);
+            const boxes = rawLine.boxes != null ? Math.max(0, Number(rawLine.boxes)) : (bpc > 1 ? qty % bpc : qty);
+            restoredLines.push({
+              productId: matchedProduct.id,
+              productCode: matchedProduct.sku,
+              nppCode: matchedProduct.nppCode,
+              productName: matchedProduct.name,
+              unit: matchedProduct.unit,
+              supplier: matchedProduct.supplier,
+              boxesPerCarton: bpc,
+              cartons,
+              boxes,
+              quantity: qty,
+              promoQuantity: Number(rawLine.promo_quantity ?? 0),
+              price: Number(rawLine.unit_price ?? matchedProduct.basePrice),
+              discountAmount: Number(rawLine.discount_amount ?? 0),
+              promotionId: rawLine.promotion_id ?? null,
+            });
+          }
+          setLines(restoredLines);
+        } else {
+          const key = new URLSearchParams(window.location.search).get("customer");
+          if (key) {
+            const c = loadedCustomers.find((x) => x.code === key);
+            if (c) selectCustomer(c);
+          }
         }
       } catch (error) {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : "Không thể tải dữ liệu.");
@@ -272,7 +359,7 @@ export default function CreateOrderForm({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [editOrderNumber]);
 
   // Ton kha dung theo kho (chi de canh bao)
   useEffect(() => {
@@ -301,6 +388,7 @@ export default function CreateOrderForm({
   }, [warehouseId]);
 
   useEffect(() => {
+    if (isEditMode) return;
     let cancelled = false;
     setOrderNumberError("");
     apiFetch(`${API_URL}/sync/vinamilk-orders/manual/next-number?order_date=${orderDate}`)
@@ -320,7 +408,7 @@ export default function CreateOrderForm({
     return () => {
       cancelled = true;
     };
-  }, [orderDate]);
+  }, [orderDate, isEditMode]);
 
   function selectCustomer(c: SystemCustomer) {
     setSelectedCustomer(c);
@@ -627,6 +715,10 @@ export default function CreateOrderForm({
 
   async function handleSubmit() {
     setSubmitError("");
+    if (editBlockedReason) {
+      setSubmitError(editBlockedReason);
+      return;
+    }
     if (!selectedCustomer) {
       setSubmitError("Vui lòng chọn khách hàng.");
       return;
@@ -641,8 +733,11 @@ export default function CreateOrderForm({
     }
     setSubmitting(true);
     try {
-      const response = await apiFetch(`${API_URL}/sync/vinamilk-orders/manual`, {
-        method: "POST",
+      const endpoint = isEditMode && editOrderNumber
+        ? `${API_URL}/sync/vinamilk-orders/manual/${encodeURIComponent(editOrderNumber)}`
+        : `${API_URL}/sync/vinamilk-orders/manual`;
+      const response = await apiFetch(endpoint, {
+        method: isEditMode ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           customer_code: selectedCustomer.code,
@@ -673,9 +768,9 @@ export default function CreateOrderForm({
       if (!response.ok) {
         throw new Error(typeof payload.detail === "string" ? payload.detail : "Không thể lưu đơn hàng.");
       }
-      const createdOrderNumber = payload.order_number ?? "";
-      window.sessionStorage.setItem("dms-order-created", createdOrderNumber);
-      if (onSaved) onSaved(createdOrderNumber);
+      const savedOrderNumber = payload.order_number ?? editOrderNumber ?? "";
+      window.sessionStorage.setItem("dms-order-created", savedOrderNumber);
+      if (onSaved) onSaved(savedOrderNumber);
       else router.push("/sales/orders");
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Không thể lưu đơn hàng.");
@@ -683,6 +778,20 @@ export default function CreateOrderForm({
       setSubmitting(false);
     }
   }
+
+  const submitHandlerRef = useRef(handleSubmit);
+  submitHandlerRef.current = handleSubmit;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "F9") return;
+      event.preventDefault();
+      if (!selectedCustomer || lines.length === 0 || submitting || Boolean(editBlockedReason)) return;
+      void submitHandlerRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedCustomer, lines.length, submitting, editBlockedReason]);
 
   const inputCls =
     "w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100";
@@ -692,7 +801,9 @@ export default function CreateOrderForm({
       <header className="flex items-center justify-between bg-[#14263d] px-3 py-2 text-white">
         <div className="flex items-center gap-2">
           <ShoppingCart size={17} className="text-red-500" />
-          <h1 className="text-xs font-bold uppercase">Thêm mới đơn đặt hàng</h1>
+          <h1 className="text-xs font-bold uppercase">
+            {isEditMode ? `Chỉnh sửa đơn đặt hàng ${orderNumber}` : "Thêm mới đơn đặt hàng"}
+          </h1>
         </div>
         <button type="button" onClick={() => onClose ? onClose() : router.push("/sales/orders")} className="rounded p-1 text-white hover:bg-white/10" aria-label="Đóng tạo đơn hàng">
           <X size={16} />
@@ -700,9 +811,9 @@ export default function CreateOrderForm({
       </header>
 
       <div className="max-h-[calc(100vh-12rem)] overflow-y-auto">
-        {(submitError || loadError) && (
+        {(submitError || loadError || editBlockedReason) && (
           <div role="alert" className="mx-3 mt-2 flex items-center gap-2 border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-            <AlertTriangle size={14} /> {submitError || loadError}
+            <AlertTriangle size={14} /> {submitError || loadError || editBlockedReason}
           </div>
         )}
 
@@ -1105,11 +1216,11 @@ export default function CreateOrderForm({
           <button
             type="button"
             onClick={handleSubmit}
-            disabled={!selectedCustomer || lines.length === 0 || submitting}
+            disabled={!selectedCustomer || lines.length === 0 || submitting || Boolean(editBlockedReason)}
             className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
           >
             {submitting ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
-            Lưu đơn (F9)
+            {isEditMode ? "Cập nhật đơn (F9)" : "Lưu đơn (F9)"}
           </button>
         </div>
       </footer>

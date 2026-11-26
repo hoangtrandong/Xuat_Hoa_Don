@@ -20,7 +20,9 @@ from app.api.v1.endpoints.sync import (
     _create_split_order_request,
     _create_manual_order,
     _delete_manual_order,
+    _get_manual_order_detail,
     _merge_vinamilk_orders,
+    _update_manual_order,
     list_grouped_vinamilk_orders,
     list_local_vinamilk_orders,
 )
@@ -241,13 +243,15 @@ def test_grouped_order_pagination_filter_and_detail(db):
     assert matching["rows"][0]["_product_count"] == 2
     assert matching["rows"][0]["totalValue"] == 300
     assert matching["rows"][0]["totalDiscount"] == 40
-    assert matching["rows"][0]["Nhà cung cấp"] == "Vinamilk"
+    # ORD-1 có Nguồn đồng bộ = NAZZY nên không kế thừa mặc định Nhà cung cấp = Vinamilk
+    assert "Nhà cung cấp" not in matching["rows"][0]
     assert matching["rows"][0]["Nguồn đồng bộ"] == "NAZZY"
     vinamilk_order = next(row for row in first["rows"] + second["rows"] if row["orderNumber"] == "ORD-2")
     assert vinamilk_order["Nguồn đồng bộ"] == "VINAMILK"
+    assert vinamilk_order["Nhà cung cấp"] == "Vinamilk"
     assert "productCode" not in matching["rows"][0]
     assert "quantity" not in matching["rows"][0]
-    assert list_grouped_vinamilk_orders(day, day, product="Vinamilk", skip=0, limit=20, db=db)["total"] == 2
+    assert list_grouped_vinamilk_orders(day, day, product="Vinamilk", skip=0, limit=20, db=db)["total"] == 1
     detail = list_local_vinamilk_orders(
         from_date=day, to_date=day, source="sync", search=None, status=None,
         skip=0, limit=100, db=db, order_number="ORD-1",
@@ -626,6 +630,64 @@ def test_delete_manual_order(db):
     assert _delete_manual_order(db, "TC-261104-001")["deleted_lines"] == 1
     with pytest.raises(HTTPException):
         _delete_manual_order(db, "IN062823")
+
+
+def test_get_and_update_manual_order(db):
+    shipper = Employee(code="NV025", name="Giao Hàng Sửa", position="Giao hàng", phone="0900000025")
+    db.add(shipper)
+    db.commit()
+
+    created = _create_manual_order(db, _payload(note="Bản đầu"), performed_by="admin")
+    order_number = created["order_number"]
+
+    detail = _get_manual_order_detail(db, order_number)
+    assert detail["order_number"] == order_number
+    assert detail["customer_code"] == "0MD"
+    assert detail["note"] == "Bản đầu"
+    assert detail["can_edit"] is True
+    assert len(detail["lines"]) == 1
+    assert detail["lines"][0]["quantity"] == 10
+
+    updated = _update_manual_order(
+        db,
+        order_number,
+        _payload(
+            order_type="002-Dương Số",
+            delivery_employee_code="NV025",
+            note="Đã chỉnh sửa",
+            lines=[ManualOrderLine(product_code="01VD41", quantity=20, discount_amount=1000)],
+        ),
+        performed_by="ketoan",
+    )
+    assert updated["order_number"] == order_number
+    assert updated["total_value"] == 4428 * 20 - 1000
+
+    after = _get_manual_order_detail(db, order_number)
+    assert after["order_type"] == "002-Dương Số"
+    assert after["delivery_employee_code"] == "NV025"
+    assert after["note"] == "Đã chỉnh sửa"
+    assert after["lines"][0]["quantity"] == 20
+
+    # Chặn sửa đơn không phải tự tạo
+    with pytest.raises(HTTPException) as non_manual_err:
+        _update_manual_order(db, "IN062823", _payload())
+    assert non_manual_err.value.status_code == 400
+
+    # Chặn sửa khi đã đưa vào yêu cầu xuất hàng chưa hủy
+    warehouse = Warehouse(code="WH-EDIT-LOCK", name="Kho Sửa", location="HN")
+    db.add(warehouse)
+    db.flush()
+    req = DeliveryRequest(code="YC-EDIT-LOCK", warehouse_id=warehouse.id, status="DRAFT")
+    db.add(req)
+    db.flush()
+    db.add(DeliveryRequestOrder(delivery_request_id=req.id, order_number=order_number, employee_code="NV025"))
+    db.commit()
+
+    locked_detail = _get_manual_order_detail(db, order_number)
+    assert locked_detail["can_edit"] is False
+    with pytest.raises(HTTPException) as locked_err:
+        _update_manual_order(db, order_number, _payload())
+    assert locked_err.value.status_code == 400
 
 
 def test_manual_order_defaults_staff_to_current_user_and_records_delivery_employee(db):

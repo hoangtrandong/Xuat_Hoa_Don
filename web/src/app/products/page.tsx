@@ -30,6 +30,7 @@ import {
   FileText,
   Tag,
   Link2,
+  Copy,
 } from "lucide-react";
 import AuthenticatedDownloadLink from "@/components/ui/AuthenticatedDownloadLink";
 import { formatNumber, formatUnitPrice } from "@/lib/format";
@@ -308,6 +309,19 @@ export default function ProductsPage() {
   const [inlineApplyAllMst, setInlineApplyAllMst] = useState<boolean>(false);
   const [savingNppKey, setSavingNppKey] = useState<string | null>(null);
   const [editApplyAllMst, setEditApplyAllMst] = useState<boolean>(false);
+  const [copiedTaxKey, setCopiedTaxKey] = useState<string | null>(null);
+
+  const handleCopyTaxCode = useCallback((key: string, taxCode: string) => {
+    const clean = taxCode.trim();
+    if (!clean) return;
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      void navigator.clipboard.writeText(clean).catch(() => {});
+    }
+    setCopiedTaxKey(key);
+    window.setTimeout(() => {
+      setCopiedTaxKey((prev) => (prev === key ? null : prev));
+    }, 1500);
+  }, []);
 
   // Danh sách mã sản phẩm NPP nội bộ (từ đơn hàng DMS / web NCC)
   const [nppProductOptions, setNppProductOptions] = useState<NppProductOption[]>([]);
@@ -1906,8 +1920,8 @@ export default function ProductsPage() {
                 </th>
                 <th className="w-10 px-2 py-2 text-center">STT</th>
                 <th className="px-2.5 py-2">Nhà phân phối</th>
-                <th className="px-2.5 py-2" title="Pháp nhân & Mã số thuế đứng tên mua vào trên Hóa đơn CQT hoặc được gán quản lý SKU">
-                  MST đầu vào (CQT)
+                <th className="min-w-[200px] px-2.5 py-2" title="Công ty quản lý & Mã số thuế đầu vào trên Hóa đơn CQT">
+                  Công ty / MST (CQT)
                 </th>
                 <th className="px-2.5 py-2">
                   <button
@@ -2056,63 +2070,99 @@ export default function ProductsPage() {
                         })()}
                       </td>
 
-                      {/* CỘT MST ĐẦU VÀO (TÁCH TỪNG DÒNG THEO MST HOẶC GỘP BADGE) */}
-                      <td className="px-2.5 py-1.5 max-w-[240px]">
-                        {row.rowCompanyId != null ? (
-                          <div className="flex flex-col gap-0.5">
-                            <div className="flex items-center gap-1 flex-wrap">
-                              <span
-                                className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-900"
-                                title={`${row.rowCompanyTaxCode || row.rowCompanyCode} - ${row.rowCompanyName}`}
-                              >
-                                <Building2 size={10} className="text-amber-700 shrink-0" />
-                                {row.rowCompanyTaxCode || row.rowCompanyCode}
-                              </span>
-                              {row.mstCount > 1 && (
+                      {/* CỘT CÔNG TY QUẢN LÝ & MST ĐẦU VÀO (CỐ ĐỊNH 2 DÒNG GỌN GÀNG) */}
+                      <td className="min-w-[200px] max-w-[240px] px-2.5 py-1.5">
+                        {row.rowCompanyId != null ? (() => {
+                          const taxCode = (row.rowCompanyTaxCode || row.rowCompanyCode || "").trim();
+                          const companyLabel = row.rowCompanyShortName || row.rowCompanyName || "";
+                          const copyKey = `${row.rowKey}-${taxCode}`;
+                          const isCopied = copiedTaxKey === copyKey;
+                          return (
+                            <div className="flex flex-col gap-0.5 leading-tight">
+                              {companyLabel && (
                                 <span
-                                  className="rounded border border-sky-200 bg-sky-50 px-1 py-0 text-[9px] font-bold text-sky-700"
-                                  title={`SKU ${row.code} thuộc ${row.mstCount} MST khác nhau — có thể gán Mã SP XHĐ riêng cho từng dòng MST`}
+                                  className="truncate text-[11px] font-semibold text-slate-800"
+                                  title={row.rowCompanyName || companyLabel}
                                 >
-                                  {row.mstCount} MST
+                                  {companyLabel}
                                 </span>
                               )}
-                              {row.rowCompanyPurchasedQty > 0 && (
-                                <span className="text-[9px] font-semibold text-sky-700">
-                                  ({formatNumber(row.rowCompanyPurchasedQty)})
+                              <div className="flex items-center gap-1 whitespace-nowrap">
+                                <span
+                                  className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wide text-amber-900 tabular-nums"
+                                  title={`${taxCode}${row.rowCompanyName ? ` - ${row.rowCompanyName}` : ""}`}
+                                >
+                                  <Building2 size={10} className="shrink-0 text-amber-700" />
+                                  {taxCode || "—"}
                                 </span>
-                              )}
-                            </div>
-                            {(row.rowCompanyShortName || row.rowCompanyName) && (
-                              <span
-                                className="truncate text-[10px] text-slate-500 max-w-[215px]"
-                                title={row.rowCompanyName}
-                              >
-                                {row.rowCompanyShortName || row.rowCompanyName}
-                              </span>
-                            )}
-                          </div>
-                        ) : row.managed_companies && row.managed_companies.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {row.managed_companies.map((mc) => (
-                              <span
-                                key={mc.company_id}
-                                className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-700"
-                                title={`${mc.tax_code || mc.company_code} - ${mc.company_name}${
-                                  (mc.total_purchased_qty ?? 0) > 0
-                                    ? ` (Nhập CQT: ${formatNumber(mc.total_purchased_qty ?? 0)})`
-                                    : ""
-                                }`}
-                              >
-                                <span className="font-mono font-bold text-slate-800">
-                                  {mc.tax_code || mc.company_code}
-                                </span>
-                                {(mc.total_purchased_qty ?? 0) > 0 && (
-                                  <span className="text-[9px] font-semibold text-sky-700">
-                                    ({formatNumber(mc.total_purchased_qty ?? 0)})
-                                  </span>
+                                {taxCode && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleCopyTaxCode(copyKey, taxCode);
+                                    }}
+                                    className="rounded p-0.5 text-slate-400 transition-colors hover:bg-slate-200/70 hover:text-slate-700"
+                                    title={isCopied ? "Đã sao chép MST" : `Sao chép MST ${taxCode}`}
+                                    aria-label={`Sao chép MST ${taxCode}`}
+                                  >
+                                    {isCopied ? (
+                                      <Check size={11} className="text-emerald-600" />
+                                    ) : (
+                                      <Copy size={11} />
+                                    )}
+                                  </button>
                                 )}
-                              </span>
-                            ))}
+                              </div>
+                            </div>
+                          );
+                        })() : row.managed_companies && row.managed_companies.length > 0 ? (
+                          <div className="flex flex-col gap-1">
+                            {row.managed_companies.map((mc) => {
+                              const taxCode = (mc.tax_code || mc.company_code || "").trim();
+                              const companyLabel = mc.short_name || mc.company_name || "";
+                              const copyKey = `${row.rowKey}-${mc.company_id}`;
+                              const isCopied = copiedTaxKey === copyKey;
+                              return (
+                                <div key={mc.company_id} className="flex flex-col gap-0.5 leading-tight">
+                                  {companyLabel && (
+                                    <span
+                                      className="truncate text-[11px] font-semibold text-slate-800"
+                                      title={mc.company_name || companyLabel}
+                                    >
+                                      {companyLabel}
+                                    </span>
+                                  )}
+                                  <div className="flex items-center gap-1 whitespace-nowrap">
+                                    <span
+                                      className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wide text-amber-900 tabular-nums"
+                                      title={`${taxCode}${mc.company_name ? ` - ${mc.company_name}` : ""}`}
+                                    >
+                                      <Building2 size={10} className="shrink-0 text-amber-700" />
+                                      {taxCode || "—"}
+                                    </span>
+                                    {taxCode && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleCopyTaxCode(copyKey, taxCode);
+                                        }}
+                                        className="rounded p-0.5 text-slate-400 transition-colors hover:bg-slate-200/70 hover:text-slate-700"
+                                        title={isCopied ? "Đã sao chép MST" : `Sao chép MST ${taxCode}`}
+                                        aria-label={`Sao chép MST ${taxCode}`}
+                                      >
+                                        {isCopied ? (
+                                          <Check size={11} className="text-emerald-600" />
+                                        ) : (
+                                          <Copy size={11} />
+                                        )}
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
                           </div>
                         ) : (
                           <span className="text-[10px] italic text-slate-400">—</span>

@@ -16,7 +16,7 @@ from zipfile import BadZipFile
 from pydantic import BaseModel, Field
 import httpx
 from dotenv import dotenv_values
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 from app.api.v1.endpoints.promotions import promotion_matches_customer
 from app.core.auth import get_current_user, resolve_user_employee
@@ -2504,7 +2504,7 @@ def list_grouped_vinamilk_orders(
             from_date=from_date, to_date=to_date, source="sync", search=None,
             status=None, skip=offset, limit=10_000, db=db, current_user=current_user,
             distributor_code=distributor_code,
-            include_product_lookup=False,
+            include_product_lookup=True,
         )
         last_synced_at = page["last_synced_at"]
         for row in page["rows"]:
@@ -3055,6 +3055,16 @@ class ManualOrderRequest(BaseModel):
     lines: list[ManualOrderLine] = Field(min_length=1)
 
 
+def _lock_manual_order_sequence(db: Session, ref_date: date) -> None:
+    """Serialize manual order number allocation per date on PostgreSQL."""
+    bind = db.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    digest = hashlib.sha256(f"manual-order-seq:{ref_date.isoformat()}".encode()).digest()
+    lock_key = int.from_bytes(digest[:8], "big", signed=True)
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+
+
 def _next_manual_order_number(db: Session, ref_date: date) -> str:
     prefix = f"{MANUAL_ORDER_PREFIX}-{ref_date:%y%m%d}-"
     existing = db.scalars(
@@ -3070,17 +3080,15 @@ def _next_manual_order_number(db: Session, ref_date: date) -> str:
     return f"{prefix}{max_seq + 1:03d}"
 
 
-def _create_manual_order(
+def _build_manual_order_snapshots(
     db: Session,
     payload: ManualOrderRequest,
+    *,
+    order_number: str,
     performed_by: str | None = None,
     current_employee: Employee | None = None,
     distributor_code: str | None = None,
-) -> dict[str, Any]:
-    """Tạo đơn hàng tự tạo (không từ DMS), lưu cùng bảng snapshot để hiển thị chung danh sách Đơn hàng.
-
-    NVBH mặc định là nhân viên gắn với tài khoản đang đăng nhập (nếu không truyền staff_code).
-    """
+) -> tuple[list[VinamilkOrderSnapshot], dict[str, Any]]:
     actor = (performed_by or "").strip() or "Hệ thống"
     cust_code = (payload.customer_code or "").strip()
     customer = db.scalar(select(Customer).where(Customer.code == cust_code)) if cust_code else None
@@ -3105,7 +3113,6 @@ def _create_manual_order(
     order_date = payload.order_date or date.today()
     entry_date = payload.entry_date or date.today()
     delivery_date = payload.delivery_date or order_date
-    order_number = _next_manual_order_number(db, order_date)
     staff_code = (payload.staff_code or "").strip()
     staff_name = (payload.staff_name or "").strip()
     if not staff_code and current_employee is not None:
@@ -3131,6 +3138,7 @@ def _create_manual_order(
     sales_route = (payload.sales_route or customer.store_route or "").strip()
     now = datetime.utcnow()
     total_value = 0.0
+    snapshots: list[VinamilkOrderSnapshot] = []
 
     for line_idx, line in enumerate(payload.lines, start=1):
         product = products[line.product_code.strip().upper()]
@@ -3320,6 +3328,7 @@ def _create_manual_order(
             "Địa chỉ": address,
             "Mã sản phẩm": product.sku,
             "Sản phẩm": product.name,
+            "Nhà cung cấp": (product.supplier or "").strip(),
             "ĐVT": unit_name,
             "Số lượng": float(line.quantity),
             "Số thùng": line.cartons if line.cartons is not None else int(line.quantity // max(int(product.boxes_per_carton or 1), 1)),
@@ -3339,7 +3348,7 @@ def _create_manual_order(
             "_manual_order": True,
             **({"Mã NPP": distributor_code} if distributor_code else {}),
         }
-        db.add(VinamilkOrderSnapshot(
+        snapshots.append(VinamilkOrderSnapshot(
             remote_key=hashlib.sha256(f"MANUAL|{order_number}|{product.sku}|{line_idx}".encode()).hexdigest(),
             order_number=order_number,
             customer_code=customer.code,
@@ -3357,27 +3366,160 @@ def _create_manual_order(
             synced_at=now,
             raw_payload=raw,
         ))
-    db.commit()
-    return {
+
+    summary = {
         "order_number": order_number,
         "customer_code": customer.code,
         "line_count": len(payload.lines),
         "total_value": total_value,
         "performed_by": actor,
     }
+    return snapshots, summary
+
+
+def _create_manual_order(
+    db: Session,
+    payload: ManualOrderRequest,
+    performed_by: str | None = None,
+    current_employee: Employee | None = None,
+    distributor_code: str | None = None,
+) -> dict[str, Any]:
+    """Tạo đơn hàng tự tạo (không từ DMS), lưu cùng bảng snapshot để hiển thị chung danh sách Đơn hàng.
+
+    NVBH mặc định là nhân viên gắn với tài khoản đang đăng nhập (nếu không truyền staff_code).
+    """
+    order_date = payload.order_date or date.today()
+    _lock_manual_order_sequence(db, order_date)
+    order_number = _next_manual_order_number(db, order_date)
+    snapshots, summary = _build_manual_order_snapshots(
+        db,
+        payload,
+        order_number=order_number,
+        performed_by=performed_by,
+        current_employee=current_employee,
+        distributor_code=distributor_code,
+    )
+    db.add_all(snapshots)
+    db.commit()
+    return summary
+
+
+def _manual_order_in_active_delivery(db: Session, order_number: str) -> bool:
+    return db.scalar(
+        select(DeliveryRequestOrder.id)
+        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
+        .where(func.upper(DeliveryRequestOrder.order_number) == order_number.upper(), DeliveryRequest.status != "CANCELLED")
+        .limit(1)
+    ) is not None
+
+
+def _get_manual_order_detail(db: Session, order_number: str) -> dict[str, Any]:
+    target = order_number.strip()
+    if not target.upper().startswith(f"{MANUAL_ORDER_PREFIX}-"):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ lấy thông tin sửa cho đơn hàng tự tạo.")
+    rows = db.scalars(
+        select(VinamilkOrderSnapshot)
+        .where(
+            VinamilkOrderSnapshot.order_number == target,
+            VinamilkOrderSnapshot.is_synthetic.is_(True),
+        )
+        .order_by(VinamilkOrderSnapshot.id.asc())
+    ).all()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng {target}.")
+    first = rows[0]
+    first_raw = first.raw_payload or {}
+    entry_date_raw = str(first_raw.get("Ngày nhập") or "").strip()
+    entry_date_iso = first.order_created_date.isoformat() if first.order_created_date else date.today().isoformat()
+    if entry_date_raw:
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                entry_date_iso = datetime.strptime(entry_date_raw, fmt).date().isoformat()
+                break
+            except ValueError:
+                pass
+    in_delivery = _manual_order_in_active_delivery(db, target)
+    lines: list[dict[str, Any]] = []
+    for row in rows:
+        raw = row.raw_payload or {}
+        lines.append({
+            "product_code": row.product_code or str(raw.get("Mã sản phẩm") or ""),
+            "quantity": float(raw.get("Số lượng") or 0),
+            "cartons": int(raw.get("Số thùng") or 0) if raw.get("Số thùng") is not None else None,
+            "boxes": float(raw.get("Số hộp") or 0) if raw.get("Số hộp") is not None else None,
+            "promo_quantity": float(raw.get("Số lượng KM") or 0),
+            "unit_price": float(raw.get("Đơn giá") or 0),
+            "discount_amount": float(raw.get("Số tiền CK") or 0),
+            "promotion_id": raw.get("promotion_id"),
+        })
+    return {
+        "order_number": target,
+        "customer_code": first.customer_code or str(first_raw.get("Mã KH") or ""),
+        "order_type": str(first_raw.get("Trạng thái tạo đơn") or first_raw.get("orderType") or "001-Xuất hàng"),
+        "order_date": first.order_created_date.isoformat() if first.order_created_date else date.today().isoformat(),
+        "entry_date": entry_date_iso,
+        "delivery_date": first.delivery_date.isoformat() if first.delivery_date else (first.order_created_date.isoformat() if first.order_created_date else date.today().isoformat()),
+        "sales_route": str(first_raw.get("Tuyến bán hàng") or ""),
+        "staff_code": str(first_raw.get("Mã NVBH") or ""),
+        "staff_name": str(first_raw.get("Tên NVBH") or ""),
+        "delivery_employee_code": str(first_raw.get("Mã NVGH") or ""),
+        "delivery_employee_name": str(first_raw.get("Tên NVGH") or ""),
+        "note": str(first_raw.get("Ghi chú") or ""),
+        "can_edit": not in_delivery,
+        "edit_blocked_reason": f"Đơn {target} đã nằm trong yêu cầu xuất hàng, không thể sửa." if in_delivery else None,
+        "lines": lines,
+    }
+
+
+def _update_manual_order(
+    db: Session,
+    order_number: str,
+    payload: ManualOrderRequest,
+    performed_by: str | None = None,
+    current_employee: Employee | None = None,
+    distributor_code: str | None = None,
+) -> dict[str, Any]:
+    target = order_number.strip()
+    if not target.upper().startswith(f"{MANUAL_ORDER_PREFIX}-"):
+        raise HTTPException(status_code=400, detail="Chỉ sửa được đơn hàng tự tạo.")
+    existing = db.scalars(
+        select(VinamilkOrderSnapshot)
+        .where(
+            VinamilkOrderSnapshot.order_number == target,
+            VinamilkOrderSnapshot.is_synthetic.is_(True),
+        )
+    ).all()
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng {target}.")
+    if _manual_order_in_active_delivery(db, target):
+        raise HTTPException(status_code=400, detail=f"Đơn {target} đã nằm trong yêu cầu xuất hàng, không thể sửa.")
+
+    existing_dist = (existing[0].raw_payload or {}).get("Mã NPP")
+    effective_dist = distributor_code or (str(existing_dist).strip().upper() if existing_dist else None)
+    snapshots, summary = _build_manual_order_snapshots(
+        db,
+        payload,
+        order_number=target,
+        performed_by=performed_by,
+        current_employee=current_employee,
+        distributor_code=effective_dist,
+    )
+    db.execute(
+        delete(VinamilkOrderSnapshot).where(
+            VinamilkOrderSnapshot.order_number == target,
+            VinamilkOrderSnapshot.is_synthetic.is_(True),
+        )
+    )
+    db.add_all(snapshots)
+    db.commit()
+    return summary
 
 
 def _delete_manual_order(db: Session, order_number: str) -> dict[str, Any]:
     target = order_number.strip()
     if not target.upper().startswith(f"{MANUAL_ORDER_PREFIX}-"):
         raise HTTPException(status_code=400, detail="Chỉ xóa được đơn hàng tự tạo.")
-    in_delivery = db.scalar(
-        select(DeliveryRequestOrder.id)
-        .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
-        .where(func.upper(DeliveryRequestOrder.order_number) == target.upper(), DeliveryRequest.status != "CANCELLED")
-        .limit(1)
-    )
-    if in_delivery is not None:
+    if _manual_order_in_active_delivery(db, target):
         raise HTTPException(status_code=400, detail=f"Đơn {target} đã nằm trong yêu cầu xuất hàng, không thể xóa.")
     result = db.execute(
         delete(VinamilkOrderSnapshot).where(
@@ -3418,6 +3560,37 @@ def get_next_manual_order_number(
     current_user: User = Depends(get_current_user),
 ):
     return {"order_number": _next_manual_order_number(db, order_date or date.today())}
+
+
+@router.get("/vinamilk-orders/manual/{order_number}")
+def get_manual_order(
+    order_number: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _get_manual_order_detail(db, order_number)
+
+
+@router.put("/vinamilk-orders/manual/{order_number}")
+def update_manual_order(
+    order_number: str,
+    payload: ManualOrderRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dist_code = (
+        (current_user.distributor.code or "").strip().upper()
+        if current_user and getattr(current_user, "distributor", None)
+        else None
+    )
+    return _update_manual_order(
+        db,
+        order_number,
+        payload,
+        performed_by=getattr(current_user, "username", None),
+        current_employee=resolve_user_employee(db, current_user),
+        distributor_code=dist_code,
+    )
 
 
 @router.delete("/vinamilk-orders/manual/{order_number}")

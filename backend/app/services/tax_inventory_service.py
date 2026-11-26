@@ -264,6 +264,19 @@ def compute_tax_inventory_by_mst(
         if p_sku and p_ip_id in ip_by_id:
             cqt_sku_to_ip[p_sku.strip().upper()] = ip_by_id[p_ip_id]
 
+    # Ánh xạ ưu tiên theo từng cặp (MST đầu vào, SKU CQT) -> Sản phẩm xuất hóa đơn
+    cqt_mst_sku_to_ip: dict[tuple[str, str], InvoiceProduct] = {}
+    for pc_mst, p_sku, pc_ip_id in db.execute(
+        select(Company.tax_code, Product.sku, ProductCompany.invoice_product_id)
+        .join(Product, Product.id == ProductCompany.product_id)
+        .join(Company, Company.id == ProductCompany.company_id)
+        .where(ProductCompany.invoice_product_id.is_not(None))
+    ).all():
+        clean_mst = (pc_mst or "").strip()
+        clean_sku = (p_sku or "").strip().upper()
+        if clean_mst and clean_sku and pc_ip_id in ip_by_id:
+            cqt_mst_sku_to_ip[(clean_mst, clean_sku)] = ip_by_id[pc_ip_id]
+
     dms_sku_to_ip: dict[str, InvoiceProduct] = {}
     dp_ip_stmt = select(DistributorProduct.distributor_sku, DistributorProduct.invoice_product_id).where(
         DistributorProduct.invoice_product_id.is_not(None)
@@ -277,11 +290,20 @@ def compute_tax_inventory_by_mst(
         if d_sku and d_ip_id in ip_by_id:
             dms_sku_to_ip[d_sku.strip().upper()] = ip_by_id[d_ip_id]
 
-    def _resolve_to_invoice_product(raw_code: str) -> tuple[str, InvoiceProduct | None]:
+    def _resolve_to_invoice_product(
+        raw_code: str,
+        mst: str | None = None,
+        *,
+        prefer_cqt_mst: bool = False,
+    ) -> tuple[str, InvoiceProduct | None]:
         clean = (raw_code or "").strip().upper()
         if not clean:
             return "", None
-        ip = ip_by_code.get(clean) or cqt_sku_to_ip.get(clean) or dms_sku_to_ip.get(clean)
+        clean_mst = (mst or "").strip()
+        mst_ip = cqt_mst_sku_to_ip.get((clean_mst, clean)) if clean_mst else None
+        if prefer_cqt_mst and mst_ip is not None:
+            return mst_ip.code.strip().upper(), mst_ip
+        ip = ip_by_code.get(clean) or mst_ip or cqt_sku_to_ip.get(clean) or dms_sku_to_ip.get(clean)
         if ip is not None:
             return ip.code.strip().upper(), ip
         return clean, None
@@ -296,7 +318,7 @@ def compute_tax_inventory_by_mst(
     # Quy đổi số dư đầu kỳ về Mã SP xuất hóa đơn (nếu bản ghi cũ nhập theo SKU CQT đã gán)
     opening_map: dict[tuple[str, str], dict[str, Any]] = {}
     for (mst, raw_sku), ob in raw_opening_map.items():
-        eff_code, ip = _resolve_to_invoice_product(raw_sku)
+        eff_code, ip = _resolve_to_invoice_product(raw_sku, mst=mst, prefer_cqt_mst=True)
         key = (mst, eff_code)
         if key not in opening_map:
             opening_map[key] = {
@@ -372,7 +394,7 @@ def compute_tax_inventory_by_mst(
 
     # Khởi tạo sẵn các dòng có khai báo tồn đầu kỳ (kể cả khi kỳ này chưa có phát sinh N-X)
     for (mst, sku), ob in opening_map.items():
-        _, ip = _resolve_to_invoice_product(sku)
+        _, ip = _resolve_to_invoice_product(sku, mst=mst)
         _get_or_init_rec(mst, sku, ob["product_name"], ob["unit_name"], ip=ip)
 
     # 2. Quét header Hóa đơn mua vào CQT (không tải xml_content / html_content)
@@ -459,8 +481,8 @@ def compute_tax_inventory_by_mst(
                 if not raw_sku:
                     unmapped_sku_items_count += 1
                     continue
-                sku, ip = _resolve_to_invoice_product(raw_sku)
                 mst, inv_date = purch_meta_by_id[p_inv_id]
+                sku, ip = _resolve_to_invoice_product(raw_sku, mst=mst, prefer_cqt_mst=True)
                 ob = opening_map.get((mst, sku))
                 cutoff_date = (ob["as_of_date"] if ob is not None else None) or mst_cutoffs.get(mst)
                 if cutoff_date is not None and inv_date is not None and inv_date < cutoff_date:
@@ -558,9 +580,9 @@ def compute_tax_inventory_by_mst(
         raw_out_code = (prod_code or src_sku or "").strip().upper()
         if not raw_out_code:
             continue
-        sku, ip = _resolve_to_invoice_product(raw_out_code)
+        sku, ip = _resolve_to_invoice_product(raw_out_code, mst=mst)
         if ip is None and src_sku:
-            alt_sku, alt_ip = _resolve_to_invoice_product(src_sku)
+            alt_sku, alt_ip = _resolve_to_invoice_product(src_sku, mst=mst)
             if alt_ip is not None:
                 sku, ip = alt_sku, alt_ip
 

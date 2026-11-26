@@ -1391,11 +1391,25 @@ def list_paged_by_mst(
         (ProductCompanyModel.id.is_not(None), ProductCompanyModel.npp_code),
         else_=Product._npp_code,
     )
+    effective_ip_id_expr = case(
+        (ProductCompanyModel.id.is_not(None), ProductCompanyModel.invoice_product_id),
+        else_=Product.invoice_product_id,
+    )
 
     if has_internal_code is True:
-        conditions.append(and_(effective_npp_expr.is_not(None), func.trim(effective_npp_expr) != ""))
+        conditions.append(
+            or_(
+                effective_ip_id_expr.is_not(None),
+                and_(effective_npp_expr.is_not(None), func.trim(effective_npp_expr) != ""),
+            )
+        )
     elif has_internal_code is False:
-        conditions.append(or_(effective_npp_expr.is_(None), func.trim(effective_npp_expr) == ""))
+        conditions.append(
+            and_(
+                effective_ip_id_expr.is_(None),
+                or_(effective_npp_expr.is_(None), func.trim(effective_npp_expr) == ""),
+            )
+        )
 
     if status and status != "ALL":
         if status == "active":

@@ -116,6 +116,10 @@ type ProductManagedCompany = {
   source?: string;
   is_primary: boolean;
   npp_code?: string | null;
+  invoice_product_id?: number | null;
+  invoice_product_code?: string | null;
+  invoice_product_name?: string | null;
+  invoice_product_unit?: string | null;
   company_product_code?: string | null;
   invoice_name_override?: string | null;
   invoice_unit_name?: string | null;
@@ -298,9 +302,12 @@ export default function ProductsPage() {
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
 
   // Chỉnh sửa nhanh inline Mã NPP trực tiếp trên bảng (theo từng dòng SKU–MST)
+  const [expandByMst, setExpandByMst] = useState<boolean>(true);
   const [editingNppKey, setEditingNppKey] = useState<string | null>(null);
   const [inlineNppCode, setInlineNppCode] = useState<string>("");
+  const [inlineApplyAllMst, setInlineApplyAllMst] = useState<boolean>(false);
   const [savingNppKey, setSavingNppKey] = useState<string | null>(null);
+  const [editApplyAllMst, setEditApplyAllMst] = useState<boolean>(false);
 
   // Danh sách mã sản phẩm NPP nội bộ (từ đơn hàng DMS / web NCC)
   const [nppProductOptions, setNppProductOptions] = useState<NppProductOption[]>([]);
@@ -475,7 +482,7 @@ export default function ProductsPage() {
         params.set("distributor_code", distributorFilter);
       }
 
-      params.set("expand_by_mst", "false");
+      params.set("expand_by_mst", expandByMst ? "true" : "false");
       const res = await apiFetch(`${API_URL}/products/paged?${params.toString()}`);
       if (!res.ok) throw new Error("Không thể tải danh sách SKU.");
       const data = await res.json();
@@ -577,6 +584,7 @@ export default function ProductsPage() {
     authSession.distributorCode,
     categories,
     units,
+    expandByMst,
   ]);
 
   useEffect(() => {
@@ -789,13 +797,17 @@ export default function ProductsPage() {
       const result = (await response.json()) as { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Không thể cập nhật SKU.");
 
-      // Gán / gỡ Sản phẩm XHĐ chuẩn (dùng chung toàn NPP)
+      // Gán / gỡ Sản phẩm XHĐ chuẩn (riêng cho MST đang chọn hoặc toàn bộ MST của SKU)
       const ipResp = await apiFetch(
         `${API_URL}/products/${editingProduct.id}/invoice-product`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ invoice_product_id: matchedIp?.id ?? null }),
+          body: JSON.stringify({
+            invoice_product_id: matchedIp?.id ?? null,
+            company_id: editingProduct.rowCompanyId,
+            apply_all_companies: editingProduct.rowCompanyId == null || editApplyAllMst,
+          }),
         }
       );
       if (!ipResp.ok) {
@@ -806,12 +818,15 @@ export default function ProductsPage() {
       const updatedSku = editForm.sku.trim().toUpperCase();
       setEditOpen(false);
       setEditingProduct(null);
+      setEditApplyAllMst(false);
       await loadCatalog(false);
       setBannerMsg({
         type: "success",
         text:
-          editingProduct.rowCompanyId != null
-            ? `Đã cập nhật SKU ${updatedSku} (MST ${editingProduct.rowCompanyTaxCode || editingProduct.rowCompanyCode}) thành công.`
+          editingProduct.rowCompanyId != null && !editApplyAllMst
+            ? `Đã cập nhật SKU ${updatedSku} (riêng MST ${editingProduct.rowCompanyTaxCode || editingProduct.rowCompanyCode}) thành công.`
+            : editingProduct.mstCount > 1 && editApplyAllMst
+            ? `Đã cập nhật SKU ${updatedSku} và áp dụng Mã SP XHĐ cho tất cả ${editingProduct.mstCount} MST thành công.`
             : `Đã cập nhật thông tin SKU ${updatedSku} thành công.`,
       });
     } catch (err) {
@@ -821,10 +836,15 @@ export default function ProductsPage() {
     }
   }
 
-  async function handleSaveNppCode(product: ProductRow, newNppCode: string) {
+  async function handleSaveNppCode(
+    product: ProductRow,
+    newNppCode: string,
+    applyAllCompanies = false
+  ) {
     const formatted = newNppCode.trim().toUpperCase();
-    if (formatted === (product.nppCode || "")) {
+    if (formatted === (product.nppCode || "") && !applyAllCompanies) {
       setEditingNppKey(null);
+      setInlineApplyAllMst(false);
       return;
     }
     setSavingNppKey(product.rowKey);
@@ -839,10 +859,15 @@ export default function ProductsPage() {
         );
       }
 
+      const shouldApplyAll = product.rowCompanyId == null || applyAllCompanies;
       const res = await apiFetch(`${API_URL}/products/${product.id}/invoice-product`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invoice_product_id: matchedIp?.id ?? null }),
+        body: JSON.stringify({
+          invoice_product_id: matchedIp?.id ?? null,
+          company_id: product.rowCompanyId,
+          apply_all_companies: shouldApplyAll,
+        }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -852,10 +877,21 @@ export default function ProductsPage() {
       setProducts((prev) =>
         prev.map((p) => {
           if (p.id !== product.id) return p;
-          const nextManaged = (p.managed_companies || []).map((mc) => ({
-            ...mc,
-            npp_code: formatted || null,
-          }));
+          const isTargetRow = shouldApplyAll || p.rowKey === product.rowKey;
+          const nextManaged = (p.managed_companies || []).map((mc) => {
+            if (!shouldApplyAll && mc.company_id !== product.rowCompanyId) return mc;
+            return {
+              ...mc,
+              npp_code: formatted || null,
+              invoice_product_id: matchedIp?.id ?? null,
+              invoice_product_code: formatted || null,
+              invoice_product_name: matchedIp?.name || null,
+              invoice_product_unit: matchedIp?.unit || null,
+            };
+          });
+          if (!isTargetRow) {
+            return { ...p, managed_companies: nextManaged };
+          }
           const updated = {
             ...p,
             nppCode: formatted,
@@ -867,6 +903,7 @@ export default function ProductsPage() {
           return updated;
         })
       );
+      setInlineApplyAllMst(false);
       setBannerMsg({
         type: "success",
         text: formatted
@@ -971,6 +1008,7 @@ export default function ProductsPage() {
   function openEditModal(product: ProductRow) {
     setModalError("");
     setEditingProduct(product);
+    setEditApplyAllMst(false);
     setEditNppSearchQuery("");
     setShowEditNppDropdown(false);
     setEditForm({
@@ -1210,7 +1248,7 @@ export default function ProductsPage() {
         params.set("distributor_code", distributorFilter);
       }
 
-      params.set("expand_by_mst", "false");
+      params.set("expand_by_mst", expandByMst ? "true" : "false");
       const res = await apiFetch(`${API_URL}/products/paged?${params.toString()}`);
       if (!res.ok) throw new Error("Không thể tải toàn bộ danh sách sản phẩm theo bộ lọc.");
       const data = await res.json();
@@ -1702,6 +1740,47 @@ export default function ProductsPage() {
             </div>
 
             <div className="flex items-center gap-2">
+              {/* Chuyển đổi chế độ hiển thị: Tách dòng theo từng MST vs Gộp theo SKU */}
+              <div
+                className="inline-flex items-center rounded border border-slate-300 bg-slate-100 p-0.5 text-[10px] font-semibold"
+                title="Chọn chế độ hiển thị tách nhiều dòng theo MST để gán Mã SP XHĐ riêng cho từng MST, hoặc gộp 1 dòng/SKU"
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!expandByMst) {
+                      setExpandByMst(true);
+                      setCurrentPage(1);
+                    }
+                  }}
+                  className={cn(
+                    "rounded px-2 py-0.5 transition-colors",
+                    expandByMst
+                      ? "bg-[#14263d] text-white shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  Tách theo MST
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (expandByMst) {
+                      setExpandByMst(false);
+                      setCurrentPage(1);
+                    }
+                  }}
+                  className={cn(
+                    "rounded px-2 py-0.5 transition-colors",
+                    !expandByMst
+                      ? "bg-[#14263d] text-white shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  Gộp theo SKU
+                </button>
+              </div>
+
               {selectedIds.size > 0 && (
                 <>
                   {companyOptions.length > 0 && (
@@ -1977,9 +2056,42 @@ export default function ProductsPage() {
                         })()}
                       </td>
 
-                      {/* CỘT MST ĐẦU VÀO (GỘP 1 SKU = 1 DÒNG, CÁC MST HIỂN THỊ DẠNG BADGE) */}
+                      {/* CỘT MST ĐẦU VÀO (TÁCH TỪNG DÒNG THEO MST HOẶC GỘP BADGE) */}
                       <td className="px-2.5 py-1.5 max-w-[240px]">
-                        {row.managed_companies && row.managed_companies.length > 0 ? (
+                        {row.rowCompanyId != null ? (
+                          <div className="flex flex-col gap-0.5">
+                            <div className="flex items-center gap-1 flex-wrap">
+                              <span
+                                className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-900"
+                                title={`${row.rowCompanyTaxCode || row.rowCompanyCode} - ${row.rowCompanyName}`}
+                              >
+                                <Building2 size={10} className="text-amber-700 shrink-0" />
+                                {row.rowCompanyTaxCode || row.rowCompanyCode}
+                              </span>
+                              {row.mstCount > 1 && (
+                                <span
+                                  className="rounded border border-sky-200 bg-sky-50 px-1 py-0 text-[9px] font-bold text-sky-700"
+                                  title={`SKU ${row.code} thuộc ${row.mstCount} MST khác nhau — có thể gán Mã SP XHĐ riêng cho từng dòng MST`}
+                                >
+                                  {row.mstCount} MST
+                                </span>
+                              )}
+                              {row.rowCompanyPurchasedQty > 0 && (
+                                <span className="text-[9px] font-semibold text-sky-700">
+                                  ({formatNumber(row.rowCompanyPurchasedQty)})
+                                </span>
+                              )}
+                            </div>
+                            {(row.rowCompanyShortName || row.rowCompanyName) && (
+                              <span
+                                className="truncate text-[10px] text-slate-500 max-w-[215px]"
+                                title={row.rowCompanyName}
+                              >
+                                {row.rowCompanyShortName || row.rowCompanyName}
+                              </span>
+                            )}
+                          </div>
+                        ) : row.managed_companies && row.managed_companies.length > 0 ? (
                           <div className="flex flex-wrap gap-1">
                             {row.managed_companies.map((mc) => (
                               <span
@@ -2019,54 +2131,77 @@ export default function ProductsPage() {
                         onClick={(e) => e.stopPropagation()}
                       >
                         {editingNppKey === row.rowKey ? (
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="text"
-                              autoFocus
-                              list="sku-npp-options-datalist"
-                              value={inlineNppCode}
-                              onChange={(e) => setInlineNppCode(e.target.value.toUpperCase())}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.preventDefault();
-                                  void handleSaveNppCode(row, inlineNppCode);
-                                } else if (e.key === "Escape") {
-                                  setEditingNppKey(null);
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="text"
+                                autoFocus
+                                list="sku-npp-options-datalist"
+                                value={inlineNppCode}
+                                onChange={(e) => setInlineNppCode(e.target.value.toUpperCase())}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void handleSaveNppCode(row, inlineNppCode, inlineApplyAllMst);
+                                  } else if (e.key === "Escape") {
+                                    setEditingNppKey(null);
+                                    setInlineApplyAllMst(false);
+                                  }
+                                }}
+                                disabled={savingNppKey === row.rowKey}
+                                placeholder="Mã SP XHĐ"
+                                className="h-6 w-28 rounded border border-sky-400 bg-white px-1.5 font-mono text-[11px] font-bold uppercase text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                              />
+                              <button
+                                type="button"
+                                disabled={savingNppKey === row.rowKey}
+                                onClick={() =>
+                                  void handleSaveNppCode(row, inlineNppCode, inlineApplyAllMst)
                                 }
-                              }}
-                              disabled={savingNppKey === row.rowKey}
-                              placeholder="Mã SP XHĐ"
-                              className="h-6 w-28 rounded border border-sky-400 bg-white px-1.5 font-mono text-[11px] font-bold uppercase text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500"
-                            />
-                            <button
-                              type="button"
-                              disabled={savingNppKey === row.rowKey}
-                              onClick={() => void handleSaveNppCode(row, inlineNppCode)}
-                              className="rounded bg-sky-600 p-1 text-white hover:bg-sky-700 disabled:bg-slate-300"
-                              title="Lưu Mã SP XHĐ (Enter)"
-                            >
-                              {savingNppKey === row.rowKey ? (
-                                <Loader2 size={12} className="animate-spin" />
-                              ) : (
-                                <Check size={12} />
-                              )}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={savingNppKey === row.rowKey}
-                              onClick={() => setEditingNppKey(null)}
-                              className="rounded bg-slate-200 p-1 text-slate-600 hover:bg-slate-300"
-                              title="Hủy (Esc)"
-                            >
-                              <X size={12} />
-                            </button>
+                                className="rounded bg-sky-600 p-1 text-white hover:bg-sky-700 disabled:bg-slate-300"
+                                title={
+                                  row.rowCompanyId != null && !inlineApplyAllMst
+                                    ? `Lưu riêng cho MST ${row.rowCompanyTaxCode || row.rowCompanyCode} (Enter)`
+                                    : "Lưu Mã SP XHĐ (Enter)"
+                                }
+                              >
+                                {savingNppKey === row.rowKey ? (
+                                  <Loader2 size={12} className="animate-spin" />
+                                ) : (
+                                  <Check size={12} />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={savingNppKey === row.rowKey}
+                                onClick={() => {
+                                  setEditingNppKey(null);
+                                  setInlineApplyAllMst(false);
+                                }}
+                                className="rounded bg-slate-200 p-1 text-slate-600 hover:bg-slate-300"
+                                title="Hủy (Esc)"
+                              >
+                                <X size={12} />
+                              </button>
+                            </div>
+                            {row.rowCompanyId != null && row.mstCount > 1 && (
+                              <label className="inline-flex items-center gap-1 text-[9px] font-medium text-slate-600 cursor-pointer select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={inlineApplyAllMst}
+                                  onChange={(e) => setInlineApplyAllMst(e.target.checked)}
+                                  className="h-3 w-3 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                />
+                                <span>Áp dụng cả {row.mstCount} MST</span>
+                              </label>
+                            )}
                           </div>
                         ) : (
                           <div className="group flex items-center gap-1.5">
                             {row.nppCode ? (
                               <span
                                 className="rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] font-bold text-emerald-800"
-                                title={`Mã SP XHĐ: ${row.nppCode}`}
+                                title={`Mã SP XHĐ: ${row.nppCode}${row.internal_name ? ` - ${row.internal_name}` : ""}`}
                               >
                                 {row.nppCode}
                               </span>
@@ -2078,9 +2213,14 @@ export default function ProductsPage() {
                               onClick={() => {
                                 setEditingNppKey(row.rowKey);
                                 setInlineNppCode(row.nppCode || "");
+                                setInlineApplyAllMst(false);
                               }}
                               className="rounded p-0.5 text-slate-400 opacity-60 hover:bg-sky-50 hover:text-sky-700 hover:opacity-100 group-hover:opacity-100 transition-opacity"
-                              title="Gán / sửa Mã SP XHĐ"
+                              title={
+                                row.rowCompanyId != null
+                                  ? `Gán / sửa Mã SP XHĐ cho MST ${row.rowCompanyTaxCode || row.rowCompanyCode}`
+                                  : "Gán / sửa Mã SP XHĐ"
+                              }
                             >
                               <Pencil size={11} />
                             </button>
@@ -2903,14 +3043,31 @@ export default function ProductsPage() {
 
                   {/* Combobox Sản phẩm XHĐ */}
                   <div className="md:col-span-8" ref={editNppContainerRef}>
-                    <div className="flex items-center justify-between mb-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                       <label className="text-[10px] font-semibold text-slate-600 flex items-center gap-1.5">
                         <Link2 size={12} className="text-sky-600" />
-                        <span>Mã Sản phẩm XHĐ (Dùng chung toàn NPP)</span>
+                        <span>
+                          {editingProduct.rowCompanyId != null
+                            ? `Mã Sản phẩm XHĐ (MST: ${editingProduct.rowCompanyTaxCode || editingProduct.rowCompanyCode})`
+                            : "Mã Sản phẩm XHĐ (Chuẩn xuất hóa đơn)"}
+                        </span>
                       </label>
-                      <span className="text-[10px] text-slate-500">
-                        {nppProductOptions.length} SP XHĐ trong hệ thống
-                      </span>
+                      <div className="flex items-center gap-3">
+                        {editingProduct.rowCompanyId != null && editingProduct.mstCount > 1 && (
+                          <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-sky-800 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={editApplyAllMst}
+                              onChange={(e) => setEditApplyAllMst(e.target.checked)}
+                              className="h-3.5 w-3.5 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                            />
+                            <span>Áp dụng cho tất cả {editingProduct.mstCount} MST của mã này</span>
+                          </label>
+                        )}
+                        <span className="text-[10px] text-slate-500">
+                          {nppProductOptions.length} SP XHĐ trong hệ thống
+                        </span>
+                      </div>
                     </div>
 
                     {/* TRƯỜNG HỢP 1: ĐÃ CHỌN SP XHĐ */}

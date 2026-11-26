@@ -71,6 +71,10 @@ class ProductManagedCompany(BaseModel):
     source: str = "MANUAL"
     is_primary: bool = False
     npp_code: Optional[str] = None
+    invoice_product_id: Optional[int] = None
+    invoice_product_code: Optional[str] = None
+    invoice_product_name: Optional[str] = None
+    invoice_product_unit: Optional[str] = None
     company_product_code: Optional[str] = None
     invoice_name_override: Optional[str] = None
     invoice_unit_name: Optional[str] = None
@@ -84,6 +88,10 @@ class ProductCompanyConfigItem(BaseModel):
     company_id: int
     is_primary: bool = False
     npp_code: Optional[str] = None
+    invoice_product_id: Optional[int] = None
+    invoice_product_code: Optional[str] = None
+    invoice_product_name: Optional[str] = None
+    invoice_product_unit: Optional[str] = None
     company_product_code: Optional[str] = None
     invoice_name_override: Optional[str] = None
     invoice_unit_name: Optional[str] = None
@@ -97,6 +105,8 @@ class ProductCompanyNppCodeUpdate(BaseModel):
 
 class ProductInvoiceProductUpdate(BaseModel):
     invoice_product_id: Optional[int] = None
+    company_id: Optional[int] = None
+    apply_all_companies: bool = False
 
 
 class ProductCompanyConfigsUpdate(BaseModel):

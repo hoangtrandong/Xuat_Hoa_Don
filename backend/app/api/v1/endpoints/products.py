@@ -385,8 +385,11 @@ def _product_managed_companies(db: Session, product_ids: list[int]) -> dict[int,
             ProductCompany.id.asc(),
         )
     ).all()
+    ip_ids = {link.invoice_product_id for link, _ in rows if link.invoice_product_id}
+    ip_map = _invoice_products_by_id(db, ip_ids)
     result: dict[int, list[dict]] = {}
     for link, comp in rows:
+        ip = ip_map.get(link.invoice_product_id) if link.invoice_product_id else None
         result.setdefault(link.product_id, []).append(
             {
                 "company_id": comp.id,
@@ -397,7 +400,11 @@ def _product_managed_companies(db: Session, product_ids: list[int]) -> dict[int,
                 "invoice_item_mode": comp.invoice_item_mode or "TAX_INPUT",
                 "source": link.source or "MANUAL",
                 "is_primary": bool(link.is_primary),
-                "npp_code": link.npp_code,
+                "npp_code": (ip.code if ip else link.npp_code),
+                "invoice_product_id": link.invoice_product_id,
+                "invoice_product_code": ip.code if ip else None,
+                "invoice_product_name": ip.name if ip else None,
+                "invoice_product_unit": ip.unit_name if ip else None,
                 "company_product_code": link.company_product_code,
                 "invoice_name_override": link.invoice_name_override,
                 "invoice_unit_name": link.invoice_unit_name,
@@ -509,7 +516,13 @@ def list_products_paged(
     unique_ids = list({prod.id for prod, _, _ in row_tuples})
     distributor_map = _product_distributors(db, unique_skus)
     managed_companies_map = _product_managed_companies(db, unique_ids)
-    ip_map = _invoice_products_by_id(db, {prod.invoice_product_id for prod, _, _ in row_tuples if prod.invoice_product_id})
+    ip_ids: set[int] = set()
+    for prod, pc_link, _ in row_tuples:
+        if prod.invoice_product_id:
+            ip_ids.add(prod.invoice_product_id)
+        if pc_link is not None and pc_link.invoice_product_id:
+            ip_ids.add(pc_link.invoice_product_id)
+    ip_map = _invoice_products_by_id(db, ip_ids)
     total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
 
     # Cache base product dump per product_id để tránh validate lặp khi 1 SKU có nhiều MST
@@ -523,7 +536,8 @@ def list_products_paged(
         base_data = dict(base_dump_cache[prod.id])
         managed_list = managed_companies_map.get(prod.id, [])
         if pc_link is not None and comp is not None:
-            row_npp = (pc_link.npp_code or "").strip().upper() or None
+            row_ip = ip_map.get(pc_link.invoice_product_id) if pc_link.invoice_product_id else None
+            row_npp = (row_ip.code if row_ip else (pc_link.npp_code or "")).strip().upper() or None
             has_conv = bool(
                 (pc_link.conversion_num and pc_link.conversion_num != 1)
                 or (pc_link.conversion_den and pc_link.conversion_den != 1)
@@ -533,6 +547,12 @@ def list_products_paged(
             base_data.update(
                 {
                     "npp_code": row_npp,
+                    "invoice_product_id": pc_link.invoice_product_id,
+                    "invoice_product_code": row_ip.code if row_ip else None,
+                    "invoice_product_name": row_ip.name if row_ip else None,
+                    "invoice_product_unit": row_ip.unit_name if row_ip else None,
+                    "internal_name": row_ip.name if row_ip else None,
+                    "internal_unit": row_ip.unit_name if row_ip else None,
                     "row_key": f"{prod.id}:{comp.id}",
                     "row_company_id": comp.id,
                     "row_company_code": comp.code,
@@ -753,13 +773,45 @@ def update_product_company_npp_code(
     }
 
 
+def _sync_product_fallback_invoice_product(db: Session, product: ProductModel) -> None:
+    """Giữ Product.invoice_product_id và Product._npp_code đồng bộ với MST chính (hoặc MST đầu tiên có gán)."""
+    links = db.scalars(
+        select(ProductCompany)
+        .where(ProductCompany.product_id == product.id)
+        .order_by(
+            ProductCompany.is_primary.desc(),
+            ProductCompany.last_purchased_at.desc().nullslast(),
+            ProductCompany.id.asc(),
+        )
+    ).all()
+    if not links:
+        return
+    primary_link = next((l for l in links if l.invoice_product_id is not None), None)
+    if primary_link is not None and primary_link.invoice_product_id is not None:
+        ip = db.get(InvoiceProduct, primary_link.invoice_product_id)
+        product.invoice_product_id = primary_link.invoice_product_id
+        if ip is not None:
+            product.npp_code = ip.code
+            product.internal_name = ip.name
+            product.internal_unit = ip.unit_name
+        else:
+            product.npp_code = (primary_link.npp_code or "").strip().upper() or None
+    else:
+        product.invoice_product_id = None
+        primary_code = next(((l.npp_code or "").strip().upper() for l in links if (l.npp_code or "").strip()), None)
+        product.npp_code = primary_code
+        if not primary_code:
+            product.internal_name = None
+            product.internal_unit = None
+
+
 @router.patch("/{product_id}/invoice-product")
 def assign_product_invoice_product(
     product_id: int,
     payload: ProductInvoiceProductUpdate,
     db: Session = Depends(get_db),
 ):
-    """Gán hoặc gỡ Sản phẩm xuất hóa đơn chuẩn cho 1 SKU đầu vào CQT."""
+    """Gán hoặc gỡ Sản phẩm xuất hóa đơn chuẩn cho 1 SKU đầu vào CQT (riêng theo từng MST hoặc toàn bộ MST)."""
     product = product_crud.get(db, product_id)
     if not product:
         raise HTTPException(status_code=404, detail="Không tìm thấy sản phẩm SKU.")
@@ -769,31 +821,44 @@ def assign_product_invoice_product(
         ip = db.get(InvoiceProduct, payload.invoice_product_id)
         if not ip:
             raise HTTPException(status_code=404, detail="Không tìm thấy Sản phẩm xuất hóa đơn.")
-        product.invoice_product_id = ip.id
-        product.npp_code = ip.code
-        product.internal_name = ip.name
-        product.internal_unit = ip.unit_name
-        # Đồng bộ luôn cho các liên kết ProductCompany để tương thích ngược
-        for pc in db.scalars(select(ProductCompany).where(ProductCompany.product_id == product.id)).all():
-            pc.npp_code = ip.code
+
+    if payload.company_id is not None and not payload.apply_all_companies:
+        link = db.scalar(
+            select(ProductCompany).where(
+                ProductCompany.product_id == product.id,
+                ProductCompany.company_id == payload.company_id,
+            )
+        )
+        if not link:
+            raise HTTPException(
+                status_code=404,
+                detail="Không tìm thấy liên kết giữa SKU CQT này và Công ty / MST đã chọn.",
+            )
+        link.invoice_product_id = ip.id if ip else None
+        link.npp_code = ip.code if ip else None
+        db.flush()
+        _sync_product_fallback_invoice_product(db, product)
     else:
-        product.invoice_product_id = None
-        product.npp_code = None
-        product.internal_name = None
-        product.internal_unit = None
+        product.invoice_product_id = ip.id if ip else None
+        product.npp_code = ip.code if ip else None
+        product.internal_name = ip.name if ip else None
+        product.internal_unit = ip.unit_name if ip else None
         for pc in db.scalars(select(ProductCompany).where(ProductCompany.product_id == product.id)).all():
-            pc.npp_code = None
+            pc.invoice_product_id = ip.id if ip else None
+            pc.npp_code = ip.code if ip else None
 
     db.commit()
     db.refresh(product)
     return {
         "ok": True,
         "product_id": product.id,
-        "invoice_product_id": product.invoice_product_id,
+        "company_id": payload.company_id,
+        "apply_all_companies": bool(payload.apply_all_companies or payload.company_id is None),
+        "invoice_product_id": ip.id if ip else None,
         "invoice_product_code": ip.code if ip else None,
         "invoice_product_name": ip.name if ip else None,
         "invoice_product_unit": ip.unit_name if ip else None,
-        "npp_code": product._npp_code,
+        "npp_code": ip.code if ip else None,
     }
 
 

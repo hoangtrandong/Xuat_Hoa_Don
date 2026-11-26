@@ -47,13 +47,29 @@ def _serialize_invoice_products(db: Session, items: list[InvoiceProduct]) -> lis
         return []
     ids = [it.id for it in items]
 
-    cqt_counts = dict(
+    # Đếm liên kết CQT: ưu tiên đếm theo từng dòng (SKU × MST) trên product_companies,
+    # cộng thêm các Product chưa có liên kết product_companies nào nhưng có gán invoice_product_id
+    pc_counts = dict(
+        db.execute(
+            select(ProductCompany.invoice_product_id, func.count(ProductCompany.id))
+            .where(ProductCompany.invoice_product_id.in_(ids))
+            .group_by(ProductCompany.invoice_product_id)
+        ).all()
+    )
+    orphan_prod_counts = dict(
         db.execute(
             select(Product.invoice_product_id, func.count(Product.id))
-            .where(Product.invoice_product_id.in_(ids))
+            .where(
+                Product.invoice_product_id.in_(ids),
+                ~Product.company_links.any(),
+            )
             .group_by(Product.invoice_product_id)
         ).all()
     )
+    cqt_counts = {
+        ip_id: int(pc_counts.get(ip_id, 0)) + int(orphan_prod_counts.get(ip_id, 0))
+        for ip_id in ids
+    }
     dms_counts = dict(
         db.execute(
             select(DistributorProduct.invoice_product_id, func.count(DistributorProduct.id))
@@ -236,8 +252,12 @@ def update_invoice_product(
         prod.npp_code = item.code
         prod.internal_name = item.name
         prod.internal_unit = item.unit_name
-        for pc in db.scalars(select(ProductCompany).where(ProductCompany.product_id == prod.id)).all():
-            pc.npp_code = item.code
+
+    linked_pcs = db.scalars(
+        select(ProductCompany).where(ProductCompany.invoice_product_id == item.id)
+    ).all()
+    for pc in linked_pcs:
+        pc.npp_code = item.code
 
     db.commit()
     db.refresh(item)
@@ -262,6 +282,9 @@ def delete_invoice_product(
         dp.invoice_product_name = None
     for prod in db.scalars(select(Product).where(Product.invoice_product_id == item.id)).all():
         prod.invoice_product_id = None
+    for pc in db.scalars(select(ProductCompany).where(ProductCompany.invoice_product_id == item.id)).all():
+        pc.invoice_product_id = None
+        pc.npp_code = None
 
     code = item.code
     db.delete(item)
@@ -289,6 +312,9 @@ def bulk_delete_invoice_products(
             dp.invoice_product_name = None
         for prod in db.scalars(select(Product).where(Product.invoice_product_id.in_(ids))).all():
             prod.invoice_product_id = None
+        for pc in db.scalars(select(ProductCompany).where(ProductCompany.invoice_product_id.in_(ids))).all():
+            pc.invoice_product_id = None
+            pc.npp_code = None
         for it in items:
             db.delete(it)
         db.commit()

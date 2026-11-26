@@ -312,10 +312,13 @@ def consolidate_dms_orders_for_invoicing(
             if distributor_product.company_id is not None and (sku, None) not in distributor_invoice_profile_map:
                 distributor_invoice_profile_map[(sku, None)] = (invoice_code, invoice_name)
 
-    # Nạp sẵn bảng ProductCompany (kèm Company) 1 lần để phân giải Công ty quản lý & Quy đổi quy cách (zero N+1)
+    # Nạp sẵn bảng ProductCompany (kèm Company & InvoiceProduct) 1 lần để phân giải Công ty quản lý & Quy đổi quy cách (zero N+1)
     pc_links = db.scalars(
         select(ProductCompany)
-        .options(selectinload(ProductCompany.company))
+        .options(
+            selectinload(ProductCompany.company),
+            selectinload(ProductCompany.invoice_product),
+        )
         .order_by(ProductCompany.is_primary.desc(), ProductCompany.last_purchased_at.desc().nullslast())
     ).all()
     prod_company_map: dict[tuple[int, int], ProductCompany] = {}
@@ -581,6 +584,10 @@ def consolidate_dms_orders_for_invoicing(
                 resolved_ip = dp_obj.invoice_product
             elif (dp_obj.invoice_product_code or "").strip():
                 resolved_ip = invoice_product_by_code.get(dp_obj.invoice_product_code.strip().upper())
+        if resolved_ip is None and prod is not None and comp is not None:
+            pc_for_ip = prod_company_map.get((prod.id, comp.id))
+            if pc_for_ip is not None and pc_for_ip.invoice_product is not None:
+                resolved_ip = pc_for_ip.invoice_product
         if resolved_ip is None and prod is not None and prod.invoice_product is not None:
             resolved_ip = prod.invoice_product
         if resolved_ip is None and raw_prod_code:

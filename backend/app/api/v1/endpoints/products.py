@@ -140,49 +140,69 @@ def download_product_template():
     from app.core.excel_templates import create_smart_template
 
     output = create_smart_template(
-        sheet_title="SKU",
+        sheet_title="San_Pham_CQT",
         headers=[
-            "sku", "name", "category_code", "unit_code", "supplier",
-            "base_price", "cost_price", "reorder_level", "status", "boxes_per_carton",
-            "representative_sku", "representative_name",
+            "MST đầu vào (CQT)",
+            "Mã SP đầu vào (CQT)",
+            "Mã SP xuất HĐ",
+            "Tên sản phẩm / Hàng hóa",
+            "Ngành hàng",
+            "ĐVT",
+            "Nhà cung cấp",
+            "Giá bán / ĐVT (VNĐ)",
+            "Thuế suất VAT (%)",
+            "Trạng thái",
         ],
         sub_guides=[
-            "Bắt buộc. Mã sản phẩm (VD: 01CX01)",
-            "Bắt buộc. Tên sản phẩm đầy đủ",
-            "Bắt buộc. Mã ngành hàng (VD: BKS, SUA, BOT...)",
-            "Bắt buộc. Mã ĐVT (VD: CAI, HOP, THUNG...)",
+            "Tùy chọn. MST hoặc Mã Công ty QL (để gán riêng theo từng MST)",
+            "Bắt buộc. Mã sản phẩm đầu vào CQT (VD: 01CX01)",
+            "Tùy chọn. Mã SP xuất hóa đơn đã tạo trong Danh sách SP XHĐ",
+            "Bắt buộc. Tên sản phẩm / hàng hóa đầy đủ",
+            "Tùy chọn. Mã hoặc tên ngành hàng (VD: SUA, BKS...)",
+            "Tùy chọn. ĐVT (VD: Hộp, Thùng, Lon, Cái...)",
             "Tùy chọn. Nhà cung cấp (VD: Vinamilk)",
-            "Giá bán niêm yết (VNĐ)",
-            "Giá vốn nhập kho (VNĐ)",
-            "Mức tồn tối thiểu cảnh báo đặt hàng",
-            "Chọn: active / inactive",
-            "Quy cách: Số hộp/gói trong 1 thùng",
-            "Tùy chọn. Mã SKU đại diện quy đổi",
-            "Tùy chọn. Tên SKU đại diện quy đổi",
+            "Tùy chọn. Giá bán / ĐVT (VNĐ)",
+            "Tùy chọn. 0, 5, 8, 10 hoặc KCT",
+            "Chọn: Đang bán / Ngừng bán",
         ],
         sample_rows=[
-            ["01CX01", "Sữa tươi tiệt trùng 100% Có đường 110ml", "SUA", "HOP", "Vinamilk", 7500, 6800, 50, "active", 48, "", ""],
-            ["02HD14", "Sữa chua ăn Có đường 100g", "SUA", "HOP", "Vinamilk", 8000, 7200, 30, "active", 48, "", ""],
+            ["0101111111", "01CX01", "SP-XHD-01", "Sữa tươi tiệt trùng 100% Có đường 110ml", "SUA", "Hộp", "Vinamilk", 7500, "8%", "Đang bán"],
+            ["0102222222", "01CX01", "SP-XHD-02", "Sữa tươi tiệt trùng 100% Có đường 110ml", "SUA", "Hộp", "Vinamilk", 7500, "8%", "Đang bán"],
         ],
-        col_widths=[16, 36, 18, 16, 18, 18, 18, 16, 16, 18, 20, 26],
-        guide_title="HƯỚNG DẪN NHẬP DANH MỤC SẢN PHẨM (SKU)",
+        col_widths=[20, 22, 20, 40, 18, 14, 18, 20, 18, 16],
+        guide_title="HƯỚNG DẪN NHẬP DANH MỤC SẢN PHẨM ĐẦU VÀO CQT",
         guide_sections=[
             ("1. Quy tắc chung:", [
-                "• Dòng 1: Tiêu đề cột (tiếng Anh chuẩn). Dòng 2: Hướng dẫn mờ. Dữ liệu bắt đầu từ dòng 3.",
-                "• Nếu SKU đã có, hệ thống cập nhật giá, quy cách và thông tin liên quan.",
-                "• Nếu SKU chưa có, hệ thống tạo mới sản phẩm.",
+                "• Dòng 1: Tiêu đề cột tiếng Việt chuẩn khớp với bảng Sản phẩm CQT. Dòng 2: Hướng dẫn mờ. Dữ liệu bắt đầu từ dòng 3.",
+                "• Nếu Mã SP đầu vào (CQT) đã tồn tại, hệ thống sẽ cập nhật thông tin tương ứng.",
+                "• Nếu có điền 'MST đầu vào (CQT)' và 'Mã SP xuất HĐ', hệ thống sẽ tự động gắn MST đó và gán riêng Mã SP xuất HĐ cho đúng cặp (Mã SP CQT + MST).",
+                "• Nếu cùng 1 Mã SP CQT có nhiều MST, chỉ cần điền nhiều dòng với MST và Mã SP xuất HĐ tương ứng.",
             ]),
-            ("2. Quy cách quy đổi Thùng / Hộp (boxes_per_carton):", [
-                "• Trường 'boxes_per_carton' dùng để quy đổi tự động giữa Thùng và Hộp/Gói trong Phiếu giao xuất kho.",
+            ("2. Lưu ý về Mã SP xuất HĐ:", [
+                "• Mã SP xuất HĐ cần được tạo sẵn trong mục 'Sản phẩm XHĐ' để hệ thống tự động liên kết.",
             ]),
         ],
-        validations=[("I3:I500", '"active,inactive"', "Chọn trạng thái", "Chỉ chọn active hoặc inactive")],
+        validations=[("J3:J500", '"Đang bán,Ngừng bán"', "Chọn trạng thái", "Chỉ chọn Đang bán hoặc Ngừng bán")],
     )
     return Response(
         content=output.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="mau-sku.xlsx"'},
+        headers={"Content-Disposition": 'attachment; filename="mau-san-pham-cqt.xlsx"'},
     )
+
+
+def _parse_upload_vat_rate(raw_val) -> float | None:
+    if raw_val is None:
+        return None
+    s = str(raw_val).strip().upper().replace("%", "")
+    if not s:
+        return None
+    if s in ("KCT", "KHONG CHIU THUE", "KHÔNG CHỊU THUẾ", "-1"):
+        return -1.0
+    try:
+        return float(s.replace(",", "."))
+    except ValueError:
+        return None
 
 
 @router.post("/upload")
@@ -196,78 +216,174 @@ def upload_products(file: UploadFile = File(...), db: Session = Depends(get_db))
             raise HTTPException(status_code=400, detail="File Excel không có dữ liệu.")
         raw_headers = [str(value).strip() if value is not None else "" for value in rows[0]]
         header_map = {
-            "mã sku": "sku", "ma sku": "sku", "mã sản phẩm": "sku", "sku": "sku",
-            "tên sản phẩm": "name", "ten san pham": "name", "tên sp": "name", "name": "name",
-            "mã danh mục": "category_code", "ma danh muc": "category_code", "danh mục": "category_code", "category_code": "category_code",
-            "đvt": "unit_code", "dvt": "unit_code", "đơn vị tính": "unit_code", "unit_code": "unit_code",
-            "nhà cung cấp": "supplier", "nha cung cap": "supplier", "supplier": "supplier",
-            "giá bán / đvt (vnđ)": "base_price", "giá bán": "base_price", "gia ban": "base_price", "đơn giá": "base_price", "base_price": "base_price",
-            "giá vốn": "cost_price", "gia von": "cost_price", "cost_price": "cost_price",
-            "mức tồn tối thiểu": "reorder_level", "reorder_level": "reorder_level",
-            "trạng thái": "status", "trang thai": "status", "status": "status",
-            "quy cách (hộp/thùng)": "boxes_per_carton", "quy cách": "boxes_per_carton", "boxes_per_carton": "boxes_per_carton",
-            "mã sku đại diện": "representative_sku", "representative_sku": "representative_sku",
-            "tên sku đại diện": "representative_name", "representative_name": "representative_name",
+            "mst đầu vào (cqt)": "company_tax_code",
+            "công ty / mst (cqt)": "company_tax_code",
+            "mst đầu vào": "company_tax_code",
+            "mst": "company_tax_code",
+            "mã số thuế": "company_tax_code",
+            "mã công ty": "company_tax_code",
+            "mã sp đầu vào (cqt)": "sku",
+            "mã sản phẩm đầu vào cqt": "sku",
+            "mã sản phẩm (sku)": "sku",
+            "mã sku": "sku",
+            "ma sku": "sku",
+            "mã sản phẩm": "sku",
+            "sku": "sku",
+            "mã sp xuất hđ": "invoice_product_code",
+            "mã sp xhđ": "invoice_product_code",
+            "mã sản phẩm xhđ": "invoice_product_code",
+            "mã sản phẩm xuất hóa đơn": "invoice_product_code",
+            "mã sp xuất hóa đơn": "invoice_product_code",
+            "invoice_product_code": "invoice_product_code",
+            "tên sản phẩm / hàng hóa": "name",
+            "tên sản phẩm": "name",
+            "ten san pham": "name",
+            "tên sp": "name",
+            "name": "name",
+            "ngành hàng": "category_code",
+            "mã danh mục": "category_code",
+            "ma danh muc": "category_code",
+            "danh mục ngành hàng": "category_code",
+            "danh mục": "category_code",
+            "category_code": "category_code",
+            "đvt": "unit_code",
+            "dvt": "unit_code",
+            "đơn vị tính": "unit_code",
+            "unit_code": "unit_code",
+            "nhà cung cấp": "supplier",
+            "nha cung cap": "supplier",
+            "supplier": "supplier",
+            "giá bán / đvt (vnđ)": "base_price",
+            "giá bán / đvt": "base_price",
+            "giá bán (vnđ)": "base_price",
+            "giá bán": "base_price",
+            "gia ban": "base_price",
+            "đơn giá": "base_price",
+            "base_price": "base_price",
+            "thuế suất vat (%)": "vat_rate",
+            "thuế suất vat": "vat_rate",
+            "vat": "vat_rate",
+            "vat_rate": "vat_rate",
+            "giá vốn (vnđ)": "cost_price",
+            "giá vốn": "cost_price",
+            "gia von": "cost_price",
+            "cost_price": "cost_price",
+            "mức tồn tối thiểu": "reorder_level",
+            "reorder_level": "reorder_level",
+            "trạng thái": "status",
+            "trang thai": "status",
+            "status": "status",
+            "quy cách (hộp/thùng)": "boxes_per_carton",
+            "quy cách": "boxes_per_carton",
+            "boxes_per_carton": "boxes_per_carton",
+            "mã sku đại diện": "representative_sku",
+            "representative_sku": "representative_sku",
+            "tên sku đại diện": "representative_name",
+            "representative_name": "representative_name",
         }
         headers = [header_map.get(h.lower(), h) for h in raw_headers]
         required = {"sku", "name"}
         if not required.issubset(headers):
-            raise HTTPException(status_code=400, detail=f"Thiếu cột bắt buộc: {', '.join(sorted(required - set(headers)))}")
-        categories = {item.code.upper(): item.id for item in db.query(ProductCategory).all()}
-        categories.update({item.name.upper(): item.id for item in db.query(ProductCategory).all()})
-        units = {item.code.upper(): item.id for item in db.query(ProductUnit).all()}
-        units.update({item.name.upper(): item.id for item in db.query(ProductUnit).all()})
+            raise HTTPException(
+                status_code=400,
+                detail="Thiếu cột bắt buộc: 'Mã SP đầu vào (CQT)' và 'Tên sản phẩm / Hàng hóa'.",
+            )
+
+        categories = {item.code.upper(): item.id for item in db.query(ProductCategory).all() if item.code}
+        categories.update({item.name.upper(): item.id for item in db.query(ProductCategory).all() if item.name})
+        units = {item.code.upper(): item.id for item in db.query(ProductUnit).all() if item.code}
+        units.update({item.name.upper(): item.id for item in db.query(ProductUnit).all() if item.name})
         default_category_id = next(iter(categories.values()), 1)
         default_unit_id = next(iter(units.values()), 1)
-        products = {item.sku: item for item in db.scalars(select(ProductModel)).all()}
+
+        products = {item.sku.strip().upper(): item for item in db.scalars(select(ProductModel)).all() if item.sku}
+
+        # Nạp Công ty QL theo MST và Mã công ty để gán ProductCompany theo từng dòng
+        companies_by_key: dict[str, CompanyModel] = {}
+        for comp in db.scalars(select(CompanyModel)).all():
+            if comp.tax_code and comp.tax_code.strip():
+                companies_by_key[comp.tax_code.strip().upper()] = comp
+            if comp.code and comp.code.strip():
+                companies_by_key[comp.code.strip().upper()] = comp
+
+        # Nạp Danh mục Sản phẩm XHĐ theo Mã để gán trực tiếp từ file Excel
+        invoice_products_by_code: dict[str, InvoiceProduct] = {}
+        for ip in db.scalars(select(InvoiceProduct)).all():
+            if ip.code and ip.code.strip():
+                invoice_products_by_code[ip.code.strip().upper()] = ip
+
         has_representative_columns = "representative_sku" in headers or "representative_name" in headers
+        has_invoice_product_col = "invoice_product_code" in headers
+        has_vat_col = "vat_rate" in headers
         imported = 0
         updated = 0
+        mst_mapped = 0
         representative_updates: list[tuple[ProductModel, str, str]] = []
+
         for row_number, values in enumerate(rows[1:], start=2):
             data = dict(zip(headers, values))
             if not any(value is not None and str(value).strip() for value in values):
                 continue
-            sku = str(data.get("sku") or "").strip()
+            sku = str(data.get("sku") or "").strip().upper()
             name = str(data.get("name") or "").strip()
             # Bỏ qua dòng hướng dẫn phụ nếu giữ nguyên dòng 2 mẫu
-            if "Bắt buộc" in sku or "Mã sản phẩm" in sku or "Tên sản phẩm đầy đủ" in name:
+            if (
+                "BẮT BUỘC" in sku
+                or "MÃ SẢN PHẨM" in sku
+                or "Tên sản phẩm" in name
+                and "đầy đủ" in name
+            ):
                 continue
             category_code = str(data.get("category_code") or "").strip().upper()
             unit_code = str(data.get("unit_code") or "").strip().upper()
             if not sku or not name:
-                raise HTTPException(status_code=400, detail=f"Dòng {row_number}: SKU và tên sản phẩm là bắt buộc.")
-            
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Dòng {row_number}: Mã SP đầu vào (CQT) và Tên sản phẩm / Hàng hóa là bắt buộc.",
+                )
+
             product = products.get(sku)
             category_id = categories.get(category_code) or (product.category_id if product else default_category_id)
             unit_id = units.get(unit_code) or (product.unit_id if product else default_unit_id)
 
             status_val = str(data.get("status") or "").strip().lower()
-            if status_val in ["active", "đang kinh doanh", "1", "true", ""]:
+            if status_val in ["active", "đang bán", "đang kinh doanh", "1", "true", ""]:
                 clean_status = "active"
             else:
                 clean_status = "inactive"
 
             raw_boxes = data.get("boxes_per_carton")
             try:
-                boxes_val = max(1, int(float(raw_boxes))) if raw_boxes is not None and str(raw_boxes).strip() != "" else (product.boxes_per_carton if product else 1)
+                boxes_val = (
+                    max(1, int(float(raw_boxes)))
+                    if raw_boxes is not None and str(raw_boxes).strip() != ""
+                    else (product.boxes_per_carton if product else 1)
+                )
             except (ValueError, TypeError):
-                boxes_val = 1
+                boxes_val = product.boxes_per_carton if product else 1
 
             raw_base_price = data.get("base_price")
             try:
-                base_price_val = float(str(raw_base_price).replace(",", "").strip()) if raw_base_price is not None and str(raw_base_price).strip() != "" else (product.base_price if product else 0.0)
+                base_price_val = (
+                    float(str(raw_base_price).replace(",", "").strip())
+                    if raw_base_price is not None and str(raw_base_price).strip() != ""
+                    else (product.base_price if product else 0.0)
+                )
             except (ValueError, TypeError):
-                base_price_val = 0.0
+                base_price_val = product.base_price if product else 0.0
 
             raw_cost_price = data.get("cost_price")
             try:
-                cost_price_val = float(str(raw_cost_price).replace(",", "").strip()) if raw_cost_price is not None and str(raw_cost_price).strip() != "" else (product.cost_price if product else 0.0)
+                cost_price_val = (
+                    float(str(raw_cost_price).replace(",", "").strip())
+                    if raw_cost_price is not None and str(raw_cost_price).strip() != ""
+                    else (product.cost_price if product else 0.0)
+                )
             except (ValueError, TypeError):
-                cost_price_val = 0.0
+                cost_price_val = product.cost_price if product else 0.0
 
-            values_to_apply = {
-                "name": str(data["name"]).strip(),
+            values_to_apply: dict = {
+                "name": name,
                 "category_id": category_id,
                 "unit_id": unit_id,
                 "supplier": str(data.get("supplier") or "").strip() or (product.supplier if product else "Vinamilk"),
@@ -277,6 +393,12 @@ def upload_products(file: UploadFile = File(...), db: Session = Depends(get_db))
                 "status": clean_status,
                 "boxes_per_carton": boxes_val,
             }
+            if has_vat_col and data.get("vat_rate") is not None and str(data.get("vat_rate")).strip() != "":
+                parsed_vat = _parse_upload_vat_rate(data.get("vat_rate"))
+                if parsed_vat is not None:
+                    values_to_apply["vat_rate"] = parsed_vat
+                    values_to_apply["vat_rate_source"] = "MANUAL"
+
             if product is None:
                 product = ProductModel(sku=sku, **values_to_apply)
                 db.add(product)
@@ -287,14 +409,65 @@ def upload_products(file: UploadFile = File(...), db: Session = Depends(get_db))
                 for field, value in values_to_apply.items():
                     setattr(product, field, value)
                 updated += 1
+
+            # Xử lý liên kết MST đầu vào (ProductCompany) & Mã SP xuất HĐ (InvoiceProduct)
+            raw_mst_key = str(data.get("company_tax_code") or "").strip().upper()
+            matched_comp = companies_by_key.get(raw_mst_key) if raw_mst_key else None
+            raw_ip_code = str(data.get("invoice_product_code") or "").strip().upper() if has_invoice_product_col else ""
+            matched_ip = invoice_products_by_code.get(raw_ip_code) if raw_ip_code else None
+
+            if matched_comp is not None:
+                pc_link = db.scalar(
+                    select(ProductCompany).where(
+                        ProductCompany.product_id == product.id,
+                        ProductCompany.company_id == matched_comp.id,
+                    )
+                )
+                if pc_link is None:
+                    pc_link = ProductCompany(
+                        product_id=product.id,
+                        company_id=matched_comp.id,
+                        role="MANAGER",
+                        source="MANUAL",
+                        status="active",
+                    )
+                    db.add(pc_link)
+                    db.flush()
+                if matched_ip is not None:
+                    pc_link.invoice_product_id = matched_ip.id
+                    pc_link.npp_code = matched_ip.code
+                    mst_mapped += 1
+                    db.flush()
+                    _sync_product_fallback_invoice_product(db, product)
+            elif matched_ip is not None:
+                product.invoice_product_id = matched_ip.id
+                product.npp_code = matched_ip.code
+                product.internal_name = matched_ip.name
+                product.internal_unit = matched_ip.unit_name
+                for pc in db.scalars(select(ProductCompany).where(ProductCompany.product_id == product.id)).all():
+                    pc.invoice_product_id = matched_ip.id
+                    pc.npp_code = matched_ip.code
+                mst_mapped += 1
+
             if has_representative_columns:
-                representative_updates.append((product, str(data.get("representative_sku") or "").strip().upper(), str(data.get("representative_name") or "").strip()))
+                representative_updates.append(
+                    (
+                        product,
+                        str(data.get("representative_sku") or "").strip().upper(),
+                        str(data.get("representative_name") or "").strip(),
+                    )
+                )
 
         if has_representative_columns:
             for product, representative_sku, representative_name in representative_updates:
                 _apply_representative_upload(db, product, representative_sku, representative_name, products)
         db.commit()
-        return {"imported": imported, "updated": updated, "representative_updated": len(representative_updates)}
+        return {
+            "imported": imported,
+            "updated": updated,
+            "mst_mapped": mst_mapped,
+            "representative_updated": len(representative_updates),
+        }
     except HTTPException:
         db.rollback()
         raise

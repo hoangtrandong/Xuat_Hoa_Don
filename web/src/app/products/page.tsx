@@ -677,6 +677,7 @@ export default function ProductsPage() {
       const result = (await response.json()) as {
         imported?: number;
         updated?: number;
+        mst_mapped?: number;
         representative_updated?: number;
         detail?: string;
       };
@@ -686,7 +687,7 @@ export default function ProductsPage() {
       await loadCatalog(false);
       setBannerMsg({
         type: "success",
-        text: `Nhập file Excel thành công: Đã thêm mới ${result.imported ?? 0} SKU, cập nhật ${result.updated ?? 0} SKU và xử lý ${result.representative_updated ?? 0} liên kết đại diện.`,
+        text: `Nhập file Excel thành công: Thêm mới ${result.imported ?? 0} mã CQT, cập nhật ${result.updated ?? 0} mã CQT, gán Mã SP xuất HĐ cho ${result.mst_mapped ?? 0} dòng.`,
       });
     } catch (uploadErr) {
       setBannerMsg({
@@ -1308,16 +1309,20 @@ export default function ProductsPage() {
           "Nhà phân phối": distName,
           "MST đầu vào (CQT)": product.row_company_tax_code || product.row_company_code || "",
           "Công ty quản lý": product.row_company_short_name || product.row_company_name || "",
-          "Mã SKU": product.sku,
-          "Mã SP XHĐ": (product.invoice_product_code || (product.row_company_id != null ? product.row_company_npp_code : product.npp_code)) || "",
-          "Tên sản phẩm": product.name,
-          "Mã danh mục": product.category_code || catObj?.code || "",
-          "Danh mục ngành hàng": product.category_name || catObj?.name || "Chưa phân loại",
+          "Mã SP đầu vào (CQT)": product.sku,
+          "Mã SP xuất HĐ": (product.invoice_product_code || (product.row_company_id != null ? product.row_company_npp_code : product.npp_code)) || "",
+          "Tên sản phẩm / Hàng hóa": product.name,
+          "Ngành hàng": product.category_code || catObj?.code || product.category_name || "",
           ĐVT: product.unit_name || unitObj?.name || "Hộp",
-          "Quy cách (Hộp/Thùng)": Math.max(1, Number(product.boxes_per_carton ?? 1)),
           "Nhà cung cấp": (product.supplier || "Vinamilk").trim(),
           "Giá bán / ĐVT (VNĐ)": Number(product.base_price ?? 0),
-          "Trạng thái": product.status === "active" ? "Đang kinh doanh" : "Ngừng kinh doanh",
+          "Thuế suất VAT (%)":
+            product.vat_rate == null
+              ? ""
+              : product.vat_rate < 0
+              ? "KCT"
+              : `${product.vat_rate}%`,
+          "Trạng thái": product.status === "active" ? "Đang bán" : "Ngừng bán",
         };
       });
 

@@ -296,3 +296,56 @@ def test_filter_has_mst_and_safe_cleanup_non_cqt_products(db_session):
     assert remaining_skus["CQT-001"] == "active"
     assert remaining_skus["CQT-NO-MST"] == "active"
     assert remaining_skus["DMS-REF-02"] == "inactive"
+
+
+def test_cqt_template_vietnamese_headers_and_per_mst_excel_upload(db_session):
+    from io import BytesIO
+    from fastapi import UploadFile
+    from openpyxl import load_workbook
+    from app.api.v1.endpoints.products import download_product_template, upload_products
+
+    _dist, comp_a, comp_b, _prod, ip_a, ip_b = _seed_multi_mst_product(db_session)
+
+    # 1. Tải file mẫu và kiểm tra tiêu đề tiếng Việt đúng với bảng CQT (không còn Quy cách)
+    resp = download_product_template()
+    wb = load_workbook(BytesIO(resp.body))
+    ws = wb.active
+    headers = [cell.value for cell in ws[1]]
+    assert headers == [
+        "MST đầu vào (CQT)",
+        "Mã SP đầu vào (CQT)",
+        "Mã SP xuất HĐ",
+        "Tên sản phẩm / Hàng hóa",
+        "Ngành hàng",
+        "ĐVT",
+        "Nhà cung cấp",
+        "Giá bán / ĐVT (VNĐ)",
+        "Thuế suất VAT (%)",
+        "Trạng thái",
+    ]
+    assert "Quy cách" not in " ".join(headers)
+
+    # 2. Điền 2 dòng cho cùng 1 mã CQT mới (CQT-XL-01) với 2 MST và 2 Mã SP xuất HĐ khác nhau
+    ws.delete_rows(3, ws.max_row)
+    ws.append([comp_a.tax_code, "CQT-XL-01", ip_a.code, "Sữa tươi upload Excel", "SUA", "Hộp", "Vinamilk", 12000, "8%", "Đang bán"])
+    ws.append([comp_b.tax_code, "CQT-XL-01", ip_b.code, "Sữa tươi upload Excel", "SUA", "Hộp", "Vinamilk", 12000, "8%", "Đang bán"])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    upload_file = UploadFile(filename="mau-san-pham-cqt.xlsx", file=buf)
+    result = upload_products(file=upload_file, db=db_session)
+    assert result["imported"] == 1
+    assert result["updated"] == 1
+    assert result["mst_mapped"] == 2
+
+    uploaded_prod = db_session.scalar(select(Product).where(Product.sku == "CQT-XL-01"))
+    assert uploaded_prod is not None
+    assert uploaded_prod.vat_rate == 8.0
+    pcs = {
+        pc.company_id: pc.invoice_product_id
+        for pc in db_session.scalars(
+            select(ProductCompany).where(ProductCompany.product_id == uploaded_prod.id)
+        ).all()
+    }
+    assert pcs == {comp_a.id: ip_a.id, comp_b.id: ip_b.id}

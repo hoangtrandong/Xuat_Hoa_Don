@@ -56,6 +56,12 @@ export const menuItems: MenuItem[] = [
     ],
   },
   {
+    key: "employees",
+    label: "Nhân viên & Giao hàng",
+    icon: "Users",
+    href: "/employees",
+  },
+  {
     key: "system-config",
     label: "Cấu hình Hệ thống",
     icon: "Settings",

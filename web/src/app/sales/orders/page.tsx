@@ -3719,42 +3719,251 @@ return Array.from(map.values());
           </div>
         }
       >
-        <div className="space-y-4 p-3 sm:p-5">
-          {detailError && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-700">{detailError}</p>}
-          {detailLoading && <p className="text-sm text-gray-500">Đang tải sản phẩm...</p>}
-          {detailOrderLines.length > 0 && (
-            <div className="border border-slate-300 bg-white">
-              <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-2 text-[11px] font-bold uppercase text-sky-800">
-                Tổng quan đơn hàng
-              </div>
-              <div className="grid gap-x-3 gap-y-2 px-3 py-2.5 text-xs sm:grid-cols-2 xl:grid-cols-4">
-                <p><span className="font-semibold text-slate-600">Khách hàng:</span> {displayRemoteValue(detailOrderLines[0]["Tên KH"]) || "—"}</p>
-                <p><span className="font-semibold text-slate-600">Giá trị:</span> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Giá trị"]), 0))}</p>
-                <p><span className="font-semibold text-slate-600">Chiết khấu:</span> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Số tiền CK"]), 0))}</p>
-                <p><span className="font-semibold text-slate-600">Thành tiền:</span> {formatNumber(detailOrderLines.reduce((sum, line) => sum + numericValue(line["Thành tiền"]), 0))}</p>
-              </div>
+        <div className="space-y-3 p-3 sm:p-4">
+          {detailError && <p role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700">{detailError}</p>}
+          {detailLoading && (
+            <div className="flex items-center gap-2 py-6 text-xs text-slate-500">
+              <Loader2 size={14} className="animate-spin text-sky-600" /> Đang tải chi tiết đơn hàng...
             </div>
           )}
-          {!detailLoading && !detailError && <DataTable
-            data={detailOrderLines}
-            columns={orderDetailColumns.filter((column) => [
-              "Mã sản phẩm", "Sản phẩm", "Nhà cung cấp", "ĐVT", "Số lượng",
-              "Số lượng KM", "Giá trị", "Số tiền CK", "Thành tiền", "Đơn giá", "Mã CTKM", "Tên CTKM",
-            ].includes(column.title))}
-            searchable={false}
-            pageSize={20}
-            getRowKey={orderRowKey}
-            fitColumns
-            compact
-            emptyMessage="Không tìm thấy chi tiết đơn hàng."
-          />}
-          {!detailLoading && !detailError && <details className="rounded-lg border border-gray-200 p-3">
-            <summary className="cursor-pointer text-sm font-medium text-gray-700">Thông tin đầy đủ</summary>
-            <div className="mt-3">
-              <DataTable data={detailOrderLines} columns={orderDetailColumns} searchable={false}
-                pageSize={20} getRowKey={orderRowKey} fitColumns compact />
-            </div>
-          </details>}
+          {!detailLoading && !detailError && detailOrderLines.length > 0 && (() => {
+            const first = detailOrderLines[0];
+            const customerCode = displayRemoteValue(first["Mã KH"]).trim();
+            const customerName = displayRemoteValue(first["Tên KH"]).trim();
+            const customerAddress = displayRemoteValue(first["Địa chỉ"]).trim();
+            const createdDate = displayRemoteValue(first["Ngày tạo"]).trim();
+            const deliveryDate = displayRemoteValue(first["Ngày giao"]).trim();
+            const distributorName = displayRemoteValue(first["NPP"] || first["Nhà phân phối"]).trim();
+            const staffName = displayRemoteValue(first["Tên NVBH"] || first["staffName"]).trim();
+            const staffCode = displayRemoteValue(first["Mã NVBH"] || first["staffCode"]).trim();
+            const orderStatus = displayRemoteValue(first["Tình trạng xử lý đơn hàng"] || first["Trạng thái"]).trim();
+
+            const isPromoOrDiscountOnly = (line: RemoteOrder) => {
+              const qty = numericValue(line["Số lượng"]);
+              const promoQty = numericValue(line["Số lượng KM"]);
+              const ck = numericValue(line["Số tiền CK"]);
+              const code = displayRemoteValue(line["Mã sản phẩm"]).trim().toUpperCase();
+              const name = displayRemoteValue(line["Sản phẩm"] || line["Tên sản phẩm"]).trim().toLowerCase();
+              return (
+                qty <= 0 &&
+                (promoQty > 0 || ck > 0 || code === "CHIETKHAU" || name === "chiết khấu" || name === "chiet khau")
+              );
+            };
+
+            const saleLines = detailOrderLines.filter((line) => !isPromoOrDiscountOnly(line));
+            const promoLines = detailOrderLines.filter((line) => isPromoOrDiscountOnly(line));
+            const inlinePromoLines = saleLines.filter(
+              (line) =>
+                numericValue(line["Số lượng KM"]) > 0 ||
+                numericValue(line["Số tiền CK"]) > 0 ||
+                displayRemoteValue(line["Tên CTKM"]).trim() !== ""
+            );
+            const allPromoLines = [...promoLines, ...inlinePromoLines];
+
+            const totalGoodsValue = saleLines.reduce((sum, line) => sum + numericValue(line["Giá trị"]), 0);
+            const totalDiscountVal = detailOrderLines.reduce((sum, line) => sum + numericValue(line["Số tiền CK"]), 0);
+            const netPayable = Math.max(0, totalGoodsValue - totalDiscountVal);
+
+            return (
+              <>
+                {/* Khối 1: Thông tin chung đơn hàng */}
+                <div className="overflow-hidden border border-slate-300 bg-white">
+                  <div className="flex items-center justify-between border-b border-sky-100 bg-sky-50/60 px-3 py-1.5">
+                    <span className="text-[11px] font-bold uppercase text-sky-800">Thông tin chung đơn hàng</span>
+                    {orderStatus && (
+                      <span className="rounded bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800">
+                        {orderStatus}
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid gap-x-4 gap-y-1.5 border-b border-slate-200 px-3 py-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                    <div>
+                      <span className="block text-[10px] font-semibold text-slate-500">Khách hàng</span>
+                      <span className="font-semibold text-slate-800">
+                        {customerCode ? `${formatCustomerCode(customerCode)} · ` : ""}
+                        {customerName || "—"}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] font-semibold text-slate-500">Nhà phân phối</span>
+                      <span className="font-medium text-slate-800">{distributorName || "—"}</span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] font-semibold text-slate-500">Ngày tạo / Ngày giao</span>
+                      <span className="font-medium tabular-nums text-slate-800">
+                        {createdDate || "—"}
+                        {deliveryDate && deliveryDate !== createdDate ? ` · Giao: ${deliveryDate}` : ""}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] font-semibold text-slate-500">Nhân viên bán hàng</span>
+                      <span className="font-medium text-slate-800">
+                        {staffName || staffCode ? `${staffName || staffCode}${staffName && staffCode ? ` (${staffCode})` : ""}` : "—"}
+                      </span>
+                    </div>
+                    {customerAddress && (
+                      <div className="sm:col-span-2 lg:col-span-4">
+                        <span className="text-[10px] font-semibold text-slate-500">Địa chỉ: </span>
+                        <span className="text-xs text-slate-700">{customerAddress}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-3 divide-x divide-slate-200 bg-slate-50/70 px-3 py-2 text-xs">
+                    <div className="pr-3">
+                      <span className="block text-[10px] font-semibold text-slate-500">Tổng tiền hàng</span>
+                      <span className="text-sm font-bold tabular-nums text-slate-800">{formatVNDFull(totalGoodsValue)}</span>
+                    </div>
+                    <div className="px-3">
+                      <span className="block text-[10px] font-semibold text-slate-500">Chiết khấu</span>
+                      <span className="text-sm font-bold tabular-nums text-red-600">
+                        {totalDiscountVal > 0 ? `-${formatVNDFull(totalDiscountVal)}` : "0 đ"}
+                      </span>
+                    </div>
+                    <div className="pl-3">
+                      <span className="block text-[10px] font-semibold text-slate-500">Phải thanh toán</span>
+                      <span className="text-sm font-bold tabular-nums text-sky-700">{formatVNDFull(netPayable)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Khối 2: Danh sách sản phẩm đặt hàng */}
+                <div className="overflow-hidden border border-slate-300 bg-white">
+                  <div className="flex items-center justify-between border-b border-sky-100 bg-sky-50/60 px-3 py-1.5">
+                    <span className="text-[11px] font-bold uppercase text-sky-800">
+                      Danh sách sản phẩm đặt hàng ({saleLines.length})
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse text-left">
+                      <thead className="bg-slate-100 text-[10px] font-semibold uppercase text-slate-600">
+                        <tr>
+                          <th className="w-9 px-2 py-1.5 text-center">TT</th>
+                          <th className="px-2 py-1.5">Mã SP</th>
+                          <th className="px-2 py-1.5">Tên sản phẩm</th>
+                          <th className="px-2 py-1.5">Nhà cung cấp</th>
+                          <th className="px-2 py-1.5 text-center">ĐVT</th>
+                          <th className="px-2 py-1.5 text-center">SL</th>
+                          <th className="px-2 py-1.5 text-right">Đơn giá</th>
+                          <th className="px-2 py-1.5 text-right">Thành tiền</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-[11px]">
+                        {saleLines.length === 0 ? (
+                          <tr>
+                            <td colSpan={8} className="px-3 py-5 text-center text-xs text-slate-400">
+                              Không có dòng sản phẩm bán.
+                            </td>
+                          </tr>
+                        ) : (
+                          saleLines.map((line, idx) => {
+                            const code = displayRemoteValue(line["Mã sản phẩm"]).trim();
+                            const name = displayRemoteValue(line["Sản phẩm"] || line["Tên sản phẩm"]).trim();
+                            const supplier = displayRemoteValue(line["Nhà cung cấp"]).trim();
+                            const unit = displayRemoteValue(line["ĐVT"]).trim();
+                            const qty = numericValue(line["Số lượng"]);
+                            const price = numericValue(line["Đơn giá"] || line["Giá bán"]);
+                            const value = numericValue(line["Giá trị"]);
+                            return (
+                              <tr key={orderRowKey(line, idx)} className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/50">
+                                <td className="px-2 py-1.5 text-center text-slate-500">{idx + 1}</td>
+                                <td className="whitespace-nowrap px-2 py-1.5 font-mono font-semibold text-sky-800">{code || "—"}</td>
+                                <td className="px-2 py-1.5 font-medium text-slate-800">{name || "—"}</td>
+                                <td className="whitespace-nowrap px-2 py-1.5">
+                                  {supplier ? (
+                                    <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+                                      {supplier}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-400">—</span>
+                                  )}
+                                </td>
+                                <td className="whitespace-nowrap px-2 py-1.5 text-center text-slate-700">{unit || "—"}</td>
+                                <td className="whitespace-nowrap px-2 py-1.5 text-center font-semibold tabular-nums text-slate-800">{formatNumber(qty)}</td>
+                                <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums text-slate-700">{formatNumber(price)}</td>
+                                <td className="whitespace-nowrap px-2 py-1.5 text-right font-semibold tabular-nums text-slate-800">{formatNumber(value)}</td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                      {saleLines.length > 0 && (
+                        <tfoot className="border-t border-slate-200 bg-slate-50 text-[10px] font-semibold text-slate-600">
+                          <tr>
+                            <td colSpan={7} className="px-2 py-1.5 text-right">Tổng tiền hàng</td>
+                            <td className="whitespace-nowrap px-2 py-1.5 text-right font-bold tabular-nums text-slate-900">
+                              {formatVNDFull(totalGoodsValue)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+                </div>
+
+                {/* Khối 3: Khuyến mại & Chiết khấu nhận được */}
+                {allPromoLines.length > 0 && (
+                  <div className="overflow-hidden border border-slate-300 bg-white">
+                    <div className="border-b border-emerald-100 bg-emerald-50/70 px-3 py-1.5 text-[11px] font-bold uppercase text-emerald-800">
+                      Khuyến mại &amp; Chiết khấu nhận được ({allPromoLines.length})
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse text-left">
+                        <thead className="bg-slate-100 text-[10px] font-semibold uppercase text-slate-600">
+                          <tr>
+                            <th className="w-9 px-2 py-1.5 text-center">TT</th>
+                            <th className="px-2 py-1.5">Tên chương trình KM</th>
+                            <th className="px-2 py-1.5">Mã SP</th>
+                            <th className="px-2 py-1.5">Sản phẩm KM / Loại</th>
+                            <th className="px-2 py-1.5 text-right">SL KM / Tiền CK</th>
+                          </tr>
+                        </thead>
+                        <tbody className="text-[11px]">
+                          {allPromoLines.map((line, idx) => {
+                            const programName = displayRemoteValue(line["Tên CTKM"] || line["Mã CTKM"]).trim();
+                            const code = displayRemoteValue(line["Mã sản phẩm"]).trim();
+                            const name = displayRemoteValue(line["Sản phẩm"] || line["Tên sản phẩm"]).trim();
+                            const unit = displayRemoteValue(line["ĐVT"]).trim();
+                            const promoQty = numericValue(line["Số lượng KM"]);
+                            const ck = numericValue(line["Số tiền CK"]);
+                            const isCashDiscount =
+                              ck > 0 && promoQty <= 0 &&
+                              (code.toUpperCase() === "CHIETKHAU" || name.toLowerCase().includes("chiết khấu") || numericValue(line["Số lượng"]) <= 0);
+                            return (
+                              <tr key={`promo-${orderRowKey(line, idx)}`} className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/50">
+                                <td className="px-2 py-1.5 text-center text-slate-500">{idx + 1}</td>
+                                <td className="px-2 py-1.5 font-medium text-slate-800">{programName || "—"}</td>
+                                <td className="whitespace-nowrap px-2 py-1.5 font-mono text-slate-600">
+                                  {isCashDiscount ? "CHIETKHAU" : (code || "—")}
+                                </td>
+                                <td className="px-2 py-1.5 text-slate-700">{name || "—"}</td>
+                                <td className="whitespace-nowrap px-2 py-1.5 text-right">
+                                  <div className="inline-flex items-center justify-end gap-1.5">
+                                    {promoQty > 0 && (
+                                      <span className="rounded bg-emerald-100 px-2 py-0.5 font-semibold tabular-nums text-emerald-800">
+                                        {formatNumber(promoQty)} {unit || "Hộp"}
+                                      </span>
+                                    )}
+                                    {ck > 0 && (
+                                      <span className="rounded bg-red-100 px-2 py-0.5 font-semibold tabular-nums text-red-700">
+                                        -{formatVNDFull(ck)}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+          {!detailLoading && !detailError && detailOrderLines.length === 0 && (
+            <p className="py-6 text-center text-xs text-slate-400">Không tìm thấy chi tiết đơn hàng.</p>
+          )}
         </div>
       </OrderActionModal>
 

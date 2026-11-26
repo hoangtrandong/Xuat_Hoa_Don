@@ -662,14 +662,16 @@ class DynamicFieldMapper:
                 )
                 or f"Sản phẩm {product_code}"
             ).strip()
-            unit = str(
-                _extract_value(
-                    row,
-                    field_mapping.get("unit"),
-                    ("unit", "don_vi_tinh", "uom", "Unit", "ĐVT"),
-                )
-                or "Thùng"
-            ).strip()
+            raw_unit = _extract_value(
+                row,
+                field_mapping.get("unit"),
+                ("unit", "don_vi_tinh", "uom", "Unit", "ĐVT"),
+            )
+            is_discount_only_line = (
+                product_code.upper() == "CHIETKHAU"
+                or product_name.casefold() in ("chiết khấu", "chiet khau")
+            )
+            unit = str(raw_unit).strip() if raw_unit is not None and str(raw_unit).strip() else ("" if is_discount_only_line else "Thùng")
             quantity = _to_float(
                 _extract_value(
                     row,
@@ -803,12 +805,16 @@ def persist_canonical_orders_to_snapshots(
 
     # Bước 1: Chuẩn bị toàn bộ dòng trong RAM (tránh lặp trùng remote_key trong cùng batch)
     prepared: dict[str, tuple[CanonicalOrder, CanonicalOrderItem, dict[str, Any]]] = {}
+    valid_keys_by_order: dict[tuple[str, str], set[str]] = {}
     for order in canonical_orders:
         order_date_str = order.order_date.strftime("%d/%m/%Y")
         delivery_date_str = (order.delivery_date or order.order_date).strftime("%d/%m/%Y")
+        order_proc_status = f"NCC:{order.supplier_code}"
+        order_key_bucket = valid_keys_by_order.setdefault((order.order_number, order_proc_status), set())
         for line_idx, item in enumerate(order.items, start=1):
             key_seed = f"{distributor_code or 'DEFAULT'}|{order.supplier_code}|{order.order_number}|{item.product_code}|{line_idx}"
             remote_key = hashlib.sha1(key_seed.encode("utf-8")).hexdigest()
+            order_key_bucket.add(remote_key)
 
             subtotal_val = round(item.quantity * item.unit_price)
             net_val = round(item.line_total if item.line_total > 0 else max(0.0, subtotal_val - item.discount_amount))
@@ -925,7 +931,39 @@ def persist_canonical_orders_to_snapshots(
     if to_insert:
         db.add_all(to_insert)
 
-    if new_lines > 0 or updated_lines > 0:
+    # Bước 3b: Dọn các dòng cũ dư thừa của các đơn vừa đồng bộ lại (tránh trùng dòng khi thay đổi cấu trúc/thứ tự dòng)
+    deleted_stale_lines = 0
+    if valid_keys_by_order:
+        from sqlalchemy import delete as sa_delete
+
+        synced_order_numbers = sorted({ord_num for ord_num, _ in valid_keys_by_order})
+        stale_ids: list[int] = []
+        for start in range(0, len(synced_order_numbers), 500):
+            ord_chunk = synced_order_numbers[start : start + 500]
+            stmt = select(
+                VinamilkOrderSnapshot.id,
+                VinamilkOrderSnapshot.order_number,
+                VinamilkOrderSnapshot.processing_status,
+                VinamilkOrderSnapshot.remote_key,
+            ).where(
+                VinamilkOrderSnapshot.order_number.in_(ord_chunk),
+                VinamilkOrderSnapshot.is_synthetic.is_(False),
+            )
+            if distributor_code:
+                stmt = stmt.where(VinamilkOrderSnapshot.performed_by == distributor_code)
+            for snap_id, snap_ord_num, snap_proc, snap_rkey in db.execute(stmt).all():
+                expected_keys = valid_keys_by_order.get((snap_ord_num, snap_proc or ""))
+                if expected_keys is not None and snap_rkey not in expected_keys:
+                    stale_ids.append(snap_id)
+        if stale_ids:
+            for start in range(0, len(stale_ids), 1000):
+                id_chunk = stale_ids[start : start + 1000]
+                res_del = db.execute(
+                    sa_delete(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.id.in_(id_chunk))
+                )
+                deleted_stale_lines += res_del.rowcount or len(id_chunk)
+
+    if new_lines > 0 or updated_lines > 0 or deleted_stale_lines > 0:
         db.flush()
         db.commit()
         try:

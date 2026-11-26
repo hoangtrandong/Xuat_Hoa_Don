@@ -387,8 +387,17 @@ def list_product_companies(product_id: int, db: Session = Depends(get_db)):
     ).all()
 
 
-def _serialize_distributor_product(item: DistributorProduct) -> DistributorProductItem:
+def _serialize_distributor_product(
+    item: DistributorProduct,
+    *,
+    fallback_price: float = 0.0,
+    fallback_boxes_per_carton: int = 1,
+) -> DistributorProductItem:
     ip = item.invoice_product
+    stored_price = float(item.unit_price or 0.0)
+    eff_price = stored_price if stored_price > 0 else float(fallback_price or 0.0)
+    stored_spec = int(item.boxes_per_carton or 1)
+    eff_spec = stored_spec if stored_spec > 1 else max(1, int(fallback_boxes_per_carton or 1))
     return DistributorProductItem(
         id=item.id,
         distributor_id=item.distributor_id,
@@ -404,6 +413,8 @@ def _serialize_distributor_product(item: DistributorProduct) -> DistributorProdu
         conversion_den=max(1, int(item.conversion_den or 1)),
         supplier=item.supplier or "",
         unit=item.unit or "HOP",
+        unit_price=round(eff_price, 4),
+        boxes_per_carton=eff_spec,
         company_id=item.company_id,
         company_code=item.company.code if item.company else None,
         company_name=item.company.name if item.company else None,
@@ -418,6 +429,8 @@ def list_distributor_products(
     current_user: User = Depends(get_current_user),
 ):
     """Danh sách mã sản phẩm DMS (cô lập theo Nhà phân phối)."""
+    from app.crud.product import _infer_boxes_per_carton
+
     scoped_dist_id = resolve_distributor_scope(current_user, distributor_id)
     stmt = (
         select(DistributorProduct)
@@ -433,7 +446,43 @@ def list_distributor_products(
             | (DistributorProduct.distributor_id.is_(None))
         )
     items = db.scalars(stmt).all()
-    return [_serialize_distributor_product(item) for item in items]
+
+    # Batch-enrich đơn giá & quy cách từ bảng Product (nếu DistributorProduct chưa lưu tay)
+    skus = {it.distributor_sku.strip().upper() for it in items if it.distributor_sku}
+    prod_info_by_code: dict[str, tuple[float, int]] = {}
+    if skus:
+        prod_rows = db.execute(
+            select(Product.sku, Product._npp_code, Product.base_price, Product.boxes_per_carton).where(
+                func.upper(Product.sku).in_(skus) | func.upper(Product._npp_code).in_(skus)
+            )
+        ).all()
+        for p_sku, p_npp, p_price, p_bpc in prod_rows:
+            val = (float(p_price or 0.0), max(1, int(p_bpc or 1)))
+            if p_sku:
+                k = p_sku.strip().upper()
+                prev = prod_info_by_code.get(k)
+                if prev is None or (val[0] > 0 and prev[0] <= 0):
+                    prod_info_by_code[k] = val
+            if p_npp:
+                k = p_npp.strip().upper()
+                prev = prod_info_by_code.get(k)
+                if prev is None or (val[0] > 0 and prev[0] <= 0):
+                    prod_info_by_code[k] = val
+
+    result: list[DistributorProductItem] = []
+    for item in items:
+        sku_u = (item.distributor_sku or "").strip().upper()
+        fb_price, fb_spec = prod_info_by_code.get(sku_u, (0.0, 1))
+        if fb_spec <= 1:
+            fb_spec = _infer_boxes_per_carton(sku_u, item.distributor_product_name or "")
+        result.append(
+            _serialize_distributor_product(
+                item,
+                fallback_price=fb_price,
+                fallback_boxes_per_carton=fb_spec,
+            )
+        )
+    return result
 
 
 @router.get("/products/company-links", response_model=list[ProductCompanyManagementView])
@@ -619,6 +668,14 @@ def create_distributor_product(
             clean_inv_code = ip_obj.code
             clean_inv_name = ip_obj.name
 
+    from app.crud.product import _infer_boxes_per_carton
+
+    inferred_spec = max(
+        1,
+        int(payload.boxes_per_carton or 1)
+        if (payload.boxes_per_carton and payload.boxes_per_carton > 1)
+        else _infer_boxes_per_carton(clean_sku, payload.distributor_product_name.strip()),
+    )
     new_prod = DistributorProduct(
         distributor_id=scoped_dist_id,
         distributor_name=resolved_dist_name,
@@ -631,6 +688,8 @@ def create_distributor_product(
         conversion_den=max(1, int(payload.conversion_den or 1)),
         supplier=(payload.supplier or "").strip(),
         unit=(payload.unit or "HOP").strip().upper(),
+        unit_price=max(0.0, float(payload.unit_price or 0.0)),
+        boxes_per_carton=inferred_spec,
         company_id=target_company_id,
         status="active",
     )
@@ -732,6 +791,10 @@ def update_distributor_product(
         item.supplier = payload.supplier.strip()
     if payload.unit:
         item.unit = payload.unit.strip().upper()
+    if payload.unit_price is not None:
+        item.unit_price = max(0.0, float(payload.unit_price))
+    if payload.boxes_per_carton is not None:
+        item.boxes_per_carton = max(1, int(payload.boxes_per_carton))
     item.company_id = target_company_id
 
     # Chỉ đổi npp_code trên Product nếu không còn dòng DistributorProduct nào khác dùng old_sku
@@ -762,6 +825,8 @@ def update_distributor_product(
         "invoice_product_name": item.invoice_product_name,
         "conversion_num": item.conversion_num,
         "conversion_den": item.conversion_den,
+        "unit_price": float(item.unit_price or 0.0),
+        "boxes_per_carton": max(1, int(item.boxes_per_carton or 1)),
         "company_id": item.company_id,
         "company_code": item.company.code if item.company else None,
         "company_name": item.company.name if item.company else None,

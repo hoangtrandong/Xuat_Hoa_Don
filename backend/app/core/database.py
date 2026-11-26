@@ -56,6 +56,8 @@ def init_db() -> None:
         conn.execute(text("ALTER TABLE distributor_products ADD COLUMN IF NOT EXISTS distributor_id INTEGER REFERENCES distributors(id) ON DELETE CASCADE;"))
         conn.execute(text("ALTER TABLE distributor_products ADD COLUMN IF NOT EXISTS invoice_product_code VARCHAR(60);"))
         conn.execute(text("ALTER TABLE distributor_products ADD COLUMN IF NOT EXISTS invoice_product_name VARCHAR(255);"))
+        conn.execute(text("ALTER TABLE distributor_products ADD COLUMN IF NOT EXISTS unit_price DOUBLE PRECISION DEFAULT 0;"))
+        conn.execute(text("ALTER TABLE distributor_products ADD COLUMN IF NOT EXISTS boxes_per_carton INTEGER DEFAULT 1;"))
         if engine.dialect.name == "postgresql":
             conn.execute(text("ALTER TABLE distributor_products DROP CONSTRAINT IF EXISTS distributor_products_distributor_sku_key;"))
             conn.execute(text("ALTER TABLE distributor_products DROP CONSTRAINT IF EXISTS uq_distributor_products_sku_company;"))

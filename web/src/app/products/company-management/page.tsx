@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { API_URL, apiFetch } from "@/lib/api";
-import { formatNumber } from "@/lib/format";
+import { formatNumber, formatUnitPrice } from "@/lib/format";
 import { downloadExcel } from "@/lib/excel";
 import { useDistributorContext } from "@/lib/distributor-context";
 
@@ -45,6 +45,8 @@ type DistributorProductRow = {
   conversion_den: number;
   supplier: string;
   unit: string;
+  unit_price: number;
+  boxes_per_carton: number;
   company_id: number | null;
   company_code: string | null;
   company_name: string | null;
@@ -109,6 +111,8 @@ export default function DmsProductCatalogPage() {
   const [editSku, setEditSku] = useState<string>("");
   const [editName, setEditName] = useState<string>("");
   const [editUnit, setEditUnit] = useState<string>("THUNG");
+  const [editUnitPrice, setEditUnitPrice] = useState<string>("0");
+  const [editBoxesPerCarton, setEditBoxesPerCarton] = useState<string>("1");
   const [editInvoiceProductId, setEditInvoiceProductId] = useState<string>("");
   const [editConvNum, setEditConvNum] = useState<number>(1);
   const [editConvDen, setEditConvDen] = useState<number>(1);
@@ -299,6 +303,8 @@ export default function DmsProductCatalogPage() {
     setEditSku("");
     setEditName("");
     setEditUnit("THUNG");
+    setEditUnitPrice("0");
+    setEditBoxesPerCarton("1");
     setEditInvoiceProductId("");
     setEditConvNum(1);
     setEditConvDen(1);
@@ -314,9 +320,11 @@ export default function DmsProductCatalogPage() {
     setEditSku(row.distributor_sku);
     setEditName(row.distributor_product_name);
     setEditUnit(row.unit || "HOP");
+    setEditUnitPrice(String(row.unit_price ?? 0));
+    setEditBoxesPerCarton(String(Math.max(1, row.boxes_per_carton || 1)));
     setEditInvoiceProductId(row.invoice_product_id ? String(row.invoice_product_id) : "");
-    setEditConvNum(Math.max(1, row.conversion_num || 1));
-    setEditConvDen(Math.max(1, row.conversion_den || 1));
+    setEditConvNum(1);
+    setEditConvDen(1);
     setEditDistributor(row.distributor_name);
     setEditSupplier(row.supplier);
     setEditCompanyId(row.company_id ? String(row.company_id) : "");
@@ -337,6 +345,8 @@ export default function DmsProductCatalogPage() {
       const cleanSku = editSku.trim().toUpperCase();
       const selectedIpId = editInvoiceProductId ? Number(editInvoiceProductId) : null;
       const selectedIp = selectedIpId ? invoiceProducts.find((ip) => ip.id === selectedIpId) : null;
+      const parsedPrice = Math.max(0, Number(editUnitPrice) || 0);
+      const parsedSpec = Math.max(1, Math.round(Number(editBoxesPerCarton) || 1));
 
       if (isCreatingNew) {
         const res = await apiFetch(`${API_URL}/product-groups/distributor-products`, {
@@ -347,11 +357,13 @@ export default function DmsProductCatalogPage() {
             distributor_sku: cleanSku,
             distributor_product_name: editName.trim(),
             unit: editUnit.trim().toUpperCase() || "HOP",
+            unit_price: parsedPrice,
+            boxes_per_carton: parsedSpec,
             invoice_product_id: selectedIpId,
             invoice_product_code: selectedIp ? selectedIp.code : null,
             invoice_product_name: selectedIp ? selectedIp.name : null,
-            conversion_num: Math.max(1, Number(editConvNum) || 1),
-            conversion_den: Math.max(1, Number(editConvDen) || 1),
+            conversion_num: 1,
+            conversion_den: 1,
             distributor_name: editDistributor.trim(),
             supplier: editSupplier.trim() || "Vinamilk",
             company_id: editCompanyId ? Number(editCompanyId) : null,
@@ -375,11 +387,13 @@ export default function DmsProductCatalogPage() {
           distributor_sku: cleanSku,
           distributor_product_name: editName.trim(),
           unit: editUnit.trim().toUpperCase() || "HOP",
+          unit_price: parsedPrice,
+          boxes_per_carton: parsedSpec,
           invoice_product_id: selectedIpId,
           invoice_product_code: selectedIp ? selectedIp.code : null,
           invoice_product_name: selectedIp ? selectedIp.name : null,
-          conversion_num: Math.max(1, Number(editConvNum) || 1),
-          conversion_den: Math.max(1, Number(editConvDen) || 1),
+          conversion_num: 1,
+          conversion_den: 1,
           distributor_name: editDistributor.trim(),
           supplier: editSupplier.trim() || "Vinamilk",
           company_id: editCompanyId ? Number(editCompanyId) : null,
@@ -601,10 +615,11 @@ export default function DmsProductCatalogPage() {
       "Mã SP DMS": r.distributor_sku,
       "Tên Sản Phẩm DMS": r.distributor_product_name,
       "ĐVT DMS": r.unit || "HOP",
+      "Quy cách": Math.max(1, r.boxes_per_carton || 1),
+      "Đơn giá (VNĐ)": Number(r.unit_price || 0),
       "Mã SP Xuất Hóa Đơn": r.invoice_product_code || "",
       "Tên Sản Phẩm Xuất Hóa Đơn": r.invoice_product_name || "",
       "ĐVT Xuất HĐ": r.invoice_product_unit || "",
-      "Tỷ lệ quy đổi": `${r.conversion_num || 1}/${r.conversion_den || 1}`,
       "Nhà cung cấp": r.supplier || "",
       "Mã Công ty QL": r.company_code || "",
       "Tên Công ty QL": r.company_name || "",
@@ -816,10 +831,12 @@ export default function DmsProductCatalogPage() {
                 <th className="px-2.5 py-2">Mã SP DMS</th>
                 <th className="px-2.5 py-2">Tên Sản Phẩm DMS</th>
                 <th className="px-2 py-2 text-center">ĐVT DMS</th>
+                <th className="px-2 py-2 text-center">Quy cách</th>
+                <th className="px-2.5 py-2 text-right">Đơn giá</th>
                 <th className="px-2.5 py-2">SP Xuất Hóa Đơn (Đã gán)</th>
-                <th className="px-2 py-2 text-center">Tỷ lệ quy đổi</th>
                 <th className="px-2 py-2">Nhà cung cấp</th>
-                <th className="px-2 py-2">Công ty QL</th>
+                <th className="px-2 py-2">Mã Cty QL</th>
+                <th className="px-2.5 py-2">Tên Công ty quản lý</th>
                 <th className="w-24 px-2 py-2 text-center">Thao tác</th>
               </tr>
             </thead>
@@ -827,7 +844,7 @@ export default function DmsProductCatalogPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={11} className="px-4 py-10 text-center text-xs text-slate-500">
                     <span className="inline-flex items-center gap-2">
                       <Loader2 size={15} className="animate-spin text-sky-600" />
                       Đang tải danh sách mã sản phẩm DMS...
@@ -836,14 +853,15 @@ export default function DmsProductCatalogPage() {
                 </tr>
               ) : pagedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={11} className="px-4 py-10 text-center text-xs text-slate-500">
                     {error || "Chưa có mã sản phẩm DMS nào."}
                   </td>
                 </tr>
               ) : (
                 pagedRows.map((row, idx) => {
                   const stt = (safePage - 1) * pageSize + idx + 1;
-                  const ratioChanged = (row.conversion_num || 1) !== (row.conversion_den || 1);
+                  const spec = Math.max(1, row.boxes_per_carton || 1);
+                  const unitPrice = Number(row.unit_price || 0);
                   return (
                     <tr
                       key={row.id}
@@ -865,13 +883,33 @@ export default function DmsProductCatalogPage() {
                         {row.unit || "HOP"}
                       </td>
 
+                      <td className="px-2 py-1.5 text-center font-semibold text-slate-700">
+                        {spec > 1 ? (
+                          <span className="rounded bg-amber-100/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                            {spec}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">1</span>
+                        )}
+                      </td>
+
+                      <td className="whitespace-nowrap px-2.5 py-1.5 text-right font-medium text-slate-700">
+                        {unitPrice > 0 ? (
+                          <span className="font-semibold text-slate-900">
+                            {formatUnitPrice(unitPrice, 4)}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] italic text-slate-400">0</span>
+                        )}
+                      </td>
+
                       <td className="px-2.5 py-1.5">
                         {row.invoice_product_id && row.invoice_product_code ? (
                           <button
                             type="button"
                             onClick={() => openQuickMapModal(row)}
                             className="group flex max-w-[300px] items-center gap-1.5 rounded border border-emerald-200 bg-emerald-50/70 px-2 py-0.5 text-left hover:border-emerald-400 hover:bg-emerald-100/70"
-                            title="Bấm để đổi SP xuất hóa đơn hoặc tỷ lệ quy đổi"
+                            title="Bấm để đổi SP xuất hóa đơn"
                           >
                             <span className="shrink-0 font-mono text-[10px] font-bold text-emerald-800">
                               {row.invoice_product_code}
@@ -896,34 +934,32 @@ export default function DmsProductCatalogPage() {
                         )}
                       </td>
 
-                      <td className="whitespace-nowrap px-2 py-1.5 text-center">
-                        <button
-                          type="button"
-                          onClick={() => openQuickMapModal(row)}
-                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
-                            ratioChanged
-                              ? "border border-violet-300 bg-violet-50 text-violet-800"
-                              : "bg-slate-100 text-slate-600"
-                          }`}
-                          title="Bấm để chỉnh tỷ lệ quy đổi ĐVT"
-                        >
-                          {row.conversion_num || 1}/{row.conversion_den || 1}
-                        </button>
-                      </td>
-
                       <td className="whitespace-nowrap px-2 py-1.5">
                         <span className="inline-block rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">
                           {row.supplier || "Vinamilk"}
                         </span>
                       </td>
 
-                      <td className="px-2 py-1.5">
+                      <td className="whitespace-nowrap px-2 py-1.5">
                         {row.company_code ? (
                           <span className="inline-block rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-800">
                             {row.company_code}
                           </span>
                         ) : (
                           <span className="text-[10px] italic text-slate-400">Dùng chung</span>
+                        )}
+                      </td>
+
+                      <td className="px-2.5 py-1.5 max-w-[240px]">
+                        {row.company_name ? (
+                          <span
+                            className="block truncate font-medium text-slate-700"
+                            title={row.company_name}
+                          >
+                            {row.company_name}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] italic text-slate-400">—</span>
                         )}
                       </td>
 
@@ -1251,25 +1287,28 @@ export default function DmsProductCatalogPage() {
                   </div>
                   <div>
                     <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
-                      Tỷ lệ quy đổi (Tử số)
+                      Đơn giá (VNĐ)
                     </label>
                     <input
                       type="number"
-                      min={1}
-                      value={editConvNum}
-                      onChange={(e) => setEditConvNum(Math.max(1, Number(e.target.value) || 1))}
+                      min={0}
+                      step="any"
+                      value={editUnitPrice}
+                      onChange={(e) => setEditUnitPrice(e.target.value)}
+                      placeholder="0"
                       className={inputCls}
                     />
                   </div>
                   <div>
                     <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
-                      Tỷ lệ quy đổi (Mẫu số)
+                      Quy cách (Hộp/Thùng)
                     </label>
                     <input
                       type="number"
                       min={1}
-                      value={editConvDen}
-                      onChange={(e) => setEditConvDen(Math.max(1, Number(e.target.value) || 1))}
+                      value={editBoxesPerCarton}
+                      onChange={(e) => setEditBoxesPerCarton(e.target.value)}
+                      placeholder="1"
                       className={inputCls}
                     />
                   </div>
@@ -1302,7 +1341,7 @@ export default function DmsProductCatalogPage() {
 
               <footer className="flex items-center justify-between gap-3 border-t border-slate-300 bg-slate-100 px-3 py-2">
                 <span className="text-[10px] text-slate-500">
-                  SL xuất HĐ = SL DMS × ({editConvNum}/{editConvDen})
+                  * Tỷ lệ quy đổi với SP xuất hóa đơn mặc định 1/1.
                 </span>
                 <div className="flex items-center gap-2">
                   <button

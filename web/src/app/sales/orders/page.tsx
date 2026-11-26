@@ -3739,7 +3739,7 @@ return Array.from(map.values());
             data={detailOrderLines}
             columns={orderDetailColumns.filter((column) => [
               "Mã sản phẩm", "Sản phẩm", "Nhà cung cấp", "ĐVT", "Số lượng",
-              "Số lượng KM", "Giá trị", "Số tiền CK", "Thành tiền", "Đơn giá", "Mã CTKM",
+              "Số lượng KM", "Giá trị", "Số tiền CK", "Thành tiền", "Đơn giá", "Mã CTKM", "Tên CTKM",
             ].includes(column.title))}
             searchable={false}
             pageSize={20}

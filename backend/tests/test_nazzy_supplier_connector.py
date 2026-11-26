@@ -66,21 +66,27 @@ class FakeClient:
                 },
             ],
             "Promotion": [
-                {"ProductId": -1, "Price": 24000},
+                {
+                    "ProductId": -1,
+                    "ProductName": "Chiết khấu",
+                    "PromotionName": "Hỗ trợ bán hàng tháng 10",
+                    "Price": 24000,
+                },
                 {
                     "ProductId": 99,
                     "ProductCode": "GIFT001",
                     "ProductName": "Hàng tặng",
+                    "PromotionName": "Chương trình bán hàng sữa nước",
                     "UnitName": "Hộp",
                     "Amount": 6,
                     "PromotionAmount": 1,
-                    "Price": 0,
+                    "Price": 99768,
                 },
             ],
         })
 
 
-def test_nazzy_order_discount_is_allocated_and_product_promotions_are_counted(monkeypatch):
+def test_nazzy_order_discount_is_separate_line_and_product_promotions_are_zero_value(monkeypatch):
     monkeypatch.setattr("app.services.supplier_connectors.httpx.Client", FakeClient)
     config = SimpleNamespace(
         api_endpoint_url="http://dms21.nazzy.vn/handler/BillsHandler.ashx",
@@ -102,12 +108,16 @@ def test_nazzy_order_discount_is_allocated_and_product_promotions_are_counted(mo
     )[0]
 
     assert order.order_discount == 24000
-    assert [(item.quantity, item.unit_price, item.line_total, item.discount_amount) for item in order.items] == [
-        (12, 396000, 4750749, 1251),
-        (240, 360000, 86377251, 22749),
-        (0, 0, 0, 0),
+    assert [(item.product_name, item.quantity, item.unit_price, item.line_total, item.discount_amount) for item in order.items] == [
+        ("Thức uống ngũ cốc ăn kiêng", 12, 396000, 4752000, 0),
+        ("Sữa hạt ngũ cốc dinh dưỡng", 240, 360000, 86400000, 0),
+        ("Chiết khấu", 0, 0, 0, 24000),
+        ("Hàng tặng (Hàng KM không thu tiền)", 0, 0, 0, 0),
     ]
-    assert order.items[2].promo_quantity == 6
+    assert order.items[2].promotion_name == "Hỗ trợ bán hàng tháng 10"
+    assert order.items[3].promo_quantity == 6
+    assert order.items[3].line_total == 0
+    assert order.items[3].promotion_name == "Chương trình bán hàng sữa nước"
 
 
 def test_invoice_discount_allocation_preserves_order_discount_total():
@@ -216,7 +226,7 @@ def test_nazzy_session_expired_html_triggers_relogin(monkeypatch):
     )
 
     rows = fetch_nazzy_orders(config, date(2026, 11, 16), date(2026, 11, 16), strict=True)
-    assert len(rows) == 3
+    assert len(rows) == 4
     assert calls["list"] == 2
     assert calls["relogin"] == 2
 

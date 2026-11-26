@@ -29,6 +29,8 @@ class CanonicalOrderItem(BaseModel):
     discount_amount: float = 0.0
     vat_rate: float = 8.0
     line_total: float = 0.0
+    promotion_code: str | None = None
+    promotion_name: str | None = None
 
 
 class CanonicalOrder(BaseModel):
@@ -210,6 +212,8 @@ SUPPLIER_FIELD_MAPPING_PRESETS: dict[str, dict[str, Any]] = {
             "line_total": "TotalPrice",
             "staff_code": "SaleEmployeeCode",
             "staff_name": "SaleEmployeeName",
+            "promotion_code": "PromotionCode",
+            "promotion_name": "PromotionName",
         },
     },
 }
@@ -723,6 +727,22 @@ class DynamicFieldMapper:
                 ),
                 0.0,
             )
+            promotion_code = str(
+                _extract_value(
+                    row,
+                    field_mapping.get("promotion_code"),
+                    ("PromotionCode", "ProgramCode", "promotionCode", "Mã CTKM"),
+                )
+                or ""
+            ).strip() or None
+            promotion_name = str(
+                _extract_value(
+                    row,
+                    field_mapping.get("promotion_name"),
+                    ("PromotionName", "ProgramName", "promotionName", "Tên CTKM", "Tên Chương trình"),
+                )
+                or ""
+            ).strip() or None
 
             if order_number not in orders_by_number:
                 orders_by_number[order_number] = CanonicalOrder(
@@ -753,6 +773,8 @@ class DynamicFieldMapper:
                     discount_amount=discount_amount,
                     vat_rate=vat_rate,
                     line_total=line_total,
+                    promotion_code=promotion_code,
+                    promotion_name=promotion_name,
                 )
             )
 
@@ -809,6 +831,8 @@ def persist_canonical_orders_to_snapshots(
                 "ĐVT": item.unit,
                 "Số lượng": item.quantity,
                 "Số lượng KM": item.promo_quantity,
+                "Mã CTKM": item.promotion_code or "",
+                "Tên CTKM": item.promotion_name or "",
                 "Giá bán": item.unit_price,
                 "Giá trị": subtotal_val,
                 "Số tiền CK": item.discount_amount,
@@ -1354,13 +1378,52 @@ def fetch_nazzy_orders(
             details = det_data.get("Details") or []
             promotions = det_data.get("Promotion") or []
 
-            cash_discount_total = sum(
-                float(p.get("Price") or 0.0)
-                for p in promotions
-                if p.get("ProductId", -1) <= 0
-            )
+            def _is_cash_discount_promo(p: dict[str, Any]) -> bool:
+                prod_id = p.get("ProductId")
+                if prod_id is not None:
+                    try:
+                        if int(prod_id) <= 0:
+                            return True
+                    except (TypeError, ValueError):
+                        pass
+                p_name = str(p.get("ProductName") or "").strip().casefold()
+                return p_name in ("chiết khấu", "chiet khau")
+
+            def _promo_cash_value(p: dict[str, Any]) -> float:
+                for key in ("Price", "Amount", "PromotionAmount", "TotalPrice", "Discount"):
+                    val = p.get(key)
+                    if val is not None:
+                        try:
+                            num = float(val)
+                            if num > 0:
+                                return num
+                        except (TypeError, ValueError):
+                            pass
+                return 0.0
+
+            def _promo_program_name(p: dict[str, Any]) -> str:
+                for key in ("PromotionName", "ProgramName", "PromotionTitle", "Title", "Name"):
+                    val = str(p.get(key) or "").strip()
+                    if val:
+                        return val
+                return ""
+
+            def _promo_program_code(p: dict[str, Any]) -> str:
+                for key in ("PromotionCode", "ProgramCode"):
+                    val = str(p.get(key) or "").strip()
+                    if val:
+                        return val
+                return ""
+
+            cash_discount_promos: list[tuple[dict[str, Any], float]] = []
+            for p in promotions:
+                if _is_cash_discount_promo(p):
+                    val = _promo_cash_value(p)
+                    if val > 0:
+                        cash_discount_promos.append((p, val))
+
+            cash_discount_total = sum(val for _, val in cash_discount_promos)
             order_discount = float(info.get("DiscountPromotion") or cash_discount_total or 0.0)
-            total_detail_price = sum(float(line.get("TotalPrice") or 0.0) for line in details)
             header_data = {
                 "Code": info.get("Code") or ord_sum.get("Code"),
                 "BillsDate": info.get("BillsDate") or ord_sum.get("BillsDate"),
@@ -1381,19 +1444,10 @@ def fetch_nazzy_orders(
 
             order_rows: list[dict[str, Any]] = []
 
-            # Các dòng sản phẩm mua bán
-            remaining_order_discount = round(order_discount)
-            priced_lines = [line for line in details if float(line.get("TotalPrice") or 0.0) > 0]
+            # 1. Các dòng sản phẩm đặt hàng (kể cả dòng Trưng bày giữ nguyên như trên Nazzy)
             for line in details:
                 line_price = float(line.get("TotalPrice") or 0.0)
-                allocated_discount = 0.0
-                if line in priced_lines and total_detail_price > 0 and order_discount > 0:
-                    if line is priced_lines[-1]:
-                        allocated_discount = remaining_order_discount
-                    else:
-                        allocated_discount = round(order_discount * line_price / total_detail_price)
-                    remaining_order_discount -= allocated_discount
-                line_discount = float(line.get("Discount") or 0.0) + allocated_discount
+                line_discount = float(line.get("Discount") or 0.0)
 
                 order_rows.append({
                     **header_data,
@@ -1406,23 +1460,60 @@ def fetch_nazzy_orders(
                     "Discount": line_discount,
                     "TaxPercent": float(line.get("TaxPercent") or 8.0),
                     "TotalPrice": max(0.0, line_price - line_discount),
+                    "PromotionCode": "",
+                    "PromotionName": "",
                 })
 
-            # Các dòng hàng tặng khuyến mại (hiện vật)
+            # 2. Các dòng khuyến mại chiết khấu tiền -> tạo thành dòng riêng với sản phẩm là "Chiết khấu"
+            if cash_discount_promos:
+                for p, discount_val in cash_discount_promos:
+                    order_rows.append({
+                        **header_data,
+                        "ProductCode": str(p.get("ProductCode") or "CHIETKHAU").strip(),
+                        "ProductName": str(p.get("ProductName") or "Chiết khấu").strip(),
+                        "UnitName": str(p.get("UnitName") or "").strip(),
+                        "Amount": 0.0,
+                        "promo_quantity": 0.0,
+                        "PriceNow": 0.0,
+                        "Discount": discount_val,
+                        "TaxPercent": 0.0,
+                        "TotalPrice": 0.0,
+                        "PromotionCode": _promo_program_code(p),
+                        "PromotionName": _promo_program_name(p),
+                    })
+            elif order_discount > 0:
+                order_rows.append({
+                    **header_data,
+                    "ProductCode": "CHIETKHAU",
+                    "ProductName": "Chiết khấu",
+                    "UnitName": "",
+                    "Amount": 0.0,
+                    "promo_quantity": 0.0,
+                    "PriceNow": 0.0,
+                    "Discount": order_discount,
+                    "TaxPercent": 0.0,
+                    "TotalPrice": 0.0,
+                    "PromotionCode": "",
+                    "PromotionName": "",
+                })
+
+            # 3. Các dòng hàng tặng khuyến mại hiện vật (bỏ qua giá trị tham khảo ở cột Thành tiền -> luôn để 0đ)
             for p in promotions:
-                if p.get("ProductId", -1) > 0 and float(p.get("Amount") or p.get("PromotionAmount") or 0) > 0:
+                if not _is_cash_discount_promo(p) and float(p.get("Amount") or p.get("PromotionAmount") or 0) > 0:
                     p_qty = float(p.get("Amount") or p.get("PromotionAmount") or 0)
                     order_rows.append({
                         **header_data,
                         "ProductCode": str(p.get("ProductCode") or f"KM-{p.get('ProductId')}").strip(),
                         "ProductName": f"{p.get('ProductName', 'Hàng khuyến mại')} (Hàng KM không thu tiền)",
-                        "UnitName": p.get("UnitName") or "Gói",
+                        "UnitName": p.get("UnitName") or "Hộp",
                         "Amount": 0.0,
                         "promo_quantity": p_qty,
                         "PriceNow": 0.0,
                         "Discount": 0.0,
                         "TaxPercent": float(p.get("PromotionVATPercent") or 0.0),
                         "TotalPrice": 0.0,
+                        "PromotionCode": _promo_program_code(p),
+                        "PromotionName": _promo_program_name(p),
                     })
 
             return order_rows, None

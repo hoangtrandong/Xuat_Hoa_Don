@@ -18,13 +18,17 @@ import {
   CUSTOMER_TYPE_LABELS,
   type MobileCurrentUser,
   type MobileCustomer,
+  fetchWithRetry,
+  getCachedMasterData,
   normalizeSearchText,
 } from "@/lib/mobile-sales";
+import { useAuthSession } from "@/lib/auth-session";
 import { cn } from "@/lib/utils";
 
 const PAGE_STEP = 50;
 
 export default function MobileCustomersPage() {
+  const session = useAuthSession();
   const [customers, setCustomers] = useState<MobileCustomer[]>([]);
   const [ownEmployeeCode, setOwnEmployeeCode] = useState<string>("");
   const [loading, setLoading] = useState(true);
@@ -41,13 +45,29 @@ export default function MobileCustomersPage() {
       setLoading(true);
       setError("");
       try {
-        const [custRes, meRes] = await Promise.all([
-          apiFetch(`${API_URL}/customers/?limit=5000`),
-          apiFetch(`${API_URL}/auth/me`),
+        const cacheKey = `${session.distributorCode || "default"}:${session.username || "guest"}`;
+        const cached = getCachedMasterData(cacheKey);
+        if (cached) {
+          if (cancelled) return;
+          const empCode = cached.me?.employee_code?.trim() || "";
+          setOwnEmployeeCode(empCode);
+          if (!empCode) setOnlyMine(false);
+          setCustomers(cached.customers);
+          setLoading(false);
+          return;
+        }
+
+        const [custRes, meSettled] = await Promise.all([
+          fetchWithRetry(() => apiFetch(`${API_URL}/customers/?limit=2000`)),
+          Promise.allSettled([fetchWithRetry(() => apiFetch(`${API_URL}/auth/me`), 1)]),
         ]);
-        if (!custRes.ok) throw new Error("Không thể tải danh sách khách hàng.");
+        if (!custRes.ok) {
+          throw new Error(`Không thể tải danh sách khách hàng (HTTP ${custRes.status}).`);
+        }
         const custRows = (await custRes.json()) as Array<Record<string, unknown>>;
-        const me = meRes.ok ? ((await meRes.json()) as MobileCurrentUser) : null;
+        const meRes = meSettled[0].status === "fulfilled" ? meSettled[0].value : null;
+        const me =
+          meRes && meRes.ok ? ((await meRes.json()) as MobileCurrentUser) : null;
         if (cancelled) return;
 
         const empCode = me?.employee_code?.trim() || "";
@@ -76,7 +96,11 @@ export default function MobileCustomersPage() {
         );
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Lỗi tải khách hàng.");
+          setError(
+            err instanceof Error
+              ? `${err.message} (API: ${API_URL})`
+              : "Lỗi tải khách hàng.",
+          );
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -86,7 +110,7 @@ export default function MobileCustomersPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [session.distributorCode, session.username]);
 
   const routes = useMemo(() => {
     const set = new Set<string>();

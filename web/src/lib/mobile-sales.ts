@@ -388,3 +388,65 @@ export function clearMobileOrderDraft(
     // Ignore
   }
 }
+
+// --- Resilient Fetch with Retry + In-Memory Master Data Cache ---
+
+export async function fetchWithRetry(
+  fetcher: () => Promise<Response>,
+  retries = 2,
+  delayMs = 700,
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetcher();
+      if (
+        (res.status === 502 || res.status === 503 || res.status === 504) &&
+        attempt < retries
+      ) {
+        await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+        continue;
+      }
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Không thể kết nối máy chủ.");
+}
+
+interface MasterDataCache {
+  key: string;
+  loadedAt: number;
+  customers: MobileCustomer[];
+  products: MobileProduct[];
+  warehouses: MobileWarehouseOption[];
+  deliveryEmployees: MobileEmployeeOption[];
+  me: MobileCurrentUser | null;
+}
+
+const CACHE_TTL_MS = 5 * 60 * 1000;
+let masterCache: MasterDataCache | null = null;
+
+export function getCachedMasterData(
+  cacheKey: string,
+): MasterDataCache | null {
+  if (!masterCache) return null;
+  if (masterCache.key !== cacheKey) return null;
+  if (Date.now() - masterCache.loadedAt > CACHE_TTL_MS) return null;
+  return masterCache;
+}
+
+export function setCachedMasterData(data: Omit<MasterDataCache, "loadedAt">): void {
+  masterCache = { ...data, loadedAt: Date.now() };
+}
+
+export function clearCachedMasterData(): void {
+  masterCache = null;
+}

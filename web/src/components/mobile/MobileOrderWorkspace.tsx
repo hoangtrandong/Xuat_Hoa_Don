@@ -39,6 +39,8 @@ import {
   type MobilePromotionOption,
   type MobileWarehouseOption,
   clearMobileOrderDraft,
+  fetchWithRetry,
+  getCachedMasterData,
   getMobilePromotionReward,
   getMobileQualifyingPromotions,
   lineGrossAmount,
@@ -46,6 +48,7 @@ import {
   loadMobileOrderDraft,
   normalizeSearchText,
   saveMobileOrderDraft,
+  setCachedMasterData,
   todayInputDate,
 } from "@/lib/mobile-sales";
 import { cn } from "@/lib/utils";
@@ -98,6 +101,7 @@ export default function MobileOrderWorkspace() {
   const [deliveryEmployees, setDeliveryEmployees] = useState<MobileEmployeeOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [reloadTick, setReloadTick] = useState(0);
   const [editBlockedReason, setEditBlockedReason] = useState("");
 
   // Order metadata
@@ -144,58 +148,158 @@ export default function MobileOrderWorkspace() {
 
   const draftReadyRef = useRef(false);
 
-  // Load master data (customers, products, units, warehouses, me, employees, optional edit detail)
+  // Load master data with retry, fault isolation, and 5-minute memory cache
   useEffect(() => {
     let cancelled = false;
     async function load() {
       setLoading(true);
       setLoadError("");
       try {
-        const requests: Array<Promise<Response>> = [
-          apiFetch(`${API_URL}/customers/?limit=5000`),
-          apiFetch(`${API_URL}/products/?limit=10000`),
-          apiFetch(`${API_URL}/products/units/`),
-          apiFetch(`${API_URL}/inventory/warehouses/`),
-          apiFetch(`${API_URL}/auth/me`),
-          apiFetch(`${API_URL}/employees/?status=active&limit=1000`),
-        ];
+        const cacheKey = `${session.distributorCode || "default"}:${session.username || "guest"}`;
+        const cached = reloadTick === 0 ? getCachedMasterData(cacheKey) : null;
+
+        let loadedCustomers: MobileCustomer[] = cached?.customers ?? [];
+        let loadedProducts: MobileProduct[] = cached?.products ?? [];
+        let loadedWarehouses: MobileWarehouseOption[] = cached?.warehouses ?? [];
+        let loadedEmployees: MobileEmployeeOption[] = cached?.deliveryEmployees ?? [];
+        let me: MobileCurrentUser | null = cached?.me ?? null;
+
+        if (!cached) {
+          // Stage 1: Core catalog (customers + products) with retry
+          const [custSettled, prodSettled] = await Promise.allSettled([
+            fetchWithRetry(() => apiFetch(`${API_URL}/customers/?limit=2000`)),
+            fetchWithRetry(() => apiFetch(`${API_URL}/products/?limit=5000`)),
+          ]);
+
+          if (custSettled.status === "rejected") {
+            throw new Error(
+              `Không thể kết nối API khách hàng (${custSettled.reason instanceof Error ? custSettled.reason.message : "Failed to fetch"}). Máy chủ: ${API_URL}`,
+            );
+          }
+          if (!custSettled.value.ok) {
+            throw new Error(
+              `Không thể tải danh sách khách hàng (HTTP ${custSettled.value.status}).`,
+            );
+          }
+          if (prodSettled.status === "rejected") {
+            throw new Error(
+              `Không thể kết nối API sản phẩm (${prodSettled.reason instanceof Error ? prodSettled.reason.message : "Failed to fetch"}). Máy chủ: ${API_URL}`,
+            );
+          }
+          if (!prodSettled.value.ok) {
+            throw new Error(
+              `Không thể tải danh sách sản phẩm (HTTP ${prodSettled.value.status}).`,
+            );
+          }
+
+          // Stage 2: Auxiliary metadata (non-blocking if any single endpoint fails)
+          const [unitSettled, whSettled, meSettled, empSettled] =
+            await Promise.allSettled([
+              fetchWithRetry(() => apiFetch(`${API_URL}/products/units/`), 1),
+              fetchWithRetry(() => apiFetch(`${API_URL}/inventory/warehouses/`), 1),
+              fetchWithRetry(() => apiFetch(`${API_URL}/auth/me`), 1),
+              fetchWithRetry(
+                () => apiFetch(`${API_URL}/employees/?status=active&limit=1000`),
+                1,
+              ),
+            ]);
+
+          const custRows = (await custSettled.value.json()) as Array<
+            Record<string, unknown>
+          >;
+          const prodRows = (await prodSettled.value.json()) as Array<
+            Record<string, unknown>
+          >;
+          const unitRows =
+            unitSettled.status === "fulfilled" && unitSettled.value.ok
+              ? ((await unitSettled.value.json()) as Array<{
+                  id: number;
+                  name: string;
+                }>)
+              : [];
+          const whRows =
+            whSettled.status === "fulfilled" && whSettled.value.ok
+              ? ((await whSettled.value.json()) as Array<{
+                  id: number;
+                  name: string;
+                }>)
+              : [];
+          me =
+            meSettled.status === "fulfilled" && meSettled.value.ok
+              ? ((await meSettled.value.json()) as MobileCurrentUser)
+              : null;
+          const empRows =
+            empSettled.status === "fulfilled" && empSettled.value.ok
+              ? ((await empSettled.value.json()) as MobileEmployeeOption[])
+              : [];
+
+          const unitName = new Map(unitRows.map((u) => [u.id, u.name]));
+          loadedCustomers = custRows
+            .filter((row) => row.status !== "inactive")
+            .map((row) => ({
+              id: Number(row.id),
+              code: String(row.code ?? ""),
+              name: String(row.name ?? ""),
+              type:
+                CUSTOMER_TYPE_LABELS[String(row.type ?? "")] ??
+                String(row.type ?? ""),
+              tier: String(row.tier ?? ""),
+              status: String(row.status ?? "active"),
+              staffCode: String(row.staff_code ?? ""),
+              staffName: String(row.staff_name ?? ""),
+              storeName: String(row.store_name ?? ""),
+              salesRoute: String(row.store_route ?? ""),
+              phone: String(row.phone ?? ""),
+              address: String(row.address ?? ""),
+            }));
+
+          loadedProducts = prodRows
+            .filter((row) => row.status !== "inactive")
+            .map((row) => ({
+              id: Number(row.id),
+              sku: String(row.sku ?? ""),
+              nppCode: String(row.npp_code ?? row.sku ?? ""),
+              name: String(row.name ?? ""),
+              unit: unitName.get(Number(row.unit_id)) ?? "",
+              supplier: String(row.supplier ?? ""),
+              basePrice: Number(row.base_price ?? 0),
+              boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
+            }));
+
+          loadedWarehouses = whRows.map((w) => ({ id: w.id, name: w.name }));
+          loadedEmployees = (Array.isArray(empRows) ? empRows : []).filter(
+            (e) =>
+              e.status?.toLowerCase() === "active" &&
+              e.code?.trim().toUpperCase().startsWith("NV"),
+          );
+
+          setCachedMasterData({
+            key: cacheKey,
+            customers: loadedCustomers,
+            products: loadedProducts,
+            warehouses: loadedWarehouses,
+            deliveryEmployees: loadedEmployees,
+            me,
+          });
+        }
+
+        let editDetail: ManualOrderDetailResponse | null = null;
         if (editOrderNumber) {
-          requests.push(
+          const editRes = await fetchWithRetry(() =>
             apiFetch(
               `${API_URL}/sync/vinamilk-orders/manual/${encodeURIComponent(editOrderNumber)}`,
             ),
           );
+          if (!editRes.ok) {
+            const errPayload = (await editRes.json().catch(() => ({}))) as {
+              detail?: string;
+            };
+            throw new Error(
+              errPayload.detail || `Không thể tải đơn ${editOrderNumber}.`,
+            );
+          }
+          editDetail = (await editRes.json()) as ManualOrderDetailResponse;
         }
-
-        const [custRes, prodRes, unitRes, whRes, meRes, empRes, editRes] =
-          await Promise.all(requests);
-
-        if (!custRes.ok) throw new Error("Không thể tải danh sách khách hàng.");
-        if (!prodRes.ok) throw new Error("Không thể tải danh sách sản phẩm.");
-        if (!whRes.ok) throw new Error("Không thể tải danh sách kho.");
-        if (editOrderNumber && editRes && !editRes.ok) {
-          const errPayload = (await editRes.json().catch(() => ({}))) as {
-            detail?: string;
-          };
-          throw new Error(
-            errPayload.detail || `Không thể tải đơn ${editOrderNumber}.`,
-          );
-        }
-
-        const custRows = (await custRes.json()) as Array<Record<string, unknown>>;
-        const prodRows = (await prodRes.json()) as Array<Record<string, unknown>>;
-        const unitRows = unitRes.ok
-          ? ((await unitRes.json()) as Array<{ id: number; name: string }>)
-          : [];
-        const whRows = (await whRes.json()) as Array<{ id: number; name: string }>;
-        const me = meRes.ok ? ((await meRes.json()) as MobileCurrentUser) : null;
-        const empRows = empRes.ok
-          ? ((await empRes.json()) as MobileEmployeeOption[])
-          : [];
-        const editDetail =
-          editOrderNumber && editRes
-            ? ((await editRes.json()) as ManualOrderDetailResponse)
-            : null;
 
         if (cancelled) return;
 
@@ -207,51 +311,11 @@ export default function MobileOrderWorkspace() {
           }
         }
 
-        setDeliveryEmployees(
-          (Array.isArray(empRows) ? empRows : []).filter(
-            (e) =>
-              e.status?.toLowerCase() === "active" &&
-              e.code?.trim().toUpperCase().startsWith("NV"),
-          ),
-        );
-
-        const unitName = new Map(unitRows.map((u) => [u.id, u.name]));
-        const loadedCustomers: MobileCustomer[] = custRows
-          .filter((row) => row.status !== "inactive")
-          .map((row) => ({
-            id: Number(row.id),
-            code: String(row.code ?? ""),
-            name: String(row.name ?? ""),
-            type:
-              CUSTOMER_TYPE_LABELS[String(row.type ?? "")] ??
-              String(row.type ?? ""),
-            tier: String(row.tier ?? ""),
-            status: String(row.status ?? "active"),
-            staffCode: String(row.staff_code ?? ""),
-            staffName: String(row.staff_name ?? ""),
-            storeName: String(row.store_name ?? ""),
-            salesRoute: String(row.store_route ?? ""),
-            phone: String(row.phone ?? ""),
-            address: String(row.address ?? ""),
-          }));
-
-        const loadedProducts: MobileProduct[] = prodRows
-          .filter((row) => row.status !== "inactive")
-          .map((row) => ({
-            id: Number(row.id),
-            sku: String(row.sku ?? ""),
-            nppCode: String(row.npp_code ?? row.sku ?? ""),
-            name: String(row.name ?? ""),
-            unit: unitName.get(Number(row.unit_id)) ?? "",
-            supplier: String(row.supplier ?? ""),
-            basePrice: Number(row.base_price ?? 0),
-            boxesPerCarton: Math.max(1, Number(row.boxes_per_carton ?? 1)),
-          }));
-
+        setDeliveryEmployees(loadedEmployees);
         setCustomers(loadedCustomers);
         setProducts(loadedProducts);
-        setWarehouses(whRows.map((w) => ({ id: w.id, name: w.name })));
-        if (whRows.length > 0) setWarehouseId(whRows[0].id);
+        setWarehouses(loadedWarehouses);
+        if (loadedWarehouses.length > 0) setWarehouseId(loadedWarehouses[0].id);
 
         if (editDetail) {
           setOrderNumber(editDetail.order_number);
@@ -381,7 +445,13 @@ export default function MobileOrderWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [editOrderNumber, preselectedCustomerCode, session.username, session.distributorCode]);
+  }, [
+    editOrderNumber,
+    preselectedCustomerCode,
+    session.username,
+    session.distributorCode,
+    reloadTick,
+  ]);
 
   // Auto-save draft on changes (non-edit mode)
   useEffect(() => {
@@ -860,7 +930,7 @@ export default function MobileOrderWorkspace() {
           <p className="text-sm font-semibold text-red-800">{loadError}</p>
           <button
             type="button"
-            onClick={() => window.location.reload()}
+            onClick={() => setReloadTick((n) => n + 1)}
             className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white"
           >
             <RefreshCw size={14} /> Thử tải lại

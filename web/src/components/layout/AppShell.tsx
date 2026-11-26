@@ -8,7 +8,7 @@ import Header from "@/components/layout/Header";
 import GlobalTaskProgressBar from "@/components/layout/GlobalTaskProgressBar";
 import { DistributorProvider } from "@/lib/distributor-context";
 import { useTheme } from "@/lib/theme";
-import { API_URL, apiFetch } from "@/lib/api";
+import { API_URL, apiFetch, resolveApiRequestUrl } from "@/lib/api";
 import {
   AUTH_EXPIRED_EVENT,
   clearAuthSession,
@@ -91,7 +91,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     setIsLoggingIn(true);
 
     try {
-      const response = await fetch(`${API_URL}/auth/login`, {
+      const response = await fetch(resolveApiRequestUrl(`${API_URL}/auth/login`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

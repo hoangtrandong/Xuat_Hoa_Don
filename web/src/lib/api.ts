@@ -7,6 +7,45 @@ const renderApiUrl = "https://dms-project-250u.onrender.com/api/v1";
 // Chỉ fallback về Render khi không có cấu hình.
 export const API_URL = configuredApiUrl || renderApiUrl;
 
+function shouldUseSameOriginProxy(requestUrl: string): boolean {
+  if (typeof window === "undefined") return false;
+  if (!requestUrl.startsWith(API_URL)) return false;
+
+  const host = window.location.hostname;
+  const isLocalOrLan =
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host.startsWith("192.168.") ||
+    host.startsWith("10.") ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+
+  const isMixedContent =
+    window.location.protocol === "https:" && requestUrl.startsWith("http://");
+
+  // Nếu đang chạy ở localhost / mạng LAN (test điện thoại) mà gọi lên API remote,
+  // hoặc trang HTTPS gọi API HTTP -> đi qua Next.js same-origin proxy (/api/proxy)
+  // để tránh lỗi CORS (Disallowed CORS origin) và Mixed Content.
+  if (isMixedContent) return true;
+  if (isLocalOrLan) {
+    try {
+      const apiHost = new URL(API_URL).hostname;
+      if (apiHost !== "localhost" && apiHost !== "127.0.0.1") {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export function resolveApiRequestUrl(url: string): string {
+  if (shouldUseSameOriginProxy(url)) {
+    return `/api/proxy${url.slice(API_URL.length)}`;
+  }
+  return url;
+}
+
 export async function apiFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -24,7 +63,8 @@ export async function apiFetch(
   const token = getStoredAccessToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const response = await fetch(input, { ...init, headers });
+  const effectiveUrl = resolveApiRequestUrl(requestUrl);
+  const response = await fetch(effectiveUrl, { ...init, headers });
   if (response.status === 401 && token) {
     clearAuthSession(true);
   }

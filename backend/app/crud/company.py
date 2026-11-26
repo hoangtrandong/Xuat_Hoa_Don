@@ -1,6 +1,6 @@
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from app.models.customer import Company, Customer, CustomerCompany
 from app.schemas.company import CompanyCreate, CompanyUpdate
@@ -168,10 +168,13 @@ def sync_companies_from_purchase_invoices(
     *,
     distributor_id: Optional[int] = None,
     invoice_ids: Optional[List[int]] = None,
+    from_date: Optional[Any] = None,
+    to_date: Optional[Any] = None,
     commit: bool = True,
 ) -> dict:
     """Tự động đồng bộ Công ty quản lý (Company) và liên kết SKU–Công ty (ProductCompany)
     từ dữ liệu Hóa đơn mua vào CQT (PurchaseInvoice.buyer_tax_code / buyer_name)."""
+    from datetime import datetime as _dt, time as _time
     from app.models.multi_tenant_invoice import (
         PurchaseInvoice,
         PurchaseInvoiceItem,
@@ -192,6 +195,11 @@ def sync_companies_from_purchase_invoices(
         if not invoice_ids:
             return {"companies_created": 0, "companies_updated": 0, "sku_links_upserted": 0}
         inv_stmt = inv_stmt.where(PurchaseInvoice.id.in_(invoice_ids))
+    else:
+        if from_date is not None:
+            inv_stmt = inv_stmt.where(PurchaseInvoice.invoice_date >= _dt.combine(from_date, _time.min))
+        if to_date is not None:
+            inv_stmt = inv_stmt.where(PurchaseInvoice.invoice_date <= _dt.combine(to_date, _time.max))
 
     inv_rows = db.execute(inv_stmt).all()
     if not inv_rows:

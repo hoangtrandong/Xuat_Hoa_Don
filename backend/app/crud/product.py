@@ -439,16 +439,20 @@ def sync_products_from_system_data(
     db: Session,
     invoice_ids: list[int] | None = None,
     commit: bool = True,
+    from_date: Any = None,
+    to_date: Any = None,
 ) -> dict[str, Any]:
-    """Tự động đồng bộ SKU từ hóa đơn CQT tối ưu theo cơ chế Incremental:
-    1. Nếu invoice_ids được truyền vào: Chỉ quét và trích xuất đúng các hóa đơn mới tải về (O(K)).
-    2. Nếu invoice_ids is None: Đồng bộ toàn diện (Full Sync) dùng khi nhấn nút 'Đồng bộ từ CQT'.
-    3. Mã NPP nội bộ: Cập nhật từ Đơn hàng DMS (vinamilk_order_snapshots).
-       Đơn hàng DMS KHÔNG tạo mới SKU vào bảng products, mà cập nhật mã sản phẩm vào Quản lý mã NPP nội bộ.
+    """Tự động đồng bộ SKU từ hóa đơn CQT tối ưu:
+    1. Nếu invoice_ids được truyền vào: Chỉ quét đúng các hóa đơn mới tải về (O(K)).
+    2. Nếu invoice_ids is None: Quét theo khoảng ngày (from_date..to_date) hoặc toàn bộ,
+       dùng SQL DISTINCT ON trên PostgreSQL và chỉ chọn cột nhẹ để tránh tải hàng trăm nghìn dòng lên RAM.
+    3. Mã NPP nội bộ: Cập nhật từ Đơn hàng DMS (vinamilk_order_snapshots) bằng tra cứu dict O(1).
     """
+    from datetime import datetime as _dt, time as _time
     from app.models.customer import Company
     from app.models.product import ProductGroup, ProductGroupCompany, ProductGroupItem
 
+    is_postgres = db.get_bind().dialect.name == "postgresql"
     categories, units = ensure_default_categories_and_units(db, commit=False)
     candidates: dict[str, dict[str, Any]] = {}
     purchase_skus: set[str] = set()
@@ -457,13 +461,27 @@ def sync_products_from_system_data(
     dms_mapped_count = 0
     existing_products: dict[str, Product] = {}
 
-    # 1. Quét từ PurchaseInvoice & PurchaseInvoiceItem (Hóa đơn mua vào CQT) -> NGUỒN CHÍNH TẠO SKU
+    # 1. Quét từ PurchaseInvoice & PurchaseInvoiceItem (chỉ đọc cột nhẹ + DISTINCT ON trên PostgreSQL)
     try:
         from app.models.multi_tenant_invoice import PurchaseInvoice, PurchaseInvoiceItem
 
+        norm_sku_expr = func.upper(func.trim(PurchaseInvoiceItem.product_code))
         purch_stmt = (
-            select(PurchaseInvoiceItem, PurchaseInvoice.seller_name)
+            select(
+                PurchaseInvoiceItem.product_code,
+                PurchaseInvoiceItem.product_name,
+                PurchaseInvoiceItem.unit_name,
+                PurchaseInvoiceItem.unit_price,
+                PurchaseInvoiceItem.quantity,
+                PurchaseInvoiceItem.amount_before_tax,
+                PurchaseInvoiceItem.vat_rate,
+                PurchaseInvoice.seller_name,
+            )
             .join(PurchaseInvoice, PurchaseInvoice.id == PurchaseInvoiceItem.purchase_invoice_id)
+            .where(
+                PurchaseInvoiceItem.product_code.is_not(None),
+                func.trim(PurchaseInvoiceItem.product_code) != "",
+            )
         )
         if invoice_ids is not None:
             if not invoice_ids:
@@ -472,20 +490,29 @@ def sync_products_from_system_data(
                 purch_stmt = purch_stmt.where(PurchaseInvoiceItem.purchase_invoice_id.in_(invoice_ids))
                 purch_rows = db.execute(purch_stmt.order_by(PurchaseInvoiceItem.id.asc())).all()
         else:
-            purch_rows = db.execute(purch_stmt.order_by(PurchaseInvoiceItem.id.asc())).all()
+            if from_date is not None:
+                purch_stmt = purch_stmt.where(PurchaseInvoice.invoice_date >= _dt.combine(from_date, _time.min))
+            if to_date is not None:
+                purch_stmt = purch_stmt.where(PurchaseInvoice.invoice_date <= _dt.combine(to_date, _time.max))
+            if is_postgres:
+                purch_rows = db.execute(
+                    purch_stmt.distinct(norm_sku_expr).order_by(norm_sku_expr, PurchaseInvoiceItem.id.desc())
+                ).all()
+            else:
+                purch_rows = db.execute(purch_stmt.order_by(PurchaseInvoiceItem.id.asc())).all()
 
-        for item, seller_name in purch_rows:
-            sku = (item.product_code or "").strip().upper()[:30]
-            name = (item.product_name or "").strip()[:200]
+        for p_code, p_name, p_unit, p_price, p_qty, p_amt, p_vat, seller_name in purch_rows:
+            sku = (p_code or "").strip().upper()[:30]
+            name = (p_name or "").strip()[:200]
             if not sku or not name:
                 continue
-            unit_raw = (item.unit_name or "").strip()
-            cost_price = float(item.unit_price or 0.0)
-            if cost_price <= 0 and (item.quantity or 0) > 0 and float(item.amount_before_tax or 0) > 0:
-                cost_price = round(float(item.amount_before_tax) / float(item.quantity), 4)
+            unit_raw = (p_unit or "").strip()
+            cost_price = float(p_price or 0.0)
+            if cost_price <= 0 and (p_qty or 0) > 0 and float(p_amt or 0) > 0:
+                cost_price = round(float(p_amt) / float(p_qty), 4)
             supplier = _normalize_supplier_name(seller_name, fallback="Nhà cung cấp CQT")
             boxes_per_carton = _infer_boxes_per_carton(sku, name)
-            parsed_vat = _parse_cqt_vat_rate(item.vat_rate)
+            parsed_vat = _parse_cqt_vat_rate(p_vat)
 
             purchase_skus.add(sku)
             if sku not in candidates:
@@ -515,28 +542,31 @@ def sync_products_from_system_data(
     except Exception:
         pass
 
-    # 2. Quét từ IssuedInvoiceItem (Hóa đơn bán ra đã phát hành) -> CHỈ bổ sung giá bán cho SKU đã có từ HĐ mua vào CQT,
-    # KHÔNG tự tạo mới Product không có MST đầu vào vào bảng products.
+    # 2. Quét từ IssuedInvoiceItem (gom nhóm MAX(unit_price) ngay trong SQL, chỉ cho SKU đã có từ HĐ mua vào CQT)
     if invoice_ids is None and candidates:
         try:
             from app.models.multi_tenant_invoice import IssuedInvoiceItem
 
-            issued_rows = db.scalars(
-                select(IssuedInvoiceItem)
-                .where(
-                    IssuedInvoiceItem.product_code.is_not(None),
-                    IssuedInvoiceItem.item_type.in_(("NORMAL", "PROMOTION")),
-                )
-                .order_by(IssuedInvoiceItem.id.asc())
-            ).all()
-            for item in issued_rows:
-                sku = (item.product_code or "").strip().upper()[:30]
-                if not sku or sku not in candidates:
-                    continue
-                price = float(item.unit_price or 0.0)
-                issued_skus.add(sku)
-                if price > 0 and candidates[sku]["base_price"] <= 0:
-                    candidates[sku]["base_price"] = price
+            cand_keys = list(candidates.keys())
+            norm_issued_code = func.upper(func.trim(IssuedInvoiceItem.product_code))
+            for i in range(0, len(cand_keys), 500):
+                batch_keys = cand_keys[i : i + 500]
+                price_rows = db.execute(
+                    select(norm_issued_code, func.max(IssuedInvoiceItem.unit_price))
+                    .where(
+                        norm_issued_code.in_(batch_keys),
+                        IssuedInvoiceItem.item_type.in_(("NORMAL", "PROMOTION")),
+                        IssuedInvoiceItem.unit_price > 0,
+                    )
+                    .group_by(norm_issued_code)
+                ).all()
+                for sku_code, max_price in price_rows:
+                    sku = (sku_code or "").strip().upper()[:30]
+                    price = float(max_price or 0.0)
+                    if sku in candidates:
+                        issued_skus.add(sku)
+                        if price > 0 and candidates[sku]["base_price"] <= 0:
+                            candidates[sku]["base_price"] = price
         except Exception:
             pass
 
@@ -614,160 +644,8 @@ def sync_products_from_system_data(
 
         db.flush()
 
-    # 3. Quét từ VinamilkOrderSnapshot (Đơn hàng DMS) -> Chỉ quét khi full sync (invoice_ids is None)
-    if invoice_ids is None:
-        dms_items: dict[str, dict[str, Any]] = {}
-        snapshots = db.scalars(
-            select(VinamilkOrderSnapshot)
-            .where(
-                VinamilkOrderSnapshot.product_code.is_not(None),
-                func.trim(VinamilkOrderSnapshot.product_code) != "",
-            )
-            .order_by(VinamilkOrderSnapshot.id.asc())
-        ).all()
-
-        for snap in snapshots:
-            raw = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
-            dms_code = (
-                snap.product_code
-                or raw.get("Mã sản phẩm")
-                or raw.get("productCode")
-                or raw.get("ProductCode")
-                or raw.get("ma_sku")
-                or raw.get("ItemCode")
-                or ""
-            ).strip().upper()[:30]
-            if not dms_code:
-                continue
-
-            dms_name = str(
-                snap.product_name
-                or raw.get("Sản phẩm")
-                or raw.get("Tên sản phẩm")
-                or raw.get("productName")
-                or raw.get("ProductName")
-                or raw.get("ten_hang_hoa")
-                or raw.get("ItemName")
-                or ""
-            ).strip()[:200]
-            if not dms_name or dms_name == f"Name {dms_code}":
-                continue
-
-            price = _to_float(
-                raw.get("Đơn giá")
-                or raw.get("Giá bán")
-                or raw.get("unitPrice")
-                or raw.get("Price")
-                or raw.get("don_gia_chua_vat")
-                or raw.get("basePrice")
-                or 0.0
-            )
-            if price <= 0:
-                qty = _to_float(raw.get("Số lượng") or raw.get("quantity") or raw.get("Quantity"), 0.0)
-                val = _to_float(raw.get("Giá trị") or raw.get("totalValue") or raw.get("SubTotal"), 0.0)
-                if qty > 0 and val > 0:
-                    price = round(val / qty, 4)
-
-            order_skus.add(dms_code)
-            if dms_code not in dms_items:
-                dms_items[dms_code] = {
-                    "code": dms_code,
-                    "name": dms_name,
-                    "price": price,
-                    "boxes_per_carton": _infer_boxes_per_carton(dms_code, dms_name, raw),
-                }
-            else:
-                if price > 0:
-                    dms_items[dms_code]["price"] = price
-
-        # Khớp mã DMS vào danh sách sản phẩm SKU và cập nhật Mã NPP nội bộ
-        all_current_products = db.scalars(
-            select(Product).options(
-                selectinload(Product.group_items).selectinload(ProductGroupItem.group).selectinload(ProductGroup.company_links)
-            )
-        ).all()
-        all_companies = db.scalars(select(Company)).all()
-        existing_group_by_prod_id: dict[int, ProductGroup] = {}
-        for p in all_current_products:
-            if p.group_items and p.group_items[0].group is not None:
-                existing_group_by_prod_id[p.id] = p.group_items[0].group
-        # Nạp thêm từ DB để chắc chắn 100% không bỏ sót product_id nào đã tồn tại trong product_group_items
-        for pgi in db.scalars(
-            select(ProductGroupItem).options(
-                selectinload(ProductGroupItem.group).selectinload(ProductGroup.company_links)
-            )
-        ).all():
-            if pgi.product_id not in existing_group_by_prod_id and pgi.group is not None:
-                existing_group_by_prod_id[pgi.product_id] = pgi.group
-
-        dms_mapped_count = 0
-        for dms_code, dms_info in dms_items.items():
-            matched_prod = None
-
-            # 1) Khớp theo mã SKU
-            for p in all_current_products:
-                if p.sku.strip().upper() == dms_code:
-                    matched_prod = p
-                    break
-
-            # 2) Khớp theo mã NPP đã gán
-            if matched_prod is None:
-                for p in all_current_products:
-                    if (p.npp_code or "").strip().upper() == dms_code:
-                        matched_prod = p
-                        break
-
-            # 3) Khớp theo tên sản phẩm
-            if matched_prod is None and dms_info["name"]:
-                for p in all_current_products:
-                    if _is_name_match(dms_info["name"], p.name):
-                        matched_prod = p
-                        break
-
-            # Khi tìm thấy SKU tương ứng, cập nhật Mã NPP nội bộ
-            if matched_prod is not None:
-                prod_changed = False
-                if (matched_prod.npp_code or "").strip().upper() != dms_code:
-                    matched_prod.npp_code = dms_code
-                    prod_changed = True
-
-                if dms_info["price"] > 0:
-                    matched_prod.base_price = round(float(dms_info["price"]), 4)
-                    prod_changed = True
-
-                if (matched_prod.boxes_per_carton is None or matched_prod.boxes_per_carton <= 1) and dms_info["boxes_per_carton"] > 1:
-                    matched_prod.boxes_per_carton = dms_info["boxes_per_carton"]
-                    prod_changed = True
-
-                # Đồng bộ vào Quản lý mã NPP nội bộ (ProductGroup & ProductGroupCompany)
-                existing_group = existing_group_by_prod_id.get(matched_prod.id)
-                if existing_group is not None:
-                    for link in existing_group.company_links:
-                        if link.distributor_sku != dms_code:
-                            link.distributor_sku = dms_code
-                            link.distributor_name = dms_info["name"]
-                            prod_changed = True
-                elif all_companies:
-                    new_group = ProductGroup(name=matched_prod.name, representative_product_id=matched_prod.id)
-                    db.add(new_group)
-                    db.flush()
-                    new_pgi = ProductGroupItem(product_group_id=new_group.id, product_id=matched_prod.id)
-                    db.add(new_pgi)
-                    for comp in all_companies:
-                        db.add(ProductGroupCompany(
-                            product_group_id=new_group.id,
-                            company_id=comp.id,
-                            role="MANAGER",
-                            distributor_sku=dms_code,
-                            distributor_name=dms_info["name"],
-                        ))
-                    db.flush()
-                    existing_group_by_prod_id[matched_prod.id] = new_group
-                    prod_changed = True
-
-                if prod_changed:
-                    dms_mapped_count += 1
-                    updated += 1
+    # Lưu ý: Đã tách hoàn toàn danh mục Sản phẩm DMS (distributor_products) và Sản phẩm XHĐ (invoice_products),
+    # nên bước đồng bộ Sản phẩm CQT CHỈ lấy từ Hóa đơn mua vào CQT (không quét/ghi đè từ Đơn hàng DMS nữa).
 
     if added > 0 or updated > 0:
         db.flush()
@@ -778,7 +656,11 @@ def sync_products_from_system_data(
         from app.crud.company import sync_companies_from_purchase_invoices
 
         company_sync_stats = sync_companies_from_purchase_invoices(
-            db, invoice_ids=invoice_ids, commit=False
+            db,
+            invoice_ids=invoice_ids,
+            from_date=from_date if invoice_ids is None else None,
+            to_date=to_date if invoice_ids is None else None,
+            commit=False,
         )
     except Exception:
         pass

@@ -241,6 +241,7 @@ export default function ProductsPage() {
   const [units, setUnits] = useState<UnitOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [syncDays, setSyncDays] = useState<string>("30");
   const [submitting, setSubmitting] = useState(false);
 
   // Bộ lọc tra cứu
@@ -629,35 +630,48 @@ export default function ProductsPage() {
 
   async function handleSyncFromSystem() {
     setSyncing(true);
+    const qs = new URLSearchParams();
+    if (syncDays === "YEAR") {
+      const y = new Date().getFullYear();
+      qs.set("from_date", `${y}-01-01`);
+      qs.set("days", "0");
+    } else {
+      qs.set("days", syncDays);
+    }
+    const rangeLabel =
+      syncDays === "0"
+        ? "toàn bộ lịch sử"
+        : syncDays === "YEAR"
+        ? `năm ${new Date().getFullYear()}`
+        : `${syncDays} ngày gần nhất`;
     setBannerMsg({
       type: "info",
-      text: "Đang đồng bộ danh mục SKU từ Hóa đơn mua vào CQT và cập nhật Mã NPP nội bộ từ Đơn hàng DMS...",
+      text: `Đang đồng bộ danh mục Sản phẩm CQT từ Hóa đơn mua vào (${rangeLabel})...`,
     });
     try {
-      const response = await apiFetch(`${API_URL}/products/sync-from-system`, {
+      const response = await apiFetch(`${API_URL}/products/sync-from-system?${qs.toString()}`, {
         method: "POST",
       });
       const result = (await response.json()) as {
         added?: number;
         updated?: number;
-        dms_mapped?: number;
-        total_products?: number;
-        from_orders?: number;
+        sku_links_upserted?: number;
         from_purchase_invoices?: number;
         detail?: string;
       };
       if (!response.ok) {
-        throw new Error(result.detail ?? "Không thể đồng bộ SKU từ hệ thống.");
+        throw new Error(result.detail ?? "Không thể đồng bộ SKU từ Hóa đơn mua vào CQT.");
       }
       await loadCatalog(false);
+      await loadFilterOptions();
       setBannerMsg({
         type: "success",
-        text: `Đồng bộ hoàn tất: ${result.added ?? 0} SKU mới từ Hóa đơn CQT, ${result.dms_mapped ?? 0} Mã NPP cập nhật từ DMS. Tổng: ${result.total_products ?? 0} SKU.`,
+        text: `Đồng bộ CQT (${rangeLabel}) hoàn tất: ${result.added ?? 0} mã mới, ${result.updated ?? 0} mã cập nhật, ${result.sku_links_upserted ?? 0} liên kết MST đầu vào (quét ${result.from_purchase_invoices ?? 0} mã trên Hóa đơn mua vào CQT).`,
       });
     } catch (err) {
       setBannerMsg({
         type: "error",
-        text: err instanceof Error ? err.message : "Lỗi khi đồng bộ SKU từ hệ thống.",
+        text: err instanceof Error ? err.message : "Lỗi khi đồng bộ SKU từ Hóa đơn mua vào CQT.",
       });
     } finally {
       setSyncing(false);
@@ -1378,20 +1392,34 @@ export default function ProductsPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            <button
-              type="button"
-              onClick={handleSyncFromSystem}
-              disabled={syncing}
-              className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-400"
-              title="Quét và lấy toàn bộ mã sản phẩm, tên sản phẩm từ Đơn hàng DMS & Hóa đơn mua vào CQT"
-            >
-              {syncing ? (
-                <Loader2 size={13} className="animate-spin" />
-              ) : (
-                <RefreshCw size={13} />
-              )}
-              Đồng bộ SKU từ hệ thống
-            </button>
+            <div className="inline-flex items-center rounded bg-sky-700/70 border border-sky-400/30 overflow-hidden">
+              <select
+                value={syncDays}
+                onChange={(e) => setSyncDays(e.target.value)}
+                disabled={syncing}
+                className="bg-transparent px-2 py-1 text-[11px] font-semibold text-white focus:outline-none cursor-pointer"
+                title="Chọn khoảng thời gian Hóa đơn mua vào CQT cần đồng bộ"
+              >
+                <option value="30" className="text-slate-900">30 ngày gần nhất</option>
+                <option value="90" className="text-slate-900">90 ngày gần nhất</option>
+                <option value="YEAR" className="text-slate-900">Từ đầu năm nay</option>
+                <option value="0" className="text-slate-900">Toàn bộ lịch sử</option>
+              </select>
+              <button
+                type="button"
+                onClick={handleSyncFromSystem}
+                disabled={syncing}
+                className="inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-400 border-l border-sky-400/30"
+                title="Chỉ đồng bộ mã sản phẩm & MST đầu vào từ Hóa đơn mua vào CQT trong khoảng ngày đã chọn"
+              >
+                {syncing ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={13} />
+                )}
+                Đồng bộ từ CQT
+              </button>
+            </div>
 
             <AuthenticatedDownloadLink
               href={`${API_URL}/products/template`}

@@ -526,12 +526,35 @@ def list_units(db: Session = Depends(get_db)):
 
 
 @router.post("/sync-from-system")
-def sync_products_from_system(db: Session = Depends(get_db)):
-    """Đồng bộ toàn bộ Mã sản phẩm (SKU), Tên sản phẩm, ĐVT, Đơn giá và Nhà cung cấp
-    từ các đơn hàng DMS và hóa đơn mua vào CQT đã đồng bộ về bảng products."""
+def sync_products_from_system(
+    days: int = 30,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Đồng bộ Mã sản phẩm (SKU), Tên sản phẩm, ĐVT, Đơn giá và Nhà cung cấp
+    từ Hóa đơn mua vào CQT & Đơn hàng DMS.
+    Mặc định đồng bộ 30 ngày gần nhất để tối ưu hiệu năng CSDL (truyền days=0 để quét toàn bộ lịch sử)."""
+    from datetime import date as _date, timedelta as _timedelta
+
     try:
-        result = product_crud.sync_products_from_system_data(db, commit=True)
-        return {"success": True, **result}
+        parsed_from: _date | None = _date.fromisoformat(from_date) if from_date else None
+        parsed_to: _date | None = _date.fromisoformat(to_date) if to_date else None
+        if parsed_from is None and days > 0:
+            parsed_to = parsed_to or _date.today()
+            parsed_from = parsed_to - _timedelta(days=days)
+        result = product_crud.sync_products_from_system_data(
+            db,
+            commit=True,
+            from_date=parsed_from,
+            to_date=parsed_to,
+        )
+        return {
+            "success": True,
+            "from_date": parsed_from.isoformat() if parsed_from else None,
+            "to_date": parsed_to.isoformat() if parsed_to else None,
+            **result,
+        }
     except Exception as exc:
         db.rollback()
         raise HTTPException(

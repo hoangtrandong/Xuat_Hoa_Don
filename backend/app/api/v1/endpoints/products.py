@@ -1118,10 +1118,13 @@ def assign_product_invoice_product(
 
 @router.delete("/{product_id}")
 def delete_product(product_id: int, db: Session = Depends(get_db)):
-    success = product_crud.delete(db, product_id)
+    try:
+        success = product_crud.delete(db, product_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not success:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return {"success": True, "message": "Product deleted"}
+        raise HTTPException(status_code=404, detail="Không tìm thấy sản phẩm.")
+    return {"success": True, "message": "Đã xóa sản phẩm."}
 
 
 class BulkAssignProductCompanyPayload(BaseModel):
@@ -1185,9 +1188,9 @@ def bulk_assign_product_company(
 @router.post("/bulk-delete")
 def bulk_delete_products(product_ids: List[int], db: Session = Depends(get_db)):
     if not product_ids:
-        raise HTTPException(status_code=400, detail="No product IDs provided")
-    deleted = product_crud.bulk_delete(db, product_ids)
-    return {"success": True, "deleted": deleted}
+        raise HTTPException(status_code=400, detail="Chưa chọn sản phẩm nào để xóa.")
+    result = product_crud.bulk_delete(db, product_ids)
+    return {"success": True, **result}
 
 
 @router.get("/price-lists/", response_model=List[PriceList], tags=["price-lists"])

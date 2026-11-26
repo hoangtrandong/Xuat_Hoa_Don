@@ -994,17 +994,34 @@ export default function ProductsPage() {
       });
       const result = (await response.json().catch(() => ({}))) as {
         deleted?: number;
+        skipped?: number;
+        skipped_skus?: string[];
+        deleted_ids?: number[];
         detail?: string;
       };
       if (!response.ok) throw new Error(result.detail ?? "Không thể xóa các SKU đã chọn.");
-      const count = result.deleted ?? selectedIds.size;
+      const deletedCount = result.deleted ?? 0;
+      const skippedCount = result.skipped ?? 0;
+      const deletedSet = new Set(result.deleted_ids ?? Array.from(selectedIds));
       setBulkDeleteConfirm(false);
-      setProducts((prev) => prev.filter((p) => !selectedIds.has(p.id)));
+      setProducts((prev) => prev.filter((p) => !deletedSet.has(p.id)));
       setSelectedIds(new Set());
-      setBannerMsg({
-        type: "success",
-        text: `Đã xóa thành công ${count} mã sản phẩm đã chọn.`,
-      });
+      if (skippedCount > 0) {
+        const sampleSkipped = (result.skipped_skus || []).slice(0, 5).join(", ");
+        setBannerMsg({
+          type: deletedCount > 0 ? "info" : "error",
+          text:
+            deletedCount > 0
+              ? `Đã xóa ${deletedCount} mã sản phẩm. Bỏ qua ${skippedCount} mã đang có dữ liệu tham chiếu lịch sử (${sampleSkipped}${skippedCount > 5 ? "..." : ""}).`
+              : `Không thể xóa ${skippedCount} mã đã chọn vì đang có dữ liệu tham chiếu lịch sử (đơn hàng, tồn kho hoặc bảng giá). Bạn có thể chuyển sang trạng thái 'Ngừng bán'.`,
+        });
+      } else {
+        setBannerMsg({
+          type: "success",
+          text: `Đã xóa thành công ${deletedCount} mã sản phẩm đã chọn.`,
+        });
+      }
+      void loadCatalog(false);
     } catch (err) {
       setBannerMsg({
         type: "error",

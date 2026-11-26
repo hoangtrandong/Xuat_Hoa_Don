@@ -1710,24 +1710,87 @@ def update(db: Session, product_id: int, obj_in) -> Optional[Product]:
     return product
 
 
+def _detach_product_groups_before_delete(db: Session, product_id: int) -> None:
+    """Gỡ hoặc chuyển đại diện cho ProductGroup trỏ tới product_id trước khi xóa Product."""
+    from app.models.product import ProductGroup, ProductGroupItem
+
+    groups = list(
+        db.scalars(
+            select(ProductGroup).where(ProductGroup.representative_product_id == product_id)
+        ).all()
+    )
+    for grp in groups:
+        other_item = db.scalar(
+            select(ProductGroupItem).where(
+                ProductGroupItem.product_group_id == grp.id,
+                ProductGroupItem.product_id != product_id,
+            )
+        )
+        if other_item is not None:
+            grp.representative_product_id = other_item.product_id
+        else:
+            db.delete(grp)
+    db.flush()
+
+
 def delete(db: Session, product_id: int) -> bool:
+    from sqlalchemy.exc import IntegrityError
+
     product = db.get(Product, product_id)
     if not product:
         return False
-    db.delete(product)
-    db.commit()
-    return True
+    referenced_ids = _find_referenced_product_ids(db, [product_id])
+    if product_id in referenced_ids:
+        raise ValueError(
+            f"Không thể xóa mã SKU '{product.sku}' vì đang có dữ liệu tham chiếu lịch sử "
+            f"(đơn hàng, tồn kho hoặc bảng giá). Bạn có thể chuyển mã này sang trạng thái 'Ngừng bán'."
+        )
+    try:
+        _detach_product_groups_before_delete(db, product_id)
+        db.delete(product)
+        db.commit()
+        return True
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError(
+            f"Không thể xóa mã SKU '{product.sku}' do đang được tham chiếu bởi dữ liệu khác trong hệ thống."
+        ) from exc
 
 
-def bulk_delete(db: Session, product_ids: List[int]) -> int:
-    deleted = 0
-    for product_id in product_ids:
+def bulk_delete(db: Session, product_ids: List[int]) -> dict[str, Any]:
+    from sqlalchemy.exc import IntegrityError
+
+    unique_ids = list(dict.fromkeys(int(pid) for pid in product_ids if pid))
+    if not unique_ids:
+        return {"deleted": 0, "skipped": 0, "skipped_skus": [], "deleted_ids": []}
+
+    referenced_ids = _find_referenced_product_ids(db, unique_ids)
+    deleted_ids: list[int] = []
+    skipped_skus: list[str] = []
+
+    for product_id in unique_ids:
         product = db.get(Product, product_id)
-        if product:
-            db.delete(product)
-            deleted += 1
+        if not product:
+            continue
+        if product_id in referenced_ids:
+            skipped_skus.append(product.sku)
+            continue
+        try:
+            with db.begin_nested():
+                _detach_product_groups_before_delete(db, product_id)
+                db.delete(product)
+                db.flush()
+            deleted_ids.append(product_id)
+        except IntegrityError:
+            skipped_skus.append(product.sku)
+
     db.commit()
-    return deleted
+    return {
+        "deleted": len(deleted_ids),
+        "skipped": len(skipped_skus),
+        "skipped_skus": skipped_skus[:30],
+        "deleted_ids": deleted_ids,
+    }
 
 
 def _find_referenced_product_ids(db: Session, candidate_ids: list[int]) -> set[int]:
@@ -1740,8 +1803,8 @@ def _find_referenced_product_ids(db: Session, candidate_ids: list[int]) -> set[i
 
     bind = db.get_bind()
     existing_tables = set(sa_inspect(bind).get_table_names())
-    # Các bảng liên kết phụ trợ có ON DELETE CASCADE (xóa theo Product là an toàn)
-    cascade_only_tables = {"product_companies", "product_group_items"}
+    # Các bảng liên kết phụ trợ có ON DELETE CASCADE hoặc tự động gỡ trước khi xóa (product_groups)
+    cascade_only_tables = {"product_companies", "product_group_items", "product_groups"}
     referenced: set[int] = set()
 
     # Chia batch 500 IDs để tương thích cả SQLite & PostgreSQL
@@ -1871,6 +1934,7 @@ def cleanup_non_cqt_products(
                 prod.status = "inactive"
                 deactivated_count += 1
         else:
+            _detach_product_groups_before_delete(db, prod.id)
             db.delete(prod)
             deleted_count += 1
 

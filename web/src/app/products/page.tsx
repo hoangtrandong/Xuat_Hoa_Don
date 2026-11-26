@@ -302,6 +302,21 @@ export default function ProductsPage() {
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: number; code: string; name: string } | null>(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
 
+  // Modal Dọn dẹp mã không phải CQT (an toàn, xem trước trước khi xóa)
+  const [cleanupModalOpen, setCleanupModalOpen] = useState(false);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupExecuting, setCleanupExecuting] = useState(false);
+  const [cleanupDeactivateRef, setCleanupDeactivateRef] = useState(true);
+  const [cleanupPreview, setCleanupPreview] = useState<{
+    total_no_mst: number;
+    cqt_missing_mst_count: number;
+    total_non_cqt: number;
+    deletable_count: number;
+    referenced_count: number;
+    sample_deletable: Array<{ id: number; sku: string; name: string; supplier: string; sync_source: string; status: string }>;
+    sample_referenced: Array<{ id: number; sku: string; name: string; supplier: string; sync_source: string; status: string }>;
+  } | null>(null);
+
   // Chỉnh sửa nhanh inline Mã NPP trực tiếp trên bảng (theo từng dòng SKU–MST)
   const [expandByMst, setExpandByMst] = useState<boolean>(true);
   const [editingNppKey, setEditingNppKey] = useState<string | null>(null);
@@ -482,6 +497,8 @@ export default function ProductsPage() {
       if (statusFilter !== "ALL") params.set("status", statusFilter);
       if (companyFilter === "UNASSIGNED") {
         params.set("company_id", "0");
+      } else if (companyFilter === "HAS_MST") {
+        params.set("company_id", "-1");
       } else if (companyFilter !== "ALL") {
         params.set("company_id", companyFilter);
       }
@@ -1248,6 +1265,8 @@ export default function ProductsPage() {
       if (statusFilter !== "ALL") params.set("status", statusFilter);
       if (companyFilter === "UNASSIGNED") {
         params.set("company_id", "0");
+      } else if (companyFilter === "HAS_MST") {
+        params.set("company_id", "-1");
       } else if (companyFilter !== "ALL") {
         params.set("company_id", companyFilter);
       }
@@ -1634,7 +1653,8 @@ export default function ProductsPage() {
                 className={inputCls}
               >
                 <option value="ALL">Tất cả Công ty ({companyOptions.length})</option>
-                <option value="UNASSIGNED">Chưa có Công ty quản lý</option>
+                <option value="HAS_MST">Chỉ hiện SP có MST CQT</option>
+                <option value="UNASSIGNED">Chưa có MST đầu vào (DMS / thủ công)</option>
                 {companyOptions.map((comp) => (
                   <option key={comp.id} value={String(comp.id)}>
                     {comp.tax_code ? `[${comp.tax_code}] ` : ""}
@@ -1794,6 +1814,34 @@ export default function ProductsPage() {
                   Gộp theo SKU
                 </button>
               </div>
+
+              {/* Nút dọn dẹp an toàn các mã không phải từ CQT */}
+              <button
+                type="button"
+                onClick={async () => {
+                  setCleanupModalOpen(true);
+                  setCleanupLoading(true);
+                  setCleanupPreview(null);
+                  try {
+                    const resp = await apiFetch(`${API_URL}/products/cleanup-non-cqt/preview`);
+                    if (!resp.ok) throw new Error("Không thể phân tích danh sách mã không phải CQT.");
+                    setCleanupPreview(await resp.json());
+                  } catch (e) {
+                    setBannerMsg({
+                      type: "error",
+                      text: e instanceof Error ? e.message : "Lỗi khi phân tích dữ liệu dọn dẹp.",
+                    });
+                    setCleanupModalOpen(false);
+                  } finally {
+                    setCleanupLoading(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 hover:bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 transition-colors"
+                title="Quét và xóa an toàn các mã không nằm trên Hóa đơn mua vào CQT và không có MST đầu vào"
+              >
+                <Trash2 size={11} />
+                Dọn mã không phải CQT
+              </button>
 
               {selectedIds.size > 0 && (
                 <>
@@ -1969,16 +2017,6 @@ export default function ProductsPage() {
                     ĐVT {renderSortIcon("unit")}
                   </button>
                 </th>
-                <th className="px-2 py-2 text-center">
-                  <button
-                    type="button"
-                    onClick={() => handleSort("boxes_per_carton")}
-                    className="inline-flex items-center gap-1 font-semibold uppercase text-slate-700 hover:text-sky-700"
-                    title="Số đơn vị (Hộp/Lon/Chai/Gói) trong 1 Thùng"
-                  >
-                    Quy cách (ĐVT/Thùng) {renderSortIcon("boxes_per_carton")}
-                  </button>
-                </th>
                 <th className="px-2.5 py-2">
                   <button
                     type="button"
@@ -2005,7 +2043,7 @@ export default function ProductsPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={14} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={13} className="px-4 py-10 text-center text-xs text-slate-500">
                     <span className="inline-flex items-center gap-2">
                       <Loader2 size={15} className="animate-spin text-sky-600" />
                       Đang đồng bộ và tải danh sách mã sản phẩm (SKU) từ hệ thống...
@@ -2014,7 +2052,7 @@ export default function ProductsPage() {
                 </tr>
               ) : pagedProducts.length === 0 ? (
                 <tr>
-                  <td colSpan={14} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={13} className="px-4 py-10 text-center text-xs text-slate-500">
                     Không tìm thấy mã sản phẩm (SKU) nào khớp với điều kiện lọc hiện tại.
                   </td>
                 </tr>
@@ -2303,16 +2341,6 @@ export default function ProductsPage() {
                         {row.unit}
                       </td>
 
-                      <td className="px-2 py-1.5 text-center font-semibold text-slate-700">
-                        {row.boxes_per_carton > 1 ? (
-                          <span className="rounded bg-amber-100/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
-                            {row.boxes_per_carton}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400">1</span>
-                        )}
-                      </td>
-
                       <td className="px-2.5 py-1.5 whitespace-nowrap">
                         <span
                           className={cn(
@@ -2425,7 +2453,7 @@ export default function ProductsPage() {
                   </strong>{" "}
                   SKU
                 </td>
-                <td colSpan={4} className="px-2.5 py-2 text-right">
+                <td colSpan={3} className="px-2.5 py-2 text-right">
                   Tổng sản lượng giao dịch từ hệ thống:
                 </td>
                 <td className="px-2.5 py-2">
@@ -3770,6 +3798,198 @@ export default function ProductsPage() {
                 {submitting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
                 Xóa {selectedIds.size} SKU
               </button>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DỌN DẸP AN TOÀN MÃ KHÔNG PHẢI CQT (Chuẩn CreateOrderForm) */}
+      {cleanupModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => {
+            if (!cleanupExecuting) setCleanupModalOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-3xl border border-slate-400 bg-white shadow-lg max-h-[88vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <Trash2 size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  Dọn Dẹp An Toàn Mã Không Phải Từ CQT
+                </h2>
+              </div>
+              <button
+                type="button"
+                disabled={cleanupExecuting}
+                onClick={() => setCleanupModalOpen(false)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <div className="flex-1 overflow-y-auto">
+              {cleanupLoading ? (
+                <div className="flex items-center justify-center gap-2 py-12 text-xs text-slate-500">
+                  <Loader2 size={16} className="animate-spin text-sky-600" />
+                  Đang quét Hóa đơn mua vào CQT và kiểm tra ràng buộc dữ liệu...
+                </div>
+              ) : cleanupPreview ? (
+                <>
+                  <div className="border-b border-slate-200 px-3 py-2.5 grid gap-2 sm:grid-cols-4">
+                    <div className="rounded border border-slate-200 bg-slate-50 p-2">
+                      <div className="text-[10px] font-semibold text-slate-500">Tổng mã chưa có MST</div>
+                      <div className="text-base font-bold text-slate-800">{formatNumber(cleanupPreview.total_no_mst)}</div>
+                    </div>
+                    <div className="rounded border border-sky-200 bg-sky-50 p-2">
+                      <div className="text-[10px] font-semibold text-sky-700">Có trên HĐ mua CQT (Giữ lại)</div>
+                      <div className="text-base font-bold text-sky-900">{formatNumber(cleanupPreview.cqt_missing_mst_count)}</div>
+                    </div>
+                    <div className="rounded border border-emerald-200 bg-emerald-50 p-2">
+                      <div className="text-[10px] font-semibold text-emerald-700">Có thể xóa an toàn</div>
+                      <div className="text-base font-bold text-emerald-900">{formatNumber(cleanupPreview.deletable_count)}</div>
+                    </div>
+                    <div className="rounded border border-amber-200 bg-amber-50 p-2">
+                      <div className="text-[10px] font-semibold text-amber-700">Đang dính lịch sử (Giữ lại)</div>
+                      <div className="text-base font-bold text-amber-900">{formatNumber(cleanupPreview.referenced_count)}</div>
+                    </div>
+                  </div>
+
+                  {cleanupPreview.cqt_missing_mst_count > 0 && (
+                    <div className="border-b border-sky-100 bg-sky-50/70 px-3 py-2 text-[11px] text-sky-900">
+                      Có <strong>{formatNumber(cleanupPreview.cqt_missing_mst_count)}</strong> mã thực sự nằm trên Hóa đơn mua vào CQT nhưng chưa gắn MST — hệ thống tự động <strong>bảo vệ, không xóa</strong>. Bạn có thể bấm <em>Đồng bộ từ hệ thống</em> để gắn MST cho các mã này.
+                    </div>
+                  )}
+
+                  {cleanupPreview.referenced_count > 0 && (
+                    <div className="border-b border-slate-200 px-3 py-2 bg-amber-50/50">
+                      <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={cleanupDeactivateRef}
+                          onChange={(e) => setCleanupDeactivateRef(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                        />
+                        <span>
+                          Chuyển <strong>{formatNumber(cleanupPreview.referenced_count)}</strong> mã không phải CQT đang dính lịch sử đơn hàng/kho sang trạng thái <strong>Ngừng bán</strong> (không xóa vật lý).
+                        </span>
+                      </label>
+                    </div>
+                  )}
+
+                  <div className="border-b border-sky-100 bg-sky-50/60 px-3 py-1.5 text-[11px] font-bold text-sky-800 uppercase">
+                    Xem trước các mã sẽ xóa an toàn ({Math.min(cleanupPreview.sample_deletable.length, 40)} / {formatNumber(cleanupPreview.deletable_count)})
+                  </div>
+                  {cleanupPreview.sample_deletable.length === 0 ? (
+                    <div className="px-3 py-6 text-center text-xs text-slate-500">
+                      Không có mã rác nào cần xóa. Danh sách Sản phẩm CQT hiện tại đã sạch!
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto max-h-60">
+                      <table className="w-full border-collapse text-left">
+                        <thead className="bg-slate-100 text-[10px] font-semibold text-slate-600 sticky top-0">
+                          <tr>
+                            <th className="px-2.5 py-1.5">Mã SKU</th>
+                            <th className="px-2.5 py-1.5">Tên sản phẩm</th>
+                            <th className="px-2.5 py-1.5">NCC</th>
+                            <th className="px-2.5 py-1.5">Nguồn</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {cleanupPreview.sample_deletable.map((item) => (
+                            <tr
+                              key={item.id}
+                              className="border-b border-slate-100 even:bg-amber-50/40 hover:bg-sky-50/50 text-[11px]"
+                            >
+                              <td className="px-2.5 py-1 font-mono font-bold text-slate-800 whitespace-nowrap">
+                                {item.sku}
+                              </td>
+                              <td className="px-2.5 py-1 text-slate-700">{item.name}</td>
+                              <td className="px-2.5 py-1 text-slate-600 whitespace-nowrap">{item.supplier || "—"}</td>
+                              <td className="px-2.5 py-1 text-[10px] font-mono text-slate-500 whitespace-nowrap">
+                                {item.sync_source}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+
+            <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3 shrink-0">
+              <span className="text-[10px] text-slate-500">
+                * Tuyệt đối không xóa mã có MST đầu vào, mã nằm trên Hóa đơn mua vào CQT hoặc mã đang có lịch sử đơn hàng/kho.
+              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={cleanupExecuting}
+                  onClick={() => setCleanupModalOpen(false)}
+                  className="rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
+                >
+                  Đóng
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    cleanupLoading ||
+                    cleanupExecuting ||
+                    !cleanupPreview ||
+                    (cleanupPreview.deletable_count === 0 &&
+                      (!cleanupDeactivateRef || cleanupPreview.referenced_count === 0))
+                  }
+                  onClick={async () => {
+                    setCleanupExecuting(true);
+                    try {
+                      const resp = await apiFetch(`${API_URL}/products/cleanup-non-cqt`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ deactivate_referenced: cleanupDeactivateRef }),
+                      });
+                      const data = (await resp.json().catch(() => ({}))) as {
+                        deleted_count?: number;
+                        deactivated_count?: number;
+                        skipped_referenced_count?: number;
+                        detail?: string;
+                      };
+                      if (!resp.ok) throw new Error(data.detail || "Không thể thực hiện dọn dẹp.");
+                      setCleanupModalOpen(false);
+                      setBannerMsg({
+                        type: "success",
+                        text: `Đã xóa an toàn ${formatNumber(data.deleted_count ?? 0)} mã không phải CQT${
+                          (data.deactivated_count ?? 0) > 0
+                            ? ` và chuyển ${formatNumber(data.deactivated_count ?? 0)} mã có tham chiếu sang Ngừng bán`
+                            : ""
+                        }.`,
+                      });
+                      void loadCatalog(false);
+                      void loadFilterOptions();
+                    } catch (e) {
+                      setBannerMsg({
+                        type: "error",
+                        text: e instanceof Error ? e.message : "Lỗi khi dọn dẹp mã không phải CQT.",
+                      });
+                    } finally {
+                      setCleanupExecuting(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {cleanupExecuting ? (
+                    <Loader2 size={13} className="animate-spin" />
+                  ) : (
+                    <CheckCircle2 size={13} />
+                  )}
+                  Xác nhận dọn dẹp
+                </button>
+              </div>
             </footer>
           </div>
         </div>

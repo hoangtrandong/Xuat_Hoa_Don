@@ -372,6 +372,29 @@ def get_product_filter_options(db: Session = Depends(get_db)):
     return product_crud.get_filter_options(db)
 
 
+class CleanupNonCqtPayload(BaseModel):
+    deactivate_referenced: bool = False
+
+
+@router.get("/cleanup-non-cqt/preview")
+def preview_cleanup_non_cqt_products(db: Session = Depends(get_db)):
+    """Xem trước các mã Product không thuộc Hóa đơn mua vào CQT (không có MST đầu vào) trước khi dọn dẹp."""
+    return product_crud.analyze_non_cqt_products(db)
+
+
+@router.post("/cleanup-non-cqt")
+def execute_cleanup_non_cqt_products(
+    payload: CleanupNonCqtPayload,
+    db: Session = Depends(get_db),
+):
+    """Dọn dẹp an toàn các mã Product không phải từ CQT: chỉ xóa các mã không có MST đầu vào,
+    không xuất hiện trên Hóa đơn mua vào CQT và không có tham chiếu lịch sử đơn hàng/kho."""
+    return product_crud.cleanup_non_cqt_products(
+        db,
+        deactivate_referenced=bool(payload.deactivate_referenced),
+    )
+
+
 def _product_managed_companies(db: Session, product_ids: list[int]) -> dict[int, list[dict]]:
     if not product_ids:
         return {}

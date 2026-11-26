@@ -205,3 +205,94 @@ def test_tax_inventory_resolves_cqt_sku_by_mst_invoice_product(db_session):
 
     assert by_mst[comp_b.tax_code]["invoice_product_code"] == "XHD-B"
     assert by_mst[comp_b.tax_code]["input_qty"] == 24.0
+
+
+def test_filter_has_mst_and_safe_cleanup_non_cqt_products(db_session):
+    from app.crud.product import analyze_non_cqt_products, cleanup_non_cqt_products
+    from app.models.product import PriceList, PriceListItem
+
+    dist, comp_a, _comp_b, prod_cqt, _ip_a, _ip_b = _seed_multi_mst_product(db_session)
+
+    # 1. Mã CQT có trên PurchaseInvoiceItem nhưng chưa có ProductCompany -> phải được BẢO VỆ
+    prod_cqt_missing_mst = Product(
+        sku="CQT-NO-MST",
+        name="Sữa CQT chưa sync MST",
+        category_id=prod_cqt.category_id,
+        unit_id=prod_cqt.unit_id,
+        status="active",
+        sync_source="PURCHASE_INVOICE",
+    )
+    # 2. Mã DMS cũ không có MST, không có PurchaseInvoiceItem, không có FK -> XÓA AN TOÀN
+    prod_dms_trash = Product(
+        sku="DMS-OLD-01",
+        name="Sản phẩm DMS cũ",
+        category_id=prod_cqt.category_id,
+        unit_id=prod_cqt.unit_id,
+        status="active",
+        sync_source="ORDER_SYNC",
+    )
+    # 3. Mã DMS cũ có tham chiếu PriceListItem -> KHÔNG XÓA VẬT LÝ, chỉ chuyển inactive
+    prod_dms_ref = Product(
+        sku="DMS-REF-02",
+        name="Sản phẩm DMS có bảng giá",
+        category_id=prod_cqt.category_id,
+        unit_id=prod_cqt.unit_id,
+        status="active",
+        sync_source="ORDER_SYNC",
+    )
+    db_session.add_all([prod_cqt_missing_mst, prod_dms_trash, prod_dms_ref])
+    db_session.flush()
+
+    db_session.add(
+        PurchaseInvoice(
+            distributor_id=dist.id,
+            invoice_template="1",
+            invoice_symbol="1C26TAA",
+            invoice_number="0009999",
+            invoice_date=datetime(2026, 11, 12),
+            seller_tax_code="0300000001",
+            seller_name="NCC",
+            buyer_tax_code=comp_a.tax_code,
+            xml_downloaded=True,
+            items=[
+                PurchaseInvoiceItem(
+                    line_number=1,
+                    item_nature=1,
+                    product_code="CQT-NO-MST",
+                    product_name="Sữa CQT chưa sync MST",
+                    unit_name="Hộp",
+                    quantity=5,
+                    unit_price=10000,
+                    amount_before_tax=50_000,
+                )
+            ],
+        )
+    )
+    pl = PriceList(name="BG Test", customer_type="ALL", effective_date=datetime(2026, 11, 1))
+    db_session.add(pl)
+    db_session.flush()
+    db_session.add(PriceListItem(price_list_id=pl.id, product_id=prod_dms_ref.id, price=15000))
+    db_session.commit()
+
+    # Kiểm tra lọc company_id = -1 (chỉ hiện SP có MST CQT)
+    has_mst_paged = list_products_paged(page=1, page_size=50, company_id=-1, expand_by_mst=True, db=db_session)
+    assert {r["sku"] for r in has_mst_paged["items"]} == {"CQT-001"}
+
+    # Kiểm tra preview phân tích an toàn
+    preview = analyze_non_cqt_products(db_session)
+    assert preview["total_no_mst"] == 3
+    assert preview["cqt_missing_mst_count"] == 1
+    assert preview["deletable_count"] == 1
+    assert preview["referenced_count"] == 1
+
+    # Thực thi dọn dẹp an toàn
+    res = cleanup_non_cqt_products(db_session, deactivate_referenced=True)
+    assert res["deleted_count"] == 1
+    assert res["deactivated_count"] == 1
+    assert res["skipped_referenced_count"] == 1
+
+    remaining_skus = {p.sku: p.status for p in db_session.scalars(select(Product)).all()}
+    assert "DMS-OLD-01" not in remaining_skus
+    assert remaining_skus["CQT-001"] == "active"
+    assert remaining_skus["CQT-NO-MST"] == "active"
+    assert remaining_skus["DMS-REF-02"] == "inactive"

@@ -513,8 +513,9 @@ def sync_products_from_system_data(
     except Exception:
         pass
 
-    # 2. Quét từ IssuedInvoiceItem (Hóa đơn bán ra đã phát hành) -> Bổ sung SKU nếu full sync
-    if invoice_ids is None:
+    # 2. Quét từ IssuedInvoiceItem (Hóa đơn bán ra đã phát hành) -> CHỈ bổ sung giá bán cho SKU đã có từ HĐ mua vào CQT,
+    # KHÔNG tự tạo mới Product không có MST đầu vào vào bảng products.
+    if invoice_ids is None and candidates:
         try:
             from app.models.multi_tenant_invoice import IssuedInvoiceItem
 
@@ -528,23 +529,11 @@ def sync_products_from_system_data(
             ).all()
             for item in issued_rows:
                 sku = (item.product_code or "").strip().upper()[:30]
-                name = (item.product_name or "").strip()[:200]
-                if not sku or not name:
+                if not sku or sku not in candidates:
                     continue
                 price = float(item.unit_price or 0.0)
                 issued_skus.add(sku)
-                if sku not in candidates:
-                    candidates[sku] = {
-                        "sku": sku,
-                        "name": name,
-                        "unit_raw": item.unit_name or "HOP",
-                        "base_price": max(0.0, price),
-                        "cost_price": 0.0,
-                        "supplier": "Vinamilk",
-                        "boxes_per_carton": _infer_boxes_per_carton(sku, name),
-                        "sync_source": "ISSUED_INVOICE",
-                    }
-                elif price > 0 and candidates[sku]["base_price"] <= 0:
+                if price > 0 and candidates[sku]["base_price"] <= 0:
                     candidates[sku]["base_price"] = price
         except Exception:
             pass
@@ -1061,6 +1050,8 @@ def list_paged(
     if company_id is not None:
         if company_id == 0:
             conditions.append(~Product.company_links.any())
+        elif company_id == -1:
+            conditions.append(Product.company_links.any())
         else:
             conditions.append(
                 Product.company_links.any(ProductCompanyModel.company_id == company_id)
@@ -1380,6 +1371,8 @@ def list_paged_by_mst(
     if company_id is not None:
         if company_id == 0:
             conditions.append(ProductCompanyModel.id.is_(None))
+        elif company_id == -1:
+            conditions.append(ProductCompanyModel.id.is_not(None))
         else:
             conditions.append(ProductCompanyModel.company_id == company_id)
 
@@ -1732,6 +1725,159 @@ def bulk_delete(db: Session, product_ids: List[int]) -> int:
     return deleted
 
 
+def _find_referenced_product_ids(db: Session, candidate_ids: list[int]) -> set[int]:
+    """Quét mọi bảng có khóa ngoại (non-CASCADE) trỏ tới products.id để tránh xóa nhầm mã đang có lịch sử giao dịch."""
+    if not candidate_ids:
+        return set()
+
+    from sqlalchemy import inspect as sa_inspect
+    from app.core.database import Base
+
+    bind = db.get_bind()
+    existing_tables = set(sa_inspect(bind).get_table_names())
+    # Các bảng liên kết phụ trợ có ON DELETE CASCADE (xóa theo Product là an toàn)
+    cascade_only_tables = {"product_companies", "product_group_items"}
+    referenced: set[int] = set()
+
+    # Chia batch 500 IDs để tương thích cả SQLite & PostgreSQL
+    batch_size = 500
+    for table_name, table in Base.metadata.tables.items():
+        if table_name == "products" or table_name in cascade_only_tables:
+            continue
+        if table_name not in existing_tables:
+            continue
+        fk_cols = [
+            col
+            for col in table.columns
+            if any(
+                fk.column.table.name == "products" and fk.column.name == "id"
+                for fk in col.foreign_keys
+            )
+        ]
+        if not fk_cols:
+            continue
+        for col in fk_cols:
+            for i in range(0, len(candidate_ids), batch_size):
+                batch = candidate_ids[i : i + batch_size]
+                rows = db.scalars(select(col).where(col.in_(batch)).distinct()).all()
+                for pid in rows:
+                    if pid is not None:
+                        referenced.add(int(pid))
+    return referenced
+
+
+def analyze_non_cqt_products(db: Session) -> dict[str, Any]:
+    """Phân tích các bản ghi Product KHÔNG có MST đầu vào (ProductCompany) và KHÔNG xuất hiện trên Hóa đơn mua vào CQT."""
+    from app.models.multi_tenant_invoice import PurchaseInvoiceItem
+
+    # 1. Tập mã SKU thực sự có trên Hóa đơn mua vào CQT (luôn bảo vệ tuyệt đối, kể cả chưa sync ProductCompany)
+    purch_skus = {
+        (sku or "").strip().upper()
+        for sku in db.scalars(
+            select(PurchaseInvoiceItem.product_code)
+            .where(PurchaseInvoiceItem.product_code.is_not(None))
+            .distinct()
+        ).all()
+        if (sku or "").strip()
+    }
+
+    # 2. Lấy tất cả Product chưa có liên kết MST đầu vào (ProductCompany)
+    no_mst_products = list(
+        db.scalars(
+            select(Product)
+            .where(~Product.company_links.any())
+            .order_by(Product.sku.asc(), Product.id.asc())
+        ).all()
+    )
+
+    non_cqt_candidates: list[Product] = []
+    cqt_missing_mst_count = 0
+    for prod in no_mst_products:
+        sku_u = (prod.sku or "").strip().upper()
+        if sku_u and sku_u in purch_skus:
+            cqt_missing_mst_count += 1
+            continue
+        non_cqt_candidates.append(prod)
+
+    candidate_ids = [p.id for p in non_cqt_candidates]
+    referenced_ids = _find_referenced_product_ids(db, candidate_ids)
+
+    deletable = [p for p in non_cqt_candidates if p.id not in referenced_ids]
+    referenced = [p for p in non_cqt_candidates if p.id in referenced_ids]
+
+    def _brief(p: Product) -> dict[str, Any]:
+        return {
+            "id": p.id,
+            "sku": p.sku,
+            "name": p.name,
+            "supplier": p.supplier or "",
+            "sync_source": p.sync_source or "MANUAL",
+            "status": p.status or "active",
+        }
+
+    return {
+        "total_no_mst": len(no_mst_products),
+        "cqt_missing_mst_count": cqt_missing_mst_count,
+        "total_non_cqt": len(non_cqt_candidates),
+        "deletable_count": len(deletable),
+        "referenced_count": len(referenced),
+        "sample_deletable": [_brief(p) for p in deletable[:40]],
+        "sample_referenced": [_brief(p) for p in referenced[:20]],
+    }
+
+
+def cleanup_non_cqt_products(
+    db: Session,
+    *,
+    deactivate_referenced: bool = False,
+) -> dict[str, Any]:
+    """Dọn dẹp an toàn các mã Product không thuộc CQT:
+    - Xóa vật lý nhóm `deletable` (không có MST, không có trên HĐ mua vào CQT, không dính khóa ngoại đơn hàng/kho).
+    - Giữ nguyên nhóm `referenced` (tùy chọn chuyển `status = 'inactive'` nếu `deactivate_referenced=True`).
+    """
+    from app.models.multi_tenant_invoice import PurchaseInvoiceItem
+
+    purch_skus = {
+        (sku or "").strip().upper()
+        for sku in db.scalars(
+            select(PurchaseInvoiceItem.product_code)
+            .where(PurchaseInvoiceItem.product_code.is_not(None))
+            .distinct()
+        ).all()
+        if (sku or "").strip()
+    }
+
+    no_mst_products = list(
+        db.scalars(select(Product).where(~Product.company_links.any())).all()
+    )
+    non_cqt_candidates = [
+        p for p in no_mst_products if (p.sku or "").strip().upper() not in purch_skus
+    ]
+    referenced_ids = _find_referenced_product_ids(db, [p.id for p in non_cqt_candidates])
+
+    deleted_count = 0
+    deactivated_count = 0
+    skipped_referenced_count = 0
+
+    for prod in non_cqt_candidates:
+        if prod.id in referenced_ids:
+            skipped_referenced_count += 1
+            if deactivate_referenced and prod.status != "inactive":
+                prod.status = "inactive"
+                deactivated_count += 1
+        else:
+            db.delete(prod)
+            deleted_count += 1
+
+    db.commit()
+    return {
+        "ok": True,
+        "deleted_count": deleted_count,
+        "deactivated_count": deactivated_count,
+        "skipped_referenced_count": skipped_referenced_count,
+    }
+
+
 class ProductCRUD:
     get = staticmethod(get)
     list_ = staticmethod(list_)
@@ -1744,6 +1890,8 @@ class ProductCRUD:
     bulk_delete = staticmethod(bulk_delete)
     sync_products_from_system_data = staticmethod(sync_products_from_system_data)
     ensure_default_categories_and_units = staticmethod(ensure_default_categories_and_units)
+    analyze_non_cqt_products = staticmethod(analyze_non_cqt_products)
+    cleanup_non_cqt_products = staticmethod(cleanup_non_cqt_products)
 
 
 product = ProductCRUD()

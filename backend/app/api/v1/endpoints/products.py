@@ -448,6 +448,47 @@ def _invoice_products_by_id(db: Session, invoice_product_ids: set[int]) -> dict[
     return {row.id: row for row in rows}
 
 
+def _cqt_invoice_unit_maps(
+    db: Session, skus: set[str]
+) -> tuple[dict[tuple[str, str], str], dict[str, str]]:
+    """Lấy ĐVT gốc mới nhất từ Hóa đơn mua vào CQT theo (SKU, buyer_tax_code) và theo SKU."""
+    by_sku_tax: dict[tuple[str, str], str] = {}
+    by_sku: dict[str, str] = {}
+    if not skus:
+        return by_sku_tax, by_sku
+    try:
+        from app.models.multi_tenant_invoice import PurchaseInvoice, PurchaseInvoiceItem
+
+        rows = db.execute(
+            select(
+                func.upper(func.trim(PurchaseInvoiceItem.product_code)),
+                func.trim(PurchaseInvoice.buyer_tax_code),
+                PurchaseInvoiceItem.unit_name,
+            )
+            .join(PurchaseInvoice, PurchaseInvoice.id == PurchaseInvoiceItem.purchase_invoice_id)
+            .where(
+                PurchaseInvoiceItem.product_code.is_not(None),
+                func.upper(func.trim(PurchaseInvoiceItem.product_code)).in_(skus),
+                PurchaseInvoiceItem.unit_name.is_not(None),
+                func.trim(PurchaseInvoiceItem.unit_name) != "",
+            )
+            .order_by(PurchaseInvoice.invoice_date.desc(), PurchaseInvoiceItem.id.desc())
+        ).all()
+        for sku_key, buyer_tax, unit_name in rows:
+            clean_unit = (unit_name or "").strip()
+            if not sku_key or not clean_unit:
+                continue
+            sku_str = str(sku_key)
+            tax_str = (str(buyer_tax) if buyer_tax else "").strip()
+            if tax_str and (sku_str, tax_str) not in by_sku_tax:
+                by_sku_tax[(sku_str, tax_str)] = clean_unit
+            if sku_str not in by_sku:
+                by_sku[sku_str] = clean_unit
+    except Exception:
+        pass
+    return by_sku_tax, by_sku
+
+
 def _enrich_invoice_product_fields(data: dict, prod: ProductModel, ip_map: dict[int, InvoiceProduct]) -> dict:
     ip = ip_map.get(prod.invoice_product_id) if prod.invoice_product_id else None
     data["invoice_product_id"] = prod.invoice_product_id
@@ -492,9 +533,11 @@ def list_products_paged(
             sort_field=sort_field,
             sort_order=sort_order,
         )
-        distributor_map = _product_distributors(db, {product.sku.strip().upper() for product in items if product.sku})
+        sku_set = {product.sku.strip().upper() for product in items if product.sku}
+        distributor_map = _product_distributors(db, sku_set)
         managed_companies_map = _product_managed_companies(db, [product.id for product in items])
         ip_map = _invoice_products_by_id(db, {product.invoice_product_id for product in items if product.invoice_product_id})
+        _, cqt_unit_by_sku = _cqt_invoice_unit_maps(db, sku_set)
         total_pages = max(1, (total + page_size - 1) // page_size) if total > 0 else 1
 
         return {
@@ -502,6 +545,11 @@ def list_products_paged(
                 _enrich_invoice_product_fields(
                     {
                         **Product.model_validate(product).model_dump(),
+                        **(
+                            {"unit_name": cqt_unit_by_sku[product.sku.strip().upper()]}
+                            if product.sku and product.sku.strip().upper() in cqt_unit_by_sku
+                            else {}
+                        ),
                         "distributors": distributor_map.get(product.sku.strip().upper(), []),
                         "managed_companies": managed_companies_map.get(product.id, []),
                         "row_key": f"{product.id}:0",
@@ -539,6 +587,7 @@ def list_products_paged(
     unique_ids = list({prod.id for prod, _, _ in row_tuples})
     distributor_map = _product_distributors(db, unique_skus)
     managed_companies_map = _product_managed_companies(db, unique_ids)
+    cqt_unit_by_sku_tax, cqt_unit_by_sku = _cqt_invoice_unit_maps(db, unique_skus)
     ip_ids: set[int] = set()
     for prod, pc_link, _ in row_tuples:
         if prod.invoice_product_id:
@@ -607,7 +656,16 @@ def list_products_paged(
                     "mst_count": len(managed_list),
                 }
             )
-        base_data["distributors"] = distributor_map.get(prod.sku.strip().upper(), [])
+        sku_upper = (prod.sku or "").strip().upper()
+        comp_tax = (comp.tax_code or "").strip() if comp is not None else ""
+        cqt_unit = (
+            cqt_unit_by_sku_tax.get((sku_upper, comp_tax))
+            if comp_tax
+            else None
+        ) or cqt_unit_by_sku.get(sku_upper)
+        if cqt_unit:
+            base_data["unit_name"] = cqt_unit
+        base_data["distributors"] = distributor_map.get(sku_upper, [])
         base_data["managed_companies"] = managed_list
         serialized_items.append(base_data)
 

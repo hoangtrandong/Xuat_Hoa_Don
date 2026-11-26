@@ -479,7 +479,7 @@ def sync_products_from_system_data(
             name = (item.product_name or "").strip()[:200]
             if not sku or not name:
                 continue
-            unit_raw = (item.unit_name or "THUNG").strip()
+            unit_raw = (item.unit_name or "").strip()
             cost_price = float(item.unit_price or 0.0)
             if cost_price <= 0 and (item.quantity or 0) > 0 and float(item.amount_before_tax or 0) > 0:
                 cost_price = round(float(item.amount_before_tax) / float(item.quantity), 4)
@@ -502,6 +502,8 @@ def sync_products_from_system_data(
                 }
             else:
                 cand = candidates[sku]
+                if unit_raw:
+                    cand["unit_raw"] = unit_raw
                 if cost_price > 0:
                     cand["cost_price"] = cost_price
                     if cand["base_price"] <= 0:
@@ -581,6 +583,9 @@ def sync_products_from_system_data(
                 row_changed = False
                 if (not existing.name or existing.name.startswith("Sản phẩm ")) and cand["name"]:
                     existing.name = cand["name"]
+                    row_changed = True
+                if cand.get("unit_raw") and existing.unit_id != unit_obj.id:
+                    existing.unit_id = unit_obj.id
                     row_changed = True
                 if (existing.cost_price is None or existing.cost_price <= 0) and (cand.get("cost_price") or 0) > 0:
                     existing.cost_price = round(float(cand["cost_price"]), 4)

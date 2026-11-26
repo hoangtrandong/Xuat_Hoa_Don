@@ -6,11 +6,20 @@ import { ThemeProvider } from "@/lib/theme";
 export const metadata: Metadata = {
   title: "DMS - Hệ thống quản lý phân phối",
   description: "Distribution Management System",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "DMS Sales",
+  },
 };
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  maximumScale: 1,
+  viewportFit: "cover",
+  themeColor: "#14263d",
 };
 
 export default function RootLayout({

@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { CheckCircle2, Loader2, LockKeyhole, Moon, Sun } from "lucide-react";
+import { usePathname } from "next/navigation";
+import { CheckCircle2, Loader2, LockKeyhole, Moon, Smartphone, Sun } from "lucide-react";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
 import GlobalTaskProgressBar from "@/components/layout/GlobalTaskProgressBar";
@@ -19,12 +20,15 @@ const inputCls =
   "w-full min-w-0 rounded border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100";
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const isMobileAppRoute = pathname === "/m" || pathname?.startsWith("/m/");
   const session = useAuthSession();
   const { resolvedTheme, toggleTheme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [companyCode, setCompanyCode] = useState("");
   const [loginUsername, setLoginUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [rememberLogin, setRememberLogin] = useState(true);
   const [loginError, setLoginError] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
@@ -115,6 +119,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         distributorTaxCode: data.distributor_tax_code || "",
         isSuperAdmin: Boolean(data.is_super_admin),
         mustChangePassword: Boolean(data.must_change_password),
+        persist: isMobileAppRoute ? rememberLogin : false,
       });
       setPassword("");
       setSessionExpired(false);
@@ -137,6 +142,130 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   if (!session.token) {
+    if (isMobileAppRoute) {
+      return (
+        <main className="flex min-h-[100dvh] flex-col bg-slate-100 dark:bg-[#0b1020]">
+          {/* Header thương hiệu DMS Mobile */}
+          <div className="bg-[#14263d] px-5 pb-8 pt-[max(2rem,env(safe-area-inset-top))] text-white">
+            <div className="mx-auto flex max-w-md items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-500/20 ring-1 ring-sky-400/40">
+                  <Smartphone size={20} className="text-red-400" />
+                </div>
+                <div>
+                  <div className="text-sm font-bold uppercase tracking-wide">DMS Sales Mobile</div>
+                  <div className="text-[11px] text-slate-300">Ứng dụng bấm đơn nhân viên bán hàng</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={toggleTheme}
+                className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 text-slate-200 active:scale-95"
+                aria-label="Đổi giao diện sáng tối"
+              >
+                {resolvedTheme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+              </button>
+            </div>
+          </div>
+
+          <div className="mx-auto -mt-5 w-full max-w-md flex-1 px-4 pb-8">
+            <section className="overflow-hidden rounded-2xl border border-slate-300 bg-white shadow-lg dark:border-[#2a3547] dark:bg-[#151d2b]">
+              <div className="border-b border-slate-200 bg-slate-50 px-4 py-3 dark:border-[#2a3547] dark:bg-[#1a2434]">
+                <h1 className="text-sm font-bold text-slate-800 dark:text-white">
+                  Đăng nhập tài khoản NVBH
+                </h1>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Nhập Mã DN, Mã NV và mật khẩu để bắt đầu bấm đơn
+                </p>
+              </div>
+
+              <form onSubmit={handleLogin} className="space-y-3.5 p-4">
+                {sessionExpired && (
+                  <div
+                    role="status"
+                    className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+                  >
+                    Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.
+                  </div>
+                )}
+
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Mã DN / Nhà phân phối <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    required
+                    autoCapitalize="characters"
+                    placeholder="VD: NPP-DONGDO"
+                    value={companyCode}
+                    onChange={(event) => setCompanyCode(event.target.value)}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 text-base text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Mã nhân viên / Tài khoản <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    autoComplete="username"
+                    required
+                    placeholder="Nhập mã NV hoặc tên đăng nhập"
+                    value={loginUsername}
+                    onChange={(event) => setLoginUsername(event.target.value)}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 text-base text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Mật khẩu <span className="text-red-600">*</span>
+                  </label>
+                  <input
+                    autoComplete="current-password"
+                    required
+                    type="password"
+                    placeholder="Nhập mật khẩu"
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 text-base text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
+                  />
+                </div>
+
+                <label className="flex items-center gap-2.5 py-1 text-xs font-medium text-slate-600 select-none">
+                  <input
+                    type="checkbox"
+                    checked={rememberLogin}
+                    onChange={(e) => setRememberLogin(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                  />
+                  Ghi nhớ đăng nhập trên điện thoại này
+                </label>
+
+                {loginError && (
+                  <div
+                    role="alert"
+                    className="rounded-xl border border-red-300 bg-red-50 px-3 py-2.5 text-xs font-medium text-red-700"
+                  >
+                    {loginError}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isLoggingIn}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-3.5 text-sm font-bold text-white shadow-sm transition active:scale-[0.99] hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {isLoggingIn ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle2 size={18} />}
+                  {isLoggingIn ? "Đang xác thực..." : "Đăng nhập bấm đơn"}
+                </button>
+              </form>
+            </section>
+          </div>
+        </main>
+      );
+    }
+
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-200/80 px-4 py-10">
         {/* Khung Đăng nhập tuân thủ chuẩn CreateOrderForm (GEMINI.md) */}
@@ -245,6 +374,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </section>
       </main>
     );
+  }
+
+  if (isMobileAppRoute) {
+    return <DistributorProvider>{children}</DistributorProvider>;
   }
 
   return (

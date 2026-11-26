@@ -8,7 +8,7 @@ import {
   UserCheck, CreditCard, Target, BarChart2, Settings, List, FolderOpen,
   Tag, MapPin, FileText, Receipt, RotateCcw, Boxes, PackagePlus,
   PackageMinus, ClipboardList, ClipboardCheck, ShieldCheck, ChevronDown, ChevronRight, X, Menu as MenuIcon,
-  Store, Building2, ArrowRightLeft, FileCheck2,
+  Store, Building2, ArrowRightLeft, FileCheck2, Smartphone,
 } from "lucide-react";
 import { menuItems, MenuItem } from "@/lib/menu";
 import { cn } from "@/lib/utils";
@@ -153,7 +153,14 @@ export default function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
 
       {/* Footer */}
       {!collapsed && (
-        <div className="p-4 border-t border-gray-200">
+        <div className="p-3 border-t border-gray-200 space-y-2">
+          <Link
+            href="/m"
+            className="flex items-center justify-center gap-2 w-full rounded-lg bg-[#14263d] px-3 py-2 text-xs font-semibold text-white hover:bg-[#1d3554] transition-colors"
+          >
+            <Smartphone size={14} className="text-sky-400" />
+            Mở App Bấm Đơn Mobile
+          </Link>
           <p className="text-xs text-gray-400 text-center">DMS v1.0.0</p>
         </div>
       )}

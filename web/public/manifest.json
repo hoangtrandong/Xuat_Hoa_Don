@@ -1,0 +1,20 @@
+{
+  "name": "DMS Bán Hàng - Ứng dụng NVBH",
+  "short_name": "DMS Sales",
+  "description": "Ứng dụng bấm đơn hàng trên điện thoại cho nhân viên bán hàng DMS",
+  "start_url": "/m",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f1f5f9",
+  "theme_color": "#14263d",
+  "lang": "vi",
+  "icons": [
+    {
+      "src": "/icons/dms-mobile-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

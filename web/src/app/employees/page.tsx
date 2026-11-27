@@ -20,6 +20,11 @@ import {
   Truck,
   Phone,
   ShieldCheck,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Lock,
+  Unlock,
 } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
 import { downloadExcel } from "@/lib/excel";
@@ -53,6 +58,8 @@ type EmployeeRow = {
   status: string;
   join_date: string | null;
   account_username: string | null;
+  account_user_id: number | null;
+  account_is_active: boolean | null;
 };
 
 export default function EmployeesPage() {
@@ -79,8 +86,18 @@ export default function EmployeesPage() {
   const [formVinamilkCode, setFormVinamilkCode] = useState<string>("");
   const [formStatus, setFormStatus] = useState<string>("active");
   const [formCreateAccount, setFormCreateAccount] = useState<boolean>(false);
+  const [formAccountPassword, setFormAccountPassword] = useState<string>("");
+  const [showFormPassword, setShowFormPassword] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string>("");
+
+  // Modal Cấp tài khoản / Đặt lại mật khẩu nhanh
+  const [accountRow, setAccountRow] = useState<EmployeeRow | null>(null);
+  const [accountPassword, setAccountPassword] = useState<string>("");
+  const [showAccountPassword, setShowAccountPassword] = useState<boolean>(false);
+  const [accountIsActive, setAccountIsActive] = useState<boolean>(true);
+  const [savingAccount, setSavingAccount] = useState<boolean>(false);
+  const [accountError, setAccountError] = useState<string>("");
 
   // Thông tin tài khoản vừa khởi tạo (nếu chọn create_account)
   const [createdAccountInfo, setCreatedAccountInfo] = useState<{
@@ -187,6 +204,8 @@ export default function EmployeesPage() {
     setFormVinamilkCode("");
     setFormStatus("active");
     setFormCreateAccount(false);
+    setFormAccountPassword("");
+    setShowFormPassword(false);
     setFormError("");
     setModalOpen(true);
   }
@@ -202,8 +221,73 @@ export default function EmployeesPage() {
     setFormVinamilkCode(row.vinamilk_code || "");
     setFormStatus(row.status || "active");
     setFormCreateAccount(false);
+    setFormAccountPassword("");
+    setShowFormPassword(false);
     setFormError("");
     setModalOpen(true);
+  }
+
+  function openAccountModal(row: EmployeeRow) {
+    setAccountRow(row);
+    setAccountPassword("");
+    setShowAccountPassword(false);
+    setAccountIsActive(row.account_is_active !== false);
+    setAccountError("");
+  }
+
+  async function handleSaveAccount(e: React.FormEvent) {
+    e.preventDefault();
+    if (!accountRow) return;
+    const trimmedPw = accountPassword.trim();
+    if (trimmedPw && trimmedPw.length < 6) {
+      setAccountError("Mật khẩu phải có tối thiểu 6 ký tự.");
+      return;
+    }
+    const isExisting = Boolean(accountRow.account_username);
+    if (isExisting && !trimmedPw && accountIsActive === (accountRow.account_is_active !== false)) {
+      setAccountError("Vui lòng nhập mật khẩu mới hoặc thay đổi trạng thái tài khoản.");
+      return;
+    }
+
+    setSavingAccount(true);
+    setAccountError("");
+    try {
+      const res = await apiFetch(`${API_URL}/employees/${accountRow.id}/account`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          password: trimmedPw || null,
+          is_active: accountIsActive,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as EmployeeRow & {
+        initial_username?: string | null;
+        initial_password?: string | null;
+        detail?: string;
+      };
+      if (!res.ok) throw new Error(data.detail || "Không thể cập nhật tài khoản nhân viên.");
+
+      setAccountRow(null);
+      if (data.initial_username && data.initial_password) {
+        setCreatedAccountInfo({
+          username: data.initial_username,
+          password: data.initial_password,
+          name: accountRow.name,
+        });
+      }
+      showToast(
+        isExisting
+          ? trimmedPw
+            ? `Đã đặt lại mật khẩu cho tài khoản '${accountRow.account_username}'.`
+            : `Đã ${accountIsActive ? "mở khóa" : "khóa"} tài khoản '${accountRow.account_username}'.`
+          : `Đã cấp tài khoản đăng nhập '${data.initial_username || accountRow.code}' cho nhân viên '${accountRow.name}'.`
+      );
+      await loadData();
+    } catch (err) {
+      setAccountError(err instanceof Error ? err.message : "Lỗi khi cập nhật tài khoản.");
+    } finally {
+      setSavingAccount(false);
+    }
   }
 
   async function handleSave(e: React.FormEvent) {
@@ -219,6 +303,12 @@ export default function EmployeesPage() {
     setFormError("");
     try {
       if (editingRow) {
+        const trimmedPw = formAccountPassword.trim();
+        if ((formCreateAccount || editingRow.account_username) && trimmedPw && trimmedPw.length < 6) {
+          setFormError("Mật khẩu phải có tối thiểu 6 ký tự.");
+          setSaving(false);
+          return;
+        }
         const res = await apiFetch(`${API_URL}/employees/${editingRow.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -235,10 +325,45 @@ export default function EmployeesPage() {
         });
         const data = (await res.json().catch(() => ({}))) as EmployeeRow & { detail?: string };
         if (!res.ok) throw new Error(data.detail || "Không thể cập nhật thông tin nhân viên.");
+
+        // Nếu chọn cấp tài khoản mới hoặc nhập mật khẩu mới cho tài khoản hiện có
+        if ((!editingRow.account_username && formCreateAccount) || (editingRow.account_username && trimmedPw)) {
+          const accRes = await apiFetch(`${API_URL}/employees/${editingRow.id}/account`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              password: trimmedPw || null,
+            }),
+          });
+          const accData = (await accRes.json().catch(() => ({}))) as EmployeeRow & {
+            initial_username?: string | null;
+            initial_password?: string | null;
+            detail?: string;
+          };
+          if (!accRes.ok) {
+            throw new Error(
+              accData.detail || "Đã lưu thông tin nhân viên nhưng không thiết lập được tài khoản."
+            );
+          }
+          if (accData.initial_username && accData.initial_password) {
+            setCreatedAccountInfo({
+              username: accData.initial_username,
+              password: accData.initial_password,
+              name: cleanName,
+            });
+          }
+        }
+
         setModalOpen(false);
         showToast(`Đã cập nhật nhân viên '${cleanCode} - ${cleanName}'.`);
         await loadData();
       } else {
+        const trimmedPw = formAccountPassword.trim();
+        if (formCreateAccount && trimmedPw && trimmedPw.length < 6) {
+          setFormError("Mật khẩu phải có tối thiểu 6 ký tự.");
+          setSaving(false);
+          return;
+        }
         const res = await apiFetch(`${API_URL}/employees/`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -252,6 +377,7 @@ export default function EmployeesPage() {
             vinamilk_code: formVinamilkCode.trim().toUpperCase() || null,
             status: formStatus,
             create_account: formCreateAccount,
+            account_password: formCreateAccount ? trimmedPw || null : null,
           }),
         });
         const data = (await res.json().catch(() => ({}))) as EmployeeRow & {
@@ -665,13 +791,36 @@ export default function EmployeesPage() {
                       <td className="whitespace-nowrap px-2.5 py-1.5 font-mono text-[10px] text-slate-600">
                         {row.vinamilk_code || "—"}
                       </td>
-                      <td className="whitespace-nowrap px-2.5 py-1.5 font-mono text-[10px] text-slate-600">
+                      <td
+                        className="whitespace-nowrap px-2.5 py-1.5 font-mono text-[10px] text-slate-600"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         {row.account_username ? (
-                          <span className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 font-semibold text-indigo-800">
-                            {row.account_username}
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => openAccountModal(row)}
+                            title="Bấm để đặt lại mật khẩu hoặc khóa/mở tài khoản"
+                            className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-semibold transition-colors ${
+                              row.account_is_active === false
+                                ? "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                                : "border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+                            }`}
+                          >
+                            {row.account_is_active === false ? <Lock size={10} /> : <KeyRound size={10} />}
+                            <span>{row.account_username}</span>
+                            {row.account_is_active === false && (
+                              <span className="font-sans text-[9px] uppercase">(Khóa)</span>
+                            )}
+                          </button>
                         ) : (
-                          <span className="text-slate-400">—</span>
+                          <button
+                            type="button"
+                            onClick={() => openAccountModal(row)}
+                            title="Cấp tài khoản đăng nhập bằng Mã NV"
+                            className="inline-flex items-center gap-1 rounded border border-dashed border-slate-300 bg-white px-1.5 py-0.5 font-sans text-[10px] font-semibold text-slate-500 transition-colors hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700"
+                          >
+                            <KeyRound size={10} /> Cấp TK
+                          </button>
                         )}
                       </td>
                       <td className="whitespace-nowrap px-2 py-1.5 text-center">
@@ -690,6 +839,18 @@ export default function EmployeesPage() {
                         onClick={(e) => e.stopPropagation()}
                       >
                         <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openAccountModal(row)}
+                            className="rounded p-1 text-indigo-600 hover:bg-indigo-50 hover:text-indigo-800"
+                            title={
+                              row.account_username
+                                ? "Đặt lại mật khẩu / Quản lý tài khoản"
+                                : "Cấp tài khoản đăng nhập bằng Mã NV"
+                            }
+                          >
+                            <KeyRound size={13} />
+                          </button>
                           <button
                             type="button"
                             onClick={() => openEditModal(row)}
@@ -931,9 +1092,10 @@ export default function EmployeesPage() {
                   </div>
                 </div>
 
-                {!editingRow && (
-                  <div className="rounded border border-sky-200 bg-sky-50/60 px-2.5 py-2">
-                    <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                {/* Khu vực Tài khoản đăng nhập hệ thống (hỗ trợ cả Thêm mới và Cập nhật) */}
+                {!editingRow || !editingRow.account_username ? (
+                  <div className="rounded border border-sky-200 bg-sky-50/60 px-2.5 py-2 space-y-2">
+                    <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={formCreateAccount}
@@ -941,9 +1103,77 @@ export default function EmployeesPage() {
                         className="h-3.5 w-3.5 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                       />
                       <span>
-                        Tự động tạo tài khoản đăng nhập hệ thống (tên đăng nhập = Mã nhân viên)
+                        {editingRow
+                          ? `Cấp tài khoản đăng nhập hệ thống (tên đăng nhập = ${formCode.trim() || editingRow.code})`
+                          : "Tự động tạo tài khoản đăng nhập hệ thống (tên đăng nhập = Mã nhân viên)"}
                       </span>
                     </label>
+
+                    {formCreateAccount && (
+                      <div>
+                        <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                          Mật khẩu khởi tạo (tùy chọn — để trống để tự sinh ngẫu nhiên 16 ký tự)
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showFormPassword ? "text" : "password"}
+                            value={formAccountPassword}
+                            onChange={(e) => setFormAccountPassword(e.target.value)}
+                            placeholder="Tối thiểu 6 ký tự (hoặc bỏ trống để hệ thống tự sinh)"
+                            className={`${inputCls} pr-8`}
+                            autoComplete="new-password"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowFormPassword((v) => !v)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                            title={showFormPassword ? "Ẩn mật khẩu" : "Hiện mật khẩu"}
+                          >
+                            {showFormPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded border border-indigo-200 bg-indigo-50/50 px-2.5 py-2 space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="inline-flex items-center gap-1.5 font-semibold text-indigo-900">
+                        <KeyRound size={13} className="text-indigo-600" />
+                        Tài khoản đăng nhập:{" "}
+                        <span className="font-mono rounded bg-white px-1.5 py-0.5 border border-indigo-200">
+                          {editingRow.account_username}
+                        </span>
+                        {editingRow.account_is_active === false && (
+                          <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-700">
+                            Đang khóa
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                        Đặt lại mật khẩu mới (để trống nếu giữ nguyên mật khẩu hiện tại)
+                      </label>
+                      <div className="relative">
+                        <input
+                          type={showFormPassword ? "text" : "password"}
+                          value={formAccountPassword}
+                          onChange={(e) => setFormAccountPassword(e.target.value)}
+                          placeholder="Nhập mật khẩu mới (tối thiểu 6 ký tự)"
+                          className={`${inputCls} pr-8`}
+                          autoComplete="new-password"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowFormPassword((v) => !v)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                          title={showFormPassword ? "Ẩn mật khẩu" : "Hiện mật khẩu"}
+                        >
+                          {showFormPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -972,6 +1202,143 @@ export default function EmployeesPage() {
                       <CheckCircle2 size={13} />
                     )}
                     {editingRow ? "Lưu thay đổi" : "Thêm nhân viên"}
+                  </button>
+                </div>
+              </footer>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL CẤP TÀI KHOẢN / ĐẶT LẠI MẬT KHẨU (Chuẩn CreateOrderForm) */}
+      {accountRow && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => {
+            if (!savingAccount) setAccountRow(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md border border-slate-400 bg-white shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="bg-[#14263d] px-3 py-2 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <KeyRound size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  {accountRow.account_username
+                    ? `Quản Lý Tài Khoản · ${accountRow.account_username}`
+                    : `Cấp Tài Khoản Đăng Nhập · ${accountRow.code}`}
+                </h2>
+              </div>
+              <button
+                type="button"
+                disabled={savingAccount}
+                onClick={() => setAccountRow(null)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <form onSubmit={handleSaveAccount}>
+              <div className="border-b border-slate-200 px-3 py-3 space-y-2.5">
+                <div className="rounded border border-sky-200 bg-sky-50/70 px-2.5 py-2 text-xs text-sky-900 space-y-0.5">
+                  <div>
+                    <strong>Nhân viên:</strong> {accountRow.name}{" "}
+                    <span className="text-[10px] text-slate-600">({accountRow.position})</span>
+                  </div>
+                  <div>
+                    <strong>Tên đăng nhập:</strong>{" "}
+                    <span className="font-mono font-bold text-indigo-800">
+                      {accountRow.account_username || accountRow.code}
+                    </span>
+                  </div>
+                </div>
+
+                {accountError && (
+                  <div className="flex items-center gap-1.5 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700">
+                    <AlertTriangle size={13} className="shrink-0" />
+                    <span>{accountError}</span>
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
+                    {accountRow.account_username
+                      ? "Mật khẩu mới (để trống nếu không đổi mật khẩu)"
+                      : "Mật khẩu khởi tạo (để trống để hệ thống tự sinh ngẫu nhiên)"}
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showAccountPassword ? "text" : "password"}
+                      value={accountPassword}
+                      onChange={(e) => setAccountPassword(e.target.value)}
+                      placeholder="Tối thiểu 6 ký tự"
+                      className={`${inputCls} pr-8`}
+                      autoComplete="new-password"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAccountPassword((v) => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                      title={showAccountPassword ? "Ẩn mật khẩu" : "Hiện mật khẩu"}
+                    >
+                      {showAccountPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+                    </button>
+                  </div>
+                </div>
+
+                {accountRow.account_username && (
+                  <div className="rounded border border-slate-200 bg-slate-50 px-2.5 py-2 flex items-center justify-between gap-2">
+                    <div className="text-xs">
+                      <span className="font-semibold text-slate-700">Trạng thái tài khoản: </span>
+                      {accountIsActive ? (
+                        <span className="font-bold text-emerald-700">Đang hoạt động</span>
+                      ) : (
+                        <span className="font-bold text-red-700">Đang khóa</span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAccountIsActive((v) => !v)}
+                      className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold text-white transition-colors ${
+                        accountIsActive
+                          ? "bg-amber-600 hover:bg-amber-700"
+                          : "bg-emerald-600 hover:bg-emerald-700"
+                      }`}
+                    >
+                      {accountIsActive ? <Lock size={11} /> : <Unlock size={11} />}
+                      {accountIsActive ? "Khóa TK" : "Mở khóa TK"}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <footer className="border-t border-slate-300 bg-slate-100 px-3 py-2 flex items-center justify-between gap-3">
+                <span className="text-[10px] text-slate-500">
+                  * Nhân viên đăng nhập bằng đúng Mã NV và mật khẩu đã thiết lập.
+                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={savingAccount}
+                    onClick={() => setAccountRow(null)}
+                    className="rounded bg-red-700 hover:bg-red-800 px-3 py-1.5 text-xs font-semibold text-white transition-colors"
+                  >
+                    Đóng
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingAccount}
+                    className="inline-flex items-center gap-1.5 rounded bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors disabled:bg-slate-300"
+                  >
+                    {savingAccount ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <CheckCircle2 size={13} />
+                    )}
+                    {accountRow.account_username ? "Lưu tài khoản" : "Cấp tài khoản"}
                   </button>
                 </div>
               </footer>

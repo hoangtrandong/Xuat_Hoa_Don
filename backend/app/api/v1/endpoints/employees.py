@@ -14,12 +14,19 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.crud import employee as crud
-from app.crud.user import create_user
+from app.crud.user import create_user, update_user
 from app.models.employee import Employee as EmployeeModel
 from app.models.user import Role, User
-from app.schemas.employee import Employee, EmployeeCreate, EmployeeCreated, EmployeeCreateRequest, EmployeeUpdate
+from app.schemas.employee import (
+    Employee,
+    EmployeeAccountSetupRequest,
+    EmployeeCreate,
+    EmployeeCreated,
+    EmployeeCreateRequest,
+    EmployeeUpdate,
+)
 from app.schemas.debt_ledger import EmployeeDebtLimitChangeOut
-from app.schemas.user import UserCreate
+from app.schemas.user import UserCreate, UserUpdate
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -66,6 +73,8 @@ def _to_response(obj) -> Employee:
         status=obj.status,
         join_date=obj.join_date,
         account_username=obj.user.username if obj.user else None,
+        account_user_id=obj.user.id if obj.user else None,
+        account_is_active=bool(obj.user.is_active) if obj.user else None,
     )
 
 
@@ -358,49 +367,162 @@ def list_employees(skip: int = 0, limit: int = 100, status: str | None = None, d
     return [_to_response(obj) for obj in crud.list_(db, skip=skip, limit=limit, status=status)]
 
 
+POSITION_ROLE_MAP = {
+    "Admin": "admin",
+    "Sales Admin": "sales_admin",
+    "Kế toán": "accountant",
+    "Thủ kho": "warehouse",
+    "Nhân viên kinh doanh": "staff",
+}
+
+
+def _resolve_password(raw_password: str | None) -> str:
+    pw = (raw_password or "").strip()
+    if pw:
+        if len(pw) < 6:
+            raise HTTPException(status_code=400, detail="Mật khẩu phải có tối thiểu 6 ký tự.")
+        return pw
+    return secrets.token_urlsafe(12)  # 16 ký tự ngẫu nhiên
+
+
+def _provision_account_for_employee(
+    db: Session,
+    employee: EmployeeModel,
+    raw_password: str | None,
+    distributor_id: int | None,
+) -> tuple[str, str]:
+    username = (employee.code or "").strip()
+    if len(username) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="Mã nhân viên cần tối thiểu 3 ký tự để làm tên đăng nhập.",
+        )
+    email = (employee.email or "").strip() or f"{username.lower()}@noemail.local"
+    if db.scalar(select(User.id).where(User.username == username)):
+        raise HTTPException(status_code=409, detail=f"Tên đăng nhập '{username}' đã tồn tại.")
+    if db.scalar(select(User.id).where(User.email == email)):
+        email = f"{username.lower()}.{employee.id}@noemail.local"
+
+    password = _resolve_password(raw_password)
+    role_name = POSITION_ROLE_MAP.get(employee.position, "staff")
+    assigned_role = db.scalar(select(Role).where(Role.name == role_name)) or db.scalar(
+        select(Role).where(Role.name == "staff")
+    )
+    try:
+        create_user(
+            db,
+            UserCreate(
+                username=username,
+                email=email,
+                full_name=employee.name,
+                password=password,
+                role_ids=[assigned_role.id] if assigned_role else [],
+                employee_id=employee.id,
+                distributor_id=distributor_id,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"Không tạo được tài khoản: {exc}") from exc
+    return username, password
+
+
 @router.post("/", response_model=EmployeeCreated, status_code=201)
-def create_employee(payload: EmployeeCreateRequest, db: Session = Depends(get_db)):
+def create_employee(
+    payload: EmployeeCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     if crud.get_by_code(db, payload.code):
         raise HTTPException(status_code=409, detail="Mã nhân viên đã tồn tại.")
 
-    username = email = password = None
+    username = password = None
     if payload.create_account:
-        username = payload.code.strip()
-        email = (payload.email or "").strip() or f"{username.lower()}@noemail.local"
-        if db.scalar(select(User.id).where(User.username == username)):
-            raise HTTPException(status_code=409, detail=f"Tên đăng nhập '{username}' đã tồn tại.")
-        if db.scalar(select(User.id).where(User.email == email)):
-            raise HTTPException(status_code=409, detail=f"Email '{email}' đã được dùng cho tài khoản khác.")
-        if len(username) < 3:
+        check_username = payload.code.strip()
+        if len(check_username) < 3:
             raise HTTPException(status_code=400, detail="Mã nhân viên cần tối thiểu 3 ký tự để làm tên đăng nhập.")
+        if db.scalar(select(User.id).where(User.username == check_username)):
+            raise HTTPException(status_code=409, detail=f"Tên đăng nhập '{check_username}' đã tồn tại.")
+        if payload.account_password and len(payload.account_password.strip()) < 6:
+            raise HTTPException(status_code=400, detail="Mật khẩu phải có tối thiểu 6 ký tự.")
 
-    employee = crud.create(db, EmployeeCreate(**payload.model_dump(exclude={"create_account"})))
+    employee = crud.create(
+        db,
+        EmployeeCreate(**payload.model_dump(exclude={"create_account", "account_password"})),
+    )
 
     if payload.create_account:
-        # Mapping vị trí sang role hệ thống tương ứng
-        position_role_map = {
-            "Admin": "admin",
-            "Sales Admin": "sales_admin",
-            "Kế toán": "accountant",
-            "Thủ kho": "warehouse",
-            "Nhân viên kinh doanh": "staff",
-        }
-        role_name = position_role_map.get(employee.position, "staff")
-        assigned_role = db.scalar(select(Role).where(Role.name == role_name)) or db.scalar(select(Role).where(Role.name == "staff"))
-        password = secrets.token_urlsafe(12)  # 16 ký tự, đạt yêu cầu tối thiểu 12
-        try:
-            create_user(db, UserCreate(
-                username=username, email=email, full_name=employee.name, password=password,
-                role_ids=[assigned_role.id] if assigned_role else [], employee_id=employee.id,
-            ))
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=f"Đã tạo nhân viên nhưng không tạo được tài khoản: {exc}")
+        username, password = _provision_account_for_employee(
+            db,
+            employee,
+            payload.account_password,
+            getattr(current_user, "distributor_id", None),
+        )
         employee = crud.get(db, employee.id)
 
     return EmployeeCreated(
         **_to_response(employee).model_dump(),
         initial_username=username,
         initial_password=password,
+    )
+
+
+@router.post("/{employee_id}/account", response_model=EmployeeCreated)
+def setup_or_update_employee_account(
+    employee_id: int,
+    payload: EmployeeAccountSetupRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cấp tài khoản đăng nhập (tên đăng nhập = Mã NV) hoặc đặt lại mật khẩu / bật-khóa tài khoản."""
+    employee = crud.get(db, employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Không tìm thấy nhân viên.")
+
+    if employee.user is None:
+        username, password = _provision_account_for_employee(
+            db,
+            employee,
+            payload.password,
+            getattr(current_user, "distributor_id", None),
+        )
+        if payload.is_active is False:
+            employee = crud.get(db, employee_id)
+            if employee and employee.user:
+                update_user(db, employee.user.id, UserUpdate(is_active=False))
+        employee = crud.get(db, employee_id)
+        return EmployeeCreated(
+            **_to_response(employee).model_dump(),
+            initial_username=username,
+            initial_password=password,
+        )
+
+    # Đã có tài khoản -> cập nhật mật khẩu / trạng thái kích hoạt
+    new_password: str | None = None
+    if payload.password is not None and payload.password.strip() != "":
+        pw = payload.password.strip()
+        if len(pw) < 6:
+            raise HTTPException(status_code=400, detail="Mật khẩu phải có tối thiểu 6 ký tự.")
+        new_password = pw
+
+    if new_password is None and payload.is_active is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Vui lòng nhập mật khẩu mới hoặc chọn thay đổi trạng thái tài khoản.",
+        )
+
+    update_user(
+        db,
+        employee.user.id,
+        UserUpdate(
+            password=new_password,
+            is_active=payload.is_active,
+        ),
+    )
+    employee = crud.get(db, employee_id)
+    return EmployeeCreated(
+        **_to_response(employee).model_dump(),
+        initial_username=employee.user.username if employee and employee.user else None,
+        initial_password=new_password,
     )
 
 

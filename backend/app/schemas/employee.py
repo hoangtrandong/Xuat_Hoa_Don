@@ -23,6 +23,12 @@ class EmployeeCreate(EmployeeBase):
 
 class EmployeeCreateRequest(EmployeeCreate):
     create_account: bool = False
+    account_password: Optional[str] = None
+
+
+class EmployeeAccountSetupRequest(BaseModel):
+    password: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class EmployeeUpdate(BaseModel):
@@ -45,6 +51,8 @@ class Employee(EmployeeBase):
     id: int
     join_date: Optional[datetime]
     account_username: Optional[str] = None
+    account_user_id: Optional[int] = None
+    account_is_active: Optional[bool] = None
 
 class EmployeeCreated(Employee):
     initial_username: Optional[str] = None

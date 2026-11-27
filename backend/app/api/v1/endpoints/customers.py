@@ -168,7 +168,7 @@ def download_customer_template():
             "Tùy chọn. Mã điểm bán liên kết (VD: CH-0001)",
             "Tùy chọn. Tuyến của cửa hàng (VD: Tuyến 1)",
             "Tùy chọn. Nhập 1 hoặc nhiều mã cách nhau bởi dấu phẩy (VD: CT001, CT002)",
-            "Tùy chọn. Mã nhân viên quản lý khách hàng, phải bắt đầu bằng NV",
+            "Tùy chọn. Mã nhân viên quản lý khách hàng (tồn tại trong danh sách nhân viên)",
         ],
         sample_rows=[
             ["KH-0001", "Hộ kinh doanh Mai Linh", "RETAIL", "mailinh@gmail.com", "012345678901", "8012345678", 20000000, "active", "CH-0001", "Tuyến 1", "CT001", "NV001"],
@@ -186,7 +186,7 @@ def download_customer_template():
                 "• 'Mã cửa hàng': Giúp gom nhóm nhiều mã xuất hóa đơn của cùng 1 cửa hàng vật lý.",
                 "• 'Tuyến': Ghi nhận tuyến của cửa hàng liên kết (hiển thị sang danh sách khách hàng).",
                 "• 'Mã công ty quản lý': 1 khách hàng có thể do NHIỀU công ty quản lý. Nhập nhiều mã cách nhau bằng dấu phẩy (VD: CT001, CT002) hoặc tách thành nhiều dòng cùng Mã KH.",
-                "• 'Mã NVQL': Mã nhân viên quản lý khách hàng, phải tồn tại trong danh sách nhân viên và bắt đầu bằng NV.",
+                "• 'Mã NVQL': Mã nhân viên quản lý khách hàng, phải tồn tại trong danh sách nhân viên.",
             ]),
         ],
         validations=[

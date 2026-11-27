@@ -506,7 +506,10 @@ def test_order_list_resolves_manager_by_last_three_customer_code_characters(db):
 
 
 def test_customer_manager_assignment_requires_existing_nv_employee(db):
-    db.add(Employee(code="NV003", name="Lê Cường", position="Quản lý", phone=""))
+    db.add_all([
+        Employee(code="NV003", name="Lê Cường", position="Quản lý", phone=""),
+        Employee(code="KT01", name="Vũ Thị Lê", position="Kế toán", phone=""),
+    ])
     db.commit()
 
     customer = customer_crud.create(
@@ -516,10 +519,17 @@ def test_customer_manager_assignment_requires_existing_nv_employee(db):
     assert customer.manager_code == "NV003"
     assert customer.manager_name == "Lê Cường"
 
-    with pytest.raises(ValueError, match="bắt đầu bằng NV"):
+    customer_kt = customer_crud.create(
+        db,
+        CustomerCreate(code="MGR-KT", name="Khách hàng KT quản lý", manager_code="kt01"),
+    )
+    assert customer_kt.manager_code == "KT01"
+    assert customer_kt.manager_name == "Vũ Thị Lê"
+
+    with pytest.raises(ValueError, match="Không tìm thấy nhân viên"):
         customer_crud.create(
             db,
-            CustomerCreate(code="MGR-2", name="Mã không hợp lệ", manager_code="AB001"),
+            CustomerCreate(code="MGR-2", name="Mã không tồn tại", manager_code="AB001"),
         )
 
 

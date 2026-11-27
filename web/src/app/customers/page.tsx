@@ -234,8 +234,11 @@ export default function CustomersPage() {
       .then((rows) =>
         setManagerOptions(
           rows
-            .filter((row) => String(row.code ?? "").trim().toUpperCase().startsWith("NV"))
-            .map((row) => ({ code: String(row.code), name: String(row.name ?? "") }))
+            .filter((row) => String(row.status ?? "active").trim().toLowerCase() === "active" && String(row.code ?? "").trim() !== "")
+            .map((row) => ({
+              code: String(row.code).trim(),
+              name: String(row.name ?? "").trim(),
+            }))
             .sort((a, b) => a.code.localeCompare(b.code)),
         ),
       )
@@ -1124,6 +1127,10 @@ export default function CustomersPage() {
                 className={inputCls}
               >
                 <option value="">— Chọn NVQL —</option>
+                {form.manager_code &&
+                  !managerOptions.some((employee) => employee.code === form.manager_code) && (
+                    <option value={form.manager_code}>{form.manager_code} (Đã nghỉ / Hiện tại)</option>
+                  )}
                 {managerOptions.map((employee) => (
                   <option key={employee.code} value={employee.code}>
                     {employee.code} · {employee.name}

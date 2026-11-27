@@ -276,9 +276,9 @@ def resolve_manager_assignment(db: Session, manager_code: str | None) -> tuple[s
     code = (manager_code or "").strip().upper()
     if not code:
         return None, None
-    if not code.startswith("NV"):
-        raise ValueError("Mã NVQL phải bắt đầu bằng NV.")
     employee = db.scalar(select(Employee).where(func.upper(Employee.code) == code))
+    if employee is None:
+        employee = db.scalar(select(Employee).where(func.upper(Employee.vinamilk_code) == code))
     if employee is None:
         raise ValueError(f"Không tìm thấy nhân viên có mã {code}.")
     return employee.code, employee.name

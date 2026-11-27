@@ -440,11 +440,17 @@ export default function EmployeesPage() {
       const data = (await res.json().catch(() => ({}))) as {
         created?: number;
         updated?: number;
+        accounts_created?: number;
+        accounts_updated?: number;
         detail?: string;
       };
       if (!res.ok) throw new Error(data.detail || "Không thể nhập danh sách nhân viên từ Excel.");
+      const accParts: string[] = [];
+      if (data.accounts_created) accParts.push(`tạo mới ${data.accounts_created} tài khoản`);
+      if (data.accounts_updated) accParts.push(`cập nhật MK ${data.accounts_updated} tài khoản`);
       showToast(
-        `Nhập Excel thành công: Thêm mới ${data.created ?? 0}, cập nhật ${data.updated ?? 0} nhân viên.`
+        `Nhập Excel thành công: Thêm mới ${data.created ?? 0}, cập nhật ${data.updated ?? 0} nhân viên` +
+          (accParts.length ? ` (${accParts.join(", ")}).` : ".")
       );
       await loadData();
     } catch (err) {

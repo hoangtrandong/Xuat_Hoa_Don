@@ -49,7 +49,20 @@ EMPLOYEE_HEADER_ALIASES = {
     "Mục tiêu": "target",
     "Hạn mức nợ": "debt_limit",
     "Trạng thái": "status",
+    "Mã DMS": "vinamilk_code",
+    "Mã Vinamilk": "vinamilk_code",
+    "Mã NV DMS": "vinamilk_code",
+    "Tạo tài khoản": "create_account",
+    "Tạo TK": "create_account",
+    "Cấp tài khoản": "create_account",
+    "create_account": "create_account",
+    "Mật khẩu": "password",
+    "Mật khẩu đăng nhập": "password",
+    "Password": "password",
+    "password": "password",
 }
+
+TRUTHY_ACCOUNT_VALUES = {"có", "co", "yes", "y", "1", "true", "x", "tạo", "tao"}
 
 STATUS_ALIASES = {
     "active": "active", "đang làm việc": "active", "đang làm": "active",
@@ -128,7 +141,7 @@ def download_employee_template():
 
     headers = [
         "Mã nhân viên", "Họ và tên", "Tên gọi", "Vị trí", "Số điện thoại", "Email",
-        "Mục tiêu tháng", "Hạn mức nợ", "Trạng thái",
+        "Mục tiêu tháng", "Hạn mức nợ", "Trạng thái", "Tạo tài khoản", "Mật khẩu",
     ]
     sub_guides = [
         "Bắt buộc. VD: NV001, KT001 (Không trùng, không dấu cách)",
@@ -140,6 +153,8 @@ def download_employee_template():
         "VNĐ. Để 0 nếu khối văn phòng",
         "VNĐ. Mặc định 500,000,000 cho mỗi nhân viên",
         "Chọn: active / inactive",
+        "Tùy chọn. Nhập 'Có' để tạo TK (tên ĐN = Mã NV)",
+        "Tùy chọn (>= 6 ký tự). Nhập MK sẽ tự tạo TK / đổi MK",
     ]
 
     # Hàng 1: Tiêu đề cột
@@ -164,9 +179,9 @@ def download_employee_template():
 
     # Dòng mẫu
     sample_rows = [
-        ["NV001", "Mai Chí Trung", "Trung NPP", "Admin", "0912345678", "trung@dms.vn", 0, 500000000, "active"],
-        ["NV004", "Nguyễn Duy Tịnh", "Tịnh xe", "Đội xe", "0987654321", "tinh@dms.vn", 0, 500000000, "active"],
-        ["NV026", "Trần Hồng Sơn", "Sơn VNM", "NVKD Sữa Vinamilk", "0901234567", "", 120000000, 500000000, "active"],
+        ["NV001", "Mai Chí Trung", "Trung NPP", "Admin", "0912345678", "trung@dms.vn", 0, 500000000, "active", "Có", "123456"],
+        ["NV004", "Nguyễn Duy Tịnh", "Tịnh xe", "Đội xe", "0987654321", "tinh@dms.vn", 0, 500000000, "active", "Có", "123456"],
+        ["NV026", "Trần Hồng Sơn", "Sơn VNM", "NVKD Sữa Vinamilk", "0901234567", "", 120000000, 500000000, "active", "", ""],
     ]
     for row_idx, r in enumerate(sample_rows, start=3):
         sheet.append(r)
@@ -177,7 +192,7 @@ def download_employee_template():
             cell.alignment = left_align
 
     # Căn độ rộng các cột tự động thoáng đẹp
-    col_widths = [18, 26, 18, 24, 18, 26, 20, 22, 16]
+    col_widths = [18, 26, 18, 24, 18, 26, 20, 22, 16, 18, 20]
     for idx, width in enumerate(col_widths, start=1):
         col_letter = sheet.cell(row=1, column=idx).column_letter
         sheet.column_dimensions[col_letter].width = width
@@ -205,6 +220,14 @@ def download_employee_template():
     dv_status.errorTitle = "Trạng thái không hợp lệ"
     sheet.add_data_validation(dv_status)
     dv_status.add("I3:I500")
+
+    dv_acc = DataValidation(
+        type="list",
+        formula1='"Có,Không"',
+        allow_blank=True,
+    )
+    sheet.add_data_validation(dv_acc)
+    dv_acc.add("J3:J500")
 
     # --- SHEET 2: HƯỚNG DẪN SỬ DỤNG CHI TIẾT ---
     sheet_guide = workbook.create_sheet(title="Hướng dẫn sử dụng")
@@ -236,6 +259,8 @@ def download_employee_template():
             "• Số điện thoại: Bắt buộc, định dạng số liên hệ (từ 10 số).",
             "• Hạn mức nợ: Số tiền nợ tối đa được phép nhận hàng, mặc định 500,000,000 cho mỗi nhân viên.",
             "• Trạng thái: 'active' (đang làm việc) hoặc 'inactive' (đã nghỉ - hệ thống sẽ tự động khóa tài khoản đăng nhập).",
+            "• Tạo tài khoản: Nhập 'Có' (hoặc Yes/1/X) để tạo tài khoản đăng nhập với Tên đăng nhập = Mã nhân viên.",
+            "• Mật khẩu: Tối thiểu 6 ký tự (VD: 123456). Nếu nhập cột Mật khẩu, hệ thống tự động tạo tài khoản (hoặc đổi mật khẩu nếu đã có tài khoản).",
         ]),
     ]
 
@@ -281,7 +306,7 @@ def upload_employees(
 
         existing = {e.code.upper(): e for e in db.query(EmployeeModel).all()}
         seen: set[str] = set()
-        created = updated = 0
+        created = updated = accounts_created = accounts_updated = 0
         for row_number, values in enumerate(rows[1:], start=2):
             if not any(v is not None and str(v).strip() for v in values):
                 continue
@@ -304,12 +329,22 @@ def upload_employees(
             if status_raw and not status:
                 raise HTTPException(status_code=400, detail=f"Dòng {row_number}: trạng thái '{status_raw}' không hợp lệ.")
 
+            create_acc_raw = _cell_text(data.get("create_account")).lower()
+            password_raw = _cell_text(data.get("password"))
+            if password_raw and len(password_raw) < 6:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Dòng {row_number} ({code}): mật khẩu phải có tối thiểu 6 ký tự.",
+                )
+            want_account = (create_acc_raw in TRUTHY_ACCOUNT_VALUES) or bool(password_raw)
+
             fields = {
                 "name": name,
                 "nickname": _cell_text(data.get("nickname")),
                 "position": _cell_text(data.get("position")),
                 "phone": _phone_text(data.get("phone")),
                 "email": _cell_text(data.get("email")),
+                "vinamilk_code": _cell_text(data.get("vinamilk_code")).upper(),
             }
             target = _cell_text(data.get("target"))
             debt_limit = _cell_text(data.get("debt_limit"))
@@ -342,15 +377,36 @@ def upload_employees(
                     position=fields["position"] or "Nhân viên kinh doanh",
                     phone=fields["phone"],
                     email=fields["email"] or None,
+                    vinamilk_code=fields["vinamilk_code"] or None,
                     target=_number(target, "mục tiêu", row_number),
                     debt_limit=_number(debt_limit, "hạn mức nợ", row_number) if debt_limit else 500000000.0,
                     status=status or "active",
                 )
                 db.add(obj)
+                db.flush()
                 existing[code.upper()] = obj
                 created += 1
+
+            if want_account:
+                if obj.user is None:
+                    _provision_account_for_employee(
+                        db,
+                        obj,
+                        password_raw or None,
+                        getattr(current_user, "distributor_id", None),
+                    )
+                    accounts_created += 1
+                elif password_raw:
+                    update_user(db, obj.user.id, UserUpdate(password=password_raw))
+                    accounts_updated += 1
         db.commit()
-        return {"created": created, "updated": updated, "imported": created + updated}
+        return {
+            "created": created,
+            "updated": updated,
+            "imported": created + updated,
+            "accounts_created": accounts_created,
+            "accounts_updated": accounts_updated,
+        }
     except HTTPException:
         db.rollback()
         raise

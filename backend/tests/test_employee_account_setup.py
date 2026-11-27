@@ -1,14 +1,18 @@
 """Tests for employee account provisioning (login by employee code) and password reset."""
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.api.v1.endpoints.employees import (
     create_employee,
+    download_employee_template,
     setup_or_update_employee_account,
+    upload_employees,
 )
 from app.core.auth import verify_password
 from app.core.database import Base
@@ -122,3 +126,43 @@ def test_provision_and_reset_password_and_lock_existing_employee(db_session):
             current_user=admin_user,
         )
     assert exc.value.status_code == 400
+
+
+def test_employee_excel_template_and_upload_with_accounts(db_session):
+    _, admin_user = _seed(db_session)
+
+    # 1. File mẫu có cột Tạo tài khoản và Mật khẩu
+    tpl = download_employee_template()
+    wb_tpl = load_workbook(BytesIO(tpl.body))
+    headers = [c.value for c in wb_tpl.active[1]]
+    assert "Tạo tài khoản" in headers
+    assert "Mật khẩu" in headers
+
+    # 2. Upload Excel tạo 2 nhân viên có tài khoản + 1 nhân viên không tạo tài khoản
+    wb = Workbook()
+    ws = wb.active
+    ws.append([
+        "Mã nhân viên", "Họ và tên", "Tên gọi", "Vị trí", "Số điện thoại",
+        "Email", "Mục tiêu tháng", "Hạn mức nợ", "Trạng thái", "Tạo tài khoản", "Mật khẩu",
+    ])
+    ws.append(["KT02", "Lê Kế Toán", "Lê KT", "Kế toán", "0901111222", "", 0, 500000000, "active", "Có", "Kt02@123"])
+    ws.append(["NVGH09", "Phạm Giao Hàng", "Phạm xe", "Đội xe", "0903333444", "", 0, 500000000, "active", "", "Gh09@123"])
+    ws.append(["NVGH10", "Trần Chưa TK", "", "Đội xe", "0905555666", "", 0, 500000000, "active", "", ""])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    res = upload_employees(
+        file=UploadFile(filename="nv.xlsx", file=buf),
+        db=db_session,
+        current_user=admin_user,
+    )
+    assert res["created"] == 3
+    assert res["accounts_created"] == 2
+
+    u1 = db_session.scalar(select(User).where(User.username == "KT02"))
+    u2 = db_session.scalar(select(User).where(User.username == "NVGH09"))
+    u3 = db_session.scalar(select(User).where(User.username == "NVGH10"))
+    assert u1 is not None and verify_password("Kt02@123", u1.hashed_password)
+    assert u2 is not None and verify_password("Gh09@123", u2.hashed_password)
+    assert u3 is None

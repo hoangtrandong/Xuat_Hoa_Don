@@ -102,7 +102,7 @@ def test_regular_sync_does_not_touch_scoped_states(db):
     assert snapshot.returned is None
 
 
-def test_successful_sync_removes_missing_orders_and_preserves_synthetic_orders(db):
+def test_successful_sync_adds_new_orders_without_removing_existing_or_synthetic_orders(db):
     day = date(2026, 10, 1)
     add_order(db, "VM-STALE")
     db.add(VinamilkOrderSnapshot(
@@ -124,18 +124,63 @@ def test_successful_sync_removes_missing_orders_and_preserves_synthetic_orders(d
     )
 
     order_numbers = {snapshot.order_number for snapshot in db.query(VinamilkOrderSnapshot).all()}
-    assert order_numbers == {"VM-CURRENT", "VM-SYNTHETIC"}
+    assert order_numbers == {"VM-STALE", "VM-CURRENT", "VM-SYNTHETIC"}
 
 
-def test_successful_empty_sync_removes_stale_dms_orders(db):
+def test_successful_empty_sync_keeps_previously_synced_orders(db):
     day = date(2026, 10, 1)
     add_order(db, "VM-STALE")
-    db.query(VinamilkOrderSnapshot).one().order_created_date = None
+
+    assert _save_snapshot(db, [], day, day) == (0, set())
+
+    assert [row.order_number for row in db.query(VinamilkOrderSnapshot).all()] == ["VM-STALE"]
+
+
+def test_sync_does_not_update_existing_order_and_only_adds_new_order_lines(db):
+    day = date(2026, 10, 1)
+    existing = VinamilkOrderSnapshot(
+        remote_key="key-VM-EXISTING",
+        order_number="VM-EXISTING",
+        status="Đã duyệt",
+        order_created_date=day,
+        synced_from=day,
+        synced_to=day,
+        warehouse_updated=False,
+        raw_payload={"orderNumber": "VM-EXISTING", "customerName": "Tên cũ"},
+    )
+    db.add(existing)
     db.flush()
+    original_synced_at = existing.synced_at
 
-    assert _save_snapshot(db, [], day, day) == 0
+    saved, new_order_numbers = _save_snapshot(
+        db,
+        [
+            {
+                "orderNumber": "VM-EXISTING",
+                "productCode": "SKU-UPDATED",
+                "lineId": "new-remote-line",
+                "orderStatus": "Đã giao",
+                "customerName": "Tên mới",
+            },
+            {"orderNumber": "VM-NEW", "productCode": "SKU-1", "lineId": "line-1"},
+            {"orderNumber": "VM-NEW", "productCode": "SKU-2", "lineId": "line-2"},
+        ],
+        day,
+        day,
+    )
 
-    assert db.query(VinamilkOrderSnapshot).all() == []
+    assert saved == 2
+    assert new_order_numbers == {"VM-NEW"}
+    assert existing.status == "Đã duyệt"
+    assert existing.raw_payload == {"orderNumber": "VM-EXISTING", "customerName": "Tên cũ"}
+    assert existing.synced_at == original_synced_at
+    assert existing.warehouse_updated is False
+    new_rows = db.query(VinamilkOrderSnapshot).filter_by(order_number="VM-NEW").all()
+    assert {row.product_code for row in new_rows} == {"SKU-1", "SKU-2"}
+
+    _apply_scoped_states(db, day, {"VM-EXISTING", "VM-NEW"}, new_order_numbers)
+    assert existing.warehouse_updated is False
+    assert all(row.warehouse_updated is True for row in new_rows)
 
 
 def test_invalid_sync_payload_keeps_existing_orders(db):
@@ -743,3 +788,127 @@ def test_migration_leaves_existing_order_states_unknown():
         ("Đang giao", None, None),
     ]
     engine.dispose()
+
+
+def test_dms_order_default_status_and_split_merge_notes(db):
+    day = date(2026, 10, 1)
+    # 1. Đơn đồng bộ từ DMS Vinamilk (warehouse_updated=None) & Nazzy (processing_status="NCC:NAZZY")
+    db.add_all([
+        VinamilkOrderSnapshot(
+            remote_key="k-dms-vnm",
+            order_number="PO-SYNC-1",
+            customer_code="KH01",
+            customer_name="KH 01",
+            product_code="SP01",
+            product_name="Sữa 1",
+            order_created_date=day,
+            delivery_date=day,
+            warehouse_updated=None,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"orderNumber": "PO-SYNC-1", "quantity": 5, "totalValue": 50000},
+        ),
+        VinamilkOrderSnapshot(
+            remote_key="k-dms-nzy",
+            order_number="NZ-SYNC-1",
+            customer_code="KH02",
+            customer_name="KH 02",
+            product_code="SP02",
+            product_name="Bánh 1",
+            processing_status="NCC:NAZZY",
+            order_created_date=day,
+            delivery_date=day,
+            warehouse_updated=None,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"orderNumber": "NZ-SYNC-1", "Nguồn đồng bộ": "NAZZY", "quantity": 4, "totalValue": 40000},
+        ),
+        VinamilkOrderSnapshot(
+            remote_key="k-dms-m1",
+            order_number="PO-M1",
+            customer_code="KH01",
+            customer_name="KH 01",
+            product_code="SP01",
+            product_name="Sữa 1",
+            order_created_date=day,
+            delivery_date=day,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"orderNumber": "PO-M1", "quantity": 2, "totalValue": 20000},
+        ),
+        VinamilkOrderSnapshot(
+            remote_key="k-dms-m2",
+            order_number="PO-M2",
+            customer_code="KH01",
+            customer_name="KH 01",
+            product_code="SP01",
+            product_name="Sữa 1",
+            order_created_date=day,
+            delivery_date=day,
+            synced_from=day,
+            synced_to=day,
+            raw_payload={"orderNumber": "PO-M2", "quantity": 3, "totalValue": 30000},
+        ),
+    ])
+    db.flush()
+
+    # Mặc định đơn đồng bộ từ DMS có trạng thái "Đã cập nhật kho" và không có ghi chú
+    initial_res = list_local_vinamilk_orders(
+        from_date=day, to_date=day, source="sync", search=None, status=None, skip=0, limit=2000, db=db
+    )
+    initial_by_num = {r["orderNumber"]: r for r in initial_res["rows"]}
+    assert initial_by_num["PO-SYNC-1"]["_processing_status"] == "Đã cập nhật kho"
+    assert initial_by_num["PO-SYNC-1"]["_order_note"] is None
+    assert initial_by_num["NZ-SYNC-1"]["_processing_status"] == "Đã cập nhật kho"
+    assert initial_by_num["NZ-SYNC-1"]["_order_note"] is None
+
+    # Tách PO-SYNC-1 thành 2 đơn
+    split_res = _split_vinamilk_order(
+        db,
+        SplitOrderRequest(
+            order_number="PO-SYNC-1",
+            splits=[
+                SplitOrderTarget(
+                    customer_code="KH01",
+                    customer_name="KH 01",
+                    items=[SplitOrderItemAllocation(snapshot_id=initial_by_num["PO-SYNC-1"]["_local_id"], quantity=2)],
+                ),
+                SplitOrderTarget(
+                    customer_code="KH02",
+                    customer_name="KH 02",
+                    items=[SplitOrderItemAllocation(snapshot_id=initial_by_num["PO-SYNC-1"]["_local_id"], quantity=3)],
+                ),
+            ],
+        ),
+    )
+    split_nums = split_res["new_order_numbers"]
+
+    # Gộp PO-M1 và PO-M2 thành 1 đơn gộp
+    merge_res = _merge_vinamilk_orders(
+        db,
+        MergeOrdersRequest(
+            order_numbers=["PO-M1", "PO-M2"],
+            representative_order_number="PO-M1",
+        ),
+    )
+    merged_num = merge_res["new_order_number"]
+
+    after_res = list_local_vinamilk_orders(
+        from_date=day, to_date=day, source="sync", search=None, status=None, skip=0, limit=2000, db=db
+    )
+    after_by_num = {r["orderNumber"]: r for r in after_res["rows"]}
+
+    # Đơn gốc bị tách -> Đã Hủy + Ghi chú liệt kê các đơn tách
+    assert after_by_num["PO-SYNC-1"]["_processing_status"] == "Đã Hủy"
+    assert after_by_num["PO-SYNC-1"]["_order_note"] == f"Đã tách thành: {', '.join(split_nums)}"
+    for sn in split_nums:
+        assert after_by_num[sn]["_processing_status"] == "Đơn Tách"
+        assert after_by_num[sn]["_order_note"] == "Tách từ đơn: PO-SYNC-1"
+
+    # Đơn gốc bị gộp -> Đã Hủy + Ghi chú trỏ tới đơn gộp; Đơn mới -> Đơn Gộp + Ghi chú liệt kê đơn gốc
+    assert after_by_num["PO-M1"]["_processing_status"] == "Đã Hủy"
+    assert after_by_num["PO-M1"]["_order_note"] == f"Đã gộp vào đơn: {merged_num}"
+    assert after_by_num["PO-M2"]["_processing_status"] == "Đã Hủy"
+    assert after_by_num["PO-M2"]["_order_note"] == f"Đã gộp vào đơn: {merged_num}"
+    assert after_by_num[merged_num]["_processing_status"] == "Đơn Gộp"
+    assert after_by_num[merged_num]["_order_note"] == "Gộp từ đơn: PO-M1, PO-M2"

@@ -282,15 +282,19 @@ def _apply_scoped_states(
     db: Session,
     day: date,
     warehouse_orders: set[str] | None,
+    order_numbers_to_update: set[str] | None = None,
 ) -> None:
     """Đặt true/false theo kết quả truy vấn đã lọc; truy vấn lỗi (None) thì giữ nguyên giá trị cũ."""
-    if warehouse_orders is None:
+    if warehouse_orders is None or order_numbers_to_update == set():
         return
-    snapshots = db.scalars(select(VinamilkOrderSnapshot).where(
+    query = select(VinamilkOrderSnapshot).where(
         VinamilkOrderSnapshot.synced_from == day,
         VinamilkOrderSnapshot.synced_to == day,
         VinamilkOrderSnapshot.order_number.is_not(None),
-    )).all()
+    )
+    if order_numbers_to_update is not None:
+        query = query.where(VinamilkOrderSnapshot.order_number.in_(order_numbers_to_update))
+    snapshots = db.scalars(query).all()
     synthetic_snapshots: list[VinamilkOrderSnapshot] = []
     for snapshot in snapshots:
         if getattr(snapshot, "is_synthetic", False):
@@ -1469,42 +1473,56 @@ def _parse_json_body(body: object) -> Any:
         raise RuntimeError(f"Vinamilk không trả về JSON hợp lệ: {preview}") from exc
 
 
-def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) -> int:
+def _save_snapshot(
+    db: Session, payload: Any, from_date: date, to_date: date
+) -> tuple[int, set[str]]:
     if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
         raise ValueError("Vinamilk trả về danh sách đơn hàng không hợp lệ; không thể đối soát snapshot.")
     rows = payload
     row_data_list = []
-    keys_to_fetch = []
+    incoming_order_numbers: set[str] = set()
     
     for row in rows:
         order_number = _field(row, ("orderNumber", "saleOrderNumber", "saleOrderCode", "orderCode", "Số đơn hàng"))
         if not order_number:
             raise ValueError("Vinamilk trả về dòng dữ liệu không có số đơn hàng; không thể đối soát snapshot.")
         product_code = _field(row, ("productCode", "itemCode", "sku", "Mã sản phẩm"))
+        incoming_order_numbers.add(order_number)
+        row_data_list.append((row, order_number, product_code))
+
+    existing_order_numbers: set[str] = set()
+    chunk_size = 500
+    order_numbers = sorted(incoming_order_numbers)
+    for i in range(0, len(order_numbers), chunk_size):
+        existing_order_numbers.update(
+            db.scalars(
+                select(VinamilkOrderSnapshot.order_number).where(
+                    VinamilkOrderSnapshot.order_number.in_(order_numbers[i:i + chunk_size])
+                )
+            ).all()
+        )
+
+    new_order_numbers = incoming_order_numbers - existing_order_numbers
+    new_rows = [
+        (row, order_number, product_code)
+        for row, order_number, product_code in row_data_list
+        if order_number in new_order_numbers
+    ]
+
+    saved = 0
+    new_snapshots: dict[str, VinamilkOrderSnapshot] = {}
+    for row, order_number, product_code in new_rows:
         line_id = _field(row, ("lineId", "itemId", "orderItemId", "detailId", "id"))
-        identity = "|".join((order_number or "", product_code or "", line_id or ""))
+        identity = "|".join((order_number, product_code or "", line_id or ""))
         if not identity.strip("|"):
             identity = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
         remote_key = hashlib.sha256(identity.encode()).hexdigest()
-        keys_to_fetch.append(remote_key)
-        row_data_list.append((remote_key, row, order_number, product_code))
-
-    existing_snapshots = {}
-    chunk_size = 500
-    for i in range(0, len(keys_to_fetch), chunk_size):
-        chunk_keys = keys_to_fetch[i:i+chunk_size]
-        found = db.scalars(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.remote_key.in_(chunk_keys))).all()
-        for s in found:
-            existing_snapshots[s.remote_key] = s
-
-    saved = 0
-    for remote_key, row, order_number, product_code in row_data_list:
-        snapshot = existing_snapshots.get(remote_key)
+        snapshot = new_snapshots.get(remote_key)
         if snapshot is None:
             snapshot = VinamilkOrderSnapshot(remote_key=remote_key, raw_payload={})
             db.add(snapshot)
-            existing_snapshots[remote_key] = snapshot
-            
+            new_snapshots[remote_key] = snapshot
+
         snapshot.order_number = order_number
         snapshot.original_order_number = _field(row, ("fromSaleOrderNumber", "originalOrderNumber", "fromSaleOrderCode", "originalOrderId"))
         snapshot.customer_code = _field(row, ("customerCode", "shopCode", "Mã KH"))
@@ -1523,36 +1541,10 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
         snapshot.synced_at = datetime.utcnow()
         snapshot.raw_payload = {**row, "Nguồn đồng bộ": "VINAMILK"}
         saved += 1
-    # Dòng tiêu đề đơn (không có sản phẩm) từ các lần đồng bộ cũ là dữ liệu thừa khi đã có dòng chi tiết.
-    detailed_orders = sorted({number for _, _, number, product in row_data_list if number and product})
-    for i in range(0, len(detailed_orders), chunk_size):
-        db.execute(
-            delete(VinamilkOrderSnapshot).where(
-                VinamilkOrderSnapshot.order_number.in_(detailed_orders[i:i + chunk_size]),
-                VinamilkOrderSnapshot.product_code.is_(None),
-            )
-        )
-    incoming_remote_keys = set(keys_to_fetch)
-    stale_snapshots = db.scalars(select(VinamilkOrderSnapshot).where(
-        or_(
-            and_(
-                VinamilkOrderSnapshot.order_created_date >= from_date,
-                VinamilkOrderSnapshot.order_created_date <= to_date,
-            ),
-            and_(
-                VinamilkOrderSnapshot.synced_from == from_date,
-                VinamilkOrderSnapshot.synced_to == to_date,
-            ),
-        ),
-        VinamilkOrderSnapshot.is_synthetic.is_(False),
-    )).all()
-    for snapshot in stale_snapshots:
-        if snapshot.remote_key not in incoming_remote_keys:
-            db.delete(snapshot)
     # Tự động cập nhật mã NVBH và tên NVBH cho khách hàng tương ứng nếu chưa có
     try:
         cust_staff_updates: dict[str, tuple[str | None, str | None]] = {}
-        for _, row, _, _ in row_data_list:
+        for row, _, _ in new_rows:
             c_code = _field(row, ("customerCode", "shopCode", "Mã KH"))
             s_code = _field(row, ("Mã NVBH", "staffCode", "salesStaffCode"))
             s_name = _field(row, ("Tên NVBH", "staffName", "salesStaffName"))
@@ -1578,7 +1570,7 @@ def _save_snapshot(db: Session, payload: Any, from_date: date, to_date: date) ->
         sync_products_from_system_data(db, commit=False)
     except Exception:
         pass
-    return saved
+    return saved, new_order_numbers
 
 def read_cookie() -> str:
     if _runtime_cookie:
@@ -1856,7 +1848,7 @@ async def sync_vinamilk_day(
 ) -> tuple[str, int]:
     """Đồng bộ 1 ngày: dòng đơn và trạng thái cập nhật kho."""
     session_cookie, payload = await _fetch_vinamilk_payload(session_cookie, day_form)
-    row_count = _save_snapshot(db, payload, day, day)
+    row_count, new_order_numbers = _save_snapshot(db, payload, day, day)
     try:
         session_cookie, scoped_payload = await _fetch_vinamilk_payload(
             session_cookie, {**day_form, "scope": "warehouse"}
@@ -1864,7 +1856,7 @@ async def sync_vinamilk_day(
         warehouse_orders = _order_numbers(scoped_payload)
     except (RuntimeError, ValueError):
         warehouse_orders = None
-    _apply_scoped_states(db, day, warehouse_orders)
+    _apply_scoped_states(db, day, warehouse_orders, new_order_numbers)
     db.commit()
     return session_cookie, row_count
 
@@ -2235,14 +2227,30 @@ def list_local_vinamilk_orders(
         rep_order = replaced_order_for.get(order_num)
         rep_by_list = replaced_by.get(order_num, [])
         pending_req = pending_split_for.get(order_num)
+        rep_type = replacement_type_for.get(order_num)
         if rep_order:
             replacement_display = f"TT: {rep_order}"
+            if rep_type == "SPLIT":
+                order_note = f"Tách từ đơn: {rep_order}"
+            elif rep_type == "MERGE":
+                order_note = f"Gộp từ đơn: {rep_order}"
+            else:
+                order_note = f"Thay thế đơn: {rep_order}"
         elif rep_by_list:
-            replacement_display = f"BTT: {', '.join(rep_by_list)}"
+            joined_rep_by = ", ".join(rep_by_list)
+            replacement_display = f"BTT: {joined_rep_by}"
+            if rep_type == "SPLIT":
+                order_note = f"Đã tách thành: {joined_rep_by}"
+            elif rep_type == "MERGE":
+                order_note = f"Đã gộp vào đơn: {joined_rep_by}"
+            else:
+                order_note = f"Bị thay thế bởi: {joined_rep_by}"
         elif pending_req:
             replacement_display = f"Chờ KT duyệt tách (#{pending_req.id})"
+            order_note = f"Chờ KT duyệt tách (#{pending_req.id})"
         else:
             replacement_display = None
+            order_note = None
 
         is_merged_source = order_num.strip().upper() in merged_source_orders
 
@@ -2272,17 +2280,20 @@ def list_local_vinamilk_orders(
         if is_merged_source:
             d_status = "Không áp dụng"
 
-        proc_status = (
-            row.processing_status
-            if getattr(row, "processing_status", None)
-            else ("Đã cập nhật kho" if row.warehouse_updated is True else "")
-        )
-        if pending_req and not getattr(row, "is_synthetic", False):
-            proc_status = "Chờ KT duyệt tách"
-        if order_num in merged_source_orders:
+        raw_proc = (getattr(row, "processing_status", None) or "").strip()
+        clean_raw_proc = "" if raw_proc.upper().startswith("NCC:") else raw_proc
+        if is_merged_source:
             proc_status = "Đã Hủy"
-        elif replacement_type_for.get(order_num) == "MERGE":
+        elif pending_req and not getattr(row, "is_synthetic", False):
+            proc_status = "Chờ KT duyệt tách"
+        elif rep_type == "MERGE" and rep_order:
             proc_status = "Đơn Gộp"
+        elif rep_type == "SPLIT" and rep_order:
+            proc_status = clean_raw_proc or "Đơn Tách"
+        elif clean_raw_proc:
+            proc_status = clean_raw_proc
+        else:
+            proc_status = "Đã cập nhật kho"
 
         prod_sku = (row.product_code or "").strip().upper()
         product = products_by_sku.get(prod_sku)
@@ -2431,6 +2442,8 @@ def list_local_vinamilk_orders(
             "_replaced_order_number": rep_order,
             "_replaced_by_order_numbers": rep_by_list,
             "_replacement_display": replacement_display,
+            "Ghi chú": order_note,
+            "_order_note": order_note,
             "_pending_split_request_id": pending_req.id if pending_req else None,
         }
         if source == "sync":
@@ -2522,9 +2535,22 @@ def list_grouped_vinamilk_orders(
         return (_field(row, keys) or "").strip()
 
     def status_for(row: dict[str, Any]) -> str:
-        status = field(row, ("_processing_status",)) or ("Đã cập nhật kho" if row.get("_warehouse_updated") is True else "Chưa xử lý")
+        raw_status = field(row, ("_processing_status",))
+        if raw_status.upper().startswith("NCC:"):
+            raw_status = ""
+        status = raw_status or "Đã cập nhật kho"
+        if status in (
+            "Đã cập nhật kho",
+            "Đơn Tách",
+            "Đơn Tách (Nợ NVBH)",
+            "Đơn Tách (Nợ NVGH)",
+            "Đơn Gộp",
+            "Đã Hủy",
+            "Chờ KT duyệt tách",
+        ):
+            return status
         kind = field(row, ("_order_type", "Trạng thái tạo đơn", "orderType"))
-        if status == "Đơn Tách" or not kind:
+        if not kind:
             return status
         return " · ".join(part for part in (kind, "" if status == "Đơn Tự Tạo" else status) if part)
 
@@ -2628,6 +2654,7 @@ def list_grouped_vinamilk_orders(
             "_processing_status", "_warehouse_updated", "_is_synthetic", "_local_id",
             "_delivery_status", "Tình trạng xuất kho", "_replacement_type", "_replacement_display",
             "_replaced_order_number", "_replaced_by_order_numbers", "_pending_split_request_id",
+            "Ghi chú", "_order_note",
             "_performed_by", "performedBy", "Người thực hiện",
         }
         summary = {k: v for k, v in row.items() if k in summary_fields}

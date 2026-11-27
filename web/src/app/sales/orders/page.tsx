@@ -322,6 +322,7 @@ const remoteColumnDefinitions: {
   { title: "Tình trạng xử lý đơn hàng", keys: ["Tình trạng xử lý đơn hàng", "Trạng thái xử lý", "_processing_status"], width: "14rem" },
   { title: "Tình trạng xuất kho", keys: ["Tình trạng xuất kho", "_delivery_status"], width: "14rem" },
   { title: "Thay thế cho đơn", keys: ["_replacement_display", "_replaced_order_number"], width: "16rem" },
+  { title: "Ghi chú", keys: ["Ghi chú", "_order_note"], width: "16rem" },
   { title: "Người thực hiện", keys: ["_performed_by", "performedBy", "Người thực hiện"], width: "9.5rem" },
 ];
 
@@ -364,7 +365,33 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
       : "Chưa yêu cầu";
   normalized["Tình trạng xuất kho"] = deliveryStatus;
   normalized["_delivery_status"] = deliveryStatus;
+  const replacementType = displayRemoteValue(order["_replacement_type"]).trim();
+  const replacedOrderNum = displayRemoteValue(order["_replaced_order_number"]).trim();
+  const replacedByList = Array.isArray(order["_replaced_by_order_numbers"])
+    ? (order["_replaced_by_order_numbers"] as string[]).filter(Boolean)
+    : [];
+  const orderNote = hasRemoteValue(order["_order_note"])
+    ? displayRemoteValue(order["_order_note"]).trim()
+    : hasRemoteValue(order["Ghi chú"])
+      ? displayRemoteValue(order["Ghi chú"]).trim()
+      : replacedOrderNum
+        ? replacementType === "SPLIT"
+          ? `Tách từ đơn: ${replacedOrderNum}`
+          : replacementType === "MERGE"
+            ? `Gộp từ đơn: ${replacedOrderNum}`
+            : `Thay thế đơn: ${replacedOrderNum}`
+        : replacedByList.length > 0
+          ? replacementType === "SPLIT"
+            ? `Đã tách thành: ${replacedByList.join(", ")}`
+            : replacementType === "MERGE"
+              ? `Đã gộp vào đơn: ${replacedByList.join(", ")}`
+              : `Bị thay thế bởi: ${replacedByList.join(", ")}`
+          : replacementType === "PENDING_SPLIT"
+            ? displayRemoteValue(replacementDisplay).trim() || "Chờ KT duyệt tách"
+            : null;
   normalized["Thay thế cho đơn"] = replacementDisplay;
+  normalized["Ghi chú"] = orderNote;
+  normalized["_order_note"] = orderNote;
   normalized["Người thực hiện"] = performedBy;
   normalized["_performed_by"] = performedBy;
   normalized["_local_id"] = order["_local_id"] ?? null;
@@ -385,12 +412,21 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
 }
 
 function addProcessingStatus(order: RemoteOrder): RemoteOrder {
-  const procStatus = displayRemoteValue(order["_processing_status"]).trim();
-  const whStatus = order["_warehouse_updated"] === true ? "Đã cập nhật kho" : "";
+  const rawProcStatus = displayRemoteValue(order["_processing_status"]).trim();
+  const procStatus = rawProcStatus.toUpperCase().startsWith("NCC:") ? "" : rawProcStatus;
   const orderType = displayRemoteValue(order["_order_type"]).trim();
-  const processingStatus = procStatus || whStatus || "Chưa xử lý";
+  const processingStatus = procStatus || "Đã cập nhật kho";
+  const standaloneStatuses = new Set([
+    "Đã cập nhật kho",
+    "Đơn Tách",
+    "Đơn Tách (Nợ NVBH)",
+    "Đơn Tách (Nợ NVGH)",
+    "Đơn Gộp",
+    "Đã Hủy",
+    "Chờ KT duyệt tách",
+  ]);
   const visibleProcessingStatus = processingStatus === "Đơn Tự Tạo" ? "" : processingStatus;
-  const finalStatus = processingStatus === "Đơn Tách"
+  const finalStatus = standaloneStatuses.has(processingStatus)
     ? processingStatus
     : orderType
       ? [orderType, visibleProcessingStatus].filter(Boolean).join(" · ")
@@ -2643,9 +2679,16 @@ return Array.from(map.values());
               </span>
             );
           }
+          if (text === "Đã Hủy") {
+            return (
+              <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-xs font-medium text-rose-700">
+                Đã hủy
+              </span>
+            );
+          }
           if (text === "Đã cập nhật kho" || text === "Đã trả") {
-            const tone = "bg-emerald-50 text-emerald-700";
-            return <span className={`rounded-full px-2 py-1 text-xs font-medium ${tone}`}>{text}</span>;
+            const tone = "border border-emerald-200 bg-emerald-50 text-emerald-700";
+            return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tone}`}>{text}</span>;
           }
           if (!text) return <span className="text-gray-400">—</span>;
           return <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700">{text}</span>;
@@ -2739,6 +2782,141 @@ return Array.from(map.values());
     },
     { key: "Số sản phẩm", title: "Số sản phẩm", sortable: true, align: "right", width: "8rem" },
     ...remoteColumns.filter((column) => ["Giá trị", "Số tiền CK", "Thành tiền"].includes(column.title)),
+    {
+      key: "Tình trạng xử lý đơn hàng",
+      title: "Trạng thái",
+      sortable: true,
+      width: "11rem",
+      render: (value, order) => {
+        const text = displayRemoteValue(value || order["Trạng thái xử lý"] || order["_processing_status"]).trim() || "Đã cập nhật kho";
+        if (text === "Chờ KT duyệt tách") {
+          return (
+            <button
+              type="button"
+              onClick={() => {
+                setSplitApprovalError("");
+                setIsSplitApprovalDrawerOpen(true);
+                void loadSplitApprovalRequests(splitApprovalFilter);
+              }}
+              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
+            >
+              <Clock3 size={11} />
+              Chờ KT duyệt tách
+            </button>
+          );
+        }
+        if (text === "Đơn Tách" || text === "Đơn Tách (Nợ NVBH)" || text === "Đơn Tách (Nợ NVGH)") {
+          const isStaffDebt = text !== "Đơn Tách";
+          return (
+            <span
+              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                isStaffDebt
+                  ? "border-amber-300 bg-amber-50 text-amber-800"
+                  : "border-purple-200 bg-purple-50 text-purple-700"
+              }`}
+            >
+              {text}
+            </span>
+          );
+        }
+        if (text === "Đơn Gộp") {
+          return (
+            <span className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+              Đơn Gộp
+            </span>
+          );
+        }
+        if (text === "Đã Hủy" || text === "Đã hủy") {
+          return (
+            <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
+              Đã hủy
+            </span>
+          );
+        }
+        if (text === "Đơn Tự Tạo") {
+          return (
+            <span className="inline-flex items-center rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-[11px] font-semibold text-teal-700">
+              Đơn Tự Tạo
+            </span>
+          );
+        }
+        if (text === "Đã cập nhật kho" || text === "Đã trả") {
+          return (
+            <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+              {text}
+            </span>
+          );
+        }
+        return (
+          <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+            {text}
+          </span>
+        );
+      },
+    },
+    {
+      key: "Ghi chú",
+      title: "Ghi chú",
+      sortable: false,
+      width: "18rem",
+      render: (value, order) => {
+        const noteText = displayRemoteValue(value || order["_order_note"]).trim();
+        const replacementType = displayRemoteValue(order["_replacement_type"]).trim();
+        const orderNum = displayRemoteValue(order["Số đơn hàng"]).trim();
+        if (replacementType === "PENDING_SPLIT") {
+          return (
+            <button
+              type="button"
+              onClick={() => {
+                setSplitApprovalError("");
+                setIsSplitApprovalDrawerOpen(true);
+                void loadSplitApprovalRequests(splitApprovalFilter);
+              }}
+              className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
+              title="Bấm để mở danh sách Kế toán xác nhận tách đơn"
+            >
+              <Clock3 size={11} />
+              {noteText || "Chờ KT duyệt tách"}
+            </button>
+          );
+        }
+        if ((replacementType === "SPLIT" || replacementType === "MERGE") && noteText) {
+          const isCancelledSource =
+            displayRemoteValue(order["Tình trạng xử lý đơn hàng"] || order["_processing_status"]).trim() === "Đã Hủy";
+          const canRevert = effectiveIsAdmin || isOrderToday(order);
+          return (
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className={`truncate text-[11px] font-medium ${
+                  isCancelledSource ? "text-rose-700" : "text-sky-700"
+                }`}
+                title={noteText}
+              >
+                {noteText}
+              </span>
+              {canRevert && (
+                <button
+                  type="button"
+                  onClick={() => void handleRevertSplitMerge(orderNum)}
+                  disabled={revertingOrderNumber === orderNum}
+                  title="Hoàn tác tách/gộp đơn này"
+                  className="inline-flex shrink-0 items-center gap-1 rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                >
+                  <RotateCcw size={10} />
+                  Hoàn tác
+                </button>
+              )}
+            </div>
+          );
+        }
+        if (!noteText) return <span className="text-slate-400">—</span>;
+        return (
+          <span className="block truncate text-[11px] text-slate-700" title={noteText}>
+            {noteText}
+          </span>
+        );
+      },
+    },
   ];
   const deliveryRequestOrderOptions = useMemo(() => {
     if (!isDeliveryRequestDrawerOpen) return [] as DeliveryRequestOrderOption[];
@@ -3215,7 +3393,7 @@ return Array.from(map.values());
       return;
     }
     const exportColumns = remoteColumnDefinitions.filter(({ title }) =>
-      ["NVGH", "Thành tiền", "Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Nhà cung cấp", "Thay thế cho đơn", "Người thực hiện"].includes(title)
+      ["NVGH", "Thành tiền", "Tình trạng xử lý đơn hàng", "Tình trạng xuất kho", "Nhà cung cấp", "Thay thế cho đơn", "Ghi chú", "Người thực hiện"].includes(title)
       || lines.some((line) => hasRemoteValue(line[title]))
     ).filter(({ title }) => title !== "Mã NVGH" && title !== "Tên NVGH");
     const exportRows = lines.map((order) =>

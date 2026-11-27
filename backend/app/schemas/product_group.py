@@ -94,6 +94,20 @@ class ProductCompanyManagementView(BaseModel):
     unit: Optional[str] = None
 
 
+class SalesManagerInfo(BaseModel):
+    code: str
+    employee_id: Optional[int] = None
+    employee_code: Optional[str] = None
+    vinamilk_code: Optional[str] = None
+    name: Optional[str] = None
+    nickname: Optional[str] = None
+    position: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    status: Optional[str] = None
+    matched: bool = False
+
+
 class DistributorProductItem(BaseModel):
     id: int
     distributor_id: Optional[int] = None
@@ -111,6 +125,8 @@ class DistributorProductItem(BaseModel):
     unit: Optional[str] = "HOP"
     unit_price: float = 0.0
     boxes_per_carton: int = 1
+    sales_manager_codes: List[str] = []
+    sales_managers: List[SalesManagerInfo] = []
     company_id: Optional[int] = None
     company_code: Optional[str] = None
     company_name: Optional[str] = None
@@ -131,6 +147,7 @@ class DistributorProductCreate(BaseModel):
     unit: Optional[str] = "HOP"
     unit_price: float = Field(default=0.0, ge=0.0)
     boxes_per_carton: int = Field(default=1, ge=1)
+    sales_manager_codes: Optional[List[str] | str] = None
     company_id: Optional[int] = None
 
 
@@ -150,6 +167,7 @@ class DistributorProductUpdate(BaseModel):
     unit: Optional[str] = "HOP"
     unit_price: Optional[float] = Field(default=None, ge=0.0)
     boxes_per_carton: Optional[int] = Field(default=None, ge=1)
+    sales_manager_codes: Optional[List[str] | str] = None
     company_id: Optional[int] = None
 
 
@@ -157,6 +175,10 @@ class DistributorProductInvoiceMappingUpdate(BaseModel):
     invoice_product_id: Optional[int] = None
     conversion_num: Optional[int] = Field(default=None, ge=1)
     conversion_den: Optional[int] = Field(default=None, ge=1)
+
+
+class DistributorProductManagersUpdate(BaseModel):
+    sales_manager_codes: List[str] | str = []
 
 
 class DistributorProductBulkDelete(BaseModel):

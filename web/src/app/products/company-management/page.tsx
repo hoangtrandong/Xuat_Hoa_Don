@@ -20,6 +20,9 @@ import {
   Check,
   Plus,
   Link2,
+  Users,
+  Phone,
+  UserPlus,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { API_URL, apiFetch } from "@/lib/api";
@@ -29,6 +32,32 @@ import { useDistributorContext } from "@/lib/distributor-context";
 
 const inputCls =
   "w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100";
+
+type SalesManagerInfo = {
+  code: string;
+  employee_id: number | null;
+  employee_code: string | null;
+  vinamilk_code: string | null;
+  name: string | null;
+  nickname: string | null;
+  position: string | null;
+  phone: string | null;
+  email: string | null;
+  status: string | null;
+  matched: boolean;
+};
+
+type EmployeeOption = {
+  id: number;
+  code: string;
+  vinamilk_code: string | null;
+  name: string;
+  nickname: string | null;
+  position: string;
+  phone: string;
+  email: string | null;
+  status: string;
+};
 
 type DistributorProductRow = {
   id: number;
@@ -47,6 +76,8 @@ type DistributorProductRow = {
   unit: string;
   unit_price: number;
   boxes_per_carton: number;
+  sales_manager_codes: string[];
+  sales_managers: SalesManagerInfo[];
   company_id: number | null;
   company_code: string | null;
   company_name: string | null;
@@ -79,14 +110,29 @@ type ExcelPreviewRow = {
   supplier: string;
   company_code: string;
   company_name: string;
+  sales_manager_codes: string;
   action_type: "Thêm mới" | "Cập nhật";
 };
+
+function parseManagerCodeList(raw: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of raw.split(/[,;\n\r]+/)) {
+    const code = part.trim().toUpperCase();
+    if (code && !seen.has(code)) {
+      seen.add(code);
+      out.push(code);
+    }
+  }
+  return out;
+}
 
 export default function DmsProductCatalogPage() {
   const { effectiveDistributorId: activeDistributorId } = useDistributorContext();
   const [rows, setRows] = useState<DistributorProductRow[]>([]);
   const [invoiceProducts, setInvoiceProducts] = useState<InvoiceProductOption[]>([]);
   const [companies, setCompanies] = useState<CompanyOption[]>([]);
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [supplierFilter, setSupplierFilter] = useState<string>("ALL");
@@ -105,6 +151,14 @@ export default function DmsProductCatalogPage() {
   const [mapConvDen, setMapConvDen] = useState<number>(1);
   const [savingMap, setSavingMap] = useState<boolean>(false);
 
+  // Modal Chi tiết & Gán Nhân viên quản lý bán hàng
+  const [managerModalRow, setManagerModalRow] = useState<DistributorProductRow | null>(null);
+  const [selectedManagerCodes, setSelectedManagerCodes] = useState<string[]>([]);
+  const [managerSearch, setManagerSearch] = useState<string>("");
+  const [manualManagerInput, setManualManagerInput] = useState<string>("");
+  const [savingManagers, setSavingManagers] = useState<boolean>(false);
+  const [managerError, setManagerError] = useState<string>("");
+
   // Modal Thêm mới / Chỉnh sửa
   const [isCreatingNew, setIsCreatingNew] = useState<boolean>(false);
   const [editingRow, setEditingRow] = useState<DistributorProductRow | null>(null);
@@ -119,13 +173,18 @@ export default function DmsProductCatalogPage() {
   const [editDistributor, setEditDistributor] = useState<string>("");
   const [editSupplier, setEditSupplier] = useState<string>("");
   const [editCompanyId, setEditCompanyId] = useState<string>("");
+  const [editSalesManagerCodes, setEditSalesManagerCodes] = useState<string>("");
   const [savingEdit, setSavingEdit] = useState<boolean>(false);
   const [editError, setEditError] = useState<string>("");
 
-  // Modal Xóa
+  // Chọn nhiều dòng & Modal Xóa
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [deletingRow, setDeletingRow] = useState<DistributorProductRow | null>(null);
   const [deleting, setDeleting] = useState<boolean>(false);
   const [deleteError, setDeleteError] = useState<string>("");
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState<boolean>(false);
+  const [bulkDeleting, setBulkDeleting] = useState<boolean>(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState<string>("");
 
   // Modal Upload Excel
   const [showUploadModal, setShowUploadModal] = useState<boolean>(false);
@@ -145,15 +204,17 @@ export default function DmsProductCatalogPage() {
     setError("");
     try {
       const distQs = activeDistributorId !== null ? `?distributor_id=${activeDistributorId}` : "";
-      const [resProducts, resInvoiceProducts, resCompanies] = await Promise.all([
+      const [resProducts, resInvoiceProducts, resCompanies, resEmployees] = await Promise.all([
         apiFetch(`${API_URL}/product-groups/distributor-products${distQs}`),
         apiFetch(`${API_URL}/invoice-products${distQs}`),
         apiFetch(`${API_URL}/companies/?limit=5000`),
+        apiFetch(`${API_URL}/employees/?limit=2000`),
       ]);
 
       if (!resProducts.ok) throw new Error("Không thể tải danh sách mã sản phẩm DMS.");
       const data = (await resProducts.json()) as DistributorProductRow[];
       setRows(data);
+      setSelectedIds(new Set());
 
       if (resInvoiceProducts.ok) {
         const ips = (await resInvoiceProducts.json()) as InvoiceProductOption[];
@@ -167,6 +228,23 @@ export default function DmsProductCatalogPage() {
             id: Number(c.id),
             code: String(c.code ?? ""),
             name: String(c.name ?? ""),
+          }))
+        );
+      }
+
+      if (resEmployees.ok) {
+        const empData = (await resEmployees.json()) as Array<Record<string, unknown>>;
+        setEmployees(
+          empData.map((e) => ({
+            id: Number(e.id),
+            code: String(e.code ?? ""),
+            vinamilk_code: e.vinamilk_code ? String(e.vinamilk_code) : null,
+            name: String(e.name ?? ""),
+            nickname: e.nickname ? String(e.nickname) : null,
+            position: String(e.position ?? ""),
+            phone: String(e.phone ?? ""),
+            email: e.email ? String(e.email) : null,
+            status: String(e.status ?? "active"),
           }))
         );
       }
@@ -208,7 +286,9 @@ export default function DmsProductCatalogPage() {
           (row.invoice_product_name || "").toLowerCase().includes(q) ||
           (row.supplier || "").toLowerCase().includes(q) ||
           (row.company_code || "").toLowerCase().includes(q) ||
-          (row.company_name || "").toLowerCase().includes(q);
+          (row.company_name || "").toLowerCase().includes(q) ||
+          (row.sales_manager_codes || []).some((c) => c.toLowerCase().includes(q)) ||
+          (row.sales_managers || []).some((m) => (m.name || "").toLowerCase().includes(q));
         if (!hit) return false;
       }
       return true;
@@ -297,6 +377,139 @@ export default function DmsProductCatalogPage() {
     }
   }
 
+  function openManagerModal(row: DistributorProductRow) {
+    setManagerModalRow(row);
+    setSelectedManagerCodes(row.sales_manager_codes || []);
+    setManagerSearch("");
+    setManualManagerInput("");
+    setManagerError("");
+  }
+
+  const employeeLookupByCode = useMemo(() => {
+    const map = new Map<string, EmployeeOption>();
+    for (const emp of employees) {
+      if (emp.code) map.set(emp.code.trim().toUpperCase(), emp);
+    }
+    for (const emp of employees) {
+      if (emp.vinamilk_code) {
+        const vk = emp.vinamilk_code.trim().toUpperCase();
+        if (vk && !map.has(vk)) map.set(vk, emp);
+      }
+    }
+    return map;
+  }, [employees]);
+
+  const selectedManagerDetails = useMemo<SalesManagerInfo[]>(() => {
+    const existingByCode = new Map<string, SalesManagerInfo>(
+      (managerModalRow?.sales_managers || []).map((m) => [m.code.toUpperCase(), m])
+    );
+    return selectedManagerCodes.map((code) => {
+      const upper = code.toUpperCase();
+      const emp = employeeLookupByCode.get(upper);
+      if (emp) {
+        return {
+          code: upper,
+          employee_id: emp.id,
+          employee_code: emp.code,
+          vinamilk_code: emp.vinamilk_code,
+          name: emp.name,
+          nickname: emp.nickname,
+          position: emp.position,
+          phone: emp.phone,
+          email: emp.email,
+          status: emp.status,
+          matched: true,
+        };
+      }
+      const fallback = existingByCode.get(upper);
+      if (fallback) return fallback;
+      return {
+        code: upper,
+        employee_id: null,
+        employee_code: null,
+        vinamilk_code: null,
+        name: null,
+        nickname: null,
+        position: null,
+        phone: null,
+        email: null,
+        status: null,
+        matched: false,
+      };
+    });
+  }, [selectedManagerCodes, employeeLookupByCode, managerModalRow]);
+
+  const filteredEmployeeOptions = useMemo(() => {
+    const q = managerSearch.trim().toLowerCase();
+    const list = employees.filter((emp) => {
+      if (!q) return true;
+      return (
+        emp.code.toLowerCase().includes(q) ||
+        (emp.vinamilk_code || "").toLowerCase().includes(q) ||
+        emp.name.toLowerCase().includes(q) ||
+        (emp.nickname || "").toLowerCase().includes(q) ||
+        (emp.phone || "").toLowerCase().includes(q) ||
+        (emp.position || "").toLowerCase().includes(q)
+      );
+    });
+    return list.slice(0, 100);
+  }, [employees, managerSearch]);
+
+  function toggleManagerCode(code: string) {
+    const upper = code.trim().toUpperCase();
+    if (!upper) return;
+    setSelectedManagerCodes((prev) =>
+      prev.includes(upper) ? prev.filter((c) => c !== upper) : [...prev, upper]
+    );
+  }
+
+  function handleAddManualManagers() {
+    const parsed = parseManagerCodeList(manualManagerInput);
+    if (parsed.length === 0) return;
+    setSelectedManagerCodes((prev) => {
+      const next = [...prev];
+      for (const c of parsed) {
+        if (!next.includes(c)) next.push(c);
+      }
+      return next;
+    });
+    setManualManagerInput("");
+  }
+
+  async function handleSaveManagers() {
+    if (!managerModalRow) return;
+    setSavingManagers(true);
+    setManagerError("");
+    try {
+      const pendingManual = parseManagerCodeList(manualManagerInput);
+      const finalCodes = Array.from(new Set([...selectedManagerCodes, ...pendingManual]));
+      const res = await apiFetch(
+        `${API_URL}/product-groups/distributor-products/${managerModalRow.id}/sales-managers`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sales_manager_codes: finalCodes }),
+        }
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Không thể cập nhật nhân viên quản lý.");
+      }
+      const updated = (await res.json()) as DistributorProductRow;
+      setRows((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      setManagerModalRow(null);
+      showToast(
+        updated.sales_manager_codes.length > 0
+          ? `Đã cập nhật ${updated.sales_manager_codes.length} NV quản lý cho mã DMS '${updated.distributor_sku}'.`
+          : `Đã gỡ toàn bộ NV quản lý khỏi mã DMS '${updated.distributor_sku}'.`
+      );
+    } catch (err) {
+      setManagerError(err instanceof Error ? err.message : "Lỗi khi lưu nhân viên quản lý.");
+    } finally {
+      setSavingManagers(false);
+    }
+  }
+
   function openCreateModal() {
     setIsCreatingNew(true);
     setEditingRow(null);
@@ -311,6 +524,7 @@ export default function DmsProductCatalogPage() {
     setEditDistributor("");
     setEditSupplier("Vinamilk");
     setEditCompanyId("");
+    setEditSalesManagerCodes("");
     setEditError("");
   }
 
@@ -328,6 +542,7 @@ export default function DmsProductCatalogPage() {
     setEditDistributor(row.distributor_name);
     setEditSupplier(row.supplier);
     setEditCompanyId(row.company_id ? String(row.company_id) : "");
+    setEditSalesManagerCodes((row.sales_manager_codes || []).join(", "));
     setEditError("");
   }
 
@@ -367,6 +582,7 @@ export default function DmsProductCatalogPage() {
             distributor_name: editDistributor.trim(),
             supplier: editSupplier.trim() || "Vinamilk",
             company_id: editCompanyId ? Number(editCompanyId) : null,
+            sales_manager_codes: parseManagerCodeList(editSalesManagerCodes),
           }),
         });
         const data = await res.json();
@@ -397,6 +613,7 @@ export default function DmsProductCatalogPage() {
           distributor_name: editDistributor.trim(),
           supplier: editSupplier.trim() || "Vinamilk",
           company_id: editCompanyId ? Number(editCompanyId) : null,
+          sales_manager_codes: parseManagerCodeList(editSalesManagerCodes),
         }),
       });
 
@@ -426,12 +643,90 @@ export default function DmsProductCatalogPage() {
         throw new Error(data.detail || "Không thể xóa mã sản phẩm DMS.");
       }
       setRows((prev) => prev.filter((r) => r.id !== deletingRow.id));
+      setSelectedIds((prev) => {
+        if (!prev.has(deletingRow.id)) return prev;
+        const next = new Set(prev);
+        next.delete(deletingRow.id);
+        return next;
+      });
       showToast(`Đã xóa mã SP DMS '${deletingRow.distributor_sku}'.`);
       setDeletingRow(null);
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : "Lỗi khi xóa mã sản phẩm.");
     } finally {
       setDeleting(false);
+    }
+  }
+
+  const allPageSelected =
+    pagedRows.length > 0 && pagedRows.every((r) => selectedIds.has(r.id));
+
+  const selectedRowsPreview = useMemo(() => {
+    if (selectedIds.size === 0) return [];
+    return rows.filter((r) => selectedIds.has(r.id));
+  }, [rows, selectedIds]);
+
+  function toggleSelectOne(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllPage() {
+    const pageIds = pagedRows.map((r) => r.id);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allPageSelected) {
+        for (const id of pageIds) next.delete(id);
+      } else {
+        for (const id of pageIds) next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function selectAllFiltered() {
+    setSelectedIds(new Set(filteredRows.map((r) => r.id)));
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  async function handleConfirmBulkDelete() {
+    if (selectedIds.size === 0) return;
+    setBulkDeleting(true);
+    setBulkDeleteError("");
+    try {
+      const idsToDelete = Array.from(selectedIds);
+      const res = await apiFetch(`${API_URL}/product-groups/distributor-products/bulk-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: idsToDelete }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        deleted_count?: number;
+        deleted_ids?: number[];
+        message?: string;
+        detail?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.detail || "Không thể xóa hàng loạt mã sản phẩm DMS.");
+      }
+      const deletedIdSet = new Set<number>(
+        Array.isArray(data.deleted_ids) && data.deleted_ids.length > 0 ? data.deleted_ids : idsToDelete
+      );
+      setRows((prev) => prev.filter((r) => !deletedIdSet.has(r.id)));
+      setSelectedIds(new Set());
+      setBulkDeleteConfirm(false);
+      showToast(data.message || `Đã xóa thành công ${data.deleted_count ?? deletedIdSet.size} mã sản phẩm DMS.`);
+    } catch (err) {
+      setBulkDeleteError(err instanceof Error ? err.message : "Lỗi khi xóa hàng loạt mã sản phẩm DMS.");
+    } finally {
+      setBulkDeleting(false);
     }
   }
 
@@ -463,6 +758,7 @@ export default function DmsProductCatalogPage() {
       let distIdx = -1;
       let supplierIdx = -1;
       let compCodeIdx = -1;
+      let managerCodesIdx = -1;
 
       headers.forEach((h, idx) => {
         if (
@@ -501,6 +797,18 @@ export default function DmsProductCatalogPage() {
           supplierIdx = idx;
         } else if (h.includes("mã công ty") || h.includes("company_code") || h.includes("mã cty")) {
           compCodeIdx = idx;
+        } else if (
+          h.includes("mã nv quản lý") ||
+          h.includes("mã nhân viên quản lý") ||
+          h.includes("nv quản lý") ||
+          h.includes("nhân viên quản lý") ||
+          h.includes("nhân viên bán hàng") ||
+          h.includes("nvbh") ||
+          h.includes("sales_manager_codes") ||
+          h.includes("manager_codes") ||
+          h.includes("ma_nv")
+        ) {
+          managerCodesIdx = idx;
         }
       });
 
@@ -534,6 +842,10 @@ export default function DmsProductCatalogPage() {
           compCodeIdx !== -1 && row[compCodeIdx] ? String(row[compCodeIdx]).trim().toUpperCase() : "";
         const matchedComp = compCode ? companyMap.get(compCode) : null;
         const compName = matchedComp ? matchedComp.name : compCode ? "Mã chưa khớp công ty QL" : "";
+        const managerCodesRaw =
+          managerCodesIdx !== -1 && row[managerCodesIdx]
+            ? parseManagerCodeList(String(row[managerCodesIdx])).join(", ")
+            : "";
         const upsertKey = `${sku}::${matchedComp ? matchedComp.id : "NONE"}`;
 
         previewList.push({
@@ -547,6 +859,7 @@ export default function DmsProductCatalogPage() {
           supplier: supplier || "Vinamilk",
           company_code: compCode,
           company_name: compName,
+          sales_manager_codes: managerCodesRaw,
           action_type: existingKeySet.has(upsertKey) ? "Cập nhật" : "Thêm mới",
         });
       }
@@ -623,6 +936,7 @@ export default function DmsProductCatalogPage() {
       "Nhà cung cấp": r.supplier || "",
       "Mã Công ty QL": r.company_code || "",
       "Tên Công ty QL": r.company_name || "",
+      "Mã NV Quản Lý": (r.sales_manager_codes || []).join(", "),
     }));
     downloadExcel(
       excelData,
@@ -820,6 +1134,46 @@ export default function DmsProductCatalogPage() {
               </select>
             </div>
           </div>
+
+          {selectedIds.size > 0 && (
+            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded border border-sky-300 bg-sky-50 px-2.5 py-1.5">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-sky-900">
+                <span>
+                  Đã chọn <strong>{formatNumber(selectedIds.size)}</strong> mã SP DMS
+                </span>
+                {filteredRows.length > selectedIds.size && (
+                  <button
+                    type="button"
+                    onClick={selectAllFiltered}
+                    className="rounded border border-sky-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-sky-700 transition-colors hover:bg-sky-100"
+                  >
+                    Chọn tất cả {formatNumber(filteredRows.length)} mã đang lọc
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={clearSelection}
+                  className="text-[11px] font-semibold text-slate-600 underline hover:text-slate-800"
+                >
+                  Bỏ chọn
+                </button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={bulkDeleting}
+                  onClick={() => {
+                    setBulkDeleteError("");
+                    setBulkDeleteConfirm(true);
+                  }}
+                  className="inline-flex items-center gap-1 rounded bg-red-700 px-2.5 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-red-800 disabled:bg-slate-300"
+                >
+                  {bulkDeleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Xóa đã chọn ({selectedIds.size})
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* 4. BẢNG DỮ LIỆU */}
@@ -827,6 +1181,15 @@ export default function DmsProductCatalogPage() {
           <table className="w-full border-collapse text-left">
             <thead className="bg-slate-100 text-[10px] font-semibold uppercase text-slate-600">
               <tr className="border-b border-slate-300">
+                <th className="w-8 px-2 py-2 text-center">
+                  <input
+                    type="checkbox"
+                    checked={allPageSelected}
+                    onChange={toggleSelectAllPage}
+                    aria-label="Chọn tất cả trên trang"
+                    className="h-3.5 w-3.5 cursor-pointer rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                  />
+                </th>
                 <th className="w-10 px-2 py-2 text-center">STT</th>
                 <th className="px-2.5 py-2">Mã SP DMS</th>
                 <th className="px-2.5 py-2">Tên Sản Phẩm DMS</th>
@@ -834,6 +1197,7 @@ export default function DmsProductCatalogPage() {
                 <th className="px-2 py-2 text-center">Quy cách</th>
                 <th className="px-2.5 py-2 text-right">Đơn giá</th>
                 <th className="px-2.5 py-2">SP Xuất Hóa Đơn (Đã gán)</th>
+                <th className="w-20 px-2 py-2 text-center" title="Nhân viên quản lý bán hàng">NV QL</th>
                 <th className="px-2 py-2">Nhà cung cấp</th>
                 <th className="px-2 py-2">Mã Cty QL</th>
                 <th className="px-2.5 py-2">Tên Công ty quản lý</th>
@@ -844,7 +1208,7 @@ export default function DmsProductCatalogPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={11} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={13} className="px-4 py-10 text-center text-xs text-slate-500">
                     <span className="inline-flex items-center gap-2">
                       <Loader2 size={15} className="animate-spin text-sky-600" />
                       Đang tải danh sách mã sản phẩm DMS...
@@ -853,7 +1217,7 @@ export default function DmsProductCatalogPage() {
                 </tr>
               ) : pagedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-4 py-10 text-center text-xs text-slate-500">
+                  <td colSpan={13} className="px-4 py-10 text-center text-xs text-slate-500">
                     {error || "Chưa có mã sản phẩm DMS nào."}
                   </td>
                 </tr>
@@ -862,11 +1226,23 @@ export default function DmsProductCatalogPage() {
                   const stt = (safePage - 1) * pageSize + idx + 1;
                   const spec = Math.max(1, row.boxes_per_carton || 1);
                   const unitPrice = Number(row.unit_price || 0);
+                  const isSelected = selectedIds.has(row.id);
                   return (
                     <tr
                       key={row.id}
-                      className="border-b border-slate-100 text-[11px] transition-colors even:bg-amber-50/40 hover:bg-sky-50/50"
+                      className={`border-b border-slate-100 text-[11px] transition-colors hover:bg-sky-50/50 ${
+                        isSelected ? "bg-sky-50/80" : "even:bg-amber-50/40"
+                      }`}
                     >
+                      <td className="px-2 py-1.5 text-center">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectOne(row.id)}
+                          aria-label={`Chọn mã SP DMS ${row.distributor_sku}`}
+                          className="h-3.5 w-3.5 cursor-pointer rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                        />
+                      </td>
                       <td className="px-2 py-1.5 text-center font-medium text-slate-500">{stt}</td>
 
                       <td className="whitespace-nowrap px-2.5 py-1.5 font-mono font-bold text-sky-800">
@@ -930,6 +1306,34 @@ export default function DmsProductCatalogPage() {
                             className="inline-flex items-center gap-1 rounded border border-red-300 bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-700 hover:bg-red-100"
                           >
                             <Link2 size={11} /> Chưa gán — Bấm để gán
+                          </button>
+                        )}
+                      </td>
+
+                      <td className="w-20 whitespace-nowrap px-2 py-1.5 text-center">
+                        {(row.sales_manager_codes || []).length > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => openManagerModal(row)}
+                            title={`NV quản lý (${row.sales_manager_codes.length}): ${row.sales_manager_codes.join(", ")} — Bấm để xem chi tiết & chỉnh sửa`}
+                            className="inline-flex items-center gap-1 rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-bold text-indigo-800 transition-colors hover:border-indigo-400 hover:bg-indigo-100"
+                          >
+                            <Users size={11} className="shrink-0 text-indigo-600" />
+                            <span>
+                              {row.sales_manager_codes.length === 1
+                                ? row.sales_manager_codes[0]
+                                : `${row.sales_manager_codes.length} NV`}
+                            </span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => openManagerModal(row)}
+                            title="Chưa gán NV quản lý — Bấm để gán"
+                            className="inline-flex items-center gap-0.5 rounded border border-dashed border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-400 transition-colors hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700"
+                          >
+                            <Users size={11} />
+                            <span>—</span>
                           </button>
                         )}
                       </td>
@@ -1048,6 +1452,293 @@ export default function DmsProductCatalogPage() {
           </div>
         </footer>
       </div>
+
+      {/* MODAL CHI TIẾT & GÁN NHÂN VIÊN QUẢN LÝ BÁN HÀNG (Standard CreateOrderForm) */}
+      {managerModalRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden border border-slate-400 bg-white shadow-2xl">
+            <header className="flex shrink-0 items-center justify-between bg-[#14263d] px-3 py-2 text-white">
+              <div className="flex items-center gap-2">
+                <Users size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  Nhân viên quản lý bán hàng — Mã SP DMS: {managerModalRow.distributor_sku}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setManagerModalRow(null)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <div className="flex-1 space-y-3 overflow-y-auto p-3">
+              {/* Thông tin sản phẩm */}
+              <div className="rounded border border-sky-200 bg-sky-50/70 px-3 py-2 text-xs text-sky-900">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5">
+                  <span>
+                    <strong>Mã SP DMS:</strong>{" "}
+                    <span className="font-mono font-bold">{managerModalRow.distributor_sku}</span>
+                  </span>
+                  <span>
+                    <strong>Nhà cung cấp:</strong> {managerModalRow.supplier || "Vinamilk"}
+                  </span>
+                  <span>
+                    <strong>Đang gán:</strong>{" "}
+                    <span className="font-bold text-indigo-800">{selectedManagerCodes.length} nhân viên</span>
+                  </span>
+                </div>
+                <div className="mt-0.5">
+                  <strong>Tên SP DMS:</strong> {managerModalRow.distributor_product_name}
+                </div>
+              </div>
+
+              {managerError && (
+                <div className="flex items-center gap-2 rounded border border-red-300 bg-red-50 p-2 text-xs text-red-800">
+                  <AlertTriangle size={14} className="shrink-0 text-red-600" />
+                  <span>{managerError}</span>
+                </div>
+              )}
+
+              {/* Danh sách chi tiết nhân viên đang quản lý */}
+              <div className="overflow-hidden rounded border border-slate-200">
+                <div className="flex items-center justify-between border-b border-sky-100 bg-sky-50/60 px-3 py-1.5">
+                  <span className="text-[11px] font-bold uppercase text-sky-800">
+                    Danh sách nhân viên đang quản lý ({selectedManagerDetails.length})
+                  </span>
+                  {selectedManagerCodes.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedManagerCodes([])}
+                      className="text-[10px] font-semibold text-red-600 hover:underline"
+                    >
+                      Gỡ tất cả
+                    </button>
+                  )}
+                </div>
+
+                {selectedManagerDetails.length === 0 ? (
+                  <div className="px-3 py-5 text-center text-xs text-slate-500">
+                    Chưa có nhân viên nào được gán quản lý sản phẩm này. Hãy chọn từ danh sách bên dưới hoặc nhập mã NV.
+                  </div>
+                ) : (
+                  <div className="max-h-52 overflow-x-auto overflow-y-auto">
+                    <table className="w-full border-collapse text-left">
+                      <thead className="sticky top-0 bg-slate-100 text-[10px] font-semibold uppercase text-slate-600">
+                        <tr className="border-b border-slate-200">
+                          <th className="w-9 px-2 py-1.5 text-center">STT</th>
+                          <th className="px-2 py-1.5">Mã NV</th>
+                          <th className="px-2 py-1.5">Mã DMS</th>
+                          <th className="px-2 py-1.5">Họ và tên</th>
+                          <th className="px-2 py-1.5">Vị trí</th>
+                          <th className="px-2 py-1.5">Liên hệ</th>
+                          <th className="px-2 py-1.5 text-center">Trạng thái</th>
+                          <th className="w-10 px-2 py-1.5 text-center">Gỡ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedManagerDetails.map((mgr, idx) => (
+                          <tr
+                            key={mgr.code}
+                            className="border-b border-slate-100 text-[11px] even:bg-amber-50/40 hover:bg-sky-50/50"
+                          >
+                            <td className="px-2 py-1.5 text-center text-slate-500">{idx + 1}</td>
+                            <td className="whitespace-nowrap px-2 py-1.5 font-mono font-bold text-indigo-800">
+                              {mgr.employee_code || mgr.code}
+                            </td>
+                            <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[10px] text-slate-600">
+                              {mgr.vinamilk_code || "—"}
+                            </td>
+                            <td className="px-2 py-1.5 font-medium text-slate-800">
+                              {mgr.matched ? (
+                                <div>
+                                  <span>{mgr.name}</span>
+                                  {mgr.nickname && (
+                                    <span className="ml-1 text-[10px] text-slate-500">({mgr.nickname})</span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+                                  <AlertTriangle size={10} /> Chưa có trong danh mục nhân viên
+                                </span>
+                              )}
+                            </td>
+                            <td className="whitespace-nowrap px-2 py-1.5 text-[10px] text-slate-600">
+                              {mgr.position || "—"}
+                            </td>
+                            <td className="whitespace-nowrap px-2 py-1.5 text-[10px] text-slate-600">
+                              {mgr.phone ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <Phone size={10} className="text-slate-400" />
+                                  {mgr.phone}
+                                </span>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td className="whitespace-nowrap px-2 py-1.5 text-center">
+                              {mgr.matched ? (
+                                <span
+                                  className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
+                                    mgr.status === "active"
+                                      ? "bg-emerald-100 text-emerald-800"
+                                      : "bg-slate-200 text-slate-600"
+                                  }`}
+                                >
+                                  {mgr.status === "active" ? "Đang làm" : "Đã nghỉ"}
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-400">—</span>
+                              )}
+                            </td>
+                            <td className="px-2 py-1.5 text-center">
+                              <button
+                                type="button"
+                                onClick={() => toggleManagerCode(mgr.code)}
+                                className="rounded p-0.5 text-red-600 hover:bg-red-100"
+                                title={`Gỡ ${mgr.code}`}
+                              >
+                                <X size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Thêm nhanh mã tay hoặc chọn từ danh mục nhân viên */}
+              <div className="space-y-2 rounded border border-slate-200 bg-slate-50/70 p-2.5">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div>
+                    <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                      Thêm nhanh theo mã NV (cách nhau bởi dấu &quot;,&quot;)
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={manualManagerInput}
+                        onChange={(e) => setManualManagerInput(e.target.value.toUpperCase())}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleAddManualManagers();
+                          }
+                        }}
+                        placeholder="VD: NV001, NV002, NV003"
+                        className={`${inputCls} font-mono uppercase`}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddManualManagers}
+                        className="inline-flex shrink-0 items-center gap-1 rounded bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700"
+                      >
+                        <UserPlus size={12} /> Thêm
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                      Tìm &amp; chọn từ danh mục nhân viên
+                    </label>
+                    <div className="relative">
+                      <Search
+                        size={13}
+                        className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-400"
+                      />
+                      <input
+                        type="text"
+                        value={managerSearch}
+                        onChange={(e) => setManagerSearch(e.target.value)}
+                        placeholder="Gõ Mã NV, Mã DMS, Họ tên, SĐT..."
+                        className={`${inputCls} pl-7`}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="max-h-44 overflow-y-auto rounded border border-slate-200 bg-white">
+                  {filteredEmployeeOptions.length === 0 ? (
+                    <div className="p-3 text-center text-xs text-slate-500">
+                      Không tìm thấy nhân viên phù hợp.
+                    </div>
+                  ) : (
+                    filteredEmployeeOptions.map((emp) => {
+                      const codeKey = emp.code.trim().toUpperCase();
+                      const vnmKey = (emp.vinamilk_code || "").trim().toUpperCase();
+                      const isChecked =
+                        selectedManagerCodes.includes(codeKey) ||
+                        (Boolean(vnmKey) && selectedManagerCodes.includes(vnmKey));
+                      return (
+                        <button
+                          key={emp.id}
+                          type="button"
+                          onClick={() => {
+                            if (vnmKey && selectedManagerCodes.includes(vnmKey) && !selectedManagerCodes.includes(codeKey)) {
+                              toggleManagerCode(vnmKey);
+                            } else {
+                              toggleManagerCode(codeKey);
+                            }
+                          }}
+                          className={`flex w-full items-center justify-between border-b border-slate-100 px-2.5 py-1.5 text-left text-[11px] last:border-b-0 ${
+                            isChecked ? "bg-indigo-50 font-semibold text-indigo-900" : "hover:bg-slate-50"
+                          }`}
+                        >
+                          <div className="flex min-w-0 flex-1 items-center gap-2 pr-2">
+                            <span className="shrink-0 font-mono font-bold text-indigo-800">{emp.code}</span>
+                            {emp.vinamilk_code && (
+                              <span className="shrink-0 rounded bg-slate-100 px-1 py-0.5 font-mono text-[9px] text-slate-600">
+                                DMS: {emp.vinamilk_code}
+                              </span>
+                            )}
+                            <span className="truncate text-slate-800">{emp.name}</span>
+                            {emp.position && (
+                              <span className="hidden shrink-0 text-[10px] text-slate-500 sm:inline">
+                                • {emp.position}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            {emp.phone && <span className="text-[10px] text-slate-500">{emp.phone}</span>}
+                            {isChecked && <Check size={14} className="text-indigo-700" />}
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-300 bg-slate-100 px-3 py-2">
+              <span className="text-[10px] text-slate-500">
+                * Có thể gắn nhiều nhân viên bằng dấu phẩy (VD: NV001, NV002, NV003) hoặc upload trực tiếp từ Excel.
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setManagerModalRow(null)}
+                  className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-800"
+                >
+                  Đóng
+                </button>
+                <button
+                  type="button"
+                  disabled={savingManagers}
+                  onClick={() => void handleSaveManagers()}
+                  className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 disabled:bg-slate-300"
+                >
+                  {savingManagers ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                  Lưu NV quản lý ({selectedManagerCodes.length})
+                </button>
+              </div>
+            </footer>
+          </div>
+        </div>
+      )}
 
       {/* MODAL GÁN NHANH SP XUẤT HÓA ĐƠN & TỶ LỆ QUY ĐỔI (Standard CreateOrderForm) */}
       {mappingRow && (
@@ -1336,6 +2027,18 @@ export default function DmsProductCatalogPage() {
                       ))}
                     </select>
                   </div>
+                  <div className="sm:col-span-2">
+                    <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                      Mã NV quản lý bán hàng (cách nhau bằng dấu &quot;,&quot;)
+                    </label>
+                    <input
+                      type="text"
+                      value={editSalesManagerCodes}
+                      onChange={(e) => setEditSalesManagerCodes(e.target.value.toUpperCase())}
+                      placeholder="VD: NV001, NV002, NV003"
+                      className={`${inputCls} font-mono uppercase`}
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -1395,7 +2098,7 @@ export default function DmsProductCatalogPage() {
                   <Info size={14} className="text-sky-700" /> Hướng dẫn Upload Danh sách mã SP DMS:
                 </div>
                 <p>
-                  File mẫu hỗ trợ cột <strong>Mã SP DMS</strong>, <strong>Tên Sản Phẩm DMS</strong>, <strong>Mã SP Xuất Hóa Đơn</strong> (tự động nối vào Danh sách SP xuất HĐ nếu trùng mã) và <strong>Tỷ lệ quy đổi</strong> (VD: <code>48/1</code> hoặc <code>48</code>).
+                  File mẫu hỗ trợ cột <strong>Mã SP DMS</strong>, <strong>Tên Sản Phẩm DMS</strong>, <strong>Mã SP Xuất Hóa Đơn</strong> (tự động nối vào Danh sách SP xuất HĐ nếu trùng mã), <strong>Tỷ lệ quy đổi</strong> (VD: <code>48/1</code> hoặc <code>48</code>) và <strong>Mã NV Quản Lý</strong> (cách nhau bằng dấu <code>,</code>, VD: <code>NV001, NV002, NV003</code>).
                 </p>
               </div>
 
@@ -1433,6 +2136,7 @@ export default function DmsProductCatalogPage() {
                         <th className="px-2 py-1.5">Tên SP DMS</th>
                         <th className="px-2 py-1.5">Mã SP Xuất HĐ</th>
                         <th className="px-2 py-1.5 text-center">Quy đổi</th>
+                        <th className="px-2 py-1.5">NV Quản lý</th>
                         <th className="px-2 py-1.5">NCC</th>
                         <th className="px-2 py-1.5 text-center">Phân loại</th>
                       </tr>
@@ -1447,6 +2151,9 @@ export default function DmsProductCatalogPage() {
                             {p.invoice_product_code || <span className="font-normal italic text-slate-400">Chưa gán</span>}
                           </td>
                           <td className="px-2 py-1 text-center font-mono">{p.conversion_ratio}</td>
+                          <td className="px-2 py-1 font-mono text-[10px] text-indigo-800">
+                            {p.sales_manager_codes || <span className="font-sans italic text-slate-400">—</span>}
+                          </td>
                           <td className="px-2 py-1">{p.supplier}</td>
                           <td className="px-2 py-1 text-center">
                             <span
@@ -1531,6 +2238,90 @@ export default function DmsProductCatalogPage() {
               >
                 {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Xác nhận Xóa
               </button>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL XÁC NHẬN XÓA HÀNG LOẠT MÃ SP DMS */}
+      {bulkDeleteConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => {
+            if (!bulkDeleting) setBulkDeleteConfirm(false);
+          }}
+        >
+          <div
+            className="w-full max-w-md border border-slate-400 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-center justify-between bg-[#14263d] px-3 py-2 text-white">
+              <div className="flex items-center gap-2">
+                <Trash2 size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  Xác Nhận Xóa Hàng Loạt ({selectedIds.size} Mã SP DMS)
+                </h2>
+              </div>
+              <button
+                type="button"
+                disabled={bulkDeleting}
+                onClick={() => setBulkDeleteConfirm(false)}
+                className="rounded p-1 text-white hover:bg-white/10 disabled:opacity-50"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <div className="space-y-2.5 border-b border-slate-200 px-3 py-3 text-xs text-slate-700">
+              {bulkDeleteError && (
+                <div className="flex items-center gap-2 rounded border border-red-300 bg-red-50 p-2 text-xs text-red-800">
+                  <AlertTriangle size={14} className="shrink-0 text-red-600" />
+                  <span>{bulkDeleteError}</span>
+                </div>
+              )}
+              <p>
+                Bạn có chắc chắn muốn xóa <strong>{formatNumber(selectedIds.size)}</strong> mã sản phẩm DMS đã chọn? Thao tác này không thể hoàn tác.
+              </p>
+              {selectedRowsPreview.length > 0 && (
+                <div className="max-h-36 overflow-y-auto rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px]">
+                  {selectedRowsPreview.slice(0, 10).map((r) => (
+                    <div key={r.id} className="flex items-center gap-1.5 truncate py-0.5">
+                      <span className="shrink-0 font-mono font-bold text-sky-800">{r.distributor_sku}</span>
+                      <span className="truncate text-slate-600">— {r.distributor_product_name}</span>
+                    </div>
+                  ))}
+                  {selectedRowsPreview.length > 10 && (
+                    <div className="pt-1 text-[10px] italic text-slate-500">
+                      ...và {formatNumber(selectedRowsPreview.length - 10)} mã sản phẩm DMS khác.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <footer className="flex items-center justify-between gap-3 border-t border-slate-300 bg-slate-100 px-3 py-2">
+              <span className="text-[10px] text-slate-500">
+                Xóa {formatNumber(selectedIds.size)} mã SP DMS đã chọn
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={bulkDeleting}
+                  onClick={() => setBulkDeleteConfirm(false)}
+                  className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="button"
+                  disabled={bulkDeleting}
+                  onClick={() => void handleConfirmBulkDelete()}
+                  className="inline-flex items-center gap-1.5 rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800 disabled:opacity-50"
+                >
+                  {bulkDeleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                  Xóa {selectedIds.size} mã SP DMS
+                </button>
+              </div>
             </footer>
           </div>
         </div>

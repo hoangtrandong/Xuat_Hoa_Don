@@ -1,3 +1,4 @@
+import re
 from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
 from io import BytesIO
@@ -15,6 +16,7 @@ from app.core.auth import (
 )
 from app.core.database import get_db
 from app.models.customer import Company
+from app.models.employee import Employee
 from app.models.multi_tenant_invoice import Distributor
 from app.models.user import User
 from app.models.product import (
@@ -33,10 +35,12 @@ from app.schemas.product_group import (
     ProductGroupItemView,
     ProductGroupRepresentativeUpdate,
     ProductGroupView,
+    SalesManagerInfo,
     DistributorProductItem,
     DistributorProductCreate,
     DistributorProductUpdate,
     DistributorProductInvoiceMappingUpdate,
+    DistributorProductManagersUpdate,
     DistributorProductBulkDelete,
 )
 
@@ -387,17 +391,89 @@ def list_product_companies(product_id: int, db: Session = Depends(get_db)):
     ).all()
 
 
+def _parse_sales_manager_codes(raw: list[str] | str | None) -> list[str]:
+    if raw is None:
+        return []
+    tokens: list[str] = []
+    if isinstance(raw, str):
+        tokens = re.split(r"[,;\n\r]+", raw)
+    else:
+        for entry in raw:
+            if entry is None:
+                continue
+            tokens.extend(re.split(r"[,;\n\r]+", str(entry)))
+    result: list[str] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        code = tok.strip().upper()
+        if code and code not in seen:
+            seen.add(code)
+            result.append(code)
+    return result
+
+
+def _serialize_sales_manager_codes(codes: list[str]) -> str | None:
+    cleaned = _parse_sales_manager_codes(codes)
+    return ",".join(cleaned) if cleaned else None
+
+
+def _load_employee_lookup(db: Session) -> dict[str, Employee]:
+    lookup: dict[str, Employee] = {}
+    employees = db.scalars(select(Employee)).all()
+    for emp in employees:
+        if emp.code:
+            lookup[emp.code.strip().upper()] = emp
+    for emp in employees:
+        if emp.vinamilk_code:
+            vk = emp.vinamilk_code.strip().upper()
+            if vk and vk not in lookup:
+                lookup[vk] = emp
+    return lookup
+
+
+def _resolve_sales_managers(
+    codes: list[str],
+    emp_lookup: dict[str, Employee] | None = None,
+) -> list[SalesManagerInfo]:
+    lookup = emp_lookup or {}
+    managers: list[SalesManagerInfo] = []
+    for code in codes:
+        emp = lookup.get(code.upper())
+        if emp is not None:
+            managers.append(
+                SalesManagerInfo(
+                    code=code,
+                    employee_id=emp.id,
+                    employee_code=emp.code,
+                    vinamilk_code=emp.vinamilk_code,
+                    name=emp.name,
+                    nickname=emp.nickname,
+                    position=emp.position,
+                    phone=emp.phone,
+                    email=emp.email,
+                    status=emp.status,
+                    matched=True,
+                )
+            )
+        else:
+            managers.append(SalesManagerInfo(code=code, matched=False))
+    return managers
+
+
 def _serialize_distributor_product(
     item: DistributorProduct,
     *,
     fallback_price: float = 0.0,
     fallback_boxes_per_carton: int = 1,
+    emp_lookup: dict[str, Employee] | None = None,
 ) -> DistributorProductItem:
     ip = item.invoice_product
     stored_price = float(item.unit_price or 0.0)
     eff_price = stored_price if stored_price > 0 else float(fallback_price or 0.0)
     stored_spec = int(item.boxes_per_carton or 1)
     eff_spec = stored_spec if stored_spec > 1 else max(1, int(fallback_boxes_per_carton or 1))
+    mgr_codes = _parse_sales_manager_codes(item.sales_manager_codes)
+    mgr_infos = _resolve_sales_managers(mgr_codes, emp_lookup)
     return DistributorProductItem(
         id=item.id,
         distributor_id=item.distributor_id,
@@ -415,6 +491,8 @@ def _serialize_distributor_product(
         unit=item.unit or "HOP",
         unit_price=round(eff_price, 4),
         boxes_per_carton=eff_spec,
+        sales_manager_codes=mgr_codes,
+        sales_managers=mgr_infos,
         company_id=item.company_id,
         company_code=item.company.code if item.company else None,
         company_name=item.company.name if item.company else None,
@@ -446,6 +524,7 @@ def list_distributor_products(
             | (DistributorProduct.distributor_id.is_(None))
         )
     items = db.scalars(stmt).all()
+    emp_lookup = _load_employee_lookup(db)
 
     # Batch-enrich đơn giá & quy cách từ bảng Product (nếu DistributorProduct chưa lưu tay)
     skus = {it.distributor_sku.strip().upper() for it in items if it.distributor_sku}
@@ -480,6 +559,7 @@ def list_distributor_products(
                 item,
                 fallback_price=fb_price,
                 fallback_boxes_per_carton=fb_spec,
+                emp_lookup=emp_lookup,
             )
         )
     return result
@@ -690,6 +770,9 @@ def create_distributor_product(
         unit=(payload.unit or "HOP").strip().upper(),
         unit_price=max(0.0, float(payload.unit_price or 0.0)),
         boxes_per_carton=inferred_spec,
+        sales_manager_codes=_serialize_sales_manager_codes(
+            _parse_sales_manager_codes(payload.sales_manager_codes)
+        ),
         company_id=target_company_id,
         status="active",
     )
@@ -697,7 +780,7 @@ def create_distributor_product(
     db.commit()
     db.refresh(new_prod)
 
-    return _serialize_distributor_product(new_prod)
+    return _serialize_distributor_product(new_prod, emp_lookup=_load_employee_lookup(db))
 
 
 @router.put("/distributor-products")
@@ -795,6 +878,10 @@ def update_distributor_product(
         item.unit_price = max(0.0, float(payload.unit_price))
     if payload.boxes_per_carton is not None:
         item.boxes_per_carton = max(1, int(payload.boxes_per_carton))
+    if "sales_manager_codes" in payload.model_fields_set:
+        item.sales_manager_codes = _serialize_sales_manager_codes(
+            _parse_sales_manager_codes(payload.sales_manager_codes)
+        )
     item.company_id = target_company_id
 
     # Chỉ đổi npp_code trên Product nếu không còn dòng DistributorProduct nào khác dùng old_sku
@@ -812,6 +899,8 @@ def update_distributor_product(
 
     db.commit()
     db.refresh(item)
+    mgr_codes = _parse_sales_manager_codes(item.sales_manager_codes)
+    mgr_infos = _resolve_sales_managers(mgr_codes, _load_employee_lookup(db))
 
     return {
         "success": True,
@@ -827,6 +916,8 @@ def update_distributor_product(
         "conversion_den": item.conversion_den,
         "unit_price": float(item.unit_price or 0.0),
         "boxes_per_carton": max(1, int(item.boxes_per_carton or 1)),
+        "sales_manager_codes": mgr_codes,
+        "sales_managers": [m.model_dump() for m in mgr_infos],
         "company_id": item.company_id,
         "company_code": item.company.code if item.company else None,
         "company_name": item.company.name if item.company else None,
@@ -873,7 +964,34 @@ def assign_dms_product_invoice_product(
 
     db.commit()
     db.refresh(item)
-    return _serialize_distributor_product(item)
+    return _serialize_distributor_product(item, emp_lookup=_load_employee_lookup(db))
+
+
+@router.patch("/distributor-products/{item_id}/sales-managers", response_model=DistributorProductItem)
+def update_dms_product_sales_managers(
+    item_id: int,
+    payload: DistributorProductManagersUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cập nhật nhanh danh sách Mã nhân viên quản lý bán hàng cho 1 Mã SP DMS."""
+    item = db.scalar(
+        select(DistributorProduct)
+        .options(
+            joinedload(DistributorProduct.company),
+            joinedload(DistributorProduct.invoice_product),
+        )
+        .where(DistributorProduct.id == item_id)
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Không tìm thấy mã sản phẩm DMS.")
+    ensure_entity_in_distributor_scope(current_user, item.distributor_id)
+
+    codes = _parse_sales_manager_codes(payload.sales_manager_codes)
+    item.sales_manager_codes = _serialize_sales_manager_codes(codes)
+    db.commit()
+    db.refresh(item)
+    return _serialize_distributor_product(item, emp_lookup=_load_employee_lookup(db))
 
 
 @router.delete("/distributor-products/{id_or_code}")
@@ -932,31 +1050,49 @@ def bulk_delete_distributor_products(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Xóa hàng loạt nhiều mã SP NPP theo IDs hoặc Codes (cô lập theo tenant)."""
-    deleted_count = 0
+    """Xóa hàng loạt nhiều mã SP DMS theo IDs hoặc Codes (cô lập theo tenant)."""
+    items: list[DistributorProduct] = []
     if payload.ids:
         stmt = select(DistributorProduct).where(DistributorProduct.id.in_(payload.ids))
         if current_user.distributor_id is not None:
             stmt = stmt.where(DistributorProduct.distributor_id == current_user.distributor_id)
-        items = db.scalars(stmt).all()
-        for it in items:
-            db.delete(it)
-            deleted_count += 1
+        items = list(db.scalars(stmt).all())
     elif payload.codes:
         clean_codes = [c.strip().upper() for c in payload.codes if c.strip()]
-        stmt = select(DistributorProduct).where(DistributorProduct.distributor_sku.in_(clean_codes))
-        if current_user.distributor_id is not None:
-            stmt = stmt.where(DistributorProduct.distributor_id == current_user.distributor_id)
-        items = db.scalars(stmt).all()
-        for it in items:
-            db.delete(it)
-            deleted_count += 1
+        if clean_codes:
+            stmt = select(DistributorProduct).where(DistributorProduct.distributor_sku.in_(clean_codes))
+            if current_user.distributor_id is not None:
+                stmt = stmt.where(DistributorProduct.distributor_id == current_user.distributor_id)
+            items = list(db.scalars(stmt).all())
+
+    deleted_ids = [it.id for it in items]
+    affected_skus = {it.distributor_sku for it in items if it.distributor_sku}
+
+    for it in items:
+        db.delete(it)
+    db.flush()
+
+    # Chỉ gỡ npp_code trên Product đối với những mã không còn dòng DistributorProduct nào giữ lại
+    if affected_skus:
+        still_used_skus = set(
+            db.scalars(
+                select(DistributorProduct.distributor_sku).where(
+                    DistributorProduct.distributor_sku.in_(affected_skus)
+                )
+            ).all()
+        )
+        orphaned_skus = affected_skus - still_used_skus
+        if orphaned_skus:
+            prods = db.scalars(select(Product).where(Product._npp_code.in_(orphaned_skus))).all()
+            for p in prods:
+                p.npp_code = None
 
     db.commit()
     return {
         "success": True,
-        "message": f"Đã xóa thành công {deleted_count} mã sản phẩm NPP.",
-        "deleted_count": deleted_count,
+        "message": f"Đã xóa thành công {len(deleted_ids)} mã sản phẩm DMS.",
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
     }
 
 
@@ -978,13 +1114,14 @@ def download_distributor_product_template():
         "Nhà cung cấp",
         "Mã Công ty QL",
         "Tên Công ty QL",
+        "Mã NV Quản Lý",
     ]
     ws.append(headers)
 
     sample_rows = [
-        [1, "Nhà Phân Phối ABC", "01TD03-THUNG", "Sữa tươi tiệt trùng có đường 180ml (Thùng 48 hộp)", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "48/1", "Vinamilk", "CT01", "Công ty TNHH Phân Phối A"],
-        [2, "Nhà Phân Phối ABC", "07KD12", "Sữa chua ăn lựu đỏ 100g", "07KD12", "Sữa chua ăn 100g", "1/1", "Vinamilk", "", ""],
-        [3, "Nhà Phân Phối ABC", "NZ001", "Nước giải khát Nazzy 330ml (Thùng 24 lon)", "NZ001", "Nước giải khát Nazzy 330ml", "24/1", "Nazzy", "", ""],
+        [1, "Nhà Phân Phối ABC", "01TD03-THUNG", "Sữa tươi tiệt trùng có đường 180ml (Thùng 48 hộp)", "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "48/1", "Vinamilk", "CT01", "Công ty TNHH Phân Phối A", "NV001, NV002, NV003"],
+        [2, "Nhà Phân Phối ABC", "07KD12", "Sữa chua ăn lựu đỏ 100g", "07KD12", "Sữa chua ăn 100g", "1/1", "Vinamilk", "", "", "NV001"],
+        [3, "Nhà Phân Phối ABC", "NZ001", "Nước giải khát Nazzy 330ml (Thùng 24 lon)", "NZ001", "Nước giải khát Nazzy 330ml", "24/1", "Nazzy", "", "", ""],
     ]
     for row in sample_rows:
         ws.append(row)
@@ -999,6 +1136,7 @@ def download_distributor_product_template():
     ws.column_dimensions["H"].width = 16
     ws.column_dimensions["I"].width = 16
     ws.column_dimensions["J"].width = 32
+    ws.column_dimensions["K"].width = 28
 
     output = BytesIO()
     wb.save(output)
@@ -1068,6 +1206,7 @@ def upload_distributor_products(
         dist_idx = -1
         supplier_idx = -1
         company_code_idx = -1
+        manager_codes_idx = -1
 
         for idx, h in enumerate(raw_headers):
             if any(k in h for k in ["mã sp xuất hóa đơn", "mã sản phẩm xuất hóa đơn", "mã xuất hóa đơn", "mã xuất hđ", "mã sp xuất hđ", "invoice_product_code", "invoice_code"]):
@@ -1086,6 +1225,8 @@ def upload_distributor_products(
                 supplier_idx = idx
             elif any(k in h for k in ["mã công ty ql", "mã công ty", "company_code", "ma_cty", "mã cty"]):
                 company_code_idx = idx
+            elif any(k in h for k in ["mã nv quản lý", "mã nhân viên quản lý", "nv quản lý", "nhân viên quản lý", "nhân viên bán hàng", "nvbh", "sales_manager_codes", "manager_codes", "ma_nv_ql", "ma_nv"]):
+                manager_codes_idx = idx
 
         if sku_idx == -1:
             sku_idx = 2 if len(raw_headers) > 2 else 0
@@ -1177,6 +1318,12 @@ def upload_distributor_products(
                 if raw_code and raw_code in companies_by_code:
                     company_id = companies_by_code[raw_code].id
 
+            manager_codes_serialized: str | None = None
+            if manager_codes_idx != -1 and manager_codes_idx < len(row) and row[manager_codes_idx] is not None:
+                manager_codes_serialized = _serialize_sales_manager_codes(
+                    _parse_sales_manager_codes(str(row[manager_codes_idx]))
+                )
+
             upsert_key = (sku_val, company_id)
 
             if upsert_key in existing_products:
@@ -1192,6 +1339,8 @@ def upload_distributor_products(
                     item.conversion_den = conv_den
                 if dist_val:
                     item.distributor_name = dist_val
+                if manager_codes_idx != -1:
+                    item.sales_manager_codes = manager_codes_serialized
                 item.supplier = supplier_val
                 item.company_id = company_id
                 item.updated_at = now
@@ -1209,6 +1358,7 @@ def upload_distributor_products(
                     conversion_den=conv_den,
                     supplier=supplier_val,
                     unit="HOP",
+                    sales_manager_codes=manager_codes_serialized,
                     company_id=company_id,
                     status="active",
                     created_at=now,

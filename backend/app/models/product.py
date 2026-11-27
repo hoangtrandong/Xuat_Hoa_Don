@@ -268,6 +268,7 @@ class DistributorProduct(Base):
     unit: Mapped[str | None] = mapped_column(String(30), default="HOP")
     unit_price: Mapped[float] = mapped_column(Float, default=0.0)
     boxes_per_carton: Mapped[int] = mapped_column(Integer, default=1)
+    sales_manager_codes: Mapped[str | None] = mapped_column(Text, nullable=True)
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

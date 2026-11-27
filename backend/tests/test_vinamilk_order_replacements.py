@@ -852,14 +852,14 @@ def test_dms_order_default_status_and_split_merge_notes(db):
     ])
     db.flush()
 
-    # Mặc định đơn đồng bộ từ DMS có trạng thái "Đã cập nhật kho" và không có ghi chú
+    # Mặc định đơn đồng bộ từ DMS có trạng thái "Đã duyệt đơn" và không có ghi chú
     initial_res = list_local_vinamilk_orders(
         from_date=day, to_date=day, source="sync", search=None, status=None, skip=0, limit=2000, db=db
     )
     initial_by_num = {r["orderNumber"]: r for r in initial_res["rows"]}
-    assert initial_by_num["PO-SYNC-1"]["_processing_status"] == "Đã cập nhật kho"
+    assert initial_by_num["PO-SYNC-1"]["_processing_status"] == "Đã duyệt đơn"
     assert initial_by_num["PO-SYNC-1"]["_order_note"] is None
-    assert initial_by_num["NZ-SYNC-1"]["_processing_status"] == "Đã cập nhật kho"
+    assert initial_by_num["NZ-SYNC-1"]["_processing_status"] == "Đã duyệt đơn"
     assert initial_by_num["NZ-SYNC-1"]["_order_note"] is None
 
     # Tách PO-SYNC-1 thành 2 đơn

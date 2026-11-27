@@ -60,7 +60,7 @@ class DebtLedgerEntry(Base):
 
 
 class DebtTransfer(Base):
-    """Immediate transfer of debt between an employee or a store."""
+    """Transfer of debt between an employee or a store (supports 2-step POD approval)."""
     __tablename__ = "debt_transfers"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -71,12 +71,21 @@ class DebtTransfer(Base):
     to_party_id: Mapped[int] = mapped_column(Integer, index=True)
     from_employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True, index=True)
     to_store_id: Mapped[int | None] = mapped_column(ForeignKey("stores.id"), nullable=True, index=True)
+    delivery_request_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("delivery_request_orders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    pod_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="COMPLETED", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="COMPLETED", index=True)  # PENDING_APPROVAL | COMPLETED | REJECTED
     requested_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rejected_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    override_limit_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    override_limit_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     employee: Mapped["Employee"] = relationship()
@@ -100,7 +109,7 @@ class CashReceipt(Base):
 
 
 class DeliveryReturn(Base):
-    """Goods return recorded against a delivery request and employee."""
+    """Goods return recorded against a delivery request and employee (supports 2-step warehouse receive)."""
     __tablename__ = "delivery_returns"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -109,10 +118,17 @@ class DeliveryReturn(Base):
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
     order_id: Mapped[int | None] = mapped_column(ForeignKey("delivery_request_orders.id", ondelete="SET NULL"), nullable=True, index=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
-    status: Mapped[str] = mapped_column(String(20), default="APPROVED", index=True)  # PENDING | APPROVED | CANCELLED
+    status: Mapped[str] = mapped_column(String(25), default="PENDING_WAREHOUSE", index=True)  # PENDING_WAREHOUSE | WAREHOUSE_RECEIVED | APPROVED | REJECTED | CANCELLED
+    settlement_party_type: Mapped[str] = mapped_column(String(20), default="EMPLOYEE")  # EMPLOYEE | STORE
+    settlement_party_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    warehouse_received_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    warehouse_received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rejected_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     delivery_request: Mapped["DeliveryRequest"] = relationship()
@@ -140,16 +156,25 @@ class DeliveryReturnItem(Base):
     delivery_return_id: Mapped[int] = mapped_column(ForeignKey("delivery_returns.id", ondelete="CASCADE"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     quantity: Mapped[int] = mapped_column(Integer)
+    actual_received_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cartons: Mapped[int] = mapped_column(Integer, default=0)
     loose_boxes: Mapped[int] = mapped_column(Integer, default=0)
     unit_price: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
     amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     location_id: Mapped[int | None] = mapped_column(ForeignKey("warehouse_locations.id", ondelete="SET NULL"), nullable=True)
+    lot_id: Mapped[int | None] = mapped_column(ForeignKey("inventory_lots.id", ondelete="SET NULL"), nullable=True, index=True)
+    expiry_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    item_condition: Mapped[str] = mapped_column(String(20), default="GOOD", index=True)  # GOOD | DAMAGED | EXPIRED
+    damage_resolution: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)  # PENDING | CHARGE_EMPLOYEE | COMPANY_ABSORB
+    resolved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     return_record: Mapped["DeliveryReturn"] = relationship(back_populates="items")
     product: Mapped["Product"] = relationship()
     location: Mapped["WarehouseLocation | None"] = relationship()
+    lot: Mapped["InventoryLot | None"] = relationship()
 
     @property
     def sku(self) -> str | None:
@@ -162,6 +187,10 @@ class DeliveryReturnItem(Base):
     @property
     def location_code(self) -> str | None:
         return self.location.code if self.location else None
+
+    @property
+    def lot_number(self) -> str | None:
+        return self.lot.lot_number if self.lot else None
 
 
 class BankReceipt(Base):

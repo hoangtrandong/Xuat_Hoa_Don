@@ -2,7 +2,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from math import isfinite
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from decimal import Decimal
@@ -10,8 +10,8 @@ import re
 
 from app.models.inventory import (
     DeliveryAllocation, DeliveryRequest, DeliveryRequestItem, InventoryLot,
-    InventoryTransaction, Warehouse, WarehouseLocation, DeliveryRequestEmployeeSummary,
-    DeliveryRequestOrder,
+    InventoryTransaction, Vehicle, Warehouse, WarehouseLocation, DeliveryRequestEmployeeSummary,
+    DeliveryRequestOrder, DeliveryRequestOrderItem,
 )
 from app.models.finance import CashReceipt, DebtLedgerEntry, DeliveryReturn, DeliveryReturnItem, PaymentAllocation
 from app.models.employee import Employee
@@ -183,6 +183,7 @@ def _fefo_picks(
     """
     remaining = int(quantity)
     picks: list[tuple[int | None, int | None, datetime | None, int, str]] = []
+    today_start = datetime.combine(date.today(), time.min)
     stmt = (
         select(InventoryLot)
         .join(WarehouseLocation, WarehouseLocation.id == InventoryLot.location_id)
@@ -192,6 +193,7 @@ def _fefo_picks(
             InventoryLot.quantity_on_hand > 0,
             InventoryLot.quantity_on_hand > InventoryLot.locked_quantity,
             WarehouseLocation.is_active.is_(True),
+            or_(InventoryLot.expiry_date.is_(None), InventoryLot.expiry_date >= today_start),
         )
         .order_by(
             InventoryLot.expiry_date.is_(None),
@@ -336,9 +338,24 @@ def create(
         if row.planned_allocations:
             planned_allocations.setdefault(row_product_id, []).extend(row.planned_allocations)
     employee_summaries = _validated_employee_summaries(db, payload.employee_summaries)
+    resolved_vehicle_id = payload.vehicle_id
+    resolved_driver_id = payload.driver_id
+    if resolved_vehicle_id is not None:
+        vehicle = db.get(Vehicle, resolved_vehicle_id)
+        if not vehicle or not vehicle.is_active:
+            raise ValueError("Xe giao hàng không tồn tại hoặc đang ngừng hoạt động.")
+        if resolved_driver_id is None and vehicle.default_driver_id is not None:
+            resolved_driver_id = vehicle.default_driver_id
+    if resolved_driver_id is not None and not db.get(Employee, resolved_driver_id):
+        raise ValueError("Không tìm thấy tài xế chính trong danh mục nhân viên.")
+
     request = DeliveryRequest(
         code=_code(),
         warehouse_id=payload.warehouse_id,
+        vehicle_id=resolved_vehicle_id,
+        driver_id=resolved_driver_id,
+        route_code=(payload.route_code or "").strip() or None,
+        planned_weight_kg=payload.planned_weight_kg or 0,
         note=payload.note,
         created_by=created_by if created_by is not None else payload.created_by,
     )
@@ -372,8 +389,11 @@ def create(
             if emp_id is None and order_data.employee_code:
                 emp_obj = emp_lookup.get(order_data.employee_code.strip().upper())
                 emp_id = emp_obj.id if emp_obj else None
-            db.add(DeliveryRequestOrder(
+            dro = DeliveryRequestOrder(
                 delivery_request_id=request.id,
+                source_type=order_data.source_type,
+                source_order_id=order_data.source_order_id,
+                store_id=order_data.store_id,
                 order_date=order_data.order_date,
                 order_number=order_data.order_number,
                 employee_id=emp_id,
@@ -382,12 +402,33 @@ def create(
                 customer_code=order_data.customer_code,
                 customer_name=order_data.customer_name,
                 amount=order_data.amount,
+                returned_amount=order_data.returned_amount or 0,
+                net_amount=order_data.net_amount if order_data.net_amount is not None else order_data.amount,
+                delivery_status=order_data.delivery_status or "PENDING",
                 payment_status=order_data.payment_status or "UNPAID",
                 payment_method=order_data.payment_method,
                 bank_ref=order_data.bank_ref,
                 paid_at=order_data.paid_at,
+                delivered_at=order_data.delivered_at,
+                pod_image_url=order_data.pod_image_url,
+                einvoice_status=order_data.einvoice_status or "NOT_ISSUED",
                 note=order_data.note,
-            ))
+            )
+            db.add(dro)
+            if order_data.order_items:
+                db.flush()
+                for oi in order_data.order_items:
+                    db.add(DeliveryRequestOrderItem(
+                        delivery_request_order_id=dro.id,
+                        product_id=canonical_product_id(db, oi.product_id),
+                        ordered_qty=oi.ordered_qty,
+                        delivered_qty=oi.ordered_qty,
+                        returned_qty=0,
+                        unit_price=oi.unit_price,
+                        discount=oi.discount,
+                        vat_rate=oi.vat_rate,
+                        line_total=oi.line_total,
+                    ))
         if payload.orders:
             db.flush()
 
@@ -770,24 +811,31 @@ def get_settlement(db: Session, request_id: int) -> dict:
             selectinload(DeliveryReturn.order),
             selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.product),
             selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.location),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.lot),
         )
         .where(DeliveryReturn.delivery_request_id == request_id)
         .order_by(DeliveryReturn.created_at.desc())
     ).all()
 
-    returned_order_ids = {r.order_id for r in returns if r.order_id}
+    received_returns = [r for r in returns if r.status in ("WAREHOUSE_RECEIVED", "APPROVED")]
+    returned_order_ids = {r.order_id for r in received_returns if r.order_id}
+
+    def _order_net(o: DeliveryRequestOrder) -> float:
+        if o.net_amount is not None:
+            return float(o.net_amount)
+        return max(0.0, float(o.amount or 0) - float(o.returned_amount or 0))
 
     total_orders_count = len(req.orders)
     orders_total_amount = sum(float(o.amount) for o in req.orders)
     summaries_total_amount = sum(float(s.amount) for s in req.employee_summaries)
     total_amount = orders_total_amount if orders_total_amount > 0 else summaries_total_amount
 
-    total_paid_bank = sum(float(o.amount) for o in req.orders if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK"))
-    total_paid_cash = sum(float(o.amount) for o in req.orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
-    total_transferred_debt = sum(float(o.amount) for o in req.orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
+    total_paid_bank = sum(_order_net(o) for o in req.orders if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK"))
+    total_paid_cash = sum(_order_net(o) for o in req.orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
+    total_transferred_debt = sum(_order_net(o) for o in req.orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
 
-    # total_returned includes all DeliveryReturn records, plus any order marked RETURNED that doesn't have a DeliveryReturn record yet
-    total_returned = sum(float(r.amount) for r in returns) + sum(
+    # total_returned counts only warehouse-confirmed returns + legacy orders marked RETURNED
+    total_returned = sum(float(r.amount) for r in received_returns) + sum(
         float(o.amount) for o in req.orders
         if (o.payment_method == "RETURN" or o.payment_status == "RETURNED") and o.id not in returned_order_ids
     )
@@ -803,7 +851,7 @@ def get_settlement(db: Session, request_id: int) -> dict:
         alloc_sums = {row[0]: float(row[1]) for row in alloc_rows}
 
     total_unpaid = sum(
-        (max(0.0, float(o.amount) - alloc_sums.get(o.id, 0.0))
+        (max(0.0, _order_net(o) - alloc_sums.get(o.id, 0.0))
          if o.payment_status not in ("PAID", "PAID_BANK", "PAID_CASH", "RETURNED", "TRANSFERRED_DEBT")
          else 0.0)
         for o in req.orders
@@ -815,18 +863,18 @@ def get_settlement(db: Session, request_id: int) -> dict:
         emp_orders_amt = sum(float(o.amount) for o in emp_orders)
         emp_bank = sum(
             alloc_sums[o.id] if o.id in alloc_sums
-            else (float(o.amount) if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK") else 0.0)
+            else (_order_net(o) if o.payment_method == "BANK" and o.payment_status in ("PAID", "PAID_BANK") else 0.0)
             for o in emp_orders
         )
-        emp_cash = sum(float(o.amount) for o in emp_orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
-        emp_debt = sum(float(o.amount) for o in emp_orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
+        emp_cash = sum(_order_net(o) for o in emp_orders if o.payment_method == "CASH" and o.payment_status in ("PAID", "PAID_CASH"))
+        emp_debt = sum(_order_net(o) for o in emp_orders if o.payment_method == "DEBT" or o.payment_status == "TRANSFERRED_DEBT")
         
-        emp_ret = sum(float(r.amount) for r in returns if r.employee_id == s.employee_id) + sum(
+        emp_ret = sum(float(r.amount) for r in received_returns if r.employee_id == s.employee_id) + sum(
             float(o.amount) for o in emp_orders
             if (o.payment_method == "RETURN" or o.payment_status == "RETURNED") and o.id not in returned_order_ids
         )
         emp_unpaid = sum(
-            (max(0.0, float(o.amount) - alloc_sums.get(o.id, 0.0))
+            (max(0.0, _order_net(o) - alloc_sums.get(o.id, 0.0))
              if o.payment_status not in ("PAID", "PAID_BANK", "PAID_CASH", "RETURNED", "TRANSFERRED_DEBT")
              else 0.0)
             for o in emp_orders

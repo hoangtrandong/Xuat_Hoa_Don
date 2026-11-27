@@ -4,6 +4,7 @@ from app.api.v1.endpoints import (
     stores, companies, sync, product_groups, users,
     employee_debts, store_debts, cash_receipts, debt_transfers, delivery_returns,
     bank_receipts, promotions, multi_tenant_einvoice, supplier_dictionaries, invoice_products,
+    vehicles,
 )
 
 api_router = APIRouter()
@@ -26,6 +27,7 @@ api_router.include_router(cash_receipts.router)
 api_router.include_router(bank_receipts.router)
 api_router.include_router(debt_transfers.router)
 api_router.include_router(delivery_returns.router)
+api_router.include_router(vehicles.router)
 api_router.include_router(sync.router, prefix="/sync", tags=["Sync"])
 api_router.include_router(product_groups.router)
 api_router.include_router(users.router)

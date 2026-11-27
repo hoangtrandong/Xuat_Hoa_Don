@@ -213,6 +213,27 @@ class InventoryTransferItem(Base):
     lot: Mapped["InventoryLot"] = relationship()
 
 
+class Vehicle(Base):
+    """Master list of delivery vehicles (trucks, cold vans, motorbikes)."""
+    __tablename__ = "vehicles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(30), unique=True, index=True)
+    plate_number: Mapped[str] = mapped_column(String(30), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    vehicle_type: Mapped[str] = mapped_column(String(20), default="STANDARD")  # STANDARD | COLD | MOTORBIKE
+    max_weight_kg: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
+    max_volume_m3: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
+    default_driver_id: Mapped[int | None] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    default_driver: Mapped["Employee | None"] = relationship()
+
+
 class DeliveryRequest(Base):
     """Warehouse delivery request; stock is consumed only on completion."""
     __tablename__ = "delivery_requests"
@@ -220,6 +241,14 @@ class DeliveryRequest(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(30), unique=True, index=True)
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"))
+    vehicle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    driver_id: Mapped[int | None] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    route_code: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    planned_weight_kg: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     status: Mapped[str] = mapped_column(String(15), default="DRAFT", index=True)
     note: Mapped[str | None] = mapped_column(String(255))
     created_by: Mapped[str | None] = mapped_column(String(120))
@@ -228,10 +257,13 @@ class DeliveryRequest(Base):
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime)
     received_at: Mapped[datetime | None] = mapped_column(DateTime)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     warehouse: Mapped["Warehouse"] = relationship()
+    vehicle: Mapped["Vehicle | None"] = relationship()
+    driver: Mapped["Employee | None"] = relationship()
     items: Mapped[List["DeliveryRequestItem"]] = relationship(
         back_populates="request", cascade="all, delete-orphan"
     )
@@ -241,6 +273,22 @@ class DeliveryRequest(Base):
     orders: Mapped[List["DeliveryRequestOrder"]] = relationship(
         back_populates="request", cascade="all, delete-orphan"
     )
+
+    @property
+    def vehicle_code(self) -> str | None:
+        return self.vehicle.code if self.vehicle else None
+
+    @property
+    def vehicle_plate_number(self) -> str | None:
+        return self.vehicle.plate_number if self.vehicle else None
+
+    @property
+    def driver_code(self) -> str | None:
+        return self.driver.code if self.driver else None
+
+    @property
+    def driver_name(self) -> str | None:
+        return self.driver.name if self.driver else None
 
 
 class DeliveryRequestItem(Base):
@@ -345,6 +393,11 @@ class DeliveryRequestOrder(Base):
     delivery_request_id: Mapped[int] = mapped_column(
         ForeignKey("delivery_requests.id", ondelete="CASCADE"), index=True
     )
+    source_type: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)  # SALES_ORDER | VINAMILK | KIOTVIET | EXCEL
+    source_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    store_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stores.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     order_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     order_number: Mapped[str] = mapped_column(String(120), index=True)
     employee_id: Mapped[int | None] = mapped_column(
@@ -355,12 +408,47 @@ class DeliveryRequestOrder(Base):
     customer_code: Mapped[str | None] = mapped_column(String(120), index=True)
     customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    returned_amount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    net_amount: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    delivery_status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)  # PENDING | DELIVERED | PARTIAL_DELIVERED | RETURNED_ALL
     payment_status: Mapped[str] = mapped_column(String(30), default="UNPAID", index=True)  # UNPAID | PAID_BANK | PAID_CASH | TRANSFERRED_DEBT | RETURNED
     payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)  # BANK | CASH | DEBT | RETURN
     bank_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    pod_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    einvoice_status: Mapped[str] = mapped_column(String(30), default="NOT_ISSUED", index=True)  # NOT_ISSUED | ISSUED | ADJUSTMENT_REQUIRED | ADJUSTED
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     request: Mapped["DeliveryRequest"] = relationship(back_populates="orders")
-    employee: Mapped["Employee | None"] = relationship()
+    employee: Mapped["Employee | None"] = relationship()
+    order_items: Mapped[List["DeliveryRequestOrderItem"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan"
+    )
+
+
+class DeliveryRequestOrderItem(Base):
+    """Per-SKU ordered/delivered/returned breakdown for an order inside a delivery trip."""
+    __tablename__ = "delivery_request_order_items"
+    __table_args__ = (
+        CheckConstraint("ordered_qty > 0", name="ck_droi_ordered_qty_pos"),
+        CheckConstraint("delivered_qty >= 0", name="ck_droi_delivered_qty_nonneg"),
+        CheckConstraint("returned_qty >= 0", name="ck_droi_returned_qty_nonneg"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    delivery_request_order_id: Mapped[int] = mapped_column(
+        ForeignKey("delivery_request_orders.id", ondelete="CASCADE"), index=True
+    )
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    ordered_qty: Mapped[int] = mapped_column(Integer)
+    delivered_qty: Mapped[int] = mapped_column(Integer, default=0)
+    returned_qty: Mapped[int] = mapped_column(Integer, default=0)
+    unit_price: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    discount: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    vat_rate: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
+    line_total: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+
+    order: Mapped["DeliveryRequestOrder"] = relationship(back_populates="order_items")
+    product: Mapped["Product"] = relationship()

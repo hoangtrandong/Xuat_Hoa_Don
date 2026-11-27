@@ -5,7 +5,27 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 from app.schemas.debt_ledger import DeliveryReturnOut
 
 
+class DeliveryRequestOrderItemCreate(BaseModel):
+    product_id: int
+    ordered_qty: int = Field(gt=0)
+    unit_price: float = 0.0
+    discount: float = 0.0
+    vat_rate: float = 0.0
+    line_total: float = 0.0
+
+
+class DeliveryRequestOrderItemOut(DeliveryRequestOrderItemCreate):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    delivery_request_order_id: int
+    delivered_qty: int = 0
+    returned_qty: int = 0
+
+
 class DeliveryRequestOrderBase(BaseModel):
+    source_type: Optional[str] = None
+    source_order_id: Optional[int] = None
+    store_id: Optional[int] = None
     order_date: Optional[date] = None
     order_number: str
     employee_id: Optional[int] = None
@@ -14,15 +34,21 @@ class DeliveryRequestOrderBase(BaseModel):
     customer_code: Optional[str] = None
     customer_name: Optional[str] = None
     amount: float = Field(default=0.0, ge=0)
+    returned_amount: float = Field(default=0.0, ge=0)
+    net_amount: Optional[float] = None
+    delivery_status: str = "PENDING"
     payment_status: str = "UNPAID"
     payment_method: Optional[str] = None
     bank_ref: Optional[str] = None
     paid_at: Optional[datetime] = None
+    delivered_at: Optional[datetime] = None
+    pod_image_url: Optional[str] = None
+    einvoice_status: str = "NOT_ISSUED"
     note: Optional[str] = None
 
 
 class DeliveryRequestOrderCreate(DeliveryRequestOrderBase):
-    pass
+    order_items: Optional[List[DeliveryRequestOrderItemCreate]] = None
 
 
 class DeliveryRequestOrder(DeliveryRequestOrderBase):
@@ -30,6 +56,7 @@ class DeliveryRequestOrder(DeliveryRequestOrderBase):
     id: int
     delivery_request_id: int
     created_at: datetime
+    order_items: List[DeliveryRequestOrderItemOut] = Field(default_factory=list)
 
 
 class SettlementOrderPayRequest(BaseModel):
@@ -233,6 +260,10 @@ class DeliveryRequestEmployeeSummary(DeliveryRequestEmployeeSummaryBase):
 
 class DeliveryRequestCreate(BaseModel):
     warehouse_id: int
+    vehicle_id: Optional[int] = None
+    driver_id: Optional[int] = None
+    route_code: Optional[str] = None
+    planned_weight_kg: float = Field(default=0.0, ge=0)
     items: List[DeliveryRequestItemCreate] = Field(min_length=1)
     employee_summaries: Optional[List[DeliveryRequestEmployeeSummaryCreate]] = None
     orders: Optional[List[DeliveryRequestOrderCreate]] = None
@@ -280,6 +311,11 @@ class OrderDispatchAllocation(BaseModel):
 
 class DeliveryRequestFromOrdersCreate(BaseModel):
     warehouse_id: int
+    vehicle_id: Optional[int] = None
+    driver_id: Optional[int] = None
+    route_code: Optional[str] = None
+    planned_weight_kg: float = Field(default=0.0, ge=0)
+    strict_stock_check: bool = True
     allocations: List[OrderDispatchAllocation] = Field(min_length=1)
     note: Optional[str] = None
 
@@ -419,6 +455,14 @@ class DeliveryRequestList(BaseModel):
     id: int
     code: str
     warehouse_id: int
+    vehicle_id: Optional[int] = None
+    vehicle_code: Optional[str] = None
+    vehicle_plate_number: Optional[str] = None
+    driver_id: Optional[int] = None
+    driver_code: Optional[str] = None
+    driver_name: Optional[str] = None
+    route_code: Optional[str] = None
+    planned_weight_kg: float = 0.0
     status: str
     note: Optional[str] = None
     created_by: Optional[str] = None
@@ -454,6 +498,14 @@ class DeliveryRequest(BaseModel):
     id: int
     code: str
     warehouse_id: int
+    vehicle_id: Optional[int] = None
+    vehicle_code: Optional[str] = None
+    vehicle_plate_number: Optional[str] = None
+    driver_id: Optional[int] = None
+    driver_code: Optional[str] = None
+    driver_name: Optional[str] = None
+    route_code: Optional[str] = None
+    planned_weight_kg: float = 0.0
     status: str
     note: Optional[str] = None
     created_by: Optional[str] = None

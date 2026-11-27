@@ -6,6 +6,7 @@ import { useSyncExternalStore } from "react";
 import {
   ClipboardList,
   ShoppingCart,
+  Truck,
   UserCircle2,
   Users,
   Wifi,
@@ -19,6 +20,7 @@ import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { href: "/m", label: "Bấm đơn", icon: ShoppingCart, matchExact: true },
+  { href: "/m/deliveries", label: "Giao hàng", icon: Truck, matchExact: false },
   { href: "/m/customers", label: "Khách hàng", icon: Users, matchExact: false },
   { href: "/m/orders", label: "Đơn của tôi", icon: ClipboardList, matchExact: false },
   { href: "/m/account", label: "Tài khoản", icon: UserCircle2, matchExact: false },
@@ -115,7 +117,7 @@ export default function MobileShell({ children }: { children: React.ReactNode })
         aria-label="Điều hướng chính"
         className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/95 backdrop-blur-md dark:border-[#2a3547] dark:bg-[#101725]/95 pb-[env(safe-area-inset-bottom)]"
       >
-        <div className="mx-auto grid max-w-2xl grid-cols-4">
+        <div className="mx-auto grid max-w-2xl grid-cols-5">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active = item.matchExact

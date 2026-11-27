@@ -95,6 +95,18 @@ class DebtTransferCreate(BaseModel):
     to_party_id: int = Field(gt=0)
     amount: float = Field(gt=0, description="Amount must be positive")
     reason: Optional[str] = None
+    delivery_request_order_id: Optional[int] = None
+    pod_image_url: Optional[str] = None
+    require_approval: bool = False
+    override_limit_reason: Optional[str] = None
+
+
+class DebtTransferApproveRequest(BaseModel):
+    override_limit_reason: Optional[str] = None
+
+
+class DebtTransferRejectRequest(BaseModel):
+    reject_reason: str = Field(min_length=1, max_length=255)
 
 
 class DebtTransferOut(BaseModel):
@@ -105,8 +117,19 @@ class DebtTransferOut(BaseModel):
     from_party_id: int
     to_party_type: str
     to_party_id: int
+    delivery_request_order_id: Optional[int] = None
+    pod_image_url: Optional[str] = None
     amount: float
     reason: Optional[str] = None
+    status: str = "COMPLETED"
+    requested_by: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
+    override_limit_by: Optional[str] = None
+    override_limit_reason: Optional[str] = None
     created_at: datetime
 
 
@@ -119,6 +142,9 @@ class DeliveryReturnItemBase(BaseModel):
     amount: float = 0.0
     reason: Optional[str] = None
     location_id: Optional[int] = None
+    lot_id: Optional[int] = None
+    expiry_date: Optional[datetime] = None
+    item_condition: str = Field(default="GOOD", description="GOOD | DAMAGED | EXPIRED")
 
 
 class DeliveryReturnItemCreate(DeliveryReturnItemBase):
@@ -129,9 +155,15 @@ class DeliveryReturnItemOut(DeliveryReturnItemBase):
     model_config = ConfigDict(from_attributes=True)
     id: int
     delivery_return_id: int
+    actual_received_qty: Optional[int] = None
     sku: Optional[str] = None
     product_name: Optional[str] = None
     location_code: Optional[str] = None
+    lot_number: Optional[str] = None
+    damage_resolution: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    resolution_note: Optional[str] = None
 
 
 class DeliveryReturnCreate(BaseModel):
@@ -142,6 +174,29 @@ class DeliveryReturnCreate(BaseModel):
     note: Optional[str] = None
     items: Optional[List[DeliveryReturnItemCreate]] = None
     restore_stock: bool = True
+    auto_receive: bool = True
+    settlement_party_type: str = Field(default="EMPLOYEE", description="EMPLOYEE or STORE")
+    settlement_party_id: Optional[int] = None
+
+
+class DeliveryReturnReceiveItem(BaseModel):
+    item_id: int
+    actual_received_qty: int = Field(ge=0)
+    item_condition: str = Field(default="GOOD", description="GOOD | DAMAGED | EXPIRED")
+    lot_id: Optional[int] = None
+    location_id: Optional[int] = None
+    expiry_date: Optional[datetime] = None
+
+
+class DeliveryReturnReceiveRequest(BaseModel):
+    items: Optional[List[DeliveryReturnReceiveItem]] = None
+    restore_stock: bool = True
+    note: Optional[str] = None
+
+
+class DeliveryReturnDamageResolveRequest(BaseModel):
+    resolution: str = Field(description="CHARGE_EMPLOYEE | COMPANY_ABSORB")
+    note: Optional[str] = None
 
 
 class DeliveryReturnOut(BaseModel):
@@ -156,8 +211,15 @@ class DeliveryReturnOut(BaseModel):
     order_number: Optional[str] = None
     amount: float
     status: str
+    settlement_party_type: str = "EMPLOYEE"
+    settlement_party_id: Optional[int] = None
     note: Optional[str] = None
     created_by: Optional[str] = None
     approved_by: Optional[str] = None
+    warehouse_received_by: Optional[str] = None
+    warehouse_received_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
     created_at: datetime
     items: List[DeliveryReturnItemOut] = Field(default_factory=list)

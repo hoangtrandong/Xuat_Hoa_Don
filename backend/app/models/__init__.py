@@ -6,10 +6,11 @@ from app.models.product import (
     DistributorProduct, InvoiceProduct,
 )
 from app.models.inventory import (
-    Warehouse, WarehouseLocation, InventoryLot, InventoryTransaction, DeliveryRequest, DeliveryRequestItem,
-    DeliveryAllocation, InventoryTransfer, InventoryTransferItem, SupplierGoodsDiscrepancy,
-    SupplierGoodsDiscrepancySource, SupplierGoodsDiscrepancyOffset, DeliveryRequestEmployeeSummary,
-    DeliveryRequestOrder,
+    Warehouse, WarehouseLocation, InventoryLot, InventoryTransaction, Vehicle,
+    DeliveryRequest, DeliveryRequestItem, DeliveryAllocation, InventoryTransfer,
+    InventoryTransferItem, SupplierGoodsDiscrepancy, SupplierGoodsDiscrepancySource,
+    SupplierGoodsDiscrepancyOffset, DeliveryRequestEmployeeSummary,
+    DeliveryRequestOrder, DeliveryRequestOrderItem,
 )
 from app.models.sales import SalesOrder, SalesOrderItem
 from app.models.promotion import Promotion, PromotionRule, PromotionItem
@@ -46,10 +47,11 @@ __all__ = [
     "Product", "ProductCategory", "ProductUnit", "PriceList", "PriceListItem",
     "ProductGroup", "ProductGroupItem", "ProductCompany", "ProductGroupCompany",
     "DistributorProduct", "InvoiceProduct", "SupplierDictionary",
-    "Warehouse", "WarehouseLocation", "InventoryLot", "InventoryTransaction", "DeliveryRequest", "DeliveryRequestItem",
-    "DeliveryAllocation", "InventoryTransfer", "InventoryTransferItem", "SupplierGoodsDiscrepancy",
-    "SupplierGoodsDiscrepancySource", "SupplierGoodsDiscrepancyOffset", "DeliveryRequestEmployeeSummary",
-    "DeliveryRequestOrder",
+    "Warehouse", "WarehouseLocation", "InventoryLot", "InventoryTransaction", "Vehicle",
+    "DeliveryRequest", "DeliveryRequestItem", "DeliveryAllocation", "InventoryTransfer",
+    "InventoryTransferItem", "SupplierGoodsDiscrepancy", "SupplierGoodsDiscrepancySource",
+    "SupplierGoodsDiscrepancyOffset", "DeliveryRequestEmployeeSummary",
+    "DeliveryRequestOrder", "DeliveryRequestOrderItem",
     "SalesOrder", "SalesOrderItem",
     "Promotion", "PromotionRule", "PromotionItem",
     "Employee", "EmployeeDebtLimitChange", "SalesTerritory",

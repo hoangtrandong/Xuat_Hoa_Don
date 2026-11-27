@@ -7,7 +7,11 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.employee import Employee
 from app.models.customer import Store, Customer
 from app.models.finance import DebtLedgerEntry, DebtTransfer, CashReceipt, DeliveryReturn, DeliveryReturnItem
-from app.models.inventory import DeliveryRequest, DeliveryRequestEmployeeSummary, DeliveryRequestOrder, InventoryTransaction, WarehouseLocation
+from app.models.inventory import (
+    DeliveryAllocation, DeliveryRequest, DeliveryRequestEmployeeSummary,
+    DeliveryRequestItem, DeliveryRequestOrder, DeliveryRequestOrderItem,
+    InventoryLot, InventoryTransaction, WarehouseLocation,
+)
 from app.models.product import Product
 from app.crud.npp import canonical_product_id
 
@@ -289,6 +293,45 @@ def list_cash_receipts(db: Session, limit: int = 50) -> list[dict]:
     return result
 
 
+def _check_recipient_credit_limit(
+    db: Session,
+    to_type: str,
+    recipient,
+    transfer_amount: Decimal,
+    is_admin: bool = False,
+    override_limit_reason: str | None = None,
+) -> tuple[bool, float | None]:
+    """Validate recipient debt/credit limit. Returns (overridden, limit_value)."""
+    if to_type == "STORE":
+        limit_val = getattr(recipient, "credit_limit", None)
+        if limit_val is None or float(limit_val) <= 0:
+            return False, None
+        current = get_store_balance(db, recipient.id)
+        projected = Decimal(str(current)) + transfer_amount
+        if projected > Decimal(str(limit_val)) + Decimal("0.01"):
+            if not is_admin or not (override_limit_reason or "").strip():
+                raise ValueError(
+                    f"Cửa hàng {recipient.code} vượt hạn mức công nợ "
+                    f"({float(projected):,.0f}đ > {float(limit_val):,.0f}đ). Cần Admin duyệt vượt hạn mức kèm lý do."
+                )
+            return True, float(limit_val)
+        return False, float(limit_val)
+
+    limit_val = getattr(recipient, "debt_limit", None)
+    if limit_val is None or float(limit_val) <= 0:
+        return False, None
+    current = get_employee_balance(db, recipient.id)
+    projected = Decimal(str(current)) + transfer_amount
+    if projected > Decimal(str(limit_val)) + Decimal("0.01"):
+        if not is_admin or not (override_limit_reason or "").strip():
+            raise ValueError(
+                f"Nhân viên {recipient.code} vượt hạn mức công nợ "
+                f"({float(projected):,.0f}đ > {float(limit_val):,.0f}đ). Cần Admin duyệt vượt hạn mức kèm lý do."
+            )
+        return True, float(limit_val)
+    return False, float(limit_val)
+
+
 def create_debt_transfer(
     db: Session,
     from_party_type: str,
@@ -298,6 +341,11 @@ def create_debt_transfer(
     amount: float,
     reason: str | None = None,
     created_by: str | None = None,
+    delivery_request_order_id: int | None = None,
+    pod_image_url: str | None = None,
+    require_approval: bool = False,
+    is_admin: bool = False,
+    override_limit_reason: str | None = None,
 ) -> DebtTransfer:
     if amount <= 0:
         raise ValueError("Số tiền chuyển phải lớn hơn 0.")
@@ -307,6 +355,10 @@ def create_debt_transfer(
         raise ValueError("Đối tượng chuyển và nhận chỉ có thể là nhân viên hoặc cửa hàng.")
     if (from_type, from_party_id) == (to_type, to_party_id):
         raise ValueError("Đối tượng chuyển và nhận công nợ phải khác nhau.")
+
+    if require_approval and from_type == "EMPLOYEE" and to_type == "STORE":
+        if not (pod_image_url or "").strip():
+            raise ValueError("Chuyển công nợ từ nhân viên sang cửa hàng bắt buộc đính kèm ảnh ký nhận (POD).")
 
     def lock_party(party_type: str, party_id: int, action: str):
         model = Employee if party_type == "EMPLOYEE" else Store
@@ -330,6 +382,31 @@ def create_debt_transfer(
         )
 
     now = datetime.utcnow()
+    if require_approval:
+        transfer = DebtTransfer(
+            code=_code("TRF"),
+            from_party_type=from_type,
+            from_party_id=from_party_id,
+            to_party_type=to_type,
+            to_party_id=to_party_id,
+            from_employee_id=from_party_id if from_type == "EMPLOYEE" else None,
+            to_store_id=to_party_id if to_type == "STORE" else None,
+            delivery_request_order_id=delivery_request_order_id,
+            pod_image_url=(pod_image_url or "").strip() or None,
+            amount=transfer_amount,
+            reason=reason,
+            status="PENDING_APPROVAL",
+            requested_by=created_by,
+            created_at=now,
+        )
+        db.add(transfer)
+        db.commit()
+        db.refresh(transfer)
+        return transfer
+
+    overridden, _ = _check_recipient_credit_limit(
+        db, to_type, recipient, transfer_amount, is_admin=is_admin, override_limit_reason=override_limit_reason
+    )
     transfer = DebtTransfer(
         code=_code("TRF"),
         from_party_type=from_type,
@@ -338,10 +415,16 @@ def create_debt_transfer(
         to_party_id=to_party_id,
         from_employee_id=from_party_id if from_type == "EMPLOYEE" else None,
         to_store_id=to_party_id if to_type == "STORE" else None,
+        delivery_request_order_id=delivery_request_order_id,
+        pod_image_url=(pod_image_url or "").strip() or None,
         amount=transfer_amount,
         reason=reason,
         status="COMPLETED",
         requested_by=created_by,
+        approved_by=created_by,
+        approved_at=now,
+        override_limit_by=created_by if overridden else None,
+        override_limit_reason=(override_limit_reason or "").strip() if overridden else None,
         created_at=now,
     )
     db.add(transfer)
@@ -377,17 +460,293 @@ def create_debt_transfer(
             created_at=now,
         ),
     ])
+    if delivery_request_order_id:
+        order = db.get(DeliveryRequestOrder, delivery_request_order_id)
+        if order:
+            order.payment_status = "TRANSFERRED_DEBT"
+            order.payment_method = "DEBT"
+            order.paid_at = now
     db.commit()
     db.refresh(transfer)
     return transfer
 
 
-def list_debt_transfers(db: Session) -> list[DebtTransfer]:
-    return db.scalars(
-        select(DebtTransfer)
-        .where(DebtTransfer.status == "COMPLETED")
-        .order_by(DebtTransfer.created_at.desc())
-    ).all()
+def approve_debt_transfer(
+    db: Session,
+    transfer_id: int,
+    approved_by: str,
+    is_admin: bool = False,
+    override_limit_reason: str | None = None,
+) -> DebtTransfer:
+    transfer = db.scalar(select(DebtTransfer).where(DebtTransfer.id == transfer_id).with_for_update())
+    if not transfer:
+        raise ValueError("Không tìm thấy yêu cầu chuyển công nợ.")
+    if transfer.status != "PENDING_APPROVAL":
+        raise ValueError(f"Yêu cầu chuyển công nợ đang ở trạng thái {transfer.status}, không thể duyệt.")
+
+    from_model = Employee if transfer.from_party_type == "EMPLOYEE" else Store
+    to_model = Employee if transfer.to_party_type == "EMPLOYEE" else Store
+    source = db.scalar(select(from_model).where(from_model.id == transfer.from_party_id).with_for_update())
+    recipient = db.scalar(select(to_model).where(to_model.id == transfer.to_party_id).with_for_update())
+    if not source or not recipient:
+        raise ValueError("Không tìm thấy đối tượng chuyển hoặc nhận công nợ.")
+
+    source_balance = (
+        get_employee_balance(db, transfer.from_party_id)
+        if transfer.from_party_type == "EMPLOYEE"
+        else get_store_balance(db, transfer.from_party_id)
+    )
+    transfer_amount = Decimal(str(transfer.amount))
+    if transfer_amount > Decimal(str(max(0.0, source_balance))) + Decimal("0.01"):
+        raise ValueError(
+            f"Số tiền chuyển vượt công nợ hiện tại của bên chuyển ({max(0.0, source_balance):,.0f}đ)."
+        )
+
+    overridden, _ = _check_recipient_credit_limit(
+        db, transfer.to_party_type, recipient, transfer_amount,
+        is_admin=is_admin, override_limit_reason=override_limit_reason,
+    )
+
+    now = datetime.utcnow()
+    transfer.status = "COMPLETED"
+    transfer.approved_by = approved_by
+    transfer.approved_at = now
+    if overridden:
+        transfer.override_limit_by = approved_by
+        transfer.override_limit_reason = (override_limit_reason or "").strip()
+
+    db.add_all([
+        DebtLedgerEntry(
+            party_type=transfer.from_party_type,
+            party_id=transfer.from_party_id,
+            entry_type="TRANSFER_OUT",
+            amount=-transfer_amount,
+            source_type="DEBT_TRANSFER",
+            source_id=transfer.id,
+            source_code=transfer.code,
+            document_date=now,
+            note=f"Duyệt chuyển công nợ sang {transfer.to_party_type} {recipient.code}: {transfer.reason or ''}".strip(),
+            created_by=approved_by,
+            created_at=now,
+        ),
+        DebtLedgerEntry(
+            party_type=transfer.to_party_type,
+            party_id=transfer.to_party_id,
+            entry_type="TRANSFER_IN",
+            amount=transfer_amount,
+            source_type="DEBT_TRANSFER",
+            source_id=transfer.id,
+            source_code=transfer.code,
+            document_date=now,
+            note=f"Duyệt nhận công nợ từ {transfer.from_party_type} {source.code}: {transfer.reason or ''}".strip(),
+            created_by=approved_by,
+            created_at=now,
+        ),
+    ])
+
+    if transfer.delivery_request_order_id:
+        order = db.get(DeliveryRequestOrder, transfer.delivery_request_order_id)
+        if order:
+            order.payment_status = "TRANSFERRED_DEBT"
+            order.payment_method = "DEBT"
+            order.paid_at = now
+            if transfer.pod_image_url and not order.pod_image_url:
+                order.pod_image_url = transfer.pod_image_url
+
+    db.commit()
+    db.refresh(transfer)
+    return transfer
+
+
+def reject_debt_transfer(
+    db: Session,
+    transfer_id: int,
+    rejected_by: str,
+    reject_reason: str,
+) -> DebtTransfer:
+    transfer = db.scalar(select(DebtTransfer).where(DebtTransfer.id == transfer_id).with_for_update())
+    if not transfer:
+        raise ValueError("Không tìm thấy yêu cầu chuyển công nợ.")
+    if transfer.status != "PENDING_APPROVAL":
+        raise ValueError(f"Yêu cầu chuyển công nợ đang ở trạng thái {transfer.status}, không thể từ chối.")
+    transfer.status = "REJECTED"
+    transfer.rejected_by = rejected_by
+    transfer.rejected_at = datetime.utcnow()
+    transfer.reject_reason = reject_reason.strip()
+    db.commit()
+    db.refresh(transfer)
+    return transfer
+
+
+def list_debt_transfers(db: Session, status: str | None = None) -> list[DebtTransfer]:
+    stmt = select(DebtTransfer).order_by(DebtTransfer.created_at.desc())
+    if status:
+        stmt = stmt.where(DebtTransfer.status == status.upper())
+    else:
+        stmt = stmt.where(DebtTransfer.status == "COMPLETED")
+    return db.scalars(stmt).all()
+
+
+def _resolve_original_allocation_lot(
+    db: Session,
+    delivery_request_id: int,
+    product_id: int,
+) -> tuple[int | None, int | None, datetime | None]:
+    """Trace original FEFO DeliveryAllocation for a product on a delivery request."""
+    alloc = db.scalar(
+        select(DeliveryAllocation)
+        .join(DeliveryRequestItem, DeliveryRequestItem.id == DeliveryAllocation.item_id)
+        .where(
+            DeliveryRequestItem.request_id == delivery_request_id,
+            DeliveryRequestItem.product_id == product_id,
+            DeliveryAllocation.lot_id.is_not(None),
+        )
+        .order_by(DeliveryAllocation.allocation_sequence.asc())
+    )
+    if alloc:
+        return alloc.lot_id, alloc.location_id, alloc.expiry_date
+    return None, None, None
+
+
+def _restore_item_to_lot(
+    db: Session,
+    warehouse_id: int,
+    product_id: int,
+    qty: int,
+    unit_cost: float,
+    item_condition: str,
+    lot_id: int | None,
+    location_id: int | None,
+    expiry_date: datetime | None,
+    ret_code: str,
+    dr_code: str,
+    created_by: str | None,
+    now: datetime,
+) -> tuple[int | None, int | None, datetime | None]:
+    """Restore returned goods into InventoryLot (preserving FEFO). Damaged/expired items are locked."""
+    target_lot = None
+    if lot_id is not None:
+        target_lot = db.scalar(
+            select(InventoryLot).where(InventoryLot.id == lot_id).with_for_update()
+        )
+        if target_lot and (
+            target_lot.warehouse_id != warehouse_id
+            or target_lot.product_id != product_id
+            or (location_id is not None and target_lot.location_id != location_id)
+        ):
+            target_lot = None
+
+    if target_lot is None and location_id is not None:
+        target_lot = db.scalar(
+            select(InventoryLot)
+            .where(
+                InventoryLot.warehouse_id == warehouse_id,
+                InventoryLot.product_id == product_id,
+                InventoryLot.location_id == location_id,
+                InventoryLot.expiry_date == expiry_date,
+            )
+            .with_for_update()
+        )
+
+    if target_lot is None and location_id is not None:
+        target_lot = InventoryLot(
+            warehouse_id=warehouse_id,
+            location_id=location_id,
+            product_id=product_id,
+            expiry_date=expiry_date,
+            quantity_on_hand=0,
+            locked_quantity=0,
+            unit_cost=unit_cost or None,
+        )
+        db.add(target_lot)
+        db.flush()
+
+    final_lot_id = None
+    final_location_id = location_id
+    final_expiry = expiry_date
+    if target_lot is not None:
+        target_lot.quantity_on_hand = int(target_lot.quantity_on_hand or 0) + qty
+        if item_condition in ("DAMAGED", "EXPIRED"):
+            target_lot.locked_quantity = int(target_lot.locked_quantity or 0) + qty
+        final_lot_id = target_lot.id
+        final_location_id = target_lot.location_id
+        final_expiry = target_lot.expiry_date
+
+    condition_tag = "" if item_condition == "GOOD" else f" [HÀNG {item_condition} - CÁCH LY]"
+    txn_code = f"RET-TXN-{now:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}"
+    db.add(InventoryTransaction(
+        code=txn_code,
+        type="IN",
+        warehouse_id=warehouse_id,
+        product_id=product_id,
+        quantity=qty,
+        unit_cost=unit_cost,
+        lot_id=final_lot_id,
+        location_id=final_location_id,
+        expiry_date=final_expiry,
+        ref_type="DELIVERY_RETURN",
+        ref_code=ret_code,
+        document_date=now,
+        note=f"Nhập kho hàng trả về từ chuyến xe {dr_code} (Phiếu {ret_code}){condition_tag}",
+        created_by=created_by,
+        created_at=now,
+    ))
+    return final_lot_id, final_location_id, final_expiry
+
+
+def _apply_return_settlement(
+    db: Session,
+    ret: DeliveryReturn,
+    dr: DeliveryRequest,
+    emp: Employee,
+    target_order: DeliveryRequestOrder | None,
+    good_credit_amount: float,
+    total_returned_amount: float,
+    note: str | None,
+    acted_by: str | None,
+    now: datetime,
+) -> None:
+    """Update order delivery/payment/einvoice status and credit debt ledger for GOOD returned value."""
+    if target_order:
+        orig_amt = float(target_order.amount or 0)
+        prev_ret = float(target_order.returned_amount or 0)
+        new_ret = prev_ret + total_returned_amount
+        net_amt = max(0.0, orig_amt - new_ret)
+        target_order.returned_amount = new_ret
+        target_order.net_amount = net_amt
+
+        if net_amt <= 0.01:
+            target_order.delivery_status = "RETURNED_ALL"
+            target_order.payment_method = "RETURN"
+            target_order.payment_status = "RETURNED"
+            target_order.paid_at = now
+        else:
+            target_order.delivery_status = "PARTIAL_DELIVERED"
+
+        if target_order.einvoice_status == "ISSUED":
+            target_order.einvoice_status = "ADJUSTMENT_REQUIRED"
+
+        if note:
+            target_order.note = (target_order.note or "") + (
+                f" [Trả hàng: {note}]" if target_order.note else f"Trả hàng: {note}"
+            )
+
+    if good_credit_amount > 0:
+        party_type = (ret.settlement_party_type or "EMPLOYEE").upper()
+        party_id = ret.settlement_party_id or ret.employee_id
+        db.add(DebtLedgerEntry(
+            party_type=party_type,
+            party_id=party_id,
+            entry_type="RETURN",
+            amount=-good_credit_amount,
+            source_type="DELIVERY_RETURN",
+            source_id=ret.id,
+            source_code=ret.code,
+            document_date=now,
+            note=note or f"Trả hàng phiếu {ret.code} (gốc {dr.code}) - NV {emp.code}",
+            created_by=acted_by,
+            created_at=now,
+        ))
 
 
 def create_delivery_return(
@@ -401,6 +760,9 @@ def create_delivery_return(
     note: str | None = None,
     created_by: str | None = None,
     approved_by: str | None = None,
+    auto_receive: bool = True,
+    settlement_party_type: str = "EMPLOYEE",
+    settlement_party_id: int | None = None,
 ) -> DeliveryReturn:
     dr = db.get(DeliveryRequest, delivery_request_id)
     if not dr:
@@ -408,6 +770,13 @@ def create_delivery_return(
     emp = db.get(Employee, employee_id)
     if not emp:
         raise ValueError("Không tìm thấy nhân viên.")
+
+    party_type = (settlement_party_type or "EMPLOYEE").upper()
+    if party_type not in ("EMPLOYEE", "STORE"):
+        raise ValueError("Đối tượng giảm trừ công nợ phải là EMPLOYEE hoặc STORE.")
+    resolved_party_id = settlement_party_id or (employee_id if party_type == "EMPLOYEE" else None)
+    if resolved_party_id is None:
+        raise ValueError("Thiếu mã cửa hàng nhận giảm trừ công nợ.")
 
     target_order = None
     if order_id:
@@ -418,7 +787,15 @@ def create_delivery_return(
     now = datetime.utcnow()
     total_amount = float(amount or 0.0)
 
-    # Calculate item amounts and populate return items if provided
+    order_items_by_prod: dict[int, DeliveryRequestOrderItem] = {}
+    if target_order:
+        for oi in db.scalars(
+            select(DeliveryRequestOrderItem).where(
+                DeliveryRequestOrderItem.delivery_request_order_id == target_order.id
+            )
+        ).all():
+            order_items_by_prod[oi.product_id] = oi
+
     prepared_items = []
     if items:
         calculated_items_total = 0.0
@@ -431,6 +808,11 @@ def create_delivery_return(
             item_amt = float((it.amount if hasattr(it, "amount") else it.get("amount", 0.0)) or 0.0)
             reason = it.reason if hasattr(it, "reason") else it.get("reason")
             loc_id = it.location_id if hasattr(it, "location_id") else it.get("location_id")
+            lot_id = it.lot_id if hasattr(it, "lot_id") else it.get("lot_id")
+            exp_date = it.expiry_date if hasattr(it, "expiry_date") else it.get("expiry_date")
+            cond = ((it.item_condition if hasattr(it, "item_condition") else it.get("item_condition")) or "GOOD").upper()
+            if cond not in ("GOOD", "DAMAGED", "EXPIRED"):
+                raise ValueError(f"Tình trạng hàng trả không hợp lệ: {cond}.")
 
             if qty <= 0:
                 raise ValueError("Số lượng hàng trả về phải lớn hơn 0.")
@@ -438,6 +820,25 @@ def create_delivery_return(
             if not prod:
                 raise ValueError(f"Không tìm thấy sản phẩm {p_id}.")
             p_id = canonical_product_id(db, p_id)
+
+            if p_id in order_items_by_prod:
+                oi = order_items_by_prod[p_id]
+                max_returnable = oi.ordered_qty - int(oi.returned_qty or 0)
+                if qty > max_returnable:
+                    raise ValueError(
+                        f"Sản phẩm {prod.npp_code} trả về ({qty}) vượt quá số lượng có thể trả của đơn ({max_returnable})."
+                    )
+
+            if lot_id is None:
+                orig_lot_id, orig_loc_id, orig_exp = _resolve_original_allocation_lot(db, delivery_request_id, p_id)
+                if exp_date is None:
+                    exp_date = orig_exp
+                if cond == "GOOD" and (loc_id is None or loc_id == orig_loc_id):
+                    lot_id = orig_lot_id
+                    if loc_id is None:
+                        loc_id = orig_loc_id
+                elif loc_id is None:
+                    loc_id = orig_loc_id
 
             if item_amt <= 0 and unit_price > 0:
                 item_amt = qty * unit_price
@@ -452,6 +853,9 @@ def create_delivery_return(
                 "amount": item_amt,
                 "reason": reason,
                 "location_id": loc_id,
+                "lot_id": lot_id,
+                "expiry_date": exp_date,
+                "item_condition": cond,
             })
 
         if total_amount <= 0:
@@ -469,81 +873,296 @@ def create_delivery_return(
         employee_id=employee_id,
         order_id=order_id,
         amount=total_amount,
-        status="APPROVED",
+        status="APPROVED" if auto_receive else "PENDING_WAREHOUSE",
+        settlement_party_type=party_type,
+        settlement_party_id=resolved_party_id,
         note=note,
         created_by=created_by,
-        approved_by=approved_by or created_by,
+        approved_by=(approved_by or created_by) if auto_receive else None,
+        warehouse_received_by=(approved_by or created_by) if auto_receive else None,
+        warehouse_received_at=now if auto_receive else None,
         created_at=now,
     )
     db.add(ret)
     db.flush()
 
-    # Create DeliveryReturnItems and restore physical inventory if requested
+    good_credit_amount = 0.0
     for pit in prepared_items:
+        cond = pit["item_condition"]
         ret_item = DeliveryReturnItem(
             delivery_return_id=ret.id,
             product_id=pit["product_id"],
             quantity=pit["quantity"],
+            actual_received_qty=pit["quantity"] if auto_receive else None,
             cartons=pit["cartons"],
             loose_boxes=pit["loose_boxes"],
             unit_price=pit["unit_price"],
             amount=pit["amount"],
             reason=pit["reason"],
             location_id=pit["location_id"],
+            lot_id=pit["lot_id"],
+            expiry_date=pit["expiry_date"],
+            item_condition=cond,
+            damage_resolution=("PENDING" if (auto_receive and cond != "GOOD") else None),
         )
         db.add(ret_item)
 
-        if restore_stock:
-            # Physical inventory is restored back into warehouse
-            txn_code = f"RET-TXN-{now:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}"
-            db.add(InventoryTransaction(
-                code=txn_code,
-                type="IN",
-                warehouse_id=dr.warehouse_id,
-                product_id=pit["product_id"],
-                quantity=pit["quantity"],
-                unit_cost=pit["unit_price"],
-                location_id=pit["location_id"],
-                ref_type="DELIVERY_RETURN",
-                ref_code=ret.code,
-                document_date=now,
-                note=f"Nhập kho hàng trả về từ chuyến xe {dr.code} (Phiếu {ret.code})",
-                created_by=created_by,
-                created_at=now,
-            ))
+        if auto_receive:
+            if pit["product_id"] in order_items_by_prod:
+                oi = order_items_by_prod[pit["product_id"]]
+                oi.returned_qty = int(oi.returned_qty or 0) + pit["quantity"]
+                oi.delivered_qty = max(0, oi.ordered_qty - oi.returned_qty)
 
-    # If linked to an order, mark the order as returned
-    if target_order:
-        target_order.payment_method = "RETURN"
-        target_order.payment_status = "RETURNED"
-        target_order.paid_at = now
-        if note:
-            target_order.note = (target_order.note or "") + (f" [Trả hàng: {note}]" if target_order.note else f"Trả hàng: {note}")
+            if restore_stock:
+                f_lot, f_loc, f_exp = _restore_item_to_lot(
+                    db=db,
+                    warehouse_id=dr.warehouse_id,
+                    product_id=pit["product_id"],
+                    qty=pit["quantity"],
+                    unit_cost=pit["unit_price"],
+                    item_condition=cond,
+                    lot_id=pit["lot_id"],
+                    location_id=pit["location_id"],
+                    expiry_date=pit["expiry_date"],
+                    ret_code=ret.code,
+                    dr_code=dr.code,
+                    created_by=created_by,
+                    now=now,
+                )
+                ret_item.lot_id = f_lot
+                ret_item.location_id = f_loc
+                ret_item.expiry_date = f_exp
 
-    # Credit debt ledger: negative amount reduces employee debt
-    db.add(DebtLedgerEntry(
-        party_type="EMPLOYEE",
-        party_id=employee_id,
-        entry_type="RETURN",
-        amount=-total_amount,
-        source_type="DELIVERY_RETURN",
-        source_id=ret.id,
-        source_code=ret.code,
-        document_date=now,
-        note=note or f"Trả hàng phiếu {ret.code} (gốc {dr.code}) - NV {emp.code}",
-        created_by=created_by,
-        created_at=now,
-    ))
+            if cond == "GOOD":
+                good_credit_amount += pit["amount"]
+
+    if auto_receive:
+        if not prepared_items:
+            good_credit_amount = total_amount
+        _apply_return_settlement(
+            db=db,
+            ret=ret,
+            dr=dr,
+            emp=emp,
+            target_order=target_order,
+            good_credit_amount=good_credit_amount,
+            total_returned_amount=total_amount,
+            note=note,
+            acted_by=created_by,
+            now=now,
+        )
 
     db.commit()
     db.refresh(ret)
     return ret
 
 
+def receive_delivery_return(
+    db: Session,
+    return_id: int,
+    received_by: str,
+    items_payload: list | None = None,
+    restore_stock: bool = True,
+    note: str | None = None,
+) -> DeliveryReturn:
+    """Step 2 of 2-step Return: Warehouse verifies physical goods, restores InventoryLot (FEFO), credits GOOD debt."""
+    ret = db.scalar(
+        select(DeliveryReturn)
+        .options(selectinload(DeliveryReturn.items))
+        .where(DeliveryReturn.id == return_id)
+        .with_for_update()
+    )
+    if not ret:
+        raise ValueError("Không tìm thấy phiếu trả hàng.")
+    if ret.status != "PENDING_WAREHOUSE":
+        raise ValueError(f"Phiếu trả hàng đang ở trạng thái {ret.status}, không thể xác nhận nhập kho.")
+
+    dr = db.get(DeliveryRequest, ret.delivery_request_id)
+    emp = db.get(Employee, ret.employee_id)
+    target_order = db.get(DeliveryRequestOrder, ret.order_id) if ret.order_id else None
+    now = datetime.utcnow()
+
+    override_map = {}
+    for it in (items_payload or []):
+        item_id = it.item_id if hasattr(it, "item_id") else it.get("item_id")
+        override_map[item_id] = it
+
+    order_items_by_prod: dict[int, DeliveryRequestOrderItem] = {}
+    if target_order:
+        for oi in db.scalars(
+            select(DeliveryRequestOrderItem).where(
+                DeliveryRequestOrderItem.delivery_request_order_id == target_order.id
+            )
+        ).all():
+            order_items_by_prod[oi.product_id] = oi
+
+    good_credit_amount = 0.0
+    total_actual_amount = 0.0
+
+    for item in ret.items:
+        ov = override_map.get(item.id)
+        actual_qty = item.quantity
+        cond = (item.item_condition or "GOOD").upper()
+        lot_id = item.lot_id
+        loc_id = item.location_id
+        exp_date = item.expiry_date
+
+        if ov is not None:
+            actual_qty = ov.actual_received_qty if hasattr(ov, "actual_received_qty") else ov.get("actual_received_qty", item.quantity)
+            cond = ((ov.item_condition if hasattr(ov, "item_condition") else ov.get("item_condition")) or cond).upper()
+            ov_lot = ov.lot_id if hasattr(ov, "lot_id") else ov.get("lot_id")
+            ov_loc = ov.location_id if hasattr(ov, "location_id") else ov.get("location_id")
+            ov_exp = ov.expiry_date if hasattr(ov, "expiry_date") else ov.get("expiry_date")
+            if ov_lot is not None:
+                lot_id = ov_lot
+            if ov_loc is not None:
+                loc_id = ov_loc
+            if ov_exp is not None:
+                exp_date = ov_exp
+
+        if cond not in ("GOOD", "DAMAGED", "EXPIRED"):
+            raise ValueError(f"Tình trạng hàng nhận không hợp lệ: {cond}.")
+        if actual_qty < 0 or actual_qty > item.quantity:
+            raise ValueError(f"Số lượng thực nhận ({actual_qty}) phải nằm trong khoảng 0..{item.quantity}.")
+
+        item.actual_received_qty = actual_qty
+        item.item_condition = cond
+
+        unit_price = float(item.unit_price or 0)
+        if unit_price <= 0 and item.quantity > 0:
+            unit_price = float(item.amount or 0) / item.quantity
+        actual_amt = round(actual_qty * unit_price, 2)
+        total_actual_amount += actual_amt
+
+        if actual_qty > 0:
+            if item.product_id in order_items_by_prod:
+                oi = order_items_by_prod[item.product_id]
+                oi.returned_qty = int(oi.returned_qty or 0) + actual_qty
+                oi.delivered_qty = max(0, oi.ordered_qty - oi.returned_qty)
+
+            if restore_stock:
+                f_lot, f_loc, f_exp = _restore_item_to_lot(
+                    db=db,
+                    warehouse_id=dr.warehouse_id,
+                    product_id=item.product_id,
+                    qty=actual_qty,
+                    unit_cost=unit_price,
+                    item_condition=cond,
+                    lot_id=lot_id,
+                    location_id=loc_id,
+                    expiry_date=exp_date,
+                    ret_code=ret.code,
+                    dr_code=dr.code,
+                    created_by=received_by,
+                    now=now,
+                )
+                item.lot_id = f_lot
+                item.location_id = f_loc
+                item.expiry_date = f_exp
+
+            if cond == "GOOD":
+                good_credit_amount += actual_amt
+            else:
+                item.damage_resolution = "PENDING"
+
+    if not ret.items:
+        total_actual_amount = float(ret.amount or 0)
+        good_credit_amount = total_actual_amount
+
+    ret.status = "WAREHOUSE_RECEIVED"
+    ret.warehouse_received_by = received_by
+    ret.warehouse_received_at = now
+    ret.approved_by = received_by
+    if note:
+        ret.note = f"{ret.note} | Kho nhận: {note}" if ret.note else f"Kho nhận: {note}"
+
+    _apply_return_settlement(
+        db=db,
+        ret=ret,
+        dr=dr,
+        emp=emp,
+        target_order=target_order,
+        good_credit_amount=good_credit_amount,
+        total_returned_amount=total_actual_amount,
+        note=note or ret.note,
+        acted_by=received_by,
+        now=now,
+    )
+
+    db.commit()
+    db.refresh(ret)
+    return ret
+
+
+def resolve_damaged_return_item(
+    db: Session,
+    return_id: int,
+    item_id: int,
+    resolution: str,
+    resolved_by: str,
+    note: str | None = None,
+) -> DeliveryReturnItem:
+    """Admin decision for DAMAGED/EXPIRED returned goods: CHARGE_EMPLOYEE or COMPANY_ABSORB."""
+    res = resolution.strip().upper()
+    if res not in ("CHARGE_EMPLOYEE", "COMPANY_ABSORB"):
+        raise ValueError("Phương án xử lý hàng hỏng chỉ chấp nhận CHARGE_EMPLOYEE hoặc COMPANY_ABSORB.")
+
+    ret = db.get(DeliveryReturn, return_id)
+    if not ret or ret.status not in ("WAREHOUSE_RECEIVED", "APPROVED"):
+        raise ValueError("Phiếu trả hàng chưa được thủ kho xác nhận nhập kho.")
+
+    item = db.scalar(
+        select(DeliveryReturnItem)
+        .where(
+            DeliveryReturnItem.id == item_id,
+            DeliveryReturnItem.delivery_return_id == return_id,
+        )
+        .with_for_update()
+    )
+    if not item:
+        raise ValueError("Không tìm thấy dòng hàng trả tương ứng.")
+    if item.item_condition == "GOOD":
+        raise ValueError("Dòng hàng ở tình trạng GOOD không thuộc diện xử lý hàng hỏng.")
+    if item.damage_resolution in ("CHARGE_EMPLOYEE", "COMPANY_ABSORB"):
+        raise ValueError(f"Dòng hàng hỏng này đã được xử lý ({item.damage_resolution}).")
+
+    now = datetime.utcnow()
+    item.damage_resolution = res
+    item.resolved_by = resolved_by
+    item.resolved_at = now
+    item.resolution_note = note
+
+    if res == "COMPANY_ABSORB":
+        qty = item.actual_received_qty if item.actual_received_qty is not None else item.quantity
+        unit_price = float(item.unit_price or 0)
+        if unit_price <= 0 and item.quantity > 0:
+            unit_price = float(item.amount or 0) / item.quantity
+        absorb_amt = round(qty * unit_price, 2)
+        if absorb_amt > 0:
+            db.add(DebtLedgerEntry(
+                party_type="EMPLOYEE",
+                party_id=ret.employee_id,
+                entry_type="RETURN",
+                amount=-absorb_amt,
+                source_type="DELIVERY_RETURN_DAMAGE",
+                source_id=item.id,
+                source_code=ret.code,
+                document_date=now,
+                note=note or f"Miễn trừ công nợ hàng hỏng ({ret.code})",
+                created_by=resolved_by,
+                created_at=now,
+            ))
+
+    db.commit()
+    db.refresh(item)
+    return item
+
+
 def list_delivery_returns(
     db: Session,
     delivery_request_id: int | None = None,
     employee_id: int | None = None,
+    status: str | None = None,
     limit: int = 50,
 ) -> list[DeliveryReturn]:
     stmt = (
@@ -553,6 +1172,7 @@ def list_delivery_returns(
             selectinload(DeliveryReturn.order),
             selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.product),
             selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.location),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.lot),
         )
         .order_by(DeliveryReturn.created_at.desc())
     )
@@ -560,4 +1180,6 @@ def list_delivery_returns(
         stmt = stmt.where(DeliveryReturn.delivery_request_id == delivery_request_id)
     if employee_id:
         stmt = stmt.where(DeliveryReturn.employee_id == employee_id)
+    if status:
+        stmt = stmt.where(DeliveryReturn.status == status.upper())
     return db.scalars(stmt.limit(limit)).all()

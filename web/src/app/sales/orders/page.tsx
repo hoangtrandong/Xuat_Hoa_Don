@@ -413,11 +413,14 @@ function normalizeRemoteOrder(order: RemoteOrder): RemoteOrder {
 
 function addProcessingStatus(order: RemoteOrder): RemoteOrder {
   const rawProcStatus = displayRemoteValue(order["_processing_status"]).trim();
-  const procStatus = rawProcStatus.toUpperCase().startsWith("NCC:") ? "" : rawProcStatus;
+  const procStatus =
+    rawProcStatus.toUpperCase().startsWith("NCC:") || rawProcStatus === "Đã cập nhật kho"
+      ? ""
+      : rawProcStatus;
   const orderType = displayRemoteValue(order["_order_type"]).trim();
-  const processingStatus = procStatus || "Đã cập nhật kho";
+  const processingStatus = procStatus || "Đã duyệt đơn";
   const standaloneStatuses = new Set([
-    "Đã cập nhật kho",
+    "Đã duyệt đơn",
     "Đơn Tách",
     "Đơn Tách (Nợ NVBH)",
     "Đơn Tách (Nợ NVGH)",
@@ -2659,7 +2662,7 @@ return Array.from(map.values());
                 </span>
                 {order["_warehouse_updated"] === true && (
                   <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                    Đã cập nhật kho
+                    Đã duyệt đơn
                   </span>
                 )}
               </div>
@@ -2686,9 +2689,10 @@ return Array.from(map.values());
               </span>
             );
           }
-          if (text === "Đã cập nhật kho" || text === "Đã trả") {
+          if (text === "Đã duyệt đơn" || text === "Đã cập nhật kho" || text === "Đã trả") {
+            const label = text === "Đã cập nhật kho" ? "Đã duyệt đơn" : text;
             const tone = "border border-emerald-200 bg-emerald-50 text-emerald-700";
-            return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tone}`}>{text}</span>;
+            return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tone}`}>{label}</span>;
           }
           if (!text) return <span className="text-gray-400">—</span>;
           return <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700">{text}</span>;
@@ -2788,7 +2792,8 @@ return Array.from(map.values());
       sortable: true,
       width: "11rem",
       render: (value, order) => {
-        const text = displayRemoteValue(value || order["Trạng thái xử lý"] || order["_processing_status"]).trim() || "Đã cập nhật kho";
+        const rawText = displayRemoteValue(value || order["Trạng thái xử lý"] || order["_processing_status"]).trim();
+        const text = !rawText || rawText === "Đã cập nhật kho" ? "Đã duyệt đơn" : rawText;
         if (text === "Chờ KT duyệt tách") {
           return (
             <button
@@ -2840,10 +2845,11 @@ return Array.from(map.values());
             </span>
           );
         }
-        if (text === "Đã cập nhật kho" || text === "Đã trả") {
+        if (text === "Đã duyệt đơn" || text === "Đã cập nhật kho" || text === "Đã trả") {
+          const label = text === "Đã cập nhật kho" ? "Đã duyệt đơn" : text;
           return (
             <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-              {text}
+              {label}
             </span>
           );
         }

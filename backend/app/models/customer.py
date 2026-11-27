@@ -161,6 +161,7 @@ class Store(Base):
     district: Mapped[str | None] = mapped_column(String(80))
     city: Mapped[str | None] = mapped_column(String(80))
     route: Mapped[str | None] = mapped_column(String(120))
+    credit_limit: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(15), default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

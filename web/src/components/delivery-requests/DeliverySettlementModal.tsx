@@ -27,6 +27,10 @@ type DeliveryOrder = {
   customer_code: string | null;
   customer_name: string | null;
   amount: number;
+  returned_amount?: number;
+  net_amount?: number | null;
+  delivery_status?: string;
+  einvoice_status?: string;
   payment_status: string;
   payment_method: string | null;
   bank_ref: string | null;
@@ -54,15 +58,21 @@ type DeliveryReturnItem = {
   id?: number;
   product_id: number;
   quantity: number;
+  actual_received_qty?: number | null;
   cartons: number;
   loose_boxes: number;
   unit_price: number;
   amount: number;
   reason?: string | null;
   location_id?: number | null;
+  lot_id?: number | null;
+  expiry_date?: string | null;
+  item_condition?: string;
+  damage_resolution?: string | null;
   sku?: string | null;
   product_name?: string | null;
   location_code?: string | null;
+  lot_number?: string | null;
 };
 
 type DeliveryReturn = {
@@ -145,6 +155,8 @@ export default function DeliverySettlementModal({
   const [returnAmount, setReturnAmount] = useState<number>(0);
   const [returnNote, setReturnNote] = useState("");
   const [returnRestoreStock, setReturnRestoreStock] = useState(true);
+  const [returnAutoReceive, setReturnAutoReceive] = useState(false);
+  const [processingReturnId, setProcessingReturnId] = useState<number | null>(null);
   const [returnItems, setReturnItems] = useState<
     Array<{
       product_id: number;
@@ -154,6 +166,7 @@ export default function DeliverySettlementModal({
       unit_price: number;
       amount: number;
       reason: string;
+      item_condition: "GOOD" | "DAMAGED" | "EXPIRED";
       boxes_per_carton: number;
     }>
   >([]);
@@ -222,6 +235,7 @@ export default function DeliverySettlementModal({
         amount: finalAmount,
         note: returnNote || undefined,
         restore_stock: returnRestoreStock,
+        auto_receive: returnAutoReceive,
         ...(returnItems.length > 0
           ? {
               items: returnItems.map((it) => ({
@@ -232,6 +246,7 @@ export default function DeliverySettlementModal({
                 unit_price: it.unit_price,
                 amount: it.amount,
                 reason: it.reason || undefined,
+                item_condition: it.item_condition,
               })),
             }
           : {}),
@@ -250,7 +265,9 @@ export default function DeliverySettlementModal({
 
       const createdReturn: DeliveryReturn = await res.json();
       setMessage(
-        `Đã lập phiếu trả hàng ${createdReturn.code} (${finalAmount.toLocaleString("vi-VN")} đ). Đã khôi phục tồn kho và khấu trừ công nợ NVGH.`
+        returnAutoReceive
+          ? `Đã lập & nhập kho phiếu trả hàng ${createdReturn.code} (${finalAmount.toLocaleString("vi-VN")} đ).`
+          : `Đã tạo phiếu trả hàng ${createdReturn.code} ở trạng thái CHỜ THỦ KHO NHẬN (chưa trừ công nợ cho đến khi kho kiểm đếm thực nhận).`
       );
       setShowReturnModal(false);
       setReturnEmpId("");
@@ -264,6 +281,65 @@ export default function DeliverySettlementModal({
       setError(e instanceof Error ? e.message : "Lỗi khi lập phiếu trả hàng.");
     } finally {
       setSubmittingReturn(false);
+    }
+  }
+
+  async function handleWarehouseReceiveReturn(ret: DeliveryReturn) {
+    setProcessingReturnId(ret.id);
+    setError("");
+    setMessage("");
+    try {
+      const res = await apiFetch(`${API_URL}/delivery-returns/${ret.id}/receive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ restore_stock: true }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail ?? "Không thể xác nhận nhập kho hàng trả.");
+      }
+      setMessage(`Thủ kho đã xác nhận nhập kho phiếu ${ret.code} (cộng đúng Lô FEFO & tự động giảm công nợ phần hàng GOOD).`);
+      await loadSettlement();
+      onSettled?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Lỗi khi xác nhận nhập kho.");
+    } finally {
+      setProcessingReturnId(null);
+    }
+  }
+
+  async function handleResolveDamagedItem(
+    retId: number,
+    itemId: number,
+    resolution: "CHARGE_EMPLOYEE" | "COMPANY_ABSORB"
+  ) {
+    setProcessingReturnId(retId);
+    setError("");
+    setMessage("");
+    try {
+      const res = await apiFetch(`${API_URL}/delivery-returns/${retId}/items/${itemId}/resolve-damage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resolution,
+          note: resolution === "CHARGE_EMPLOYEE" ? "Admin duyệt NVGH đền bù" : "Admin duyệt miễn trừ (Công ty chịu)",
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail ?? "Không thể xử lý hàng hỏng (chỉ Admin có quyền).");
+      }
+      setMessage(
+        resolution === "COMPANY_ABSORB"
+          ? "Admin đã duyệt miễn trừ hàng hỏng & tự động giảm công nợ cho NVGH."
+          : "Admin đã duyệt giữ công nợ đền bù hàng hỏng cho NVGH."
+      );
+      await loadSettlement();
+      onSettled?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Lỗi khi xử lý hàng hỏng.");
+    } finally {
+      setProcessingReturnId(null);
     }
   }
 
@@ -554,9 +630,9 @@ export default function DeliverySettlementModal({
                           </td>
                           <td className="px-4 py-3">
                             {ret.items && ret.items.length > 0 ? (
-                              <div className="space-y-1">
+                              <div className="space-y-1.5">
                                 {ret.items.map((it, idx) => (
-                                  <div key={idx} className="flex items-center gap-2">
+                                  <div key={idx} className="flex flex-wrap items-center gap-1.5">
                                     <span className="font-semibold text-gray-800">{it.sku || "SP"}</span>
                                     <span className="text-gray-600">
                                       {it.quantity} hộp
@@ -565,8 +641,50 @@ export default function DeliverySettlementModal({
                                           it.loose_boxes > 0 ? `${it.loose_boxes} lẻ` : ""
                                         })`}
                                     </span>
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                        (it.item_condition || "GOOD") === "GOOD"
+                                          ? "bg-emerald-50 text-emerald-700"
+                                          : "bg-red-100 text-red-700"
+                                      }`}
+                                    >
+                                      {it.item_condition || "GOOD"}
+                                    </span>
+                                    {it.lot_number && (
+                                      <span className="text-[10px] font-mono text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded">
+                                        Lô {it.lot_number}
+                                      </span>
+                                    )}
                                     {it.reason && (
                                       <span className="text-gray-400 italic">[{it.reason}]</span>
+                                    )}
+                                    {it.id &&
+                                      (it.item_condition === "DAMAGED" || it.item_condition === "EXPIRED") &&
+                                      it.damage_resolution === "PENDING" &&
+                                      ret.status !== "PENDING_WAREHOUSE" && (
+                                        <span className="inline-flex items-center gap-1 ml-1">
+                                          <button
+                                            type="button"
+                                            disabled={processingReturnId === ret.id}
+                                            onClick={() => void handleResolveDamagedItem(ret.id, it.id!, "CHARGE_EMPLOYEE")}
+                                            className="px-1.5 py-0.5 rounded bg-amber-600 text-white text-[10px] font-semibold hover:bg-amber-700"
+                                          >
+                                            NV đền bù
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={processingReturnId === ret.id}
+                                            onClick={() => void handleResolveDamagedItem(ret.id, it.id!, "COMPANY_ABSORB")}
+                                            className="px-1.5 py-0.5 rounded bg-sky-600 text-white text-[10px] font-semibold hover:bg-sky-700"
+                                          >
+                                            Cty chịu
+                                          </button>
+                                        </span>
+                                      )}
+                                    {it.damage_resolution && it.damage_resolution !== "PENDING" && (
+                                      <span className="text-[10px] font-semibold text-slate-600">
+                                        ({it.damage_resolution === "COMPANY_ABSORB" ? "Cty chịu" : "NV đền bù"})
+                                      </span>
                                     )}
                                   </div>
                                 ))}
@@ -579,9 +697,26 @@ export default function DeliverySettlementModal({
                             {ret.amount.toLocaleString("vi-VN")} đ
                           </td>
                           <td className="px-4 py-3 text-center">
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-800">
-                              <CheckCircle2 size={12} /> Đã hoàn kho & Cấn nợ
-                            </span>
+                            {ret.status === "PENDING_WAREHOUSE" ? (
+                              <div className="flex flex-col items-center gap-1">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800">
+                                  <Clock size={11} /> Chờ Thủ kho nhận
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={processingReturnId === ret.id}
+                                  onClick={() => void handleWarehouseReceiveReturn(ret)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white text-[10px] font-semibold disabled:opacity-50"
+                                >
+                                  <PackageCheck size={11} />
+                                  {processingReturnId === ret.id ? "Đang nhập..." : "Xác nhận nhập kho FEFO"}
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-800">
+                                <CheckCircle2 size={12} /> Đã hoàn kho &amp; Cấn nợ
+                              </span>
+                            )}
                           </td>
                         </tr>
                       ))
@@ -704,6 +839,7 @@ export default function DeliverySettlementModal({
                         unit_price: 0,
                         amount: 0,
                         reason: "Khách trả hàng",
+                        item_condition: "GOOD",
                         boxes_per_carton: firstProd.boxes_per_carton || 1,
                       },
                     ]);
@@ -817,7 +953,20 @@ export default function DeliverySettlementModal({
                           />
                         </div>
                       </div>
-                      <div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <select
+                          value={item.item_condition}
+                          onChange={(e) => {
+                            const updated = [...returnItems];
+                            updated[idx].item_condition = e.target.value as "GOOD" | "DAMAGED" | "EXPIRED";
+                            setReturnItems(updated);
+                          }}
+                          className="px-2 py-1 border border-gray-200 rounded text-[11px] font-semibold"
+                        >
+                          <option value="GOOD">GOOD (Bán lại FEFO)</option>
+                          <option value="DAMAGED">DAMAGED (Hỏng vận chuyển)</option>
+                          <option value="EXPIRED">EXPIRED (Hết hạn)</option>
+                        </select>
                         <input
                           type="text"
                           placeholder="Lý do trả lại (bao bì lỗi, khách dư, giao trễ...)"
@@ -827,7 +976,7 @@ export default function DeliverySettlementModal({
                             updated[idx].reason = e.target.value;
                             setReturnItems(updated);
                           }}
-                          className="w-full px-2 py-1 border border-gray-200 rounded text-[11px]"
+                          className="col-span-2 w-full px-2 py-1 border border-gray-200 rounded text-[11px]"
                         />
                       </div>
                     </div>
@@ -858,7 +1007,7 @@ export default function DeliverySettlementModal({
                 />
               </div>
 
-              <div className="flex items-center pt-5">
+              <div className="flex flex-col justify-center gap-1.5 pt-4">
                 <label className="flex items-center gap-2 text-xs font-medium text-gray-700 cursor-pointer">
                   <input
                     type="checkbox"
@@ -866,7 +1015,16 @@ export default function DeliverySettlementModal({
                     onChange={(e) => setReturnRestoreStock(e.target.checked)}
                     className="w-4 h-4 text-rose-600 rounded border-gray-300 focus:ring-rose-500"
                   />
-                  <span>Khôi phục tồn kho (Tự động nhập kho vật lý)</span>
+                  <span>Khôi phục tồn kho (đúng Lô FEFO)</span>
+                </label>
+                <label className="flex items-center gap-2 text-xs font-medium text-amber-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!returnAutoReceive}
+                    onChange={(e) => setReturnAutoReceive(!e.target.checked)}
+                    className="w-4 h-4 text-amber-600 rounded border-gray-300 focus:ring-amber-500"
+                  />
+                  <span>Quy trình 2 bước (Chờ Thủ kho kiểm đếm rồi mới giảm nợ)</span>
                 </label>
               </div>
             </div>

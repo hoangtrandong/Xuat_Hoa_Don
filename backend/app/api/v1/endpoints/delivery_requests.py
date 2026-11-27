@@ -1232,6 +1232,8 @@ def create_request_from_orders(
     emp_amounts: dict[int, float] = defaultdict(float)
     order_inputs: list[DeliveryRequestOrderCreate] = []
 
+    from app.schemas.delivery_request import DeliveryRequestOrderItemCreate
+
     for alloc in payload.allocations:
         so = orders_by_id[alloc.sales_order_id]
         if so.status == "CANCELLED":
@@ -1240,17 +1242,30 @@ def create_request_from_orders(
             raise HTTPException(status_code=400, detail=f"Đơn hàng {so.code} chưa có sản phẩm nào.")
         emp = emps_by_id[alloc.employee_id]
         emp_code = emp.code.strip().upper()
+        so_order_items: list[DeliveryRequestOrderItemCreate] = []
         for it in so.items:
             qty = int(it.quantity or 0)
             if qty <= 0:
                 continue
             product_totals[it.product_id] += qty
             product_emp_qty[it.product_id][emp_code] += qty
+            so_order_items.append(
+                DeliveryRequestOrderItemCreate(
+                    product_id=it.product_id,
+                    ordered_qty=qty,
+                    unit_price=float(it.price or 0),
+                    discount=float(it.discount or 0),
+                    line_total=float(it.line_total or 0),
+                )
+            )
 
         emp_order_counts[emp.id] += 1
         emp_amounts[emp.id] += float(so.total or 0)
         order_inputs.append(
             DeliveryRequestOrderCreate(
+                source_type="SALES_ORDER",
+                source_order_id=so.id,
+                store_id=so.customer.store_id if so.customer else None,
                 order_date=so.created_at.date() if so.created_at else None,
                 order_number=so.code,
                 employee_id=emp.id,
@@ -1260,11 +1275,41 @@ def create_request_from_orders(
                 customer_name=so.customer.name if so.customer else None,
                 amount=float(so.total or 0),
                 note=so.note,
+                order_items=so_order_items,
             )
         )
 
     if not product_totals:
         raise HTTPException(status_code=400, detail="Các đơn hàng đã chọn không có sản phẩm hợp lệ (SL > 0).")
+
+    # Hard Block D1: chặn cứng nếu tổng số lượng vượt tồn kho khả dụng (FEFO còn hạn sử dụng)
+    if payload.strict_stock_check:
+        from app.crud.delivery_request import _fefo_picks, _legacy_available
+        shortage_details: list[str] = []
+        canonical_totals: dict[int, int] = defaultdict(int)
+        for prod_id, total_qty in product_totals.items():
+            try:
+                canon_id = canonical_product_id(db, prod_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            canonical_totals[canon_id] += total_qty
+
+        for canon_id, req_qty in canonical_totals.items():
+            picks, remaining = _fefo_picks(db, payload.warehouse_id, canon_id, req_qty)
+            if remaining > 0:
+                legacy_free = _legacy_available(db, payload.warehouse_id, canon_id)
+                short = max(0, remaining - max(0, legacy_free))
+                if short > 0:
+                    prod_obj = db.get(Product, canon_id)
+                    sku_label = (prod_obj.npp_code or prod_obj.sku) if prod_obj else f"ID:{canon_id}"
+                    avail_qty = req_qty - short
+                    shortage_details.append(f"{sku_label} (cần {req_qty}, khả dụng {avail_qty}, thiếu {short})")
+        if shortage_details:
+            raise HTTPException(
+                status_code=400,
+                detail="Không đủ 100% tồn kho khả dụng (FEFO còn hạn) để lập chuyến giao: "
+                + "; ".join(shortage_details[:10]),
+            )
 
     item_inputs: list[DeliveryRequestItemCreate] = []
     for prod_id, total_qty in product_totals.items():
@@ -1295,17 +1340,26 @@ def create_request_from_orders(
     )
     req_payload = DeliveryRequestCreate(
         warehouse_id=payload.warehouse_id,
+        vehicle_id=payload.vehicle_id,
+        driver_id=payload.driver_id,
+        route_code=payload.route_code,
+        planned_weight_kg=payload.planned_weight_kg,
         items=item_inputs,
         employee_summaries=summary_inputs,
         orders=order_inputs,
         note=batch_note,
     )
     try:
-        return crud.create(
+        created = crud.create(
             db,
             req_payload,
             created_by=getattr(current_user, "username", None),
         )
+        for so in orders:
+            if so.status == "PENDING":
+                so.status = "APPROVED"
+        db.commit()
+        return created
     except ValueError as exc:
         return _error(db, exc)
 

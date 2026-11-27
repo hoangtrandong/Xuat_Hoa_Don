@@ -2281,7 +2281,7 @@ def list_local_vinamilk_orders(
             d_status = "Không áp dụng"
 
         raw_proc = (getattr(row, "processing_status", None) or "").strip()
-        clean_raw_proc = "" if raw_proc.upper().startswith("NCC:") else raw_proc
+        clean_raw_proc = "" if (raw_proc.upper().startswith("NCC:") or raw_proc == "Đã cập nhật kho") else raw_proc
         if is_merged_source:
             proc_status = "Đã Hủy"
         elif pending_req and not getattr(row, "is_synthetic", False):
@@ -2293,7 +2293,7 @@ def list_local_vinamilk_orders(
         elif clean_raw_proc:
             proc_status = clean_raw_proc
         else:
-            proc_status = "Đã cập nhật kho"
+            proc_status = "Đã duyệt đơn"
 
         prod_sku = (row.product_code or "").strip().upper()
         product = products_by_sku.get(prod_sku)
@@ -2536,11 +2536,11 @@ def list_grouped_vinamilk_orders(
 
     def status_for(row: dict[str, Any]) -> str:
         raw_status = field(row, ("_processing_status",))
-        if raw_status.upper().startswith("NCC:"):
+        if raw_status.upper().startswith("NCC:") or raw_status == "Đã cập nhật kho":
             raw_status = ""
-        status = raw_status or "Đã cập nhật kho"
+        status = raw_status or "Đã duyệt đơn"
         if status in (
-            "Đã cập nhật kho",
+            "Đã duyệt đơn",
             "Đơn Tách",
             "Đơn Tách (Nợ NVBH)",
             "Đơn Tách (Nợ NVGH)",

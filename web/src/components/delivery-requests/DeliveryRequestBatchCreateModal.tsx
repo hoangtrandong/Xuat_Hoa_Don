@@ -12,6 +12,7 @@ import {
   Users,
   Layers,
   RefreshCw,
+  Plus,
 } from "lucide-react";
 import { API_URL, apiFetch } from "@/lib/api";
 import { formatNumber, formatVND, splitCartons } from "@/lib/format";
@@ -63,6 +64,19 @@ type EmployeeOption = {
   status: string;
 };
 
+type VehicleOption = {
+  id: number;
+  code: string;
+  plate_number: string;
+  name: string;
+  vehicle_type: string;
+  max_weight_kg: number;
+  default_driver_id: number | null;
+  default_driver_code: string | null;
+  default_driver_name: string | null;
+  is_active: boolean;
+};
+
 type FefoPick = {
   lot_id: number | null;
   location_code: string | null;
@@ -97,10 +111,23 @@ export default function DeliveryRequestBatchCreateModal({
   const [orders, setOrders] = useState<DispatchPoolOrder[]>([]);
   const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
   const [employees, setEmployees] = useState<EmployeeOption[]>([]);
+  const [vehicles, setVehicles] = useState<VehicleOption[]>([]);
 
   const [warehouseId, setWarehouseId] = useState<number>(0);
+  const [vehicleId, setVehicleId] = useState<string>("");
+  const [driverId, setDriverId] = useState<string>("");
+  const [routeCode, setRouteCode] = useState<string>("");
+  const [plannedWeightKg, setPlannedWeightKg] = useState<string>("");
   const [batchNote, setBatchNote] = useState<string>("");
   const [search, setSearch] = useState<string>("");
+
+  const [showAddVehicle, setShowAddVehicle] = useState(false);
+  const [newVehCode, setNewVehCode] = useState("");
+  const [newVehPlate, setNewVehPlate] = useState("");
+  const [newVehName, setNewVehName] = useState("");
+  const [newVehMaxKg, setNewVehMaxKg] = useState("1500");
+  const [newVehType, setNewVehType] = useState("STANDARD");
+  const [creatingVeh, setCreatingVeh] = useState(false);
 
   // orderId -> employeeId (được chọn vào đợt)
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<number>>(new Set());
@@ -116,10 +143,11 @@ export default function DeliveryRequestBatchCreateModal({
     setLoading(true);
     setError("");
     try {
-      const [resPool, resWh, resEmp] = await Promise.all([
+      const [resPool, resWh, resEmp, resVeh] = await Promise.all([
         apiFetch(`${API_URL}/delivery-requests/dispatch-pool?limit=500`),
         apiFetch(`${API_URL}/inventory/warehouses/`),
         apiFetch(`${API_URL}/employees/?limit=1000&status=active`),
+        apiFetch(`${API_URL}/vehicles?active_only=true`),
       ]);
       if (!resPool.ok) {
         const d = await resPool.json().catch(() => ({}));
@@ -146,6 +174,10 @@ export default function DeliveryRequestBatchCreateModal({
         });
         setEmployees(sorted);
       }
+      if (resVeh.ok) {
+        const vehData = (await resVeh.json()) as VehicleOption[];
+        setVehicles(vehData);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Lỗi khi tải dữ liệu điều phối.");
     } finally {
@@ -158,6 +190,11 @@ export default function DeliveryRequestBatchCreateModal({
     setSelectedOrderIds(new Set());
     setAssignedEmpByOrder({});
     setBulkEmpId("");
+    setVehicleId("");
+    setDriverId("");
+    setRouteCode("");
+    setPlannedWeightKg("");
+    setShowAddVehicle(false);
     setFefoPlan(null);
     setBatchNote(`Đợt giao ${new Date().toLocaleDateString("vi-VN")}`);
     void loadPool();
@@ -315,6 +352,43 @@ export default function DeliveryRequestBatchCreateModal({
     }
   }
 
+  async function handleQuickCreateVehicle() {
+    if (!newVehCode.trim() || !newVehPlate.trim() || !newVehName.trim()) {
+      setError("Vui lòng nhập đầy đủ Mã xe, Biển số và Tên xe.");
+      return;
+    }
+    setCreatingVeh(true);
+    setError("");
+    try {
+      const res = await apiFetch(`${API_URL}/vehicles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: newVehCode.trim(),
+          plate_number: newVehPlate.trim(),
+          name: newVehName.trim(),
+          vehicle_type: newVehType,
+          max_weight_kg: Number(newVehMaxKg || 0),
+          default_driver_id: driverId ? Number(driverId) : null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Không thể thêm xe mới.");
+      const created = data as VehicleOption;
+      setVehicles((prev) => [...prev, created].sort((a, b) => a.code.localeCompare(b.code)));
+      setVehicleId(String(created.id));
+      if (created.default_driver_id) setDriverId(String(created.default_driver_id));
+      setShowAddVehicle(false);
+      setNewVehCode("");
+      setNewVehPlate("");
+      setNewVehName("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Lỗi khi thêm xe.");
+    } finally {
+      setCreatingVeh(false);
+    }
+  }
+
   async function handleCreateBatch() {
     if (!warehouseId) {
       setError("Vui lòng chọn kho xuất hàng.");
@@ -330,6 +404,12 @@ export default function DeliveryRequestBatchCreateModal({
       );
       return;
     }
+    if (totalShortageSkus > 0) {
+      setError(
+        `Có ${totalShortageSkus} mã hàng không đủ 100% tồn kho khả dụng (FEFO còn hạn). Hệ thống chặn lập chuyến giao.`
+      );
+      return;
+    }
 
     setSaving(true);
     setError("");
@@ -339,6 +419,11 @@ export default function DeliveryRequestBatchCreateModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           warehouse_id: warehouseId,
+          vehicle_id: vehicleId ? Number(vehicleId) : null,
+          driver_id: driverId ? Number(driverId) : null,
+          route_code: routeCode.trim() || null,
+          planned_weight_kg: Number(plannedWeightKg || 0),
+          strict_stock_check: true,
           note: batchNote.trim() || null,
           allocations: selectedOrders.map((o) => ({
             sales_order_id: o.id,
@@ -361,6 +446,11 @@ export default function DeliveryRequestBatchCreateModal({
 
   const fefoByProductId = new Map((fefoPlan || []).map((p) => [p.product_id, p]));
   const totalShortageSkus = (fefoPlan || []).filter((p) => p.shortage_quantity > 0).length;
+  const selectedVehicle = vehicles.find((v) => String(v.id) === vehicleId) || null;
+  const parsedWeightKg = Number(plannedWeightKg || 0);
+  const isOverweight = Boolean(
+    selectedVehicle && selectedVehicle.max_weight_kg > 0 && parsedWeightKg > selectedVehicle.max_weight_kg
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3">
@@ -437,6 +527,80 @@ export default function DeliveryRequestBatchCreateModal({
             </div>
             <div>
               <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Xe giao hàng (Biển số / Tải trọng)
+              </label>
+              <div className="flex gap-1">
+                <select
+                  value={vehicleId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setVehicleId(nextId);
+                    const found = vehicles.find((v) => String(v.id) === nextId);
+                    if (found?.default_driver_id) {
+                      setDriverId(String(found.default_driver_id));
+                    }
+                  }}
+                  className={inputCls}
+                >
+                  <option value="">-- Chọn xe (tùy chọn) --</option>
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.plate_number} · {v.name} ({formatNumber(v.max_weight_kg)} kg)
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setShowAddVehicle((s) => !s)}
+                  title="Thêm nhanh xe giao hàng"
+                  className="shrink-0 rounded border border-sky-300 bg-sky-50 px-1.5 py-1 text-sky-700 hover:bg-sky-100"
+                >
+                  <Plus size={13} />
+                </button>
+              </div>
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Tài xế chính
+              </label>
+              <select
+                value={driverId}
+                onChange={(e) => setDriverId(e.target.value)}
+                className={inputCls}
+              >
+                <option value="">-- Chọn tài xế --</option>
+                {employees.map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.code} - {e.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                Tuyến giao / Trọng lượng dự kiến (kg)
+              </label>
+              <div className="grid grid-cols-2 gap-1.5">
+                <input
+                  type="text"
+                  value={routeCode}
+                  onChange={(e) => setRouteCode(e.target.value)}
+                  placeholder="VD: TUYEN-Q1"
+                  className={inputCls}
+                />
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  value={plannedWeightKg}
+                  onChange={(e) => setPlannedWeightKg(e.target.value)}
+                  placeholder="kg"
+                  className={`${inputCls} ${isOverweight ? "border-red-500 bg-red-50 text-red-700" : ""}`}
+                />
+              </div>
+            </div>
+            <div>
+              <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
                 Gán nhanh NVGH cho {selectedOrderIds.size} đơn đang chọn
               </label>
               <div className="flex gap-1.5">
@@ -472,6 +636,81 @@ export default function DeliveryRequestBatchCreateModal({
               </div>
             </div>
           </div>
+
+          {showAddVehicle && (
+            <div className="mt-2 rounded border border-sky-200 bg-sky-50/70 p-2">
+              <div className="mb-1.5 text-[10px] font-bold uppercase text-sky-800">
+                Thêm nhanh xe giao hàng
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+                <input
+                  type="text"
+                  value={newVehCode}
+                  onChange={(e) => setNewVehCode(e.target.value)}
+                  placeholder="Mã xe (VD: XE-01)"
+                  className={inputCls}
+                />
+                <input
+                  type="text"
+                  value={newVehPlate}
+                  onChange={(e) => setNewVehPlate(e.target.value)}
+                  placeholder="Biển số (51C-123.45)"
+                  className={inputCls}
+                />
+                <input
+                  type="text"
+                  value={newVehName}
+                  onChange={(e) => setNewVehName(e.target.value)}
+                  placeholder="Tên xe (Xe tải 1.5T)"
+                  className={inputCls}
+                />
+                <select
+                  value={newVehType}
+                  onChange={(e) => setNewVehType(e.target.value)}
+                  className={inputCls}
+                >
+                  <option value="STANDARD">Xe tải thường</option>
+                  <option value="COLD">Xe đông lạnh</option>
+                  <option value="MOTORBIKE">Xe máy</option>
+                </select>
+                <input
+                  type="number"
+                  min={0}
+                  value={newVehMaxKg}
+                  onChange={(e) => setNewVehMaxKg(e.target.value)}
+                  placeholder="Tải tối đa (kg)"
+                  className={inputCls}
+                />
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    disabled={creatingVeh}
+                    onClick={() => void handleQuickCreateVehicle()}
+                    className="flex-1 rounded bg-sky-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 disabled:bg-slate-300"
+                  >
+                    {creatingVeh ? "Đang lưu..." : "Lưu xe"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddVehicle(false)}
+                    className="rounded bg-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-300"
+                  >
+                    Hủy
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isOverweight && selectedVehicle && (
+            <div className="mt-2 flex items-center gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800">
+              <AlertTriangle size={14} className="shrink-0 text-amber-600" />
+              <span>
+                Cảnh báo quá tải: Trọng lượng dự kiến ({formatNumber(parsedWeightKg)} kg) vượt tải trọng tối đa của xe{" "}
+                <strong>{selectedVehicle.plate_number}</strong> ({formatNumber(selectedVehicle.max_weight_kg)} kg).
+              </span>
+            </div>
+          )}
 
           {error && (
             <div className="mt-2 flex items-center gap-2 rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs text-red-800">
@@ -788,13 +1027,16 @@ export default function DeliveryRequestBatchCreateModal({
                 saving ||
                 selectedOrders.length === 0 ||
                 employeeBreakdown.unassignedCount > 0 ||
+                totalShortageSkus > 0 ||
                 !warehouseId
               }
               onClick={() => void handleCreateBatch()}
               className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
             >
               {saving ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
-              Tạo Đợt Giao ({selectedOrders.length} đơn)
+              {totalShortageSkus > 0
+                ? `Thiếu tồn ${totalShortageSkus} SKU (Bị chặn)`
+                : `Tạo Đợt Giao (${selectedOrders.length} đơn)`}
             </button>
           </div>
         </footer>

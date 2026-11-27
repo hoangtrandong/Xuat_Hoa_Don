@@ -9,7 +9,7 @@ from app.models.inventory import (
     DeliveryAllocation, DeliveryRequest, DeliveryRequestItem,
     InventoryTransfer, InventoryTransferItem,
 )
-from app.models.product import Product, ProductUnit, ProductCategory
+from app.models.product import Product, ProductUnit, ProductCategory, ProductCompany, InvoiceProduct
 from app.schemas.inventory import StockAdjust, StockLevel
 from app.crud.finance import record_debt_on_sales_export
 from app.crud.npp import NppDirectory, canonical_product_id
@@ -204,12 +204,54 @@ def adjust_stock(db: Session, obj_in: StockAdjust, created_by: str = "system") -
     return txn
 
 
+def resolve_invoice_products_map(db: Session, product_ids: set[int]) -> dict[int, InvoiceProduct]:
+    """Ánh xạ mỗi product_id sang InvoiceProduct (Mã SP XHĐ) tương ứng.
+
+    Ưu tiên Product.invoice_product_id; nếu chưa gán thì fallback sang ProductCompany.invoice_product_id (ưu tiên is_primary).
+    """
+    if not product_ids:
+        return {}
+    prod_ip_ids: dict[int, int] = {}
+    for pid, ip_id in db.execute(
+        select(Product.id, Product.invoice_product_id).where(
+            Product.id.in_(product_ids),
+            Product.invoice_product_id.is_not(None),
+        )
+    ).all():
+        if ip_id is not None:
+            prod_ip_ids[pid] = int(ip_id)
+
+    missing_ids = product_ids - set(prod_ip_ids.keys())
+    if missing_ids:
+        pc_rows = db.execute(
+            select(ProductCompany.product_id, ProductCompany.invoice_product_id, ProductCompany.is_primary)
+            .where(
+                ProductCompany.product_id.in_(missing_ids),
+                ProductCompany.invoice_product_id.is_not(None),
+            )
+            .order_by(ProductCompany.is_primary.desc(), ProductCompany.id.asc())
+        ).all()
+        for pid, ip_id, _ in pc_rows:
+            if pid not in prod_ip_ids and ip_id is not None:
+                prod_ip_ids[pid] = int(ip_id)
+
+    if not prod_ip_ids:
+        return {}
+    ip_objs = {
+        ip.id: ip
+        for ip in db.scalars(
+            select(InvoiceProduct).where(InvoiceProduct.id.in_(set(prod_ip_ids.values())))
+        ).all()
+    }
+    return {pid: ip_objs[ip_id] for pid, ip_id in prod_ip_ids.items() if ip_id in ip_objs}
+
+
 def get_stock_levels(
     db: Session,
     warehouse_id: Optional[int] = None,
     category_id: Optional[int] = None,
 ) -> List[StockLevel]:
-    """Tính tồn kho từ inventory_lots (ưu tiên) và inventory_transactions (fallback)."""
+    """Tính tồn kho từ inventory_lots và gom/hiển thị theo Mã sản phẩm XHĐ (InvoiceProduct)."""
     # Subquery: tổng tồn theo lô từ inventory_lots (chỉ tính các vị trí đang hoạt động)
     lot_subquery = (
         select(
@@ -251,7 +293,6 @@ def get_stock_levels(
 
     # Các yêu cầu xuất hàng đang hoạt động giữ chỗ hàng hóa (cùng trạng thái với delivery_request.py)
     active_statuses = ("DRAFT", "SUBMITTED", "RECEIVED")
-    # Subquery: số lượng đã giữ chỗ bởi các yêu cầu xuất đang hoạt động (để tính tồn khả dụng)
     reserved_subquery = (
         select(
             DeliveryRequestItem.product_id,
@@ -265,7 +306,6 @@ def get_stock_levels(
         reserved_subquery = reserved_subquery.where(DeliveryRequest.warehouse_id == warehouse_id)
     reserved_subquery = reserved_subquery.group_by(DeliveryRequestItem.product_id).subquery()
 
-    # Main query: join với products & categories
     stmt = (
         select(
             Product.id.label("product_id"),
@@ -291,36 +331,134 @@ def get_stock_levels(
     if category_id is not None:
         stmt = stmt.where(Product.category_id == category_id)
     stmt = stmt.order_by(Product.sku)
-    result = db.execute(stmt)
+    rows = db.execute(stmt).all()
 
     directory = NppDirectory(db)
-    levels = []
-    for row in result.all():
-        # Chỉ SKU đại diện của nhóm đứng đại diện cho mã NPP trong tồn kho.
-        if directory.is_secondary(row.product_id):
-            continue
-        npp_code, npp_name = directory.label(row.product_id, row.product_code, row.product_name)
+    visible_rows = [row for row in rows if not directory.is_secondary(row.product_id)]
+    ip_by_product = resolve_invoice_products_map(db, {row.product_id for row in visible_rows})
+
+    grouped_by_ip: dict[int, dict] = {}
+    unmapped_levels: list[StockLevel] = []
+
+    for row in visible_rows:
         on_hand = int(row.on_hand or 0)
         locked = int(row.locked_qty or 0)
         reserved = int(row.reserved_qty or 0)
-        available = max(0, on_hand - locked - reserved)
+        lot_count = int(row.lot_count or 0)
+        loc_tokens = [tok.strip() for tok in (row.locations or "").split(",") if tok.strip()]
+
+        ip = ip_by_product.get(row.product_id)
+        if ip is not None:
+            bucket = grouped_by_ip.get(ip.id)
+            if bucket is None:
+                grouped_by_ip[ip.id] = {
+                    "product_id": row.product_id,
+                    "invoice_product_id": ip.id,
+                    "product_code": ip.code,
+                    "product_name": ip.name,
+                    "category_id": row.category_id,
+                    "category_name": row.category_name,
+                    "unit": ip.unit_name or row.unit,
+                    "on_hand": on_hand,
+                    "reserved": reserved,
+                    "locked_quantity": locked,
+                    "reorder_level": row.reorder_level or 20,
+                    "lot_count": lot_count,
+                    "earliest_expiry": row.earliest_expiry,
+                    "locations": set(loc_tokens),
+                }
+            else:
+                bucket["on_hand"] += on_hand
+                bucket["reserved"] += reserved
+                bucket["locked_quantity"] += locked
+                bucket["lot_count"] += lot_count
+                bucket["locations"].update(loc_tokens)
+                if row.earliest_expiry is not None:
+                    if bucket["earliest_expiry"] is None or row.earliest_expiry < bucket["earliest_expiry"]:
+                        bucket["earliest_expiry"] = row.earliest_expiry
+                if not bucket["category_name"] and row.category_name:
+                    bucket["category_id"] = row.category_id
+                    bucket["category_name"] = row.category_name
+        else:
+            npp_code, npp_name = directory.label(row.product_id, row.product_code, row.product_name)
+            available = max(0, on_hand - locked - reserved)
+            unmapped_levels.append(StockLevel(
+                product_id=row.product_id,
+                product_code=npp_code,
+                product_name=npp_name,
+                invoice_product_id=None,
+                invoice_product_code=None,
+                invoice_product_name=None,
+                category_id=row.category_id,
+                category_name=row.category_name,
+                category=row.category_name,
+                unit=row.unit,
+                on_hand=on_hand,
+                reserved=reserved,
+                available=available,
+                locked_quantity=locked,
+                reorder_level=row.reorder_level or 20,
+                lot_count=lot_count,
+                earliest_expiry=row.earliest_expiry,
+                locations=row.locations,
+            ))
+
+    # Bổ sung các Mã SP XHĐ đang active chưa gắn Product nào (tồn = 0) khi không lọc category
+    if category_id is None:
+        all_active_ips = db.scalars(
+            select(InvoiceProduct).where(InvoiceProduct.status == "active").order_by(InvoiceProduct.code)
+        ).all()
+        for ip in all_active_ips:
+            if ip.id not in grouped_by_ip:
+                grouped_by_ip[ip.id] = {
+                    "product_id": -ip.id,
+                    "invoice_product_id": ip.id,
+                    "product_code": ip.code,
+                    "product_name": ip.name,
+                    "category_id": None,
+                    "category_name": ip.supplier or "SP Xuất HĐ",
+                    "unit": ip.unit_name or "Hộp",
+                    "on_hand": 0,
+                    "reserved": 0,
+                    "locked_quantity": 0,
+                    "reorder_level": 20,
+                    "lot_count": 0,
+                    "earliest_expiry": None,
+                    "locations": set(),
+                }
+
+    levels: list[StockLevel] = []
+    for b in grouped_by_ip.values():
+        available = max(0, b["on_hand"] - b["locked_quantity"] - b["reserved"])
+        locs = ", ".join(sorted(b["locations"])) if b["locations"] else None
         levels.append(StockLevel(
-            product_id=row.product_id,
-            product_code=npp_code,
-            product_name=npp_name,
-            category_id=row.category_id,
-            category_name=row.category_name,
-            category=row.category_name,
-            unit=row.unit,
-            on_hand=on_hand,
-            reserved=reserved,
+            product_id=b["product_id"],
+            product_code=b["product_code"],
+            product_name=b["product_name"],
+            invoice_product_id=b["invoice_product_id"],
+            invoice_product_code=b["product_code"],
+            invoice_product_name=b["product_name"],
+            category_id=b["category_id"],
+            category_name=b["category_name"],
+            category=b["category_name"],
+            unit=b["unit"],
+            on_hand=b["on_hand"],
+            reserved=b["reserved"],
             available=available,
-            locked_quantity=locked,
-            reorder_level=row.reorder_level or 20,
-            lot_count=int(row.lot_count or 0),
-            earliest_expiry=row.earliest_expiry,
-            locations=row.locations,
+            locked_quantity=b["locked_quantity"],
+            reorder_level=b["reorder_level"],
+            lot_count=b["lot_count"],
+            earliest_expiry=b["earliest_expiry"],
+            locations=locs,
         ))
+
+    # Chỉ giữ các sản phẩm chưa gán SP XHĐ nếu thực sự có tồn kho hoặc chưa có SP XHĐ nào trong hệ thống
+    if levels:
+        levels.extend(lv for lv in unmapped_levels if lv.on_hand > 0 or lv.reserved > 0 or lv.locked_quantity > 0)
+    else:
+        levels.extend(unmapped_levels)
+
+    levels.sort(key=lambda item: (item.product_code or "").upper())
     return levels
 
 

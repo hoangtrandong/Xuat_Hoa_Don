@@ -243,6 +243,47 @@ class DeliveryRequestCreate(BaseModel):
     created_by: Optional[str] = None
 
 
+class DispatchPoolOrderItem(BaseModel):
+    product_id: int
+    sku: str
+    product_name: str
+    boxes_per_carton: int = 1
+    quantity: int
+    price: float = 0.0
+    line_total: float = 0.0
+
+
+class DispatchPoolOrder(BaseModel):
+    id: int
+    code: str
+    order_date: Optional[date] = None
+    status: str
+    warehouse_id: int
+    customer_id: int
+    customer_code: str
+    customer_name: str
+    customer_address: Optional[str] = None
+    sales_employee_code: Optional[str] = None
+    sales_employee_name: Optional[str] = None
+    total: float = 0.0
+    note: Optional[str] = None
+    items: List[DispatchPoolOrderItem] = Field(default_factory=list)
+    dispatched_request_id: Optional[int] = None
+    dispatched_request_code: Optional[str] = None
+    dispatched_request_status: Optional[str] = None
+
+
+class OrderDispatchAllocation(BaseModel):
+    sales_order_id: int
+    employee_id: int
+
+
+class DeliveryRequestFromOrdersCreate(BaseModel):
+    warehouse_id: int
+    allocations: List[OrderDispatchAllocation] = Field(min_length=1)
+    note: Optional[str] = None
+
+
 class DeliveryPreviewItem(BaseModel):
     product_id: int
     sku: str

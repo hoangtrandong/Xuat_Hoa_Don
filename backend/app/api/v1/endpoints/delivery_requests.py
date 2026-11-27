@@ -28,12 +28,14 @@ from app.models.user import User
 from app.crud import employee_borrow as borrow_crud
 from app.crud.npp import canonical_product_id
 from app.schemas.delivery_request import (
-    DeliveryRequest, DeliveryRequestList, DeliveryRequestCreate, DeliveryPreviewItem,
+    DeliveryRequest, DeliveryRequestList, DeliveryRequestCreate, DeliveryRequestItemCreate,
+    DeliveryRequestEmployeeSummaryCreate, DeliveryPreviewItem,
     DeliveryPreviewResponse, FefoPlanItem, DeliveryRequestOrder,
     DeliveryRequestOrderCreate, SettlementOrderPayRequest,
     SettlementMatchStatementRequest, SettlementMatchStatementResponse,
     DeliverySettlementOverview, DailyEmployeeSettlement, BankStatementItem,
     EmployeeBorrowBatchCreate,
+    DispatchPoolOrder, DispatchPoolOrderItem, DeliveryRequestFromOrdersCreate,
 )
 
 router = APIRouter(prefix="/delivery-requests", tags=["delivery-requests"])
@@ -1048,6 +1050,262 @@ def create_request(
 def plan_request(payload: DeliveryRequestCreate, db: Session = Depends(get_db)):
     try:
         return crud.plan(db, payload)
+    except ValueError as exc:
+        return _error(db, exc)
+
+
+@router.get("/dispatch-pool", response_model=List[DispatchPoolOrder])
+def list_dispatch_pool_orders(
+    from_date: date | None = None,
+    to_date: date | None = None,
+    search: str | None = None,
+    include_dispatched: bool = False,
+    limit: int = 300,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Danh sách đơn hàng (SalesOrder) chờ Admin điều phối gom đợt giao & phân bổ NVGH."""
+    from sqlalchemy.orm import selectinload
+    from app.models.sales import SalesOrder, SalesOrderItem
+    from app.models.inventory import DeliveryRequest as DeliveryRequestModel, DeliveryRequestOrder as DeliveryRequestOrderModel
+
+    stmt = (
+        select(SalesOrder)
+        .options(
+            selectinload(SalesOrder.customer),
+            selectinload(SalesOrder.employee),
+            selectinload(SalesOrder.items).selectinload(SalesOrderItem.product),
+        )
+        .where(SalesOrder.status.notin_(["CANCELLED", "COMPLETED"]))
+        .order_by(SalesOrder.created_at.desc())
+        .limit(min(max(limit, 1), 1000))
+    )
+    if from_date is not None:
+        stmt = stmt.where(func.date(SalesOrder.created_at) >= from_date)
+    if to_date is not None:
+        stmt = stmt.where(func.date(SalesOrder.created_at) <= to_date)
+
+    orders = db.scalars(stmt).all()
+    order_codes = [o.code for o in orders if o.code]
+    dispatched_map: dict[str, tuple[int, str, str]] = {}
+    if order_codes:
+        links = db.execute(
+            select(
+                DeliveryRequestOrderModel.order_number,
+                DeliveryRequestModel.id,
+                DeliveryRequestModel.code,
+                DeliveryRequestModel.status,
+            )
+            .join(DeliveryRequestModel, DeliveryRequestModel.id == DeliveryRequestOrderModel.delivery_request_id)
+            .where(
+                DeliveryRequestOrderModel.order_number.in_(order_codes),
+                DeliveryRequestModel.status != "CANCELLED",
+            )
+        ).all()
+        for ord_num, req_id, req_code, req_status in links:
+            dispatched_map[str(ord_num).strip().upper()] = (req_id, req_code, req_status)
+
+    term = (search or "").strip().lower()
+    result: list[DispatchPoolOrder] = []
+    for o in orders:
+        disp = dispatched_map.get((o.code or "").strip().upper())
+        if disp is not None and not include_dispatched:
+            continue
+        cust = o.customer
+        emp = o.employee
+        cust_code = cust.code if cust else ""
+        cust_name = cust.name if cust else ""
+        cust_addr = cust.address if cust else None
+        emp_code = emp.code if emp else None
+        emp_name = emp.name if emp else None
+
+        if term:
+            hay = " ".join([
+                o.code or "",
+                cust_code,
+                cust_name,
+                cust_addr or "",
+                emp_code or "",
+                emp_name or "",
+            ]).lower()
+            if term not in hay:
+                continue
+
+        item_views: list[DispatchPoolOrderItem] = []
+        for it in o.items:
+            prod = it.product
+            if not prod:
+                continue
+            item_views.append(
+                DispatchPoolOrderItem(
+                    product_id=it.product_id,
+                    sku=prod.npp_code or prod.sku,
+                    product_name=prod.npp_name or prod.name,
+                    boxes_per_carton=max(1, int(prod.boxes_per_carton or 1)),
+                    quantity=int(it.quantity or 0),
+                    price=float(it.price or 0),
+                    line_total=float(it.line_total or 0),
+                )
+            )
+
+        result.append(
+            DispatchPoolOrder(
+                id=o.id,
+                code=o.code,
+                order_date=o.created_at.date() if o.created_at else None,
+                status=o.status,
+                warehouse_id=o.warehouse_id,
+                customer_id=o.customer_id,
+                customer_code=cust_code,
+                customer_name=cust_name,
+                customer_address=cust_addr,
+                sales_employee_code=emp_code,
+                sales_employee_name=emp_name,
+                total=float(o.total or 0),
+                note=o.note,
+                items=item_views,
+                dispatched_request_id=disp[0] if disp else None,
+                dispatched_request_code=disp[1] if disp else None,
+                dispatched_request_status=disp[2] if disp else None,
+            )
+        )
+    return result
+
+
+@router.post("/from-orders", response_model=DeliveryRequest, status_code=201)
+def create_request_from_orders(
+    payload: DeliveryRequestFromOrdersCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Gom nhiều đơn hàng (VD: Đợt 1 gồm 10 đơn) thành 1 Đơn tổng (DeliveryRequest) và phân bổ cho các NVGH theo từng khách hàng."""
+    from collections import defaultdict
+    from sqlalchemy.orm import selectinload
+    from app.models.sales import SalesOrder, SalesOrderItem
+    from app.models.inventory import DeliveryRequest as DeliveryRequestModel, DeliveryRequestOrder as DeliveryRequestOrderModel
+
+    seen_order_ids: set[int] = set()
+    for alloc in payload.allocations:
+        if alloc.sales_order_id in seen_order_ids:
+            raise HTTPException(status_code=400, detail=f"Đơn hàng ID #{alloc.sales_order_id} bị chọn trùng trong đợt giao.")
+        seen_order_ids.add(alloc.sales_order_id)
+
+    order_ids = list(seen_order_ids)
+    orders = db.scalars(
+        select(SalesOrder)
+        .options(
+            selectinload(SalesOrder.customer),
+            selectinload(SalesOrder.items).selectinload(SalesOrderItem.product),
+        )
+        .where(SalesOrder.id.in_(order_ids))
+    ).all()
+    orders_by_id = {o.id: o for o in orders}
+    missing_orders = [oid for oid in order_ids if oid not in orders_by_id]
+    if missing_orders:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng ID: {', '.join(map(str, missing_orders))}.")
+
+    emp_ids = list({alloc.employee_id for alloc in payload.allocations})
+    employees = db.scalars(select(Employee).where(Employee.id.in_(emp_ids))).all()
+    emps_by_id = {e.id: e for e in employees}
+    missing_emps = [eid for eid in emp_ids if eid not in emps_by_id]
+    if missing_emps:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy nhân viên giao hàng ID: {', '.join(map(str, missing_emps))}.")
+
+    # Kiểm tra chống giao trùng
+    order_codes = [o.code for o in orders if o.code]
+    existing_links = db.execute(
+        select(DeliveryRequestOrderModel.order_number, DeliveryRequestModel.code)
+        .join(DeliveryRequestModel, DeliveryRequestModel.id == DeliveryRequestOrderModel.delivery_request_id)
+        .where(
+            DeliveryRequestOrderModel.order_number.in_(order_codes),
+            DeliveryRequestModel.status != "CANCELLED",
+        )
+    ).all()
+    if existing_links:
+        dup_desc = ", ".join(f"{ord_num} (đã ở đợt {req_code})" for ord_num, req_code in existing_links[:5])
+        raise HTTPException(status_code=409, detail=f"Có đơn hàng đã thuộc đợt giao khác: {dup_desc}.")
+
+    # Gom hàng hóa toàn đợt (Đơn tổng) + phân bổ theo từng NVGH
+    product_totals: dict[int, int] = defaultdict(int)
+    product_emp_qty: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    emp_order_counts: dict[int, int] = defaultdict(int)
+    emp_amounts: dict[int, float] = defaultdict(float)
+    order_inputs: list[DeliveryRequestOrderCreate] = []
+
+    for alloc in payload.allocations:
+        so = orders_by_id[alloc.sales_order_id]
+        if so.status == "CANCELLED":
+            raise HTTPException(status_code=400, detail=f"Đơn hàng {so.code} đã bị hủy, không thể gom vào đợt giao.")
+        if not so.items:
+            raise HTTPException(status_code=400, detail=f"Đơn hàng {so.code} chưa có sản phẩm nào.")
+        emp = emps_by_id[alloc.employee_id]
+        emp_code = emp.code.strip().upper()
+        for it in so.items:
+            qty = int(it.quantity or 0)
+            if qty <= 0:
+                continue
+            product_totals[it.product_id] += qty
+            product_emp_qty[it.product_id][emp_code] += qty
+
+        emp_order_counts[emp.id] += 1
+        emp_amounts[emp.id] += float(so.total or 0)
+        order_inputs.append(
+            DeliveryRequestOrderCreate(
+                order_date=so.created_at.date() if so.created_at else None,
+                order_number=so.code,
+                employee_id=emp.id,
+                employee_code=emp_code,
+                employee_name=emp.name,
+                customer_code=so.customer.code if so.customer else None,
+                customer_name=so.customer.name if so.customer else None,
+                amount=float(so.total or 0),
+                note=so.note,
+            )
+        )
+
+    if not product_totals:
+        raise HTTPException(status_code=400, detail="Các đơn hàng đã chọn không có sản phẩm hợp lệ (SL > 0).")
+
+    item_inputs: list[DeliveryRequestItemCreate] = []
+    for prod_id, total_qty in product_totals.items():
+        alloc_map = {code: qty for code, qty in product_emp_qty[prod_id].items() if qty > 0}
+        item_inputs.append(
+            DeliveryRequestItemCreate(
+                product_id=prod_id,
+                quantity=total_qty,
+                employee_allocations=alloc_map,
+            )
+        )
+
+    summary_inputs: list[DeliveryRequestEmployeeSummaryCreate] = []
+    for emp_id, cnt in emp_order_counts.items():
+        emp = emps_by_id[emp_id]
+        summary_inputs.append(
+            DeliveryRequestEmployeeSummaryCreate(
+                employee_id=emp.id,
+                employee_code=emp.code.strip().upper(),
+                employee_name=emp.name,
+                order_count=cnt,
+                amount=round(emp_amounts[emp_id], 2),
+            )
+        )
+
+    batch_note = (payload.note or "").strip() or (
+        f"Đợt giao gom {len(order_inputs)} đơn hàng cho {len(summary_inputs)} NVGH"
+    )
+    req_payload = DeliveryRequestCreate(
+        warehouse_id=payload.warehouse_id,
+        items=item_inputs,
+        employee_summaries=summary_inputs,
+        orders=order_inputs,
+        note=batch_note,
+    )
+    try:
+        return crud.create(
+            db,
+            req_payload,
+            created_by=getattr(current_user, "username", None),
+        )
     except ValueError as exc:
         return _error(db, exc)
 

@@ -28,6 +28,9 @@ class StockLevel(BaseModel):
     product_id: int
     product_code: str
     product_name: str
+    invoice_product_id: Optional[int] = None
+    invoice_product_code: Optional[str] = None
+    invoice_product_name: Optional[str] = None
     category_id: Optional[int] = None
     category_name: Optional[str] = None
     category: Optional[str] = None
@@ -97,6 +100,9 @@ class InventoryLotDetail(BaseModel):
     product_id: int
     product_code: str
     product_name: str
+    invoice_product_id: Optional[int] = None
+    invoice_product_code: Optional[str] = None
+    invoice_product_name: Optional[str] = None
     unit: str
     lot_number: Optional[str] = None
     expiry_date: Optional[datetime] = None

@@ -32,6 +32,18 @@ export const menuItems: MenuItem[] = [
     ],
   },
   {
+    key: "warehouse-dispatch",
+    label: "Kho & Điều phối",
+    icon: "Warehouse",
+    href: "/admin/delivery-requests",
+    children: [
+      { key: "admin-delivery-requests", label: "Điều phối & Yêu cầu xuất", icon: "ClipboardList", href: "/admin/delivery-requests" },
+      { key: "warehouse-delivery-queue", label: "Hàng chờ xuất kho", icon: "PackageMinus", href: "/warehouse/delivery-queue" },
+      { key: "warehouse-inventory", label: "Tồn kho & FEFO / Vị trí", icon: "BoxesIcon", href: "/warehouse/inventory" },
+      { key: "warehouse-import", label: "Nhập kho (Lô & HSD)", icon: "PackagePlus", href: "/warehouse/import" },
+    ],
+  },
+  {
     key: "products",
     label: "Sản phẩm",
     icon: "Package",

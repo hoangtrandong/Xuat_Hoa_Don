@@ -422,32 +422,58 @@ def list_lot_details(
     } if location_ids else {}
 
     directory = NppDirectory(db)
-    return [
-        InventoryLotDetail(
-            id=lot.id,
-            warehouse_id=lot.warehouse_id,
-            location_id=lot.location_id,
-            location_code=locations[lot.location_id].code if lot.location_id in locations else None,
-            location_name=locations[lot.location_id].name if lot.location_id in locations else None,
-            product_id=lot.product_id,
-            product_code=directory.label(lot.product_id, products[lot.product_id].sku, products[lot.product_id].name)[0]
-            if lot.product_id in products else str(lot.product_id),
-            product_name=directory.label(lot.product_id, products[lot.product_id].sku, products[lot.product_id].name)[1]
-            if lot.product_id in products else "Sản phẩm",
-            unit=units[products[lot.product_id].unit_id].name
-            if lot.product_id in products and products[lot.product_id].unit_id in units else "",
-            lot_number=lot.lot_number,
-            expiry_date=lot.expiry_date,
-            quantity_on_hand=lot.quantity_on_hand,
-            locked_quantity=lot.locked_quantity,
-            reserved_quantity=reserved_by_lot.get(lot.id, 0),
-            available_quantity=max(
-                0, lot.quantity_on_hand - lot.locked_quantity - reserved_by_lot.get(lot.id, 0)
-            ),
-            unit_cost=lot.unit_cost,
+    ip_by_product = crud.resolve_invoice_products_map(db, set(products.keys()))
+    result_lots: list[InventoryLotDetail] = []
+    for lot in lots:
+        ip = ip_by_product.get(lot.product_id)
+        if ip is not None:
+            p_code = ip.code
+            p_name = ip.name
+            p_unit = ip.unit_name or (
+                units[products[lot.product_id].unit_id].name
+                if lot.product_id in products and products[lot.product_id].unit_id in units
+                else ""
+            )
+        else:
+            p_code = (
+                directory.label(lot.product_id, products[lot.product_id].sku, products[lot.product_id].name)[0]
+                if lot.product_id in products else str(lot.product_id)
+            )
+            p_name = (
+                directory.label(lot.product_id, products[lot.product_id].sku, products[lot.product_id].name)[1]
+                if lot.product_id in products else "Sản phẩm"
+            )
+            p_unit = (
+                units[products[lot.product_id].unit_id].name
+                if lot.product_id in products and products[lot.product_id].unit_id in units
+                else ""
+            )
+        result_lots.append(
+            InventoryLotDetail(
+                id=lot.id,
+                warehouse_id=lot.warehouse_id,
+                location_id=lot.location_id,
+                location_code=locations[lot.location_id].code if lot.location_id in locations else None,
+                location_name=locations[lot.location_id].name if lot.location_id in locations else None,
+                product_id=lot.product_id,
+                product_code=p_code,
+                product_name=p_name,
+                invoice_product_id=ip.id if ip else None,
+                invoice_product_code=ip.code if ip else None,
+                invoice_product_name=ip.name if ip else None,
+                unit=p_unit,
+                lot_number=lot.lot_number,
+                expiry_date=lot.expiry_date,
+                quantity_on_hand=lot.quantity_on_hand,
+                locked_quantity=lot.locked_quantity,
+                reserved_quantity=reserved_by_lot.get(lot.id, 0),
+                available_quantity=max(
+                    0, lot.quantity_on_hand - lot.locked_quantity - reserved_by_lot.get(lot.id, 0)
+                ),
+                unit_cost=lot.unit_cost,
+            )
         )
-        for lot in lots
-    ]
+    return result_lots
 
 
 @router.get("/stock-levels/", response_model=List[StockLevel])

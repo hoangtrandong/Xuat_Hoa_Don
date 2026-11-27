@@ -2,8 +2,8 @@ from datetime import datetime, date, time, timedelta
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 import re
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from openpyxl import load_workbook
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -14,7 +14,7 @@ from app.core.auth import get_current_user
 from app.models.user import User
 from app.schemas.inventory import (
     InventoryImportConfirm, InventoryImportItem, InventoryTransaction, StockLevel,
-    StockAdjust, Warehouse, WarehouseLocation, InventoryLot, InventoryLotDetail,
+    StockAdjust, BulkDeleteStockRequest, Warehouse, WarehouseLocation, InventoryLot, InventoryLotDetail,
     InventoryTransferCreate, InventoryTransferResponse,
     SupplierGoodsDiscrepancyResponse, SupplierGoodsDiscrepancyHistory,
     SupplierGoodsDiscrepancySuggestion, SupplierGoodsDiscrepancyOffsetConfirm,
@@ -26,7 +26,9 @@ from app.models.inventory import (
     InventoryTransfer as TransferModel, DeliveryAllocation, DeliveryRequest,
     DeliveryRequestItem,
 )
-from app.models.product import Product, ProductUnit
+from app.models.product import (
+    Product, ProductCategory, ProductCompany, ProductGroup, ProductGroupItem, ProductUnit, InvoiceProduct,
+)
 from app.crud import inventory as crud
 from app.crud.npp import NppDirectory, canonical_product_id
 from app.crud import supplier_discrepancy as discrepancy_crud
@@ -346,6 +348,475 @@ def confirm_supplier_discrepancy_offset(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/opening-stock/template")
+def download_opening_stock_template():
+    """Tải file Excel mẫu để upload khởi tạo tồn kho đầu kỳ theo Mã SP XHĐ."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ton_Dau_Ky"
+
+    headers = [
+        "STT",
+        "Mã SP XHĐ",
+        "Tên sản phẩm",
+        "Vị trí kho",
+        "Số lô",
+        "Hạn sử dụng",
+        "Số lượng tồn đầu",
+        "Ghi chú",
+    ]
+    ws.append(headers)
+    ws.append([1, "01TD03", "Sữa tươi tiệt trùng có đường 180ml", "A1-01", "LOT-202611", "31/12/2026", 480, "Tồn đầu kỳ"])
+    ws.append([2, "07KD12", "Sữa chua ăn 100g", "A1-02", "LOT-202611B", "15/01/2027", 240, "Tồn đầu kỳ"])
+
+    widths = {"A": 8, "B": 18, "C": 38, "D": 16, "E": 18, "F": 16, "G": 18, "H": 24}
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+    out = BytesIO()
+    wb.save(out)
+    return Response(
+        content=out.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="mau-ton-kho-dau-ky.xlsx"'},
+    )
+
+
+def _ensure_canonical_product_for_invoice_product(
+    db: Session,
+    ip: InvoiceProduct,
+    default_cat: ProductCategory | None,
+    units_by_name: dict[str, ProductUnit],
+    default_unit: ProductUnit | None,
+) -> Product:
+    """Tìm Product gắn với InvoiceProduct; nếu chưa có thì tự tạo Product đại diện + ProductGroup."""
+    prod = db.scalar(select(Product).where(Product.invoice_product_id == ip.id).limit(1))
+    if prod is None:
+        pc_pid = db.scalar(
+            select(ProductCompany.product_id)
+            .where(ProductCompany.invoice_product_id == ip.id)
+            .order_by(ProductCompany.is_primary.desc(), ProductCompany.id.asc())
+            .limit(1)
+        )
+        if pc_pid is not None:
+            prod = db.get(Product, pc_pid)
+    if prod is None:
+        prod = db.scalar(select(Product).where(func.upper(Product.sku) == ip.code.strip().upper()).limit(1))
+        if prod is not None and prod.invoice_product_id is None:
+            prod.invoice_product_id = ip.id
+    if prod is None:
+        unit_obj = units_by_name.get((ip.unit_name or "").strip().lower()) or default_unit
+        if unit_obj is None:
+            unit_obj = db.scalars(select(ProductUnit).order_by(ProductUnit.id)).first()
+        if unit_obj is None:
+            unit_obj = ProductUnit(code="HOP", name="Hộp")
+            db.add(unit_obj)
+            db.flush()
+            units_by_name["hộp"] = unit_obj
+        cat_obj = default_cat or db.scalars(select(ProductCategory).order_by(ProductCategory.id)).first()
+        if cat_obj is None:
+            cat_obj = ProductCategory(code="MACDINH", name="Mặc định")
+            db.add(cat_obj)
+            db.flush()
+        prod = Product(
+            sku=ip.code.strip().upper(),
+            name=ip.name.strip(),
+            category_id=cat_obj.id,
+            unit_id=unit_obj.id,
+            boxes_per_carton=1,
+            base_price=0.0,
+            status="active",
+            invoice_product_id=ip.id,
+            _npp_code=ip.code.strip().upper(),
+        )
+        db.add(prod)
+        db.flush()
+
+    # Đảm bảo thuộc ProductGroup để FEFO / adjust_stock hoạt động mượt
+    existing_group = db.scalar(
+        select(ProductGroupItem.product_group_id).where(ProductGroupItem.product_id == prod.id).limit(1)
+    )
+    if existing_group is None:
+        grp = ProductGroup(name=ip.name.strip(), representative_product_id=prod.id)
+        db.add(grp)
+        db.flush()
+        db.add(ProductGroupItem(product_group_id=grp.id, product_id=prod.id))
+        db.flush()
+    return prod
+
+
+@router.post("/opening-stock/upload")
+def upload_opening_stock(
+    warehouse_id: int,
+    mode: str = "ADD",
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload Excel khởi tạo tồn kho đầu kỳ theo Mã SP XHĐ (tự tạo vị trí kho & lô FEFO)."""
+    if not db.get(WarehouseModel, warehouse_id):
+        raise HTTPException(status_code=400, detail="Không tìm thấy kho.")
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
+        raise HTTPException(status_code=400, detail="Vui lòng tải lên file Excel định dạng .xlsx hoặc .xls.")
+
+    actor = getattr(current_user, "username", None) or "system"
+    clean_mode = (mode or "ADD").strip().upper()
+    if clean_mode not in ("ADD", "REPLACE"):
+        clean_mode = "ADD"
+
+    try:
+        wb = load_workbook(BytesIO(file.file.read()), read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows or len(rows) < 2:
+            raise HTTPException(status_code=400, detail="File Excel không có dữ liệu.")
+
+        raw_headers = [_header(c) for c in rows[0]]
+        code_idx = -1
+        loc_idx = -1
+        lot_idx = -1
+        expiry_idx = -1
+        qty_idx = -1
+        note_idx = -1
+
+        for idx, h in enumerate(raw_headers):
+            if any(k in h for k in ["mã sp xhđ", "mã sp xuất", "mã xuất hóa đơn", "mã sp", "mã hàng", "sku", "invoice_product_code", "code"]):
+                if code_idx == -1:
+                    code_idx = idx
+            elif any(k in h for k in ["vị trí", "location", "kệ", "bin"]):
+                loc_idx = idx
+            elif any(k in h for k in ["số lô", "lô", "lot"]):
+                lot_idx = idx
+            elif any(k in h for k in ["hạn sử dụng", "hsd", "expiry", "exp"]):
+                expiry_idx = idx
+            elif any(k in h for k in ["số lượng", "tồn đầu", "sl", "quantity", "qty"]):
+                qty_idx = idx
+            elif any(k in h for k in ["ghi chú", "note"]):
+                note_idx = idx
+
+        if code_idx == -1:
+            code_idx = 1 if len(raw_headers) > 1 else 0
+        if qty_idx == -1:
+            raise HTTPException(status_code=400, detail="File Excel thiếu cột 'Số lượng tồn đầu' (hoặc 'Số lượng').")
+
+        all_ips = {
+            ip.code.strip().upper(): ip
+            for ip in db.scalars(select(InvoiceProduct)).all()
+            if ip.code
+        }
+        all_products = db.scalars(select(Product)).all()
+        products_by_sku = {p.sku.strip().upper(): p for p in all_products if p.sku}
+        products_by_npp = {p._npp_code.strip().upper(): p for p in all_products if p._npp_code}
+
+        default_cat = db.scalars(select(ProductCategory).order_by(ProductCategory.id)).first()
+        all_units = db.scalars(select(ProductUnit).order_by(ProductUnit.id)).all()
+        units_by_name = {u.name.strip().lower(): u for u in all_units if u.name}
+        default_unit = all_units[0] if all_units else None
+
+        existing_locations = {
+            loc.code.strip().upper(): loc
+            for loc in db.scalars(
+                select(LocationModel).where(LocationModel.warehouse_id == warehouse_id)
+            ).all()
+            if loc.code
+        }
+        default_location = next((loc for loc in existing_locations.values() if loc.is_active), None)
+        created_locations: list[str] = []
+
+        def get_or_create_location(loc_code_raw: str) -> LocationModel:
+            nonlocal default_location
+            clean_loc = loc_code_raw.strip().upper()
+            if clean_loc:
+                loc = existing_locations.get(clean_loc)
+                if loc is None:
+                    loc = LocationModel(
+                        warehouse_id=warehouse_id,
+                        code=clean_loc,
+                        name=f"Vị trí {clean_loc}",
+                        is_active=True,
+                    )
+                    db.add(loc)
+                    db.flush()
+                    existing_locations[clean_loc] = loc
+                    created_locations.append(clean_loc)
+                elif not loc.is_active:
+                    loc.is_active = True
+                return loc
+            if default_location is None:
+                default_location = LocationModel(
+                    warehouse_id=warehouse_id,
+                    code="KHO-CHINH",
+                    name="Vị trí mặc định",
+                    is_active=True,
+                )
+                db.add(default_location)
+                db.flush()
+                existing_locations["KHO-CHINH"] = default_location
+                created_locations.append("KHO-CHINH")
+            return default_location
+
+        now = datetime.utcnow()
+        batch_ref = f"OPEN-{now:%y%m%d%H%M%S}"
+        imported_rows = 0
+        total_quantity = 0
+        errors: list[str] = []
+        cleared_products: set[int] = set()
+
+        for row_num, row in enumerate(rows[1:], start=2):
+            if not row or all(v is None or str(v).strip() == "" for v in row):
+                continue
+            code_val = str(row[code_idx] or "").strip().upper() if code_idx < len(row) and row[code_idx] is not None else ""
+            if not code_val or "MÃ SP" in code_val:
+                continue
+
+            raw_qty = row[qty_idx] if qty_idx < len(row) else None
+            try:
+                qty = int(float(str(raw_qty).replace(",", "").strip())) if raw_qty not in (None, "") else 0
+            except (TypeError, ValueError):
+                errors.append(f"Dòng {row_num} ({code_val}): Số lượng không hợp lệ ({raw_qty}).")
+                continue
+            if qty <= 0:
+                continue
+
+            ip_obj = all_ips.get(code_val)
+            prod: Product | None = None
+            if ip_obj is not None:
+                prod = _ensure_canonical_product_for_invoice_product(
+                    db, ip_obj, default_cat, units_by_name, default_unit
+                )
+            else:
+                prod = products_by_sku.get(code_val) or products_by_npp.get(code_val)
+
+            if prod is None:
+                errors.append(f"Dòng {row_num}: Không tìm thấy Mã SP XHĐ '{code_val}' trong danh mục.")
+                continue
+
+            target_pid = canonical_product_id(db, prod.id) if db.scalar(
+                select(ProductGroupItem.id).where(ProductGroupItem.product_id == prod.id).limit(1)
+            ) else prod.id
+
+            loc_raw = str(row[loc_idx] or "").strip() if loc_idx != -1 and loc_idx < len(row) and row[loc_idx] is not None else ""
+            location = get_or_create_location(loc_raw)
+
+            lot_number = (
+                str(row[lot_idx] or "").strip()
+                if lot_idx != -1 and lot_idx < len(row) and row[lot_idx] is not None
+                else ""
+            ) or "OPENING"
+
+            expiry_dt: datetime | None = None
+            if expiry_idx != -1 and expiry_idx < len(row) and row[expiry_idx] not in (None, ""):
+                try:
+                    expiry_dt = _parse_expiry(row[expiry_idx], lot_number)
+                except ValueError as exc:
+                    errors.append(f"Dòng {row_num} ({code_val}): {exc}")
+                    continue
+
+            note_val = (
+                str(row[note_idx] or "").strip()
+                if note_idx != -1 and note_idx < len(row) and row[note_idx] is not None
+                else ""
+            ) or "Khởi tạo tồn kho đầu kỳ từ Excel"
+
+            if clean_mode == "REPLACE" and target_pid not in cleared_products:
+                old_lots = db.scalars(
+                    select(LotModel).where(
+                        LotModel.warehouse_id == warehouse_id,
+                        LotModel.product_id == target_pid,
+                        LotModel.quantity_on_hand > 0,
+                    )
+                ).all()
+                for old_lot in old_lots:
+                    if old_lot.quantity_on_hand > 0:
+                        db.add(TransactionModel(
+                            code=f"RST-{now:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
+                            type="ADJUST",
+                            warehouse_id=warehouse_id,
+                            product_id=target_pid,
+                            quantity=-old_lot.quantity_on_hand,
+                            ref_type="OPENING_REPLACE",
+                            ref_code=batch_ref,
+                            note="Xóa tồn cũ để nạp lại tồn đầu kỳ",
+                            created_by=actor,
+                            created_at=now,
+                            lot_id=old_lot.id,
+                            location_id=old_lot.location_id,
+                            expiry_date=old_lot.expiry_date,
+                        ))
+                        old_lot.quantity_on_hand = 0
+                        old_lot.locked_quantity = 0
+                cleared_products.add(target_pid)
+
+            lot = db.scalar(
+                select(LotModel).where(
+                    LotModel.warehouse_id == warehouse_id,
+                    LotModel.product_id == target_pid,
+                    LotModel.location_id == location.id,
+                    LotModel.lot_number == lot_number,
+                    LotModel.expiry_date == expiry_dt if expiry_dt is not None else LotModel.expiry_date.is_(None),
+                )
+            )
+            if lot is None:
+                lot = LotModel(
+                    warehouse_id=warehouse_id,
+                    product_id=target_pid,
+                    location_id=location.id,
+                    lot_number=lot_number,
+                    expiry_date=expiry_dt,
+                    quantity_on_hand=0,
+                )
+                db.add(lot)
+                db.flush()
+
+            lot.quantity_on_hand += qty
+            db.add(TransactionModel(
+                code=f"OPN-{now:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
+                type="OPENING",
+                warehouse_id=warehouse_id,
+                product_id=target_pid,
+                quantity=qty,
+                ref_type="OPENING",
+                ref_code=batch_ref,
+                note=note_val,
+                created_by=actor,
+                created_at=now,
+                lot_id=lot.id,
+                location_id=location.id,
+                expiry_date=expiry_dt,
+            ))
+            imported_rows += 1
+            total_quantity += qty
+
+        if imported_rows == 0 and errors:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="; ".join(errors[:5]))
+
+        db.commit()
+        return {
+            "success": True,
+            "batch_code": batch_ref,
+            "imported_rows": imported_rows,
+            "total_quantity": total_quantity,
+            "created_locations": created_locations,
+            "errors": errors[:20],
+            "message": f"Đã khởi tạo tồn đầu kỳ thành công: {imported_rows} dòng (tổng {total_quantity:,} đvt).",
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ValueError, TypeError, InvalidFileException, BadZipFile, OSError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Không thể đọc file Excel: {exc}") from exc
+
+
+@router.post("/stock/bulk-delete")
+def bulk_delete_stock(
+    payload: BulkDeleteStockRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Xóa tồn kho hàng loạt cho các sản phẩm (hoặc Mã SP XHĐ) được chọn."""
+    target_product_ids: set[int] = {pid for pid in payload.product_ids if pid and pid > 0}
+
+    if payload.invoice_product_ids:
+        ip_ids = [ip_id for ip_id in payload.invoice_product_ids if ip_id and ip_id > 0]
+        if ip_ids:
+            for pid in db.scalars(select(Product.id).where(Product.invoice_product_id.in_(ip_ids))).all():
+                target_product_ids.add(pid)
+            for pid in db.scalars(select(ProductCompany.product_id).where(ProductCompany.invoice_product_id.in_(ip_ids))).all():
+                target_product_ids.add(pid)
+
+    if not target_product_ids:
+        return {
+            "success": True,
+            "cleared_products": 0,
+            "cleared_lots": 0,
+            "cleared_quantity": 0,
+            "skipped": [],
+            "message": "Không có tồn kho nào cần xóa cho các sản phẩm đã chọn.",
+        }
+
+    lot_stmt = select(LotModel).where(
+        LotModel.product_id.in_(target_product_ids),
+        LotModel.quantity_on_hand > 0,
+    )
+    if payload.warehouse_id is not None:
+        lot_stmt = lot_stmt.where(LotModel.warehouse_id == payload.warehouse_id)
+    lots = db.scalars(lot_stmt).all()
+
+    if not lots:
+        return {
+            "success": True,
+            "cleared_products": 0,
+            "cleared_lots": 0,
+            "cleared_quantity": 0,
+            "skipped": [],
+            "message": "Các sản phẩm đã chọn hiện có tồn kho bằng 0.",
+        }
+
+    lot_ids = [lot.id for lot in lots]
+    reserved_lot_ids = set(
+        db.scalars(
+            select(DeliveryAllocation.lot_id)
+            .join(DeliveryRequestItem, DeliveryRequestItem.id == DeliveryAllocation.item_id)
+            .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestItem.request_id)
+            .where(
+                DeliveryAllocation.lot_id.in_(lot_ids),
+                DeliveryRequest.status.in_(("DRAFT", "SUBMITTED", "RECEIVED")),
+            )
+        ).all()
+    )
+
+    actor = getattr(current_user, "username", None) or "system"
+    now = datetime.utcnow()
+    ref_code = f"DEL-{now:%y%m%d%H%M%S}"
+    note_text = (payload.note or "").strip() or "Xóa tồn kho hàng loạt"
+
+    cleared_products: set[int] = set()
+    cleared_lots = 0
+    cleared_quantity = 0
+    skipped: list[str] = []
+
+    for lot in lots:
+        if lot.id in reserved_lot_ids:
+            skipped.append(f"Lô #{lot.id} ({lot.lot_number or 'N/A'}) đang được giữ chỗ bởi phiếu xuất chưa hoàn tất.")
+            continue
+        qty = int(lot.quantity_on_hand or 0)
+        if qty <= 0:
+            continue
+        db.add(TransactionModel(
+            code=f"CLR-{now:%y%m%d%H%M%S}-{uuid4().hex[:6].upper()}",
+            type="ADJUST",
+            warehouse_id=lot.warehouse_id,
+            product_id=lot.product_id,
+            quantity=-qty,
+            ref_type="BULK_DELETE",
+            ref_code=ref_code,
+            note=note_text,
+            created_by=actor,
+            created_at=now,
+            lot_id=lot.id,
+            location_id=lot.location_id,
+            expiry_date=lot.expiry_date,
+        ))
+        lot.quantity_on_hand = 0
+        lot.locked_quantity = 0
+        cleared_products.add(lot.product_id)
+        cleared_lots += 1
+        cleared_quantity += qty
+
+    db.commit()
+    return {
+        "success": True,
+        "cleared_products": len(cleared_products),
+        "cleared_lots": cleared_lots,
+        "cleared_quantity": cleared_quantity,
+        "skipped": skipped,
+        "message": f"Đã xóa tồn kho của {len(cleared_products)} sản phẩm ({cleared_lots} lô, tổng {cleared_quantity:,} đvt)."
+        + (f" Bỏ qua {len(skipped)} lô đang giữ chỗ." if skipped else ""),
+    }
 
 
 @router.get("/warehouses/", response_model=List[Warehouse])

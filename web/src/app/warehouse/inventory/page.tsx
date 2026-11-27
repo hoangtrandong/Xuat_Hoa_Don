@@ -1,7 +1,7 @@
 "use client";
 // src/app/warehouse/inventory/page.tsx
-import { useEffect, useState } from "react";
-import { Boxes, CircleDollarSign, TriangleAlert, ArrowDownUp, Warehouse as WarehouseIcon, SlidersHorizontal, Download, Package } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Boxes, CircleDollarSign, TriangleAlert, ArrowDownUp, Warehouse as WarehouseIcon, SlidersHorizontal, Download, Package, Upload, Trash2, CheckCircle2, AlertTriangle, Loader2, X } from "lucide-react";
 import PageHeader from "@/components/ui/PageHeader";
 import StatCard from "@/components/ui/StatCard";
 import DataTable, { Column } from "@/components/ui/DataTable";
@@ -18,6 +18,9 @@ interface ApiStockLevel {
   product_id: number;
   product_code: string;
   product_name: string;
+  invoice_product_id?: number | null;
+  invoice_product_code?: string | null;
+  invoice_product_name?: string | null;
   category_id?: number | null;
   category_name?: string | null;
   category?: string | null;
@@ -163,6 +166,30 @@ export default function WarehouseInventoryPage() {
   const [lotProductFilter, setLotProductFilter] = useState("Tất cả");
   const [lotWarehouseFilter, setLotWarehouseFilter] = useState<number | "">("");
   const [loadError, setLoadError] = useState("");
+  const [toastMsg, setToastMsg] = useState("");
+  const [stockMetaById, setStockMetaById] = useState<Record<string, { productId: number; invoiceProductId: number | null }>>({});
+
+  // Chọn nhiều để xóa tồn kho
+  const [selectedStockIds, setSelectedStockIds] = useState<Set<string>>(new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteWarehouseId, setBulkDeleteWarehouseId] = useState<number | "">("");
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState("");
+
+  // Modal Upload Excel Tồn đầu kỳ
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadWarehouseId, setUploadWarehouseId] = useState<number | "">("");
+  const [uploadMode, setUploadMode] = useState<"ADD" | "REPLACE">("ADD");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadingOpening, setUploadingOpening] = useState(false);
+  const [uploadOpeningError, setUploadOpeningError] = useState("");
+  const [uploadWarnings, setUploadWarnings] = useState<string[]>([]);
+  const openingFileRef = useRef<HTMLInputElement>(null);
+
+  const showToast = (msg: string) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg(""), 5000);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -193,6 +220,15 @@ export default function WarehouseInventoryPage() {
         const stockMap = new Map(stocks.map((item) => [item.product_id, item]));
         const warehouseMap = new Map(warehouses.map((item) => [item.id, item.name]));
         setStockLevels(stocks.map((item) => toStockLevel(item, item.category_id ? categoryMap.get(item.category_id) : undefined)));
+        const meta: Record<string, { productId: number; invoiceProductId: number | null }> = {};
+        for (const s of stocks) {
+          meta[String(s.product_id)] = {
+            productId: s.product_id,
+            invoiceProductId: s.invoice_product_id ?? null,
+          };
+        }
+        setStockMetaById(meta);
+        setSelectedStockIds(new Set());
         setLedgerEntriesState(transactions.map((item) => ({
           id: item.id,
           code: item.code,
@@ -234,7 +270,143 @@ export default function WarehouseInventoryPage() {
       ...stockLevels.map((s) => s.category).filter(Boolean),
     ])
   ).filter((c) => c && c.trim() !== "");
+  function toggleSelectStock(id: string) {
+    setSelectedStockIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAllFilteredStock() {
+    setSelectedStockIds(new Set(filteredStock.map((s) => s.id)));
+  }
+
+  function clearSelectedStock() {
+    setSelectedStockIds(new Set());
+  }
+
+  async function handleDownloadOpeningTemplate() {
+    try {
+      const res = await apiFetch(`${API_URL}/inventory/opening-stock/template`);
+      if (!res.ok) throw new Error("Không thể tải file mẫu tồn đầu kỳ.");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "mau-ton-kho-dau-ky.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Lỗi khi tải file mẫu.");
+    }
+  }
+
+  async function handleUploadOpeningStock() {
+    if (!uploadWarehouseId) {
+      setUploadOpeningError("Vui lòng chọn kho để khởi tạo tồn đầu kỳ.");
+      return;
+    }
+    if (!uploadFile) {
+      setUploadOpeningError("Vui lòng chọn file Excel (.xlsx, .xls).");
+      return;
+    }
+    setUploadingOpening(true);
+    setUploadOpeningError("");
+    setUploadWarnings([]);
+    try {
+      const fd = new FormData();
+      fd.append("file", uploadFile);
+      const res = await apiFetch(
+        `${API_URL}/inventory/opening-stock/upload?warehouse_id=${uploadWarehouseId}&mode=${uploadMode}`,
+        { method: "POST", body: fd }
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        message?: string;
+        detail?: string;
+        errors?: string[];
+      };
+      if (!res.ok) throw new Error(data.detail || "Không thể upload file tồn đầu kỳ.");
+      if (data.errors && data.errors.length > 0) {
+        setUploadWarnings(data.errors);
+      }
+      showToast(data.message || "Khởi tạo tồn kho đầu kỳ thành công.");
+      refresh();
+      if (!data.errors || data.errors.length === 0) {
+        setUploadOpen(false);
+        setUploadFile(null);
+        if (openingFileRef.current) openingFileRef.current.value = "";
+      }
+    } catch (err) {
+      setUploadOpeningError(err instanceof Error ? err.message : "Lỗi khi upload file tồn đầu kỳ.");
+    } finally {
+      setUploadingOpening(false);
+    }
+  }
+
+  async function handleConfirmBulkDelete() {
+    if (selectedStockIds.size === 0) return;
+    setBulkDeleting(true);
+    setBulkDeleteError("");
+    try {
+      const productIds: number[] = [];
+      const invoiceProductIds: number[] = [];
+      for (const sid of selectedStockIds) {
+        const meta = stockMetaById[sid];
+        if (!meta) continue;
+        if (meta.invoiceProductId && meta.invoiceProductId > 0) {
+          invoiceProductIds.push(meta.invoiceProductId);
+        }
+        if (meta.productId > 0) {
+          productIds.push(meta.productId);
+        }
+      }
+      const res = await apiFetch(`${API_URL}/inventory/stock/bulk-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          warehouse_id: bulkDeleteWarehouseId === "" ? null : Number(bulkDeleteWarehouseId),
+          product_ids: productIds,
+          invoice_product_ids: invoiceProductIds,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { message?: string; detail?: string };
+      if (!res.ok) throw new Error(data.detail || "Không thể xóa tồn kho.");
+      setBulkDeleteOpen(false);
+      setSelectedStockIds(new Set());
+      showToast(data.message || "Đã xóa tồn kho các sản phẩm đã chọn.");
+      refresh();
+    } catch (err) {
+      setBulkDeleteError(err instanceof Error ? err.message : "Lỗi khi xóa tồn kho.");
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
+  const allFilteredSelected =
+    filteredStock.length > 0 && filteredStock.every((s) => selectedStockIds.has(s.id));
+
   const stockColumns: Column<StockLevel>[] = [
+    {
+      key: "id",
+      title: "✓",
+      align: "center",
+      render: (_, row) => (
+        <input
+          type="checkbox"
+          checked={selectedStockIds.has(row.id)}
+          onChange={(e) => {
+            e.stopPropagation();
+            toggleSelectStock(row.id);
+          }}
+          aria-label={`Chọn ${row.productCode}`}
+          className="h-3.5 w-3.5 cursor-pointer rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+        />
+      ),
+    },
     { key: "productCode", title: "Mã SP XHĐ", sortable: true },
     {
       key: "productName",
@@ -491,15 +663,48 @@ export default function WarehouseInventoryPage() {
     <div className="space-y-6">
       <PageHeader
         title="Tồn kho & Kho hàng"
-        subtitle="Bảng tồn kho theo SKU và sổ nhật ký giao dịch (inventory_transactions)"
+        subtitle="Bảng tồn kho theo Mã SP XHĐ, quản lý Lô HSD (FEFO), Vị trí kho và Nhật ký giao dịch"
         actions={
-          <button onClick={openAdjust} className="flex items-center gap-2 bg-sky-500 hover:bg-sky-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-            <SlidersHorizontal size={16} />
-            Điều chỉnh tồn
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void handleDownloadOpeningTemplate()}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
+            >
+              <Download size={14} /> Tải mẫu Tồn đầu kỳ
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setUploadWarehouseId(warehouseOptions[0]?.id ?? "");
+                setUploadMode("ADD");
+                setUploadFile(null);
+                setUploadOpeningError("");
+                setUploadWarnings([]);
+                setUploadOpen(true);
+              }}
+              className="flex items-center gap-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-2 text-xs font-semibold transition-colors"
+            >
+              <Upload size={14} /> Upload Tồn đầu kỳ
+            </button>
+            <button onClick={openAdjust} className="flex items-center gap-1.5 bg-sky-600 hover:bg-sky-700 text-white px-3 py-2 rounded-lg text-xs font-semibold transition-colors">
+              <SlidersHorizontal size={14} />
+              Điều chỉnh tồn
+            </button>
+          </div>
         }
       />
 
+      {toastMsg && (
+        <div className="flex items-center justify-between rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-xs font-semibold text-emerald-800">
+          <span className="inline-flex items-center gap-1.5">
+            <CheckCircle2 size={15} className="text-emerald-600" /> {toastMsg}
+          </span>
+          <button type="button" onClick={() => setToastMsg("")} className="text-emerald-700 hover:text-emerald-900">
+            <X size={14} />
+          </button>
+        </div>
+      )}
       {loadError && <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">{loadError}</div>}
 
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
@@ -571,15 +776,69 @@ export default function WarehouseInventoryPage() {
       </div>
 
       {tab === "stock" ? (
-        <DataTable
-          data={filteredStock}
-          columns={stockColumns}
-          searchKeys={["productCode", "productName", "category", "locations", "earliestExpiry"]}
-          searchPlaceholder="Tìm SKU, tên sản phẩm, vị trí..."
-          toolbar={
-            <div className="flex flex-wrap gap-2"><select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"><option value="Tất cả">Tất cả danh mục</option>{categories.map((c) => <option key={c} value={c}>{c}</option>)}</select><button onClick={exportStock} disabled={!filteredStock.length} className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 disabled:opacity-50"><Download size={15} />Tải Excel</button></div>
-          }
-        />
+        <div className="space-y-2.5">
+          {selectedStockIds.size > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+              <div className="flex flex-wrap items-center gap-2">
+                <span>
+                  Đã chọn <strong>{formatNumber(selectedStockIds.size)}</strong> sản phẩm
+                </span>
+                {!allFilteredSelected && (
+                  <button
+                    type="button"
+                    onClick={selectAllFilteredStock}
+                    className="rounded border border-sky-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100"
+                  >
+                    Chọn tất cả {formatNumber(filteredStock.length)} sản phẩm
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={clearSelectedStock}
+                  className="text-[11px] font-semibold text-slate-600 underline hover:text-slate-800"
+                >
+                  Bỏ chọn
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setBulkDeleteWarehouseId("");
+                  setBulkDeleteError("");
+                  setBulkDeleteOpen(true);
+                }}
+                className="inline-flex items-center gap-1 rounded bg-red-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-800"
+              >
+                <Trash2 size={12} /> Xóa tồn đã chọn ({selectedStockIds.size})
+              </button>
+            </div>
+          )}
+          <DataTable
+            data={filteredStock}
+            columns={stockColumns}
+            searchKeys={["productCode", "productName", "category", "locations", "earliestExpiry"]}
+            searchPlaceholder="Tìm Mã SP XHĐ, tên sản phẩm, vị trí..."
+            toolbar={
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={allFilteredSelected ? clearSelectedStock : selectAllFilteredStock}
+                  disabled={filteredStock.length === 0}
+                  className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+                >
+                  {allFilteredSelected ? "Bỏ chọn tất cả" : `Chọn tất cả (${filteredStock.length})`}
+                </button>
+                <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500">
+                  <option value="Tất cả">Tất cả danh mục</option>
+                  {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <button onClick={exportStock} disabled={!filteredStock.length} className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 disabled:opacity-50">
+                  <Download size={15} />Tải Excel
+                </button>
+              </div>
+            }
+          />
+        </div>
       ) : tab === "ledger" ? (
         <DataTable
           data={filteredLedger}
@@ -594,7 +853,7 @@ export default function WarehouseInventoryPage() {
         <DataTable
           data={filteredLotDetails}
           columns={[
-            { key: "product_code", title: "Mã NPP", sortable: true },
+            { key: "product_code", title: "Mã SP XHĐ", sortable: true },
             {
               key: "product_name",
               title: "Sản phẩm",
@@ -711,6 +970,228 @@ export default function WarehouseInventoryPage() {
           </button>
         </div>
       </Drawer>
+
+      {/* MODAL UPLOAD EXCEL TỒN ĐẦU KỲ (Chuẩn CreateOrderForm) */}
+      {uploadOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => {
+            if (!uploadingOpening) setUploadOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-xl border border-slate-400 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-center justify-between bg-[#14263d] px-3 py-2 text-white">
+              <div className="flex items-center gap-2">
+                <Upload size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  Upload Excel Khởi Tạo Tồn Kho Đầu Kỳ (Theo Mã SP XHĐ)
+                </h2>
+              </div>
+              <button
+                type="button"
+                disabled={uploadingOpening}
+                onClick={() => setUploadOpen(false)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <div className="space-y-3 border-b border-slate-200 px-3 py-3">
+              <div className="rounded border border-sky-200 bg-sky-50/70 px-2.5 py-2 text-[11px] text-sky-900">
+                File mẫu gồm các cột: <strong>Mã SP XHĐ</strong>, <strong>Vị trí kho</strong> (tự tạo nếu chưa có), <strong>Số lô</strong>, <strong>Hạn sử dụng</strong> (VD: <code>31/12/2026</code>), <strong>Số lượng tồn đầu</strong>.
+              </div>
+
+              {uploadOpeningError && (
+                <div className="flex items-center gap-2 rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs text-red-800">
+                  <AlertTriangle size={14} className="shrink-0 text-red-600" />
+                  <span>{uploadOpeningError}</span>
+                </div>
+              )}
+
+              {uploadWarnings.length > 0 && (
+                <div className="max-h-28 overflow-y-auto rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900 space-y-0.5">
+                  <div className="font-bold">Một số dòng bị bỏ qua:</div>
+                  {uploadWarnings.map((w, i) => (
+                    <div key={i}>• {w}</div>
+                  ))}
+                </div>
+              )}
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                    Kho khởi tạo tồn đầu <span className="text-red-600">*</span>
+                  </label>
+                  <select
+                    value={uploadWarehouseId}
+                    onChange={(e) => setUploadWarehouseId(e.target.value ? Number(e.target.value) : "")}
+                    className="w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  >
+                    <option value="">-- Chọn kho --</option>
+                    {warehouseOptions.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        [{w.code}] {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                    Chế độ nạp tồn kho
+                  </label>
+                  <select
+                    value={uploadMode}
+                    onChange={(e) => setUploadMode(e.target.value as "ADD" | "REPLACE")}
+                    className="w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  >
+                    <option value="ADD">Cộng dồn vào tồn hiện có (Khuyên dùng)</option>
+                    <option value="REPLACE">Ghi đè (Xóa tồn cũ của các mã trong file rồi nạp mới)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-dashed border-slate-300 bg-slate-50 p-3">
+                <input
+                  ref={openingFileRef}
+                  type="file"
+                  accept=".xlsx,.xlsm,.xls"
+                  onChange={(e) => {
+                    setUploadFile(e.target.files?.[0] ?? null);
+                    setUploadOpeningError("");
+                  }}
+                  className="text-xs file:mr-2 file:rounded file:border-0 file:bg-sky-600 file:px-2.5 py-1 file:text-xs file:font-semibold file:text-white hover:file:bg-sky-700"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadOpeningTemplate()}
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-sky-700 underline hover:text-sky-900"
+                >
+                  <Download size={13} /> Tải file Excel mẫu
+                </button>
+              </div>
+            </div>
+
+            <footer className="flex items-center justify-between gap-3 border-t border-slate-300 bg-slate-100 px-3 py-2">
+              <span className="text-[10px] text-slate-500">
+                {uploadFile ? `Đã chọn: ${uploadFile.name}` : "Chưa chọn file Excel"}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={uploadingOpening}
+                  onClick={() => setUploadOpen(false)}
+                  className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-800"
+                >
+                  Đóng
+                </button>
+                <button
+                  type="button"
+                  disabled={uploadingOpening || !uploadFile || !uploadWarehouseId}
+                  onClick={() => void handleUploadOpeningStock()}
+                  className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {uploadingOpening ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                  Xác nhận khởi tạo tồn
+                </button>
+              </div>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL XÁC NHẬN XÓA TỒN KHO HÀNG LOẠT (Chuẩn CreateOrderForm) */}
+      {bulkDeleteOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => {
+            if (!bulkDeleting) setBulkDeleteOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-md border border-slate-400 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-center justify-between bg-[#14263d] px-3 py-2 text-white">
+              <div className="flex items-center gap-2">
+                <Trash2 size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  Xác Nhận Xóa Tồn Kho ({selectedStockIds.size} Sản Phẩm)
+                </h2>
+              </div>
+              <button
+                type="button"
+                disabled={bulkDeleting}
+                onClick={() => setBulkDeleteOpen(false)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <div className="space-y-2.5 border-b border-slate-200 px-3 py-3 text-xs text-slate-700">
+              <p>
+                Bạn có chắc muốn đưa tồn kho về <strong>0</strong> cho{" "}
+                <strong>{selectedStockIds.size} sản phẩm</strong> đã chọn? Các lô đang được giữ chỗ bởi phiếu xuất chưa hoàn tất sẽ tự động được bảo vệ (không xóa).
+              </p>
+
+              <div>
+                <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                  Phạm vi kho cần xóa tồn
+                </label>
+                <select
+                  value={bulkDeleteWarehouseId}
+                  onChange={(e) => setBulkDeleteWarehouseId(e.target.value ? Number(e.target.value) : "")}
+                  className="w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                >
+                  <option value="">Tất cả các kho</option>
+                  {warehouseOptions.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      Chỉ kho [{w.code}] {w.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {bulkDeleteError && (
+                <div className="flex items-center gap-1.5 rounded border border-red-300 bg-red-50 px-2 py-1.5 text-[11px] text-red-700">
+                  <AlertTriangle size={13} className="shrink-0" />
+                  <span>{bulkDeleteError}</span>
+                </div>
+              )}
+            </div>
+
+            <footer className="flex items-center justify-between gap-3 border-t border-slate-300 bg-slate-100 px-3 py-2">
+              <span className="text-[10px] text-slate-500">
+                * Thao tác được ghi nhận vào Sổ nhật ký kho.
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={bulkDeleting}
+                  onClick={() => setBulkDeleteOpen(false)}
+                  className="rounded bg-slate-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-600"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="button"
+                  disabled={bulkDeleting}
+                  onClick={() => void handleConfirmBulkDelete()}
+                  className="inline-flex items-center gap-1.5 rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-800 disabled:bg-slate-300"
+                >
+                  {bulkDeleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                  Xác nhận xóa tồn
+                </button>
+              </div>
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

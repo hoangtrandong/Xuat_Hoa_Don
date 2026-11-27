@@ -68,6 +68,13 @@ class StockAdjust(BaseModel):
     unit_cost: Optional[float] = None
 
 
+class BulkDeleteStockRequest(BaseModel):
+    warehouse_id: Optional[int] = None
+    product_ids: List[int] = Field(default_factory=list)
+    invoice_product_ids: List[int] = Field(default_factory=list)
+    note: Optional[str] = None
+
+
 class WarehouseLocation(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

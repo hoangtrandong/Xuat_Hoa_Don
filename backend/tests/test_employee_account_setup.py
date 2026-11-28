@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.api.v1.endpoints.employees import (
     create_employee,
+    delete_employee,
     download_employee_template,
     setup_or_update_employee_account,
     upload_employees,
@@ -166,3 +167,78 @@ def test_employee_excel_template_and_upload_with_accounts(db_session):
     assert u1 is not None and verify_password("Kt02@123", u1.hashed_password)
     assert u2 is not None and verify_password("Gh09@123", u2.hashed_password)
     assert u3 is None
+
+
+def test_delete_employee_auto_removes_linked_user_unless_admin_or_has_business_data(db_session):
+    from decimal import Decimal
+    from app.models.employee import Employee
+    from app.models.finance import DebtLedgerEntry
+
+    _, admin_user = _seed(db_session)
+
+    # 1. Nhân viên chỉ có tài khoản user thường, chưa có giao dịch -> xóa thành công + tự xóa User đi kèm
+    emp1 = create_employee(
+        payload=EmployeeCreateRequest(
+            code="GDE-040267",
+            name="Bùi Đức Trung",
+            position="Nhân viên giao hàng",
+            create_account=True,
+            account_password="Pass@123",
+        ),
+        db=db_session,
+        current_user=admin_user,
+    )
+    assert db_session.scalar(select(User).where(User.employee_id == emp1.id)) is not None
+
+    resp = delete_employee(employee_id=emp1.id, db=db_session)
+    assert resp.status_code == 204
+    assert db_session.get(Employee, emp1.id) is None
+    assert db_session.scalar(select(User).where(User.username == "GDE-040267")) is None
+
+    # 2. Nhân viên có công nợ -> vẫn chặn xóa (409)
+    emp2 = create_employee(
+        payload=EmployeeCreateRequest(
+            code="NV-DEBT-01",
+            name="NV Co Cong No",
+            position="Nhân viên giao hàng",
+            create_account=True,
+            account_password="Pass@123",
+        ),
+        db=db_session,
+        current_user=admin_user,
+    )
+    db_session.add(
+        DebtLedgerEntry(
+            party_type="EMPLOYEE",
+            party_id=emp2.id,
+            entry_type="ADJUSTMENT",
+            amount=Decimal("100000"),
+            source_type="MANUAL",
+        )
+    )
+    db_session.commit()
+    with pytest.raises(HTTPException) as exc_debt:
+        delete_employee(employee_id=emp2.id, db=db_session)
+    assert exc_debt.value.status_code == 409
+    assert "debt_ledger_entries" in exc_debt.value.detail
+
+    # 3. Nhân viên gắn tài khoản Admin -> chặn xóa (409)
+    emp3 = create_employee(
+        payload=EmployeeCreateRequest(
+            code="NV-ADM-01",
+            name="Quan Tri Vien",
+            position="Quản trị",
+            create_account=True,
+            account_password="Pass@123",
+        ),
+        db=db_session,
+        current_user=admin_user,
+    )
+    u3 = db_session.scalar(select(User).where(User.employee_id == emp3.id))
+    admin_role = db_session.scalar(select(Role).where(Role.name == "admin"))
+    u3.roles.append(admin_role)
+    db_session.commit()
+    with pytest.raises(HTTPException) as exc_adm:
+        delete_employee(employee_id=emp3.id, db=db_session)
+    assert exc_adm.value.status_code == 409
+    assert "Admin" in exc_adm.value.detail

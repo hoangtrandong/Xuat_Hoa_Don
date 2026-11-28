@@ -26,13 +26,15 @@ def get_by_code(db: Session, code: str) -> Optional[Employee]:
     return db.scalar(select(Employee).where(func.upper(Employee.code) == code.strip().upper()))
 
 
-def usage_summary(db: Session, employee_id: int) -> List[str]:
+def usage_summary(db: Session, employee_id: int, ignore_linked_user: bool = False) -> List[str]:
     """Liệt kê các dữ liệu đang tham chiếu tới nhân viên (rỗng = có thể xóa)."""
     from app.core.database import Base
     from app.models.finance import DebtLedgerEntry
 
     used: List[str] = []
     for table in Base.metadata.sorted_tables:
+        if ignore_linked_user and table.name == "users":
+            continue
         for fk in table.foreign_keys:
             if fk.column.table.name != "employees":
                 continue
@@ -51,7 +53,24 @@ def usage_summary(db: Session, employee_id: int) -> List[str]:
     return used
 
 
-def delete(db: Session, employee: Employee) -> None:
+def delete(db: Session, employee: Employee, delete_linked_users: bool = False) -> None:
+    if delete_linked_users:
+        linked_users = list(
+            db.scalars(
+                select(User).options(selectinload(User.roles)).where(User.employee_id == employee.id)
+            ).all()
+        )
+        for u in linked_users:
+            is_admin = (u.username or "").strip().lower() == "admin" or any(
+                (r.name or "").strip().lower() == "admin" for r in (u.roles or [])
+            )
+            if is_admin:
+                raise ValueError("Không thể xóa nhân viên đang gắn tài khoản quản trị (Admin). Hãy chuyển sang trạng thái 'Đã nghỉ'.")
+        for u in linked_users:
+            u.roles.clear()
+            db.delete(u)
+        if linked_users:
+            db.flush()
     db.delete(employee)
     db.commit()
 

@@ -628,12 +628,16 @@ def delete_employee(employee_id: int, db: Session = Depends(get_db)):
     obj = crud.get(db, employee_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Employee not found")
-    used = crud.usage_summary(db, employee_id)
+    used = crud.usage_summary(db, employee_id, ignore_linked_user=True)
     if used:
         raise HTTPException(
             status_code=409,
             detail="Nhân viên đã có dữ liệu liên quan (" + ", ".join(used)
             + ") nên không thể xóa. Hãy chuyển sang trạng thái 'Đã nghỉ' thay vì xóa.",
         )
-    crud.delete(db, obj)
+    try:
+        crud.delete(db, obj, delete_linked_users=True)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return Response(status_code=204)

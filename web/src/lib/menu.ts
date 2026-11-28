@@ -38,10 +38,19 @@ export const menuItems: MenuItem[] = [
     href: "/admin/delivery-requests",
     children: [
       { key: "admin-delivery-requests", label: "Điều phối & Yêu cầu xuất", icon: "ClipboardList", href: "/admin/delivery-requests" },
-      { key: "admin-debt-transfers", label: "Duyệt chuyển công nợ (POD)", icon: "ShieldCheck", href: "/admin/debt-transfers" },
       { key: "warehouse-delivery-queue", label: "Hàng chờ xuất kho", icon: "PackageMinus", href: "/warehouse/delivery-queue" },
       { key: "warehouse-inventory", label: "Tồn kho & FEFO / Vị trí", icon: "BoxesIcon", href: "/warehouse/inventory" },
       { key: "warehouse-import", label: "Nhập kho (Lô & HSD)", icon: "PackagePlus", href: "/warehouse/import" },
+    ],
+  },
+  {
+    key: "finance-debts",
+    label: "Công nợ & Tài chính",
+    icon: "CreditCard",
+    href: "/finance/debts",
+    children: [
+      { key: "finance-debts-overview", label: "Công nợ NV & Khách hàng", icon: "CreditCard", href: "/finance/debts" },
+      { key: "admin-debt-transfers", label: "Duyệt chuyển công nợ (POD)", icon: "ArrowRightLeft", href: "/admin/debt-transfers" },
     ],
   },
   {

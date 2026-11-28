@@ -2967,6 +2967,119 @@ def list_vinamilk_staff_options(
     return {"staffs": list(options_by_code.values())[:limit]}
 
 
+class OrderCustomerUpdateRequest(BaseModel):
+    customer_code: str = Field(min_length=1, max_length=120)
+    customer_name: str | None = Field(default=None, max_length=255)
+    customer_address: str | None = Field(default=None, max_length=500)
+
+
+@router.patch("/vinamilk-orders/{order_number}/customer")
+def update_vinamilk_order_customer(
+    order_number: str,
+    payload: OrderCustomerUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cho phép thay đổi mã khách hàng đặt đơn hàng DMS (cập nhật tất cả dòng snapshot + đồng bộ đơn giao hàng chưa chốt)."""
+    from app.models.customer import Customer
+    from app.models.inventory import DeliveryRequestOrder
+    from app.models.sales import SalesOrder
+
+    clean_order_num = (order_number or "").strip()
+    if not clean_order_num:
+        raise HTTPException(status_code=400, detail="Số đơn hàng không hợp lệ.")
+
+    rows = db.scalars(
+        select(VinamilkOrderSnapshot).where(
+            func.upper(VinamilkOrderSnapshot.order_number) == clean_order_num.upper()
+        )
+    ).all()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy đơn hàng {clean_order_num}.")
+
+    raw_code = payload.customer_code.strip()
+    if not raw_code:
+        raise HTTPException(status_code=400, detail="Mã khách hàng mới không được để trống.")
+
+    # Tra cứu trong danh mục Khách hàng để tự động lấy tên & địa chỉ chuẩn nếu có
+    matched_customer = db.scalar(
+        select(Customer).where(func.upper(Customer.code) == raw_code.upper())
+    )
+    resolved_code = matched_customer.code if matched_customer else raw_code
+    resolved_name = (
+        (payload.customer_name or "").strip()
+        or (matched_customer.name if matched_customer else "")
+        or resolved_code
+    )
+    resolved_address = (
+        (payload.customer_address or "").strip()
+        or (matched_customer.address if matched_customer else None)
+    )
+
+    actor = getattr(current_user, "username", None)
+    now_iso = datetime.utcnow().isoformat()
+    old_customer_code = rows[0].customer_code
+
+    for row in rows:
+        row.customer_code = resolved_code
+        row.customer_name = resolved_name
+        if actor:
+            row.performed_by = actor
+
+        new_payload = dict(row.raw_payload or {})
+        if not new_payload.get("originalCustomerCode") and old_customer_code:
+            new_payload["originalCustomerCode"] = old_customer_code
+        new_payload["customerChangedBy"] = actor
+        new_payload["customerChangedAt"] = now_iso
+
+        for key in ("customerCode", "shopCode", "Mã KH", "Mã khách hàng"):
+            if key in new_payload or key in ("customerCode", "Mã KH"):
+                new_payload[key] = resolved_code
+        for key in ("customerName", "shopName", "Tên KH", "Tên khách hàng"):
+            if key in new_payload or key in ("customerName", "Tên KH"):
+                new_payload[key] = resolved_name
+        if resolved_address:
+            for key in ("address", "customerAddress", "Địa chỉ"):
+                if key in new_payload or key in ("customerAddress", "Địa chỉ"):
+                    new_payload[key] = resolved_address
+        row.raw_payload = new_payload
+
+    # Đồng bộ sang DeliveryRequestOrder chưa chốt thanh toán
+    dro_rows = db.scalars(
+        select(DeliveryRequestOrder).where(
+            func.upper(DeliveryRequestOrder.order_number) == clean_order_num.upper(),
+            DeliveryRequestOrder.payment_status == "UNPAID",
+        )
+    ).all()
+    for dro in dro_rows:
+        dro.customer_code = resolved_code
+        dro.customer_name = resolved_name
+        if matched_customer:
+            dro.store_id = matched_customer.store_id
+
+    # Đồng bộ sang SalesOrder nếu có đơn nội bộ trùng mã và tìm thấy khách hàng
+    if matched_customer:
+        so = db.scalar(
+            select(SalesOrder).where(
+                func.upper(SalesOrder.code) == clean_order_num.upper(),
+                SalesOrder.status.notin_(["COMPLETED", "CANCELLED"]),
+            )
+        )
+        if so:
+            so.customer_id = matched_customer.id
+
+    db.commit()
+    return {
+        "order_number": clean_order_num,
+        "old_customer_code": old_customer_code,
+        "customer_code": resolved_code,
+        "customer_name": resolved_name,
+        "customer_address": resolved_address,
+        "updated_lines": len(rows),
+        "performed_by": actor,
+    }
+
+
 @router.patch("/vinamilk-orders/{new_order_number}/replacement")
 def update_vinamilk_order_replacement(
     new_order_number: str,

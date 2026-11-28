@@ -3,7 +3,9 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.core.database import get_db
-from app.schemas.sales import SalesOrder, SalesOrderCreate
+from app.core.auth import get_current_user
+from app.models.user import User
+from app.schemas.sales import SalesOrder, SalesOrderChangeCustomerRequest, SalesOrderCreate
 from app.crud import sales_order as crud
 
 router = APIRouter(prefix="/sales-orders", tags=["sales"])
@@ -40,3 +42,16 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
     if not obj:
         raise HTTPException(status_code=404, detail="Order not found")
     return obj
+
+
+@router.patch("/{order_id}/customer", response_model=SalesOrder)
+def change_order_customer(
+    order_id: int,
+    payload: SalesOrderChangeCustomerRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return crud.change_customer(db, order_id=order_id, customer_id=payload.customer_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

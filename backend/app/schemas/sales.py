@@ -31,6 +31,10 @@ class SalesOrderCreate(SalesOrderBase):
     items: List[SalesOrderItemCreate]
 
 
+class SalesOrderChangeCustomerRequest(BaseModel):
+    customer_id: int
+
+
 class SalesOrder(SalesOrderBase):
     model_config = ConfigDict(from_attributes=True)
     id: int

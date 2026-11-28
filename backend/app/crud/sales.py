@@ -59,10 +59,42 @@ def create(db: Session, obj_in: SalesOrderCreate, employee_id: Optional[int] = N
     return order
 
 
+def change_customer(db: Session, order_id: int, customer_id: int) -> SalesOrder:
+    from app.models.customer import Customer
+    from app.models.inventory import DeliveryRequestOrder
+
+    order = db.get(SalesOrder, order_id)
+    if not order:
+        raise ValueError("Không tìm thấy đơn hàng.")
+    if order.status in ("COMPLETED", "CANCELLED"):
+        raise ValueError(f"Đơn hàng {order.code} đang ở trạng thái {order.status}, không thể đổi mã khách hàng.")
+    customer = db.get(Customer, customer_id)
+    if not customer:
+        raise ValueError("Không tìm thấy khách hàng mới.")
+
+    order.customer_id = customer.id
+    # Đồng bộ sang DeliveryRequestOrder chưa chốt nếu đơn đã đưa vào chuyến giao
+    dro_rows = db.scalars(
+        select(DeliveryRequestOrder).where(
+            (DeliveryRequestOrder.source_order_id == order.id) | (DeliveryRequestOrder.order_number == order.code),
+            DeliveryRequestOrder.payment_status == "UNPAID",
+        )
+    ).all()
+    for dro in dro_rows:
+        dro.customer_code = customer.code
+        dro.customer_name = customer.name
+        dro.store_id = customer.store_id
+
+    db.commit()
+    db.refresh(order)
+    return order
+
+
 class SalesOrderCRUD:
     get = staticmethod(get)
     list_ = staticmethod(list_)
     create = staticmethod(create)
+    change_customer = staticmethod(change_customer)
 
 
 sales_order = SalesOrderCRUD()

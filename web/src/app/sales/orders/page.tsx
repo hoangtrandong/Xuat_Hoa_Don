@@ -23,6 +23,7 @@ import {
   ChevronsRight,
   Pencil,
   Trash2,
+  X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import PageHeader from "@/components/ui/PageHeader";
@@ -643,6 +644,19 @@ export default function SalesOrdersPage() {
   const [splitApprovalError, setSplitApprovalError] = useState("");
 
   const [isDeliveryRequestDrawerOpen, setIsDeliveryRequestDrawerOpen] = useState(false);
+
+  // State cho Đổi mã khách hàng đặt đơn hàng
+  const [changeCustomerOrder, setChangeCustomerOrder] = useState<{
+    orderNumber: string;
+    currentCode: string;
+    currentName: string;
+  } | null>(null);
+  const [changeCustomerSearch, setChangeCustomerSearch] = useState("");
+  const [newCustomerCode, setNewCustomerCode] = useState("");
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerAddress, setNewCustomerAddress] = useState("");
+  const [savingChangeCustomer, setSavingChangeCustomer] = useState(false);
+  const [changeCustomerError, setChangeCustomerError] = useState("");
   const [deliveryEmployees, setDeliveryEmployees] = useState<DeliveryEmployeeOption[]>([]);
   const [deliveryWarehouses, setDeliveryWarehouses] = useState<DeliveryWarehouseOption[]>([]);
   const [deliveryWarehouseId, setDeliveryWarehouseId] = useState("");
@@ -3897,6 +3911,37 @@ return Array.from(map.values());
               Kiểm tra thông tin đơn hàng trước khi thực hiện tác vụ.
             </p>
             <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              {detailOrderNumber && !detailLoading && detailOrderLines.length > 0 && (
+                <button
+                  type="button"
+                  disabled={deletingManualOrder}
+                  onClick={() => {
+                    const firstLine = detailOrderLines[0] || {};
+                    const currCode = String(
+                      firstLine.customerCode ?? firstLine.shopCode ?? firstLine["Mã KH"] ?? ""
+                    );
+                    const currName = String(
+                      firstLine.customerName ?? firstLine.shopName ?? firstLine["Tên KH"] ?? ""
+                    );
+                    setChangeCustomerOrder({
+                      orderNumber: detailOrderNumber,
+                      currentCode: currCode,
+                      currentName: currName,
+                    });
+                    setChangeCustomerSearch("");
+                    setNewCustomerCode(currCode);
+                    setNewCustomerName(currName);
+                    setNewCustomerAddress(
+                      String(firstLine.customerAddress ?? firstLine.address ?? firstLine["Địa chỉ"] ?? "")
+                    );
+                    setChangeCustomerError("");
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  <Pencil size={13} />
+                  Đổi mã KH
+                </button>
+              )}
               {detailOrderNumber?.toUpperCase().startsWith("TC-") && !detailLoading && detailOrderLines.length > 0 && (
                 <>
                   <button
@@ -5975,6 +6020,191 @@ return Array.from(map.values());
 
         </div>
       </OrderActionModal>
+
+      {/* Modal Đổi mã khách hàng đặt đơn (chuẩn CreateOrderForm) */}
+      {changeCustomerOrder && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3">
+          <div className="w-full max-w-lg overflow-hidden border border-slate-400 bg-white shadow-2xl">
+            <header className="flex items-center justify-between bg-[#14263d] px-3 py-2 text-white">
+              <div className="flex items-center gap-2">
+                <Pencil size={17} className="text-red-500" />
+                <h2 className="text-xs font-bold uppercase tracking-wide text-white">
+                  Đổi Mã Khách Hàng Đặt Đơn · {changeCustomerOrder.orderNumber}
+                </h2>
+              </div>
+              <button
+                type="button"
+                disabled={savingChangeCustomer}
+                onClick={() => setChangeCustomerOrder(null)}
+                className="rounded p-1 text-white hover:bg-white/10"
+              >
+                <X size={16} />
+              </button>
+            </header>
+
+            <div className="space-y-2.5 border-b border-slate-200 px-3 py-3 text-xs">
+              <div className="rounded border border-amber-200 bg-amber-50/70 px-2.5 py-1.5 text-[11px] text-amber-900">
+                Khách hàng hiện tại:{" "}
+                <strong className="font-mono">{changeCustomerOrder.currentCode || "—"}</strong>{" "}
+                {changeCustomerOrder.currentName ? `— ${changeCustomerOrder.currentName}` : ""}
+              </div>
+
+              {changeCustomerError && (
+                <div className="rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-xs text-red-800">
+                  {changeCustomerError}
+                </div>
+              )}
+
+              <div>
+                <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                  Tìm nhanh khách hàng trong danh mục
+                </label>
+                <input
+                  type="text"
+                  value={changeCustomerSearch}
+                  onChange={(e) => setChangeCustomerSearch(e.target.value)}
+                  placeholder="Gõ mã KH, tên KH hoặc địa chỉ để chọn nhanh..."
+                  className="w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                />
+                {changeCustomerSearch.trim() && (
+                  <div className="mt-1 max-h-40 overflow-y-auto rounded border border-slate-200 bg-white shadow-sm">
+                    {customerOptions
+                      .filter((c) => {
+                        const q = changeCustomerSearch.trim().toLowerCase();
+                        return [c.customer_code, c.customer_name, c.customer_address]
+                          .join(" ")
+                          .toLowerCase()
+                          .includes(q);
+                      })
+                      .slice(0, 20)
+                      .map((c) => (
+                        <button
+                          key={c.customer_code}
+                          type="button"
+                          onClick={() => {
+                            setNewCustomerCode(c.customer_code);
+                            setNewCustomerName(c.customer_name);
+                            setNewCustomerAddress(c.customer_address || "");
+                            setChangeCustomerSearch("");
+                          }}
+                          className="flex w-full items-start justify-between gap-2 border-b border-slate-100 px-2.5 py-1.5 text-left text-[11px] hover:bg-sky-50"
+                        >
+                          <div className="min-w-0">
+                            <span className="font-mono font-bold text-[#14263d]">{c.customer_code}</span>{" "}
+                            <span className="font-medium text-slate-800">{c.customer_name}</span>
+                            {c.customer_address && (
+                              <div className="truncate text-[10px] text-slate-500">{c.customer_address}</div>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                    Mã khách hàng mới <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={newCustomerCode}
+                    onChange={(e) => setNewCustomerCode(e.target.value)}
+                    placeholder="VD: 00123456"
+                    className="w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 font-mono text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                    Tên khách hàng mới
+                  </label>
+                  <input
+                    type="text"
+                    value={newCustomerName}
+                    onChange={(e) => setNewCustomerName(e.target.value)}
+                    placeholder="Tự điền nếu có trong danh mục"
+                    className="w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                  Địa chỉ khách hàng (tùy chọn)
+                </label>
+                <input
+                  type="text"
+                  value={newCustomerAddress}
+                  onChange={(e) => setNewCustomerAddress(e.target.value)}
+                  placeholder="Địa chỉ giao hàng..."
+                  className="w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                />
+              </div>
+            </div>
+
+            <footer className="flex items-center justify-between gap-3 border-t border-slate-300 bg-slate-100 px-3 py-2">
+              <span className="text-[10px] text-slate-500">
+                Hệ thống lưu vết mã KH gốc và tự động đồng bộ sang chuyến giao chưa chốt.
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={savingChangeCustomer}
+                  onClick={() => setChangeCustomerOrder(null)}
+                  className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-red-800"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="button"
+                  disabled={savingChangeCustomer || !newCustomerCode.trim()}
+                  onClick={async () => {
+                    if (!changeCustomerOrder || !newCustomerCode.trim()) return;
+                    setSavingChangeCustomer(true);
+                    setChangeCustomerError("");
+                    try {
+                      const res = await apiFetch(
+                        `${API_URL}/sync/vinamilk-orders/${encodeURIComponent(changeCustomerOrder.orderNumber)}/customer`,
+                        {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            customer_code: newCustomerCode.trim(),
+                            customer_name: newCustomerName.trim() || null,
+                            customer_address: newCustomerAddress.trim() || null,
+                          }),
+                        }
+                      );
+                      const data = (await res.json().catch(() => ({}))) as {
+                        detail?: string;
+                        customer_code?: string;
+                        customer_name?: string;
+                      };
+                      if (!res.ok) throw new Error(data.detail || "Không thể đổi mã khách hàng.");
+                      const targetOrd = changeCustomerOrder.orderNumber;
+                      setChangeCustomerOrder(null);
+                      setDetailOrderNumber(null);
+                      setToast(
+                        `Đã đổi mã KH đơn ${targetOrd} sang ${data.customer_code || newCustomerCode.trim()} (${data.customer_name || newCustomerName.trim()}).`
+                      );
+                      void loadLocalOrders().catch(() => {});
+                    } catch (err) {
+                      setChangeCustomerError(err instanceof Error ? err.message : "Lỗi khi đổi mã khách hàng.");
+                    } finally {
+                      setSavingChangeCustomer(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {savingChangeCustomer ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                  Lưu mã KH mới
+                </button>
+              </div>
+            </footer>
+          </div>
+        </div>
+      )}
 
     </div>
   );

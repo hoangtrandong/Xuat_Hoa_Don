@@ -179,3 +179,117 @@ def test_asiafoods_login_and_get_cookie():
     assert posted_data["username"] == "user_gd"
     assert posted_data["password"] == "pass_gd"
     assert posted_data["lt"] == "LT-123"
+
+
+def test_deleted_supplier_orders_are_hidden_and_cleaned_up():
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+    from app.core.database import Base
+    from app.models.multi_tenant_invoice import Distributor, DistributorSupplierConfig
+    from app.models.vinamilk import VinamilkOrderSnapshot
+    from app.api.v1.endpoints.sync import list_local_vinamilk_orders
+    from app.api.v1.endpoints.multi_tenant_einvoice import delete_supplier_config
+
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    db = SessionLocal()
+    try:
+        dist = Distributor(code="NPP-MAIGOLD", name="NPP Mai Gold", tax_code="0100000099")
+        db.add(dist)
+        db.flush()
+
+        cfg_nazzy = DistributorSupplierConfig(
+            distributor_id=dist.id,
+            supplier_code="NAZZY",
+            supplier_name="DMS Nazzy",
+            connector_type="REST_API",
+        )
+        db.add(cfg_nazzy)
+        db.flush()
+
+        db.add_all([
+            VinamilkOrderSnapshot(
+                remote_key="nazzy-001",
+                order_number="NZ-001",
+                order_created_date=date(2026, 11, 20),
+                synced_from=date(2026, 11, 20),
+                synced_to=date(2026, 11, 20),
+                processing_status="NCC:NAZZY",
+                performed_by="NPP-MAIGOLD",
+                warehouse_updated=False,
+                raw_payload={"orderNumber": "NZ-001", "Mã NPP": "NPP-MAIGOLD", "Nguồn đồng bộ": "NAZZY"},
+            ),
+            VinamilkOrderSnapshot(
+                remote_key="nazzy-exported",
+                order_number="NZ-EXPORTED",
+                order_created_date=date(2026, 11, 20),
+                synced_from=date(2026, 11, 20),
+                synced_to=date(2026, 11, 20),
+                processing_status="NCC:NAZZY",
+                performed_by="NPP-MAIGOLD",
+                warehouse_updated=True,
+                raw_payload={"orderNumber": "NZ-EXPORTED", "Mã NPP": "NPP-MAIGOLD", "Nguồn đồng bộ": "NAZZY"},
+            ),
+            VinamilkOrderSnapshot(
+                remote_key="vnm-001",
+                order_number="VNM-001",
+                order_created_date=date(2026, 11, 20),
+                synced_from=date(2026, 11, 20),
+                synced_to=date(2026, 11, 20),
+                performed_by="NPP-MAIGOLD",
+                raw_payload={"orderNumber": "VNM-001", "Mã NPP": "NPP-MAIGOLD"},
+            ),
+        ])
+        db.commit()
+
+        admin_user = SimpleNamespace(
+            id=1, username="admin", distributor_id=dist.id,
+            roles=[SimpleNamespace(name="admin")],
+        )
+
+        # Trước khi xóa cấu hình NAZZY -> thấy đủ 3 đơn
+        before = list_local_vinamilk_orders(
+            from_date=date(2026, 11, 20), to_date=date(2026, 11, 20), source="sync",
+            search=None, status=None, skip=0, limit=100,
+            distributor_code=dist.code, db=db, current_user=admin_user,
+        )
+        assert {r["orderNumber"] for r in before["rows"]} == {"NZ-001", "NZ-EXPORTED", "VNM-001"}
+
+        # Xóa cấu hình NAZZY -> xóa đơn chưa xuất kho/HĐ (NZ-001), bảo vệ đơn đã xuất kho (NZ-EXPORTED)
+        del_res = delete_supplier_config(config_id=cfg_nazzy.id, db=db, current_user=admin_user)
+        assert del_res["deleted"] is True
+        assert del_res["deleted_snapshots"] == 1
+        assert del_res["preserved_snapshots"] == 1
+        assert db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == "NZ-001")) is None
+        assert db.scalar(select(VinamilkOrderSnapshot).where(VinamilkOrderSnapshot.order_number == "NZ-EXPORTED")) is not None
+
+        # Trên danh sách vận hành -> chỉ còn VNM-001 (đơn NAZZY đã bị ẩn)
+        after = list_local_vinamilk_orders(
+            from_date=date(2026, 11, 20), to_date=date(2026, 11, 20), source="sync",
+            search=None, status=None, skip=0, limit=100,
+            distributor_code=dist.code, db=db, current_user=admin_user,
+        )
+        assert {r["orderNumber"] for r in after["rows"]} == {"VNM-001"}
+
+        # Trường hợp snapshot NCC:NAZZY mồ côi còn sót sẵn trong DB -> cũng tự động bị ẩn
+        db.add(VinamilkOrderSnapshot(
+            remote_key="nazzy-orphan",
+            order_number="NZ-ORPHAN",
+            order_created_date=date(2026, 11, 20),
+            synced_from=date(2026, 11, 20),
+            synced_to=date(2026, 11, 20),
+            processing_status="NCC:NAZZY",
+            performed_by="NPP-MAIGOLD",
+            raw_payload={"orderNumber": "NZ-ORPHAN", "Mã NPP": "NPP-MAIGOLD"},
+        ))
+        db.commit()
+        after_orphan = list_local_vinamilk_orders(
+            from_date=date(2026, 11, 20), to_date=date(2026, 11, 20), source="sync",
+            search=None, status=None, skip=0, limit=100,
+            distributor_code=dist.code, db=db, current_user=admin_user,
+        )
+        assert {r["orderNumber"] for r in after_orphan["rows"]} == {"VNM-001"}
+    finally:
+        db.close()
+        engine.dispose()

@@ -210,6 +210,28 @@ def consolidate_dms_orders_for_invoicing(
     )
     snapshots = list(db.scalars(stmt).all())
 
+    # Lọc bỏ các đơn đồng bộ từ nguồn NCC đã bị xóa cấu hình khỏi NPP (VD: NCC:NAZZY sau khi xóa Nazzy)
+    from app.models.multi_tenant_invoice import DistributorSupplierConfig
+
+    cfg_stmt = select(DistributorSupplierConfig.supplier_code)
+    if distributor_id is not None:
+        cfg_stmt = cfg_stmt.where(DistributorSupplierConfig.distributor_id == distributor_id)
+    configured_supplier_codes = {
+        (code or "").strip().upper()
+        for code in db.scalars(cfg_stmt).all()
+        if (code or "").strip()
+    }
+    if snapshots:
+        filtered_snaps: list[VinamilkOrderSnapshot] = []
+        for snap in snapshots:
+            ps = (snap.processing_status or "").strip().upper()
+            if ps.startswith("NCC:"):
+                sup = ps.split(":", 1)[1].strip()
+                if sup and sup not in configured_supplier_codes:
+                    continue
+            filtered_snaps.append(snap)
+        snapshots = filtered_snaps
+
     # 2. Lấy danh sách số đơn đã xuất hóa đơn (nếu bật lọc)
     invoiced_orders: set[str] = set()
     if exclude_invoiced:

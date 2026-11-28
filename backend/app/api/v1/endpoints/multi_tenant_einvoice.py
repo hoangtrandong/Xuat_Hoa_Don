@@ -824,9 +824,83 @@ def delete_supplier_config(
     if cfg is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình nguồn Nhà cung cấp.")
     _ensure_user_can_access_supplier_config(current_user, cfg.distributor_id)
+
+    sup_code = (cfg.supplier_code or "").strip().upper()
+    dist_obj = db.get(Distributor, cfg.distributor_id)
+    dist_code = (dist_obj.code or "").strip().upper() if dist_obj else ""
+
+    # Xóa các snapshot chưa xuất kho & chưa xuất HĐĐT của nguồn NCC này; bảo vệ đơn đã có chứng từ kế toán/thuế
+    deleted_snapshots = 0
+    preserved_snapshots = 0
+    if sup_code:
+        from app.models.inventory import DeliveryRequest, DeliveryRequestOrder
+        from app.models.vinamilk import VinamilkOrderSnapshot
+
+        ncc_status = f"NCC:{sup_code}"
+        snaps = db.scalars(
+            select(VinamilkOrderSnapshot).where(
+                func.upper(VinamilkOrderSnapshot.processing_status) == ncc_status
+            )
+        ).all()
+
+        matching_snaps = []
+        for snap in snaps:
+            payload = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+            snap_dist = str(payload.get("Mã NPP") or snap.performed_by or "").strip().upper()
+            if not dist_code or not snap_dist or snap_dist == dist_code:
+                matching_snaps.append(snap)
+
+        if matching_snaps:
+            order_nums = {
+                (s.order_number or "").strip().upper()
+                for s in matching_snaps
+                if (s.order_number or "").strip()
+            }
+            protected_orders: set[str] = set()
+
+            # 1. Đơn đã phát hành hóa đơn điện tử (chưa hủy)
+            issued_stmt = select(IssuedInvoice.source_order_numbers).where(
+                IssuedInvoice.status != "CANCELLED"
+            )
+            if cfg.distributor_id is not None:
+                issued_stmt = issued_stmt.where(IssuedInvoice.distributor_id == cfg.distributor_id)
+            for src_nums in db.scalars(issued_stmt).all():
+                if isinstance(src_nums, list):
+                    for num in src_nums:
+                        if num:
+                            protected_orders.add(str(num).strip().upper())
+
+            # 2. Đơn đã nằm trong phiếu yêu cầu xuất kho (chưa hủy)
+            if order_nums:
+                dr_ord_nums = db.scalars(
+                    select(DeliveryRequestOrder.order_number)
+                    .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
+                    .where(
+                        func.upper(func.trim(DeliveryRequestOrder.order_number)).in_(order_nums),
+                        DeliveryRequest.status != "CANCELLED",
+                    )
+                ).all()
+                for num in dr_ord_nums:
+                    if num:
+                        protected_orders.add(str(num).strip().upper())
+
+            for snap in matching_snaps:
+                ord_key = (snap.order_number or "").strip().upper()
+                if snap.warehouse_updated or (ord_key and ord_key in protected_orders):
+                    preserved_snapshots += 1
+                else:
+                    db.delete(snap)
+                    deleted_snapshots += 1
+
     db.delete(cfg)
     db.commit()
-    return {"deleted": True, "id": config_id}
+    return {
+        "deleted": True,
+        "id": config_id,
+        "supplier_code": sup_code,
+        "deleted_snapshots": deleted_snapshots,
+        "preserved_snapshots": preserved_snapshots,
+    }
 
 
 @router.post("/supplier-configs/test-connection")

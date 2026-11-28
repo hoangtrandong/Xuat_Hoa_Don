@@ -1996,6 +1996,11 @@ def list_local_vinamilk_orders(
         for sup_key, d_codes in all_supplier_distributor_codes.items()
     }
 
+    payload_sync_source_upper = func.upper(
+        func.trim(func.coalesce(VinamilkOrderSnapshot.raw_payload["Nguồn đồng bộ"].as_string(), ""))
+    )
+    non_external_sync_sources = ("", "VINAMILK", "TỰ TẠO", "TÁCH/GỘP")
+
     is_default_legacy_dist = False
     if effective_dist_code:
         payload_dist_code = VinamilkOrderSnapshot.raw_payload["Mã NPP"].as_string()
@@ -2037,18 +2042,19 @@ def list_local_vinamilk_orders(
             )
         filters.append(or_(*dist_conditions))
 
-        # Ẩn các đơn đồng bộ từ nguồn NCC đã bị xóa khỏi NPP này (VD: đã xóa NAZZY khỏi NPP Mai Gold)
-        configured_for_dist = [
-            f"NCC:{sup_code}"
+        # Ẩn các đơn đồng bộ từ nguồn NCC đã bị xóa khỏi NPP này (cả processing_status=NCC:* lẫn raw_payload['Nguồn đồng bộ'])
+        configured_sups_for_dist = [
+            sup_code
             for sup_code, d_codes in all_supplier_distributor_codes.items()
             if effective_dist_code in d_codes
         ]
-        if configured_for_dist:
+        configured_ncc_for_dist = [f"NCC:{sup_code}" for sup_code in configured_sups_for_dist]
+        if configured_ncc_for_dist:
             filters.append(
                 or_(
                     VinamilkOrderSnapshot.processing_status.is_(None),
                     ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
-                    func.upper(VinamilkOrderSnapshot.processing_status).in_(configured_for_dist),
+                    func.upper(VinamilkOrderSnapshot.processing_status).in_(configured_ncc_for_dist),
                 )
             )
         else:
@@ -2058,24 +2064,46 @@ def list_local_vinamilk_orders(
                     ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
                 )
             )
+        allowed_sync_sources = [*non_external_sync_sources, *configured_sups_for_dist]
+        filters.append(payload_sync_source_upper.in_(allowed_sync_sources))
     else:
-        # Khi xem tất cả NPP: vẫn ẩn các đơn NCC:<SUPPLIER> của nguồn NCC đã bị xóa khỏi toàn bộ hệ thống
-        all_configured_ncc = [f"NCC:{sup_code}" for sup_code in all_supplier_distributor_codes.keys()]
-        if all_configured_ncc:
-            filters.append(
-                or_(
-                    VinamilkOrderSnapshot.processing_status.is_(None),
-                    ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
-                    func.upper(VinamilkOrderSnapshot.processing_status).in_(all_configured_ncc),
+        # Khi xem tất cả NPP: ẩn mọi đơn NCC đã bị xóa khỏi NPP sở hữu nó (kể cả khi NPP khác vẫn còn cấu hình NCC đó)
+        payload_dist_upper = func.upper(
+            func.trim(func.coalesce(VinamilkOrderSnapshot.raw_payload["Mã NPP"].as_string(), ""))
+        )
+        performed_by_upper = func.upper(func.trim(func.coalesce(VinamilkOrderSnapshot.performed_by, "")))
+        row_has_no_explicit_dist = and_(
+            payload_dist_upper == "",
+            performed_by_upper.in_(("", "HỆ THỐNG")),
+        )
+        valid_ncc_status_clauses = [
+            VinamilkOrderSnapshot.processing_status.is_(None),
+            ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
+        ]
+        valid_sync_source_clauses = [
+            payload_sync_source_upper.in_(non_external_sync_sources),
+        ]
+        for sup_code, d_codes in all_supplier_distributor_codes.items():
+            d_list = sorted(d_codes)
+            dist_match = or_(
+                payload_dist_upper.in_(d_list),
+                and_(payload_dist_upper == "", performed_by_upper.in_(d_list)),
+                row_has_no_explicit_dist,
+            )
+            valid_ncc_status_clauses.append(
+                and_(
+                    func.upper(VinamilkOrderSnapshot.processing_status) == f"NCC:{sup_code}",
+                    dist_match,
                 )
             )
-        else:
-            filters.append(
-                or_(
-                    VinamilkOrderSnapshot.processing_status.is_(None),
-                    ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
+            valid_sync_source_clauses.append(
+                and_(
+                    payload_sync_source_upper == sup_code,
+                    dist_match,
                 )
             )
+        filters.append(or_(*valid_ncc_status_clauses))
+        filters.append(or_(*valid_sync_source_clauses))
     snapshot_total = db.scalar(select(func.count()).select_from(VinamilkOrderSnapshot).where(*filters)) or 0
     raw_snapshot_total = snapshot_total
     rows = db.scalars(

@@ -8,7 +8,7 @@ import zipfile
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.job_queue import job_manager
@@ -837,9 +837,15 @@ def delete_supplier_config(
         from app.models.vinamilk import VinamilkOrderSnapshot
 
         ncc_status = f"NCC:{sup_code}"
+        payload_sync_src = func.upper(
+            func.trim(func.coalesce(VinamilkOrderSnapshot.raw_payload["Nguồn đồng bộ"].as_string(), ""))
+        )
         snaps = db.scalars(
             select(VinamilkOrderSnapshot).where(
-                func.upper(VinamilkOrderSnapshot.processing_status) == ncc_status
+                or_(
+                    func.upper(VinamilkOrderSnapshot.processing_status) == ncc_status,
+                    payload_sync_src == sup_code,
+                )
             )
         ).all()
 

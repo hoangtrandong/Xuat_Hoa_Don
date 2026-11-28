@@ -272,24 +272,71 @@ def test_deleted_supplier_orders_are_hidden_and_cleaned_up():
         )
         assert {r["orderNumber"] for r in after["rows"]} == {"VNM-001"}
 
-        # Trường hợp snapshot NCC:NAZZY mồ côi còn sót sẵn trong DB -> cũng tự động bị ẩn
+        # Trường hợp snapshot NAZZY mồ côi (kể cả khi processing_status đã đổi thành 'Đã duyệt đơn' hoặc NULL
+        # nhưng raw_payload['Nguồn đồng bộ'] vẫn là 'NAZZY') -> tự động bị ẩn
+        db.add_all([
+            VinamilkOrderSnapshot(
+                remote_key="nazzy-orphan",
+                order_number="NZ-ORPHAN",
+                order_created_date=date(2026, 11, 20),
+                synced_from=date(2026, 11, 20),
+                synced_to=date(2026, 11, 20),
+                processing_status="NCC:NAZZY",
+                performed_by="NPP-MAIGOLD",
+                raw_payload={"orderNumber": "NZ-ORPHAN", "Mã NPP": "NPP-MAIGOLD"},
+            ),
+            VinamilkOrderSnapshot(
+                remote_key="nazzy-status-changed",
+                order_number="NZ-APPROVED",
+                order_created_date=date(2026, 11, 20),
+                synced_from=date(2026, 11, 20),
+                synced_to=date(2026, 11, 20),
+                processing_status="Đã duyệt đơn",
+                performed_by="NPP-MAIGOLD",
+                raw_payload={"orderNumber": "NZ-APPROVED", "Mã NPP": "NPP-MAIGOLD", "Nguồn đồng bộ": "NAZZY"},
+            ),
+        ])
+        # Trường hợp NPP khác (NPP-OTHER) vẫn cấu hình NAZZY:
+        # khi Super Admin xem 'Tất cả NPP' (distributor_code=None), đơn NAZZY của NPP-MAIGOLD vẫn bị ẩn,
+        # còn đơn NAZZY của NPP-OTHER vẫn hiển thị bình thường.
+        dist_other = Distributor(code="NPP-OTHER", name="NPP Khác", tax_code="0100000088")
+        db.add(dist_other)
+        db.flush()
+        db.add(DistributorSupplierConfig(
+            distributor_id=dist_other.id,
+            supplier_code="NAZZY",
+            supplier_name="DMS Nazzy",
+            connector_type="REST_API",
+        ))
         db.add(VinamilkOrderSnapshot(
-            remote_key="nazzy-orphan",
-            order_number="NZ-ORPHAN",
+            remote_key="nazzy-other-npp",
+            order_number="NZ-OTHER-001",
             order_created_date=date(2026, 11, 20),
             synced_from=date(2026, 11, 20),
             synced_to=date(2026, 11, 20),
             processing_status="NCC:NAZZY",
-            performed_by="NPP-MAIGOLD",
-            raw_payload={"orderNumber": "NZ-ORPHAN", "Mã NPP": "NPP-MAIGOLD"},
+            performed_by="NPP-OTHER",
+            raw_payload={"orderNumber": "NZ-OTHER-001", "Mã NPP": "NPP-OTHER", "Nguồn đồng bộ": "NAZZY"},
         ))
         db.commit()
+
         after_orphan = list_local_vinamilk_orders(
             from_date=date(2026, 11, 20), to_date=date(2026, 11, 20), source="sync",
             search=None, status=None, skip=0, limit=100,
             distributor_code=dist.code, db=db, current_user=admin_user,
         )
         assert {r["orderNumber"] for r in after_orphan["rows"]} == {"VNM-001"}
+
+        super_admin = SimpleNamespace(
+            id=99, username="superadmin", distributor_id=None,
+            roles=[SimpleNamespace(name="admin")],
+        )
+        all_npp_view = list_local_vinamilk_orders(
+            from_date=date(2026, 11, 20), to_date=date(2026, 11, 20), source="sync",
+            search=None, status=None, skip=0, limit=100,
+            distributor_code=None, db=db, current_user=super_admin,
+        )
+        assert {r["orderNumber"] for r in all_npp_view["rows"]} == {"VNM-001", "NZ-OTHER-001"}
     finally:
         db.close()
         engine.dispose()

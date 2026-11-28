@@ -222,13 +222,22 @@ def consolidate_dms_orders_for_invoicing(
         if (code or "").strip()
     }
     if snapshots:
+        non_external_sources = {"", "VINAMILK", "TỰ TẠO", "TÁCH/GỘP"}
         filtered_snaps: list[VinamilkOrderSnapshot] = []
         for snap in snapshots:
             ps = (snap.processing_status or "").strip().upper()
-            if ps.startswith("NCC:"):
-                sup = ps.split(":", 1)[1].strip()
-                if sup and sup not in configured_supplier_codes:
-                    continue
+            payload = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+            payload_src = str(
+                payload.get("Nguồn đồng bộ") or payload.get("_sync_source") or ""
+            ).strip().upper()
+            sup = ps.split(":", 1)[1].strip() if ps.startswith("NCC:") else ""
+            effective_sup = sup or payload_src
+            if (
+                effective_sup
+                and effective_sup not in non_external_sources
+                and effective_sup not in configured_supplier_codes
+            ):
+                continue
             filtered_snaps.append(snap)
         snapshots = filtered_snaps
 

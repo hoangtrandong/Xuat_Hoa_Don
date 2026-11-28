@@ -763,6 +763,9 @@ def create_delivery_return(
     auto_receive: bool = True,
     settlement_party_type: str = "EMPLOYEE",
     settlement_party_id: int | None = None,
+    return_type: str = "STANDARD",
+    replacement_order_number: str | None = None,
+    commit: bool = True,
 ) -> DeliveryReturn:
     dr = db.get(DeliveryRequest, delivery_request_id)
     if not dr:
@@ -872,6 +875,8 @@ def create_delivery_return(
         delivery_request_id=delivery_request_id,
         employee_id=employee_id,
         order_id=order_id,
+        return_type=(return_type or "STANDARD").upper(),
+        replacement_order_number=(replacement_order_number or "").strip() or None,
         amount=total_amount,
         status="APPROVED" if auto_receive else "PENDING_WAREHOUSE",
         settlement_party_type=party_type,
@@ -952,8 +957,11 @@ def create_delivery_return(
             now=now,
         )
 
-    db.commit()
-    db.refresh(ret)
+    if commit:
+        db.commit()
+        db.refresh(ret)
+    else:
+        db.flush()
     return ret
 
 
@@ -1089,6 +1097,71 @@ def receive_delivery_return(
         now=now,
     )
 
+    # Nếu phiếu trả phát sinh từ nghiệp vụ thay thế đơn DMS, đánh dấu đơn cũ là đã trả trên snapshot
+    # để báo cáo tổng hợp doanh số không tính trùng giữa đơn cũ và đơn mới.
+    if ret.replacement_order_number and target_order and target_order.order_number:
+        from app.models.vinamilk import VinamilkOrderSnapshot
+        old_snapshots = db.scalars(
+            select(VinamilkOrderSnapshot).where(
+                VinamilkOrderSnapshot.order_number == target_order.order_number
+            )
+        ).all()
+        for snap in old_snapshots:
+            snap.returned = True
+
+    db.commit()
+    return db.scalar(
+        select(DeliveryReturn)
+        .options(
+            selectinload(DeliveryReturn.delivery_request),
+            selectinload(DeliveryReturn.employee),
+            selectinload(DeliveryReturn.order),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.product),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.location),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.lot),
+        )
+        .where(DeliveryReturn.id == ret.id)
+    )
+
+
+def cancel_delivery_return(
+    db: Session,
+    return_id: int,
+    cancelled_by: str,
+    reason: str | None = None,
+) -> DeliveryReturn:
+    """Hủy phiếu yêu cầu trả hàng đang ở trạng thái CHỜ THỦ KHO NHẬN (chưa nhập kho, chưa trừ công nợ)."""
+    ret = db.scalar(
+        select(DeliveryReturn)
+        .options(
+            selectinload(DeliveryReturn.delivery_request),
+            selectinload(DeliveryReturn.employee),
+            selectinload(DeliveryReturn.order),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.product),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.location),
+            selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.lot),
+        )
+        .where(DeliveryReturn.id == return_id)
+        .with_for_update()
+    )
+    if not ret:
+        raise ValueError("Không tìm thấy phiếu trả hàng.")
+    if ret.status != "PENDING_WAREHOUSE":
+        raise ValueError(f"Chỉ có thể hủy phiếu trả hàng đang ở trạng thái CHỜ THỦ KHO NHẬN (hiện tại: {ret.status}).")
+
+    now = datetime.utcnow()
+    ret.status = "CANCELLED"
+    ret.rejected_by = cancelled_by
+    ret.rejected_at = now
+    ret.reject_reason = (reason or "").strip() or "Hủy yêu cầu trả hàng"
+
+    if ret.return_type == "ORDER_REPLACEMENT" and ret.replacement_order_number:
+        from app.models.vinamilk import VinamilkOrderReplacement
+        rep = db.get(VinamilkOrderReplacement, ret.replacement_order_number)
+        if rep and getattr(rep, "replacement_type", "MANUAL") not in ("SPLIT", "MERGE"):
+            if not ret.order or rep.replaced_order_number == ret.order.order_number:
+                db.delete(rep)
+
     db.commit()
     db.refresh(ret)
     return ret
@@ -1163,11 +1236,14 @@ def list_delivery_returns(
     delivery_request_id: int | None = None,
     employee_id: int | None = None,
     status: str | None = None,
-    limit: int = 50,
+    return_type: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
 ) -> list[DeliveryReturn]:
     stmt = (
         select(DeliveryReturn)
         .options(
+            selectinload(DeliveryReturn.delivery_request),
             selectinload(DeliveryReturn.employee),
             selectinload(DeliveryReturn.order),
             selectinload(DeliveryReturn.items).selectinload(DeliveryReturnItem.product),
@@ -1182,4 +1258,21 @@ def list_delivery_returns(
         stmt = stmt.where(DeliveryReturn.employee_id == employee_id)
     if status:
         stmt = stmt.where(DeliveryReturn.status == status.upper())
-    return db.scalars(stmt.limit(limit)).all()
+    if return_type:
+        stmt = stmt.where(DeliveryReturn.return_type == return_type.upper())
+    rows = db.scalars(stmt.limit(limit if not search else max(limit * 3, 300))).all()
+    if search and search.strip():
+        q = search.strip().lower()
+        rows = [
+            r for r in rows
+            if q in (r.code or "").lower()
+            or q in (r.order_number or "").lower()
+            or q in (r.replacement_order_number or "").lower()
+            or q in (r.delivery_request_code or "").lower()
+            or q in (r.employee_code or "").lower()
+            or q in (r.employee_name or "").lower()
+            or q in (r.customer_code or "").lower()
+            or q in (r.customer_name or "").lower()
+            or any(q in (it.sku or "").lower() or q in (it.product_name or "").lower() for it in r.items)
+        ][:limit]
+    return rows

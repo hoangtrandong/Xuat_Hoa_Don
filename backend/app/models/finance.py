@@ -117,6 +117,8 @@ class DeliveryReturn(Base):
     delivery_request_id: Mapped[int] = mapped_column(ForeignKey("delivery_requests.id"), index=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
     order_id: Mapped[int | None] = mapped_column(ForeignKey("delivery_request_orders.id", ondelete="SET NULL"), nullable=True, index=True)
+    return_type: Mapped[str] = mapped_column(String(30), default="STANDARD", index=True)  # STANDARD | ORDER_REPLACEMENT
+    replacement_order_number: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     amount: Mapped[float] = mapped_column(Numeric(14, 2))
     status: Mapped[str] = mapped_column(String(25), default="PENDING_WAREHOUSE", index=True)  # PENDING_WAREHOUSE | WAREHOUSE_RECEIVED | APPROVED | REJECTED | CANCELLED
     settlement_party_type: Mapped[str] = mapped_column(String(20), default="EMPLOYEE")  # EMPLOYEE | STORE
@@ -147,6 +149,18 @@ class DeliveryReturn(Base):
     @property
     def order_number(self) -> str | None:
         return self.order.order_number if self.order else None
+
+    @property
+    def delivery_request_code(self) -> str | None:
+        return self.delivery_request.code if self.delivery_request else None
+
+    @property
+    def customer_code(self) -> str | None:
+        return self.order.customer_code if self.order else None
+
+    @property
+    def customer_name(self) -> str | None:
+        return self.order.customer_name if self.order else None
 
 
 class DeliveryReturnItem(Base):

@@ -204,11 +204,16 @@ class DeliveryReturnOut(BaseModel):
     id: int
     code: str
     delivery_request_id: int
+    delivery_request_code: Optional[str] = None
     employee_id: int
     employee_code: Optional[str] = None
     employee_name: Optional[str] = None
     order_id: Optional[int] = None
     order_number: Optional[str] = None
+    customer_code: Optional[str] = None
+    customer_name: Optional[str] = None
+    return_type: str = "STANDARD"
+    replacement_order_number: Optional[str] = None
     amount: float
     status: str
     settlement_party_type: str = "EMPLOYEE"
@@ -223,3 +228,82 @@ class DeliveryReturnOut(BaseModel):
     reject_reason: Optional[str] = None
     created_at: datetime
     items: List[DeliveryReturnItemOut] = Field(default_factory=list)
+
+
+class EligibleOldOrderOut(BaseModel):
+    delivery_request_order_id: int
+    delivery_request_id: int
+    delivery_request_code: str
+    order_number: str
+    order_date: Optional[date] = None
+    employee_id: Optional[int] = None
+    employee_code: str
+    employee_name: Optional[str] = None
+    customer_code: Optional[str] = None
+    customer_name: Optional[str] = None
+    amount: float
+    returned_amount: float = 0.0
+    net_amount: float = 0.0
+    delivery_status: str
+    payment_status: str
+    item_count: int = 0
+    total_qty: int = 0
+
+
+class EligibleNewOrderOut(BaseModel):
+    order_number: str
+    order_date: Optional[date] = None
+    customer_code: Optional[str] = None
+    customer_name: Optional[str] = None
+    staff_code: Optional[str] = None
+    staff_name: Optional[str] = None
+    total_qty: int = 0
+    total_amount: float = 0.0
+    line_count: int = 0
+    status: Optional[str] = None
+
+
+class ReplacementReturnPreviewRequest(BaseModel):
+    old_delivery_request_order_id: int = Field(gt=0)
+    new_order_number: str = Field(min_length=1, max_length=120)
+
+
+class ReplacementReturnComparisonLine(BaseModel):
+    product_id: int
+    sku: str
+    product_name: str
+    boxes_per_carton: int = 1
+    old_qty: int
+    new_qty: int
+    return_qty: int
+    return_cartons: int = 0
+    return_loose_boxes: int = 0
+    old_amount: float = 0.0
+    new_amount: float = 0.0
+    unit_price: float = 0.0
+    return_amount: float = 0.0
+
+
+class ReplacementReturnPreviewOut(BaseModel):
+    old_order: EligibleOldOrderOut
+    new_order: EligibleNewOrderOut
+    comparison_lines: List[ReplacementReturnComparisonLine] = Field(default_factory=list)
+    old_amount: float = 0.0
+    new_amount: float = 0.0
+    return_amount: float = 0.0
+    total_old_qty: int = 0
+    total_new_qty: int = 0
+    total_return_qty: int = 0
+    warnings: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    can_create: bool = False
+
+
+class ReplacementReturnCreateRequest(BaseModel):
+    old_delivery_request_order_id: int = Field(gt=0)
+    new_order_number: str = Field(min_length=1, max_length=120)
+    note: Optional[str] = Field(default=None, max_length=255)
+
+
+class DeliveryReturnCancelRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=255)

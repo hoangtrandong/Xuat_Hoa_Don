@@ -124,6 +124,8 @@ async def lifespan(_: FastAPI):
                     conn.execute(text("ALTER TABLE debt_transfers ADD COLUMN IF NOT EXISTS override_limit_reason VARCHAR(255)"))
                     conn.execute(text("ALTER TABLE delivery_returns ADD COLUMN IF NOT EXISTS settlement_party_type VARCHAR(20) DEFAULT 'EMPLOYEE' NOT NULL"))
                     conn.execute(text("ALTER TABLE delivery_returns ADD COLUMN IF NOT EXISTS settlement_party_id INTEGER"))
+                    conn.execute(text("ALTER TABLE delivery_returns ADD COLUMN IF NOT EXISTS return_type VARCHAR(30) DEFAULT 'STANDARD' NOT NULL"))
+                    conn.execute(text("ALTER TABLE delivery_returns ADD COLUMN IF NOT EXISTS replacement_order_number VARCHAR(120)"))
                     conn.execute(text("ALTER TABLE delivery_returns ADD COLUMN IF NOT EXISTS warehouse_received_by VARCHAR(120)"))
                     conn.execute(text("ALTER TABLE delivery_returns ADD COLUMN IF NOT EXISTS warehouse_received_at TIMESTAMP"))
                     conn.execute(text("ALTER TABLE delivery_returns ADD COLUMN IF NOT EXISTS rejected_by VARCHAR(120)"))

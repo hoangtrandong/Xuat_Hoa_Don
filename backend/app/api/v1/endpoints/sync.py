@@ -2177,6 +2177,23 @@ def list_local_vinamilk_orders(
 
     order_delivery_status: dict[str, str] = {}
     delivery_assignments: dict[tuple[str, date | None], dict[str, str]] = defaultdict(dict)
+
+    # Batch-load nhân viên để ánh xạ Mã NVBH trên đơn Vinamilk/DMS -> Tên nhân viên đăng ký
+    employees_by_staff_key: dict[str, Employee] = {}
+    try:
+        all_employees = db.scalars(select(Employee)).all()
+        for emp in all_employees:
+            for raw_k in (emp.vinamilk_code, emp.code):
+                k = (raw_k or "").strip().upper()
+                if not k:
+                    continue
+                if k not in employees_by_staff_key:
+                    employees_by_staff_key[k] = emp
+                stripped = k.lstrip("0")
+                if stripped and stripped not in employees_by_staff_key:
+                    employees_by_staff_key[stripped] = emp
+    except Exception:
+        employees_by_staff_key = {}
     try:
         if order_numbers:
             # Gộp 2 truy vấn DeliveryRequestOrder + DeliveryRequest thành 1 query duy nhất
@@ -2333,6 +2350,34 @@ def list_local_vinamilk_orders(
                 manager_assignment = suffix_matches[0]
         manager_code, manager_name = manager_assignment or (None, None)
 
+        raw_staff_code = (
+            _field(
+                row.raw_payload,
+                ("Mã NVBH", "staffCode", "salesStaffCode", "salemanCode", "salesmanCode", "salesRepCode", "employeeCode", "nvbhCode"),
+            )
+            or ""
+        ).strip()
+        raw_staff_name = (
+            _field(
+                row.raw_payload,
+                ("Tên NVBH", "staffName", "salesStaffName", "salemanName", "salesmanName", "salesRepName", "employeeName", "nvbhName"),
+            )
+            or ""
+        ).strip()
+        matched_staff_emp: Employee | None = None
+        if raw_staff_code:
+            staff_key = raw_staff_code.upper()
+            matched_staff_emp = (
+                employees_by_staff_key.get(staff_key)
+                or employees_by_staff_key.get(staff_key.lstrip("0"))
+            )
+        resolved_staff_code = raw_staff_code or (matched_staff_emp.vinamilk_code or matched_staff_emp.code if matched_staff_emp else "")
+        resolved_staff_name = (
+            matched_staff_emp.name.strip()
+            if matched_staff_emp and (matched_staff_emp.name or "").strip()
+            else raw_staff_name
+        )
+
         assigned_employees = {
             **delivery_assignments.get((order_num.strip().upper(), None), {}),
             **delivery_assignments.get((order_num.strip().upper(), row.order_created_date), {}),
@@ -2426,6 +2471,10 @@ def list_local_vinamilk_orders(
             "Tên NVQL": manager_name,
             "_manager_code": manager_code,
             "_manager_name": manager_name,
+            "Mã NVBH": resolved_staff_code or None,
+            "Tên NVBH": resolved_staff_name or None,
+            "_staff_code": resolved_staff_code or None,
+            "_staff_name": resolved_staff_name or None,
             "Người thực hiện": performed_by,
             "_performed_by": performed_by,
             "_local_id": row.id,

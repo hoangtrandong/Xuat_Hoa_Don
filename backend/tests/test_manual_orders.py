@@ -505,6 +505,27 @@ def test_order_list_resolves_manager_by_last_three_customer_code_characters(db):
     assert order["Tên NVQL"] == "Trần Bình"
 
 
+def test_order_list_resolves_nvbh_name_from_registered_employee(db):
+    db.add(Employee(code="NVBH05", vinamilk_code="0000032253", name="Nguyễn Văn Bán", position="Nhân viên kinh doanh", phone="0901"))
+    db.add(VinamilkOrderSnapshot(
+        remote_key="vm-nvbh-resolve",
+        order_number="VM-NVBH-01",
+        order_created_date=date(2026, 11, 4),
+        synced_from=date(2026, 11, 4),
+        synced_to=date(2026, 11, 4),
+        raw_payload={"orderNumber": "VM-NVBH-01", "staffCode": "0000032253"},
+    ))
+    db.commit()
+
+    response = list_local_vinamilk_orders(
+        from_date=date(2026, 11, 4), to_date=date(2026, 11, 4), source="sync",
+        search=None, status=None, skip=0, limit=100, db=db,
+    )
+    order = next(row for row in response["rows"] if row["orderNumber"] == "VM-NVBH-01")
+    assert order["Mã NVBH"] == "0000032253"
+    assert order["Tên NVBH"] == "Nguyễn Văn Bán"
+
+
 def test_customer_manager_assignment_requires_existing_nv_employee(db):
     db.add_all([
         Employee(code="NV003", name="Lê Cường", position="Quản lý", phone=""),

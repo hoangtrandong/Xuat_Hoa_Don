@@ -305,6 +305,8 @@ const remoteColumnDefinitions: {
   { title: "Cửa Hàng", keys: ["Cửa Hàng", "store_name", "storeName"], width: "12rem", truncate: true },
   { title: "Mã NVQL", keys: ["Mã NVQL", "_manager_code"], width: "7.5rem" },
   { title: "Tên NVQL", keys: ["Tên NVQL", "_manager_name"], width: "10rem", truncate: true },
+  { title: "Mã NVBH", keys: ["Mã NVBH", "_staff_code", "staffCode", "salesStaffCode", "salemanCode", "salesmanCode"], width: "8rem" },
+  { title: "Tên NVBH", keys: ["Tên NVBH", "_staff_name", "staffName", "salesStaffName", "salemanName", "salesmanName"], width: "11rem", truncate: true },
   { title: "Địa chỉ", keys: ["address", "customerAddress", "shipTo", "Địa chỉ"], width: "14rem", truncate: true },
   { title: "Mã sản phẩm", keys: ["productCode", "itemCode", "sku", "Mã sản phẩm"], width: "7.5rem" },
   { title: "Sản phẩm", keys: ["productName", "product_name", "itemName", "product", "Sản phẩm", "Tên sản phẩm"], width: "16rem", truncate: true },
@@ -2762,25 +2764,69 @@ return Array.from(map.values());
       "Ngày tạo", "Nhà phân phối", "Nguồn đồng bộ", "Nhà cung cấp", "Mã KH", "Tên KH",
     ].includes(column.title)),
     {
-      key: "Tên NVBH",
-      title: "Nhân viên bán hàng",
+      key: "Mã NVBH",
+      title: "Mã NVBH",
       sortable: true,
-      width: "13rem",
+      width: "8rem",
       render: (_value, order) => {
-        const staffName = displayRemoteValue(order["Tên NVBH"] || order["staffName"] || order["salesStaffName"]).trim();
-        const staffCode = displayRemoteValue(order["Mã NVBH"] || order["staffCode"] || order["salesStaffCode"]).trim();
-        if (!staffName && !staffCode) {
+        const staffCode = displayRemoteValue(
+          order["Mã NVBH"] || order["_staff_code"] || order["staffCode"] || order["salesStaffCode"]
+        ).trim();
+        if (!staffCode) {
           return <span className="text-slate-400">—</span>;
         }
         return (
-          <div className="flex flex-col leading-tight">
-            <span className="truncate font-medium text-slate-800" title={staffName || staffCode}>
-              {staffName || staffCode}
-            </span>
-            {staffCode && staffName && (
-              <span className="font-mono text-[10px] text-slate-500">{staffCode}</span>
-            )}
-          </div>
+          <span className="font-mono text-xs font-semibold text-indigo-800" title={staffCode}>
+            {staffCode}
+          </span>
+        );
+      },
+    },
+    {
+      key: "Tên NVBH",
+      title: "Tên NVBH",
+      sortable: true,
+      width: "12rem",
+      render: (_value, order) => {
+        const staffName = displayRemoteValue(
+          order["Tên NVBH"] || order["_staff_name"] || order["staffName"] || order["salesStaffName"]
+        ).trim();
+        if (!staffName) {
+          return <span className="text-slate-400">—</span>;
+        }
+        return (
+          <span className="block truncate font-medium text-slate-800" title={staffName}>
+            {staffName}
+          </span>
+        );
+      },
+    },
+    {
+      key: "NVGH",
+      title: "Nhân viên giao hàng",
+      sortable: true,
+      width: "12rem",
+      render: (_value, order) => {
+        const nvghFull = displayRemoteValue(order["NVGH"]).trim();
+        const nvghCode = displayRemoteValue(order["Mã NVGH"]).trim();
+        const nvghName = displayRemoteValue(order["Tên NVGH"]).trim();
+        if (!nvghFull && !nvghCode && !nvghName) {
+          return <span className="text-slate-400">—</span>;
+        }
+        if (nvghCode && nvghName) {
+          return (
+            <div className="flex flex-col leading-tight">
+              <span className="truncate font-medium text-emerald-800" title={`${nvghCode} - ${nvghName}`}>
+                {nvghName}
+              </span>
+              <span className="font-mono text-[10px] text-slate-500">{nvghCode}</span>
+            </div>
+          );
+        }
+        return (
+          <span className="block truncate font-medium text-emerald-800" title={nvghFull || nvghName || nvghCode}>
+            {nvghFull || nvghName || nvghCode}
+          </span>
         );
       },
     },

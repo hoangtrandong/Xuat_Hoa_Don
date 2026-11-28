@@ -216,6 +216,36 @@ SUPPLIER_FIELD_MAPPING_PRESETS: dict[str, dict[str, Any]] = {
             "promotion_name": "PromotionName",
         },
     },
+    "GAUDO": {
+        "supplier_name": "Gấu Đỏ (AsiaFoods DMS)",
+        "connector_type": "REST_API",
+        "api_endpoint_url": "https://sales.asiafoods.vn/sale-product/search-sale/search",
+        "auth_type": "COOKIE",
+        "field_mapping": {
+            "order_number": "orderNumber",
+            "order_date": "orderDate",
+            "delivery_date": "deliveryDate",
+            "supplier_name": "supplierName",
+            "customer_code": "customerCode",
+            "customer_name": "customerName",
+            "customer_tax_code": "customerTaxCode",
+            "customer_address": "address",
+            "product_code": "productCode",
+            "product_name": "productName",
+            "unit": "unit",
+            "quantity": "quantity",
+            "promo_quantity": "promo_quantity",
+            "unit_price": "unitPrice",
+            "discount_amount": "discountAmount",
+            "order_discount": "totalDiscount",
+            "vat_rate": "vatRate",
+            "line_total": "lineTotal",
+            "staff_code": "staffCode",
+            "staff_name": "staffName",
+            "promotion_code": "promotionCode",
+            "promotion_name": "promotionName",
+        },
+    },
 }
 
 
@@ -231,7 +261,19 @@ def parse_curl_command(curl_str: str) -> dict[str, Any]:
         "cookies_dict": {},
         "params": {},
     }
-    cleaned = curl_str.replace("\\\r\n", " ").replace("\\\n", " ").strip()
+    cleaned = curl_str.replace("\\\r\n", " ").replace("\\\n", " ").replace("^\r\n", " ").replace("^\n", " ").strip()
+    # Hỗ trợ Windows CMD cURL (copy as cURL (cmd) trên Edge/Chrome)
+    if '^"' in cleaned or "^&" in cleaned or "^%" in cleaned:
+        cleaned = (
+            cleaned.replace('^"', '"')
+            .replace("^&", "&")
+            .replace("^%^", "%")
+            .replace("^%", "%")
+            .replace("^(", "(")
+            .replace("^)", ")")
+            .replace("^\\", "\\")
+            .replace("^^", "^")
+        )
 
     # 1. Trích xuất URL
     url_match = re.search(r"--url\s+['\"]([^'\"]+)['\"]", cleaned)
@@ -249,6 +291,15 @@ def parse_curl_command(curl_str: str) -> dict[str, Any]:
                 result["params"][k] = v[0] if len(v) == 1 else v
         else:
             result["url"] = full_url
+
+    # 1b. Trích xuất --data-raw / --data / -d (form-urlencoded, VD: AsiaFoods / Gấu Đỏ)
+    data_match = re.search(r"(?:--data-raw|--data-urlencode|--data|-d)\s+['\"]([^'\"]*)['\"]", cleaned)
+    if data_match:
+        raw_body = data_match.group(1)
+        result["data_raw"] = raw_body
+        if "=" in raw_body and not raw_body.lstrip().startswith("{"):
+            for k, v in urllib.parse.parse_qs(raw_body, keep_blank_values=True).items():
+                result["params"][k] = v[0] if len(v) == 1 else v
 
     # 2. Trích xuất Headers: -H 'Key: Value'
     headers_matches = re.findall(r"-H\s+['\"]([^'\"]+)['\"]", cleaned)
@@ -1585,8 +1636,429 @@ def fetch_nazzy_orders(
     return flat_results
 
 
+def _normalize_asiafoods_cookie(raw_cookie: str) -> str:
+    """Chuẩn hóa chuỗi Cookie JSESSIONID cho AsiaFoods (Gấu Đỏ)."""
+    cleaned = (raw_cookie or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned.lower().startswith("cookie:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    if "=" not in cleaned:
+        return f"JSESSIONID={cleaned}"
+    return cleaned
+
+
+def asiafoods_login_and_get_cookie(
+    username: str,
+    password: str,
+    base_url: str = "https://sales.asiafoods.vn",
+) -> str:
+    """Tự động đăng nhập vào DMS Gấu Đỏ (https://sales.asiafoods.vn/login) bằng HTTP thuần để lấy JSESSIONID."""
+    import re
+    from urllib.parse import urlparse
+
+    clean_user = (username or "").strip()
+    clean_pass = (password or "").strip()
+    if not clean_user or not clean_pass:
+        raise RuntimeError("Thiếu Tài khoản hoặc Mật khẩu đăng nhập Gấu Đỏ (AsiaFoods).")
+
+    parsed = urlparse(base_url or "https://sales.asiafoods.vn")
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'sales.asiafoods.vn'}"
+    login_url = f"{origin}/login"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
+    }
+
+    with httpx.Client(timeout=25.0, follow_redirects=True) as client:
+        r_get = client.get(login_url, headers=headers)
+        if r_get.status_code != 200:
+            raise RuntimeError(f"Không truy cập được trang đăng nhập Gấu Đỏ (HTTP {r_get.status_code}).")
+
+        html = r_get.text or ""
+        if re.search(r'<input[^>]+name=["\'][^"\']*captcha[^"\']*["\']', html, re.I):
+            raise RuntimeError(
+                "Trang đăng nhập Gấu Đỏ đang yêu cầu mã Captcha. "
+                "Vui lòng đăng nhập trực tiếp trên trình duyệt rồi dán JSESSIONID hoặc cURL."
+            )
+
+        form_data: dict[str, str] = {
+            "username": clean_user,
+            "password": clean_pass,
+            "lt": "",
+            "_eventId": "submit",
+            "submit": "Đăng nhập",
+            "loginCount": "",
+        }
+        for hidden_name in ("lt", "_eventId", "loginCount", "_csrf"):
+            m = re.search(
+                rf'<input[^>]+name=["\']{re.escape(hidden_name)}["\'][^>]*value=["\']([^"\']*)["\']',
+                html,
+                re.I,
+            )
+            if m:
+                form_data[hidden_name] = m.group(1)
+
+        r_post = client.post(
+            login_url,
+            headers={
+                **headers,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": origin,
+                "Referer": login_url,
+            },
+            data=form_data,
+        )
+        final_url = str(r_post.url).lower()
+        post_html = r_post.text or ""
+        if "/login" in final_url or 'name="password"' in post_html.lower():
+            if re.search(r'<input[^>]+name=["\'][^"\']*captcha[^"\']*["\']', post_html, re.I):
+                raise RuntimeError(
+                    "Gấu Đỏ yêu cầu mã Captcha (có thể do sai mật khẩu nhiều lần). "
+                    "Vui lòng đăng nhập trên trình duyệt và dán JSESSIONID hoặc cURL."
+                )
+            err_match = re.search(
+                r'class=["\'][^"\']*(?:error|errMsg|alert)[^"\']*["\'][^>]*>\s*([^<]{3,180})',
+                post_html,
+                re.I,
+            )
+            err_hint = err_match.group(1).strip() if err_match else "Sai tài khoản hoặc mật khẩu."
+            raise RuntimeError(f"Đăng nhập Gấu Đỏ (AsiaFoods) thất bại: {err_hint}")
+
+        cookie_pairs = [f"{k}={v}" for k, v in client.cookies.items() if v]
+        if not cookie_pairs:
+            raise RuntimeError("Đăng nhập Gấu Đỏ không nhận được Cookie JSESSIONID.")
+        return "; ".join(cookie_pairs)
+
+
+def fetch_asiafoods_orders(
+    config: DistributorSupplierConfig,
+    from_date: date,
+    to_date: date,
+    *,
+    strict: bool = False,
+    progress_cb: Any = None,
+    skip_existing_order_numbers: set[str] | None = None,
+    existing_order_fingerprints: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Đồng bộ đơn hàng từ DMS Gấu Đỏ (AsiaFoods - https://sales.asiafoods.vn) bằng HTTP thuần (httpx).
+
+    Luồng 2 bước:
+    1. POST /sale-product/search-sale/search (phân trang) lấy danh sách đơn hàng trong khoảng from_date..to_date.
+    2. GET /commons/adjust-load-product-for-sale?viewOnly=1&orderId={id}&shopCodeFilter={shopCode} (song song)
+       lấy chi tiết dòng hàng (sale_order_lot) & hàng tặng (order_detail_promotion).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from urllib.parse import urlparse
+
+    def _report(msg: str, processed: int = 0) -> None:
+        if callable(progress_cb):
+            try:
+                progress_cb(msg, processed)
+            except Exception:
+                pass
+
+    raw_url = (config.api_endpoint_url or "").strip() or "https://sales.asiafoods.vn/sale-product/search-sale/search"
+    parsed = urlparse(raw_url)
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'sales.asiafoods.vn'}"
+    search_url = raw_url if "/search-sale/search" in raw_url else f"{origin}/sale-product/search-sale/search"
+    detail_base_url = f"{origin}/commons/adjust-load-product-for-sale"
+
+    secret = decrypt_supplier_secret(config.encrypted_secret)
+    session_cookie = decrypt_supplier_secret(config.session_cookie)
+    clean_user = (getattr(config, "username", None) or "").strip()
+    secret_is_cookie = "jsessionid=" in (secret or "").lower()
+    can_relogin = bool(clean_user and secret and not secret_is_cookie)
+
+    cookie_header = _normalize_asiafoods_cookie(session_cookie or (secret if secret_is_cookie else ""))
+    if not cookie_header and can_relogin:
+        _report(f"Đang đăng nhập Gấu Đỏ (AsiaFoods) bằng tài khoản {clean_user}...", 0)
+        cookie_header = asiafoods_login_and_get_cookie(clean_user, secret, origin)
+        config.session_cookie = encrypt_supplier_secret(cookie_header)
+    elif not cookie_header and secret:
+        cookie_header = _normalize_asiafoods_cookie(secret)
+
+    if not cookie_header:
+        raise RuntimeError(
+            "Thiếu Tài khoản/Mật khẩu hoặc Cookie JSESSIONID cho nguồn Gấu Đỏ (AsiaFoods)."
+        )
+
+    req_cfg = config.request_config if isinstance(config.request_config, dict) else {}
+    shop_id = str(
+        req_cfg.get("lstShopId")
+        or req_cfg.get("shop_id")
+        or req_cfg.get("distributor_code")
+        or "3001"
+    ).strip() or "3001"
+    order_type = str(req_cfg.get("orderType") or "IN").strip() or "IN"
+    order_source = str(req_cfg.get("orderSource") or "0").strip() or "0"
+    priority_code = str(req_cfg.get("priorityCode") or "-1").strip() or "-1"
+    sale_order_type = str(req_cfg.get("lstSaleOrderType") or "-1").strip() or "-1"
+
+    base_headers = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
+        "Origin": origin,
+        "Referer": f"{origin}/sale-product/search-sale/info",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "X-Requested-With": "XMLHttpRequest",
+        "Cookie": cookie_header,
+    }
+
+    from_str = from_date.strftime("%d/%m/%Y")
+    to_str = to_date.strftime("%d/%m/%Y")
+    _report(f"Đang tải danh sách đơn Gấu Đỏ ({from_str} → {to_str}, Shop {shop_id})...", 0)
+
+    all_summaries: list[dict[str, Any]] = []
+    seen_order_ids: set[str] = set()
+    page_size = 100
+    current_page = 1
+    total_records = 0
+    retried_login = False
+
+    with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+        while current_page <= 50:
+            form_data = {
+                "orderNumber": "",
+                "refOrderNumber": "",
+                "fromDate": from_str,
+                "toDate": to_str,
+                "deliveryDate": "",
+                "customerCode": "",
+                "customerName": "",
+                "orderSource": order_source,
+                "saleStaff": "",
+                "deliveryStaff": "",
+                "priorityCode": priority_code,
+                "lstShopId": shop_id,
+                "orderType": order_type,
+                "lstSaleOrderType": sale_order_type,
+                "page": str(current_page),
+                "rows": str(page_size),
+            }
+            resp = client.post(
+                search_url,
+                headers={**base_headers, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+                data=form_data,
+            )
+            ct = (resp.headers.get("content-type") or "").lower()
+            session_expired = resp.status_code in (301, 302, 303, 401, 403) or (
+                resp.status_code == 200 and "json" not in ct
+            )
+            if session_expired:
+                if can_relogin and not retried_login:
+                    retried_login = True
+                    _report("Phiên JSESSIONID cũ hết hạn — đang tự động đăng nhập lại Gấu Đỏ...", 0)
+                    cookie_header = asiafoods_login_and_get_cookie(clean_user, secret, origin)
+                    config.session_cookie = encrypt_supplier_secret(cookie_header)
+                    base_headers["Cookie"] = cookie_header
+                    continue
+                raise RuntimeError(
+                    "Phiên đăng nhập Gấu Đỏ (JSESSIONID) đã hết hạn hoặc không hợp lệ. "
+                    "Vui lòng nhập Tài khoản & Mật khẩu để tự động đăng nhập lại, hoặc cập nhật JSESSIONID mới."
+                )
+            if resp.status_code != 200:
+                raise RuntimeError(f"Máy chủ Gấu Đỏ trả về HTTP {resp.status_code}.")
+
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                break
+            rows = payload.get("rows") or []
+            total_records = int(payload.get("total") or total_records or len(rows))
+            if not rows:
+                break
+
+            added_in_page = 0
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                oid = str(r.get("id") or r.get("orderNumber") or "").strip()
+                if not oid or oid in seen_order_ids:
+                    continue
+                seen_order_ids.add(oid)
+                all_summaries.append(r)
+                added_in_page += 1
+
+            _report(
+                f"Đã tải danh sách {len(all_summaries)}/{total_records or len(all_summaries)} đơn Gấu Đỏ...",
+                len(all_summaries),
+            )
+            if added_in_page == 0 or len(all_summaries) >= total_records or len(rows) < page_size:
+                break
+            current_page += 1
+
+    if not all_summaries:
+        _report("Gấu Đỏ trả về 0 đơn hàng trong khoảng ngày đã chọn.", 0)
+        return []
+
+    # Incremental skip: bỏ qua đơn đã có và không thay đổi tổng tiền / chiết khấu
+    fingerprints = existing_order_fingerprints or {}
+    skip_set = {s.strip().upper() for s in (skip_existing_order_numbers or set()) if s}
+    orders_to_fetch: list[dict[str, Any]] = []
+    skipped_count = 0
+    for ord_sum in all_summaries:
+        ord_num = str(ord_sum.get("orderNumber") or "").strip().upper()
+        if ord_num and ord_num in fingerprints:
+            fp = fingerprints[ord_num]
+            remote_total = round(float(ord_sum.get("totalValue") or 0), 2)
+            remote_disc = round(float(ord_sum.get("totalDiscount") or 0), 2)
+            if (
+                abs(remote_total - round(float(fp.get("net_total") or 0), 2)) < 1.0
+                and abs(remote_disc - round(float(fp.get("discount") or 0), 2)) < 1.0
+            ):
+                skipped_count += 1
+                continue
+        elif ord_num and ord_num in skip_set:
+            skipped_count += 1
+            continue
+        orders_to_fetch.append(ord_sum)
+
+    if not orders_to_fetch:
+        _report(f"Tất cả {len(all_summaries)} đơn Gấu Đỏ đã đồng bộ mới nhất (bỏ qua {skipped_count} đơn).", 0)
+        return []
+
+    def _fetch_one_detail(ord_sum: dict[str, Any]) -> list[dict[str, Any]]:
+        oid = ord_sum.get("id")
+        shop_code = str(ord_sum.get("shopCode") or "").strip()
+        ord_num = str(ord_sum.get("orderNumber") or f"GD-{oid}").strip()
+        ord_date = str(ord_sum.get("orderDate") or "")[:10]
+        deliv_date = str(ord_sum.get("deliveryDate") or ord_date)[:10]
+        cust_code = str(ord_sum.get("customerCode") or "").strip() or "KH-GAUDO"
+        cust_name = str(ord_sum.get("customerName") or "").strip() or "Khách lẻ Gấu Đỏ"
+        cust_addr = str(ord_sum.get("address") or ord_sum.get("customerAddress") or "").strip()
+        staff_code = str(ord_sum.get("staffCode") or "").strip()
+        staff_name = str(ord_sum.get("staffName") or "").strip()
+        delivery_code = str(ord_sum.get("deliveryCode") or "").strip()
+        delivery_name = str(ord_sum.get("deliveryName") or "").strip()
+        order_discount_total = float(ord_sum.get("totalDiscount") or 0)
+
+        with httpx.Client(timeout=25.0, follow_redirects=False) as d_client:
+            r_det = d_client.get(
+                detail_base_url,
+                params={"viewOnly": "1", "orderId": str(oid), "shopCodeFilter": shop_code},
+                headers=base_headers,
+            )
+        if r_det.status_code != 200 or "json" not in (r_det.headers.get("content-type") or "").lower():
+            raise RuntimeError(f"Đơn {ord_num}: HTTP {r_det.status_code}")
+
+        det = r_det.json()
+        sale_order = det.get("saleOrder") if isinstance(det.get("saleOrder"), dict) else {}
+        customer_obj = sale_order.get("customer") if isinstance(sale_order.get("customer"), dict) else {}
+        cust_tax = str(
+            customer_obj.get("taxCode")
+            or customer_obj.get("customerTaxCode")
+            or customer_obj.get("idNo")
+            or ""
+        ).strip()
+        if not cust_addr:
+            cust_addr = str(customer_obj.get("address") or "").strip()
+
+        lines_out: list[dict[str, Any]] = []
+        sale_lots = det.get("sale_order_lot") if isinstance(det.get("sale_order_lot"), list) else []
+        promo_details = det.get("order_detail_promotion") if isinstance(det.get("order_detail_promotion"), list) else []
+
+        def _append_line(line: dict[str, Any], force_free: bool = False) -> None:
+            p_code = str(line.get("productCode") or line.get("productId") or "").strip()
+            p_name = str(line.get("productName") or "Sản phẩm Gấu Đỏ").strip()
+            if not p_code:
+                return
+            is_free = force_free or bool(line.get("isFreeItem"))
+            raw_qty = float(line.get("quantity") or 0)
+            if raw_qty <= 0:
+                return
+            unit = str(line.get("uom1") or line.get("unit") or "GOI").strip()
+            unit_price = float(line.get("price") or line.get("priceView") or 0)
+            gross_amount = float(line.get("amount") or (raw_qty * unit_price))
+            disc_amount = float(line.get("discountAmount") or 0)
+            if is_free:
+                qty_val = 0.0
+                promo_qty_val = raw_qty
+                line_total_val = 0.0
+                disc_amount = 0.0
+            else:
+                qty_val = raw_qty
+                promo_qty_val = 0.0
+                line_total_val = max(0.0, gross_amount - disc_amount)
+            vat_raw = line.get("vat")
+            vat_rate = float(vat_raw) if vat_raw not in (None, "") else 8.0
+            promo_code = str(
+                line.get("promotionZV")
+                or line.get("programCode")
+                or line.get("promotionOntop")
+                or ""
+            ).strip()
+
+            lines_out.append({
+                "orderNumber": ord_num,
+                "refOrderNumber": str(ord_sum.get("refOrderNumber") or "").strip(),
+                "orderDate": ord_date,
+                "deliveryDate": deliv_date,
+                "supplierName": "Gấu Đỏ",
+                "customerCode": cust_code,
+                "customerName": cust_name,
+                "customerTaxCode": cust_tax,
+                "address": cust_addr,
+                "productCode": p_code,
+                "productName": p_name,
+                "unit": unit,
+                "quantity": qty_val,
+                "promo_quantity": promo_qty_val,
+                "unitPrice": unit_price,
+                "discountAmount": disc_amount,
+                "totalDiscount": order_discount_total,
+                "vatRate": vat_rate,
+                "lineTotal": line_total_val,
+                "staffCode": staff_code,
+                "staffName": staff_name,
+                "deliveryCode": delivery_code,
+                "deliveryName": delivery_name,
+                "promotionCode": promo_code,
+                "promotionName": "",
+                "shopCode": shop_code,
+                "convfact": int(line.get("convfact") or 1),
+            })
+
+        for ln in sale_lots:
+            if isinstance(ln, dict):
+                _append_line(ln, force_free=False)
+        for pln in promo_details:
+            if isinstance(pln, dict):
+                _append_line(pln, force_free=True)
+
+        return lines_out
+
+    flat_results: list[dict[str, Any]] = []
+    total_to_fetch = len(orders_to_fetch)
+    completed = 0
+    failed = 0
+    last_err = ""
+    _report(f"Đang tải chi tiết 0/{total_to_fetch} đơn Gấu Đỏ...", 0)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_fetch_one_detail, o): o for o in orders_to_fetch}
+        for fut in as_completed(futures):
+            completed += 1
+            try:
+                flat_results.extend(fut.result())
+            except Exception as exc:
+                failed += 1
+                last_err = str(exc)
+            if completed % 5 == 0 or completed == total_to_fetch:
+                err_note = f", {failed} lỗi" if failed else ""
+                _report(
+                    f"Đang tải chi tiết đơn Gấu Đỏ {completed}/{total_to_fetch} ({len(flat_results)} dòng{err_note})...",
+                    completed,
+                )
+
+    if not flat_results and failed > 0 and strict:
+        raise RuntimeError(f"Không tải được chi tiết đơn Gấu Đỏ ({failed}/{total_to_fetch} lỗi): {last_err}")
+
+    return flat_results
+
+
 class RestApiSupplierConnector(BaseSupplierConnector):
-    """Connector kết nối REST API của các Nhà cung cấp (Nazzy, Masan, Unilever, KiotViet...)."""
+    """Connector kết nối REST API của các Nhà cung cấp (Nazzy, Gấu Đỏ/AsiaFoods, Masan, Unilever, KiotViet...)."""
 
     def fetch_raw_orders(
         self,
@@ -1605,6 +2077,22 @@ class RestApiSupplierConnector(BaseSupplierConnector):
         )
         if is_vinamilk:
             return fetch_vinamilk_orders(config, from_date, to_date, progress_cb=progress_cb)
+
+        # Tự động ưu tiên xử lý chuyên biệt cho Gấu Đỏ (AsiaFoods DMS)
+        is_asiafoods = (
+            config.supplier_code.upper() in ("GAUDO", "GAU_DO", "ASIAFOODS")
+            or "asiafoods.vn" in (config.api_endpoint_url or "").lower()
+        )
+        if is_asiafoods:
+            return fetch_asiafoods_orders(
+                config,
+                from_date,
+                to_date,
+                strict=not allow_sample_fallback,
+                progress_cb=progress_cb,
+                skip_existing_order_numbers=skip_existing_order_numbers,
+                existing_order_fingerprints=existing_order_fingerprints,
+            )
 
         # Tự động ưu tiên xử lý chuyên biệt cho Nazzy DMS (NPP Mai Gold)
         is_nazzy = (

@@ -1032,6 +1032,94 @@ def test_supplier_connection(
             except Exception as nazzy_err:
                 message = f"Kết nối Nazzy DMS: {nazzy_err}. "
 
+        # Hỗ trợ kiểm tra kết nối chuyên biệt cho Gấu Đỏ (AsiaFoods - sales.asiafoods.vn)
+        is_asiafoods = (
+            (payload.supplier_code or "").strip().upper() in ("GAUDO", "GAU_DO", "ASIAFOODS")
+            or "asiafoods.vn" in url.lower()
+        )
+        if is_asiafoods and not sample_row:
+            try:
+                from urllib.parse import urlparse
+                from app.services.supplier_connectors import (
+                    _normalize_asiafoods_cookie,
+                    asiafoods_login_and_get_cookie,
+                )
+
+                parsed_af = urlparse(url or "https://sales.asiafoods.vn/sale-product/search-sale/search")
+                af_origin = f"{parsed_af.scheme or 'https'}://{parsed_af.netloc or 'sales.asiafoods.vn'}"
+                af_search_url = url if "/search-sale/search" in url else f"{af_origin}/sale-product/search-sale/search"
+                af_user = (payload.username or "").strip()
+                af_secret_is_cookie = "jsessionid=" in (secret or "").lower()
+                af_cookie = ""
+                if af_user and secret and not af_secret_is_cookie:
+                    af_cookie = asiafoods_login_and_get_cookie(af_user, secret, af_origin)
+                else:
+                    af_cookie = _normalize_asiafoods_cookie(
+                        str(headers.get("Cookie") or session_cookie or secret or "")
+                    )
+                if not af_cookie:
+                    message = "Thiếu Tài khoản/Mật khẩu hoặc Cookie JSESSIONID cho nguồn Gấu Đỏ (AsiaFoods)."
+                else:
+                    req_cfg = payload.request_config if isinstance(payload.request_config, dict) else {}
+                    shop_id = str(
+                        req_cfg.get("lstShopId") or req_cfg.get("shop_id") or req_cfg.get("distributor_code") or "3001"
+                    ).strip() or "3001"
+                    today_dt = date.today()
+                    from_dt_str = (today_dt - timedelta(days=14)).strftime("%d/%m/%Y")
+                    to_dt_str = today_dt.strftime("%d/%m/%Y")
+                    af_headers = {
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                        "Origin": af_origin,
+                        "Referer": f"{af_origin}/sale-product/search-sale/info",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Cookie": af_cookie,
+                    }
+                    with httpx.Client(timeout=20.0, follow_redirects=False) as af_client:
+                        r_af = af_client.post(
+                            af_search_url,
+                            headers=af_headers,
+                            data={
+                                "orderNumber": "", "refOrderNumber": "",
+                                "fromDate": from_dt_str, "toDate": to_dt_str,
+                                "deliveryDate": "", "customerCode": "", "customerName": "",
+                                "orderSource": "0", "saleStaff": "", "deliveryStaff": "",
+                                "priorityCode": "-1", "lstShopId": shop_id,
+                                "orderType": "IN", "lstSaleOrderType": "-1",
+                                "page": "1", "rows": "5",
+                            },
+                        )
+                        if r_af.status_code == 200 and "json" in (r_af.headers.get("content-type") or "").lower():
+                            af_data = r_af.json()
+                            af_rows = af_data.get("rows") or []
+                            total_found = int(af_data.get("total") or len(af_rows))
+                            is_live = True
+                            if af_rows:
+                                first_ord = af_rows[0]
+                                sample_row = first_ord
+                                sample_rows = af_rows[:5]
+                                # Thử lấy chi tiết dòng hàng của đơn đầu tiên
+                                r_det = af_client.get(
+                                    f"{af_origin}/commons/adjust-load-product-for-sale",
+                                    params={
+                                        "viewOnly": "1",
+                                        "orderId": str(first_ord.get("id") or ""),
+                                        "shopCodeFilter": str(first_ord.get("shopCode") or ""),
+                                    },
+                                    headers=af_headers,
+                                )
+                                if r_det.status_code == 200 and "json" in (r_det.headers.get("content-type") or "").lower():
+                                    lots = r_det.json().get("sale_order_lot") or []
+                                    if lots:
+                                        sample_row = {**first_ord, **lots[0]}
+                                        sample_rows = [{**first_ord, **ln} for ln in lots[:5]]
+                            message = f"Kết nối Gấu Đỏ (AsiaFoods) thành công! Tìm thấy {total_found} đơn hàng (Shop {shop_id}, 14 ngày gần nhất)."
+                        else:
+                            message = f"Kết nối Gấu Đỏ thất bại (HTTP {r_af.status_code}): JSESSIONID có thể đã hết hạn."
+            except Exception as af_err:
+                message = f"Kết nối Gấu Đỏ (AsiaFoods): {af_err}."
+
         if not sample_row:
             try:
                 with httpx.Client(timeout=15.0, follow_redirects=True) as client:
@@ -1648,6 +1736,11 @@ def sync_orders_from_curl_command(
             "saleId",
             "productId",
             "typePayment",
+            "lstShopId",
+            "orderType",
+            "orderSource",
+            "priorityCode",
+            "lstSaleOrderType",
         ]:
             if p_key in parsed.get("params", {}):
                 cur_req_cfg[p_key] = parsed["params"][p_key]
@@ -1658,16 +1751,17 @@ def sync_orders_from_curl_command(
     # Xác định khoảng ngày đồng bộ
     target_from = payload.from_date
     target_to = payload.to_date
-    if not target_from and parsed.get("params", {}).get("fromDate"):
-        try:
-            target_from = datetime.strptime(str(parsed["params"]["fromDate"]), "%Y/%m/%d").date()
-        except Exception:
-            pass
-    if not target_to and parsed.get("params", {}).get("toDate"):
-        try:
-            target_to = datetime.strptime(str(parsed["params"]["toDate"]), "%Y/%m/%d").date()
-        except Exception:
-            pass
+    for date_fmt in ("%Y/%m/%d", "%d/%m/%Y", "%Y-%m-%d"):
+        if not target_from and parsed.get("params", {}).get("fromDate"):
+            try:
+                target_from = datetime.strptime(str(parsed["params"]["fromDate"]).strip(), date_fmt).date()
+            except Exception:
+                pass
+        if not target_to and parsed.get("params", {}).get("toDate"):
+            try:
+                target_to = datetime.strptime(str(parsed["params"]["toDate"]).strip(), date_fmt).date()
+            except Exception:
+                pass
 
     today = datetime.utcnow().date()
     target_from = target_from or today
@@ -1709,7 +1803,7 @@ def sync_orders_from_curl_command(
         "total_value": total_value,
         "order_numbers": [o.order_number for o in canonical_orders],
         "canonical_preview": [o.model_dump(mode="json") for o in canonical_orders[:5]],
-        "message": f"Đồng bộ thành công {len(canonical_orders)} đơn hàng ({saved_lines} dòng sản phẩm) từ DMS Nazzy cho {dist_code}!",
+        "message": f"Đồng bộ thành công {len(canonical_orders)} đơn hàng ({saved_lines} dòng sản phẩm) từ {cfg.supplier_name or cfg.supplier_code} cho {dist_code}!",
     }
 
 

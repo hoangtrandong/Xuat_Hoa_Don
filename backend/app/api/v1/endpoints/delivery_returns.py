@@ -16,6 +16,7 @@ from app.schemas.debt_ledger import (
     DeliveryReturnReceiveRequest,
     EligibleNewOrderOut,
     EligibleOldOrderOut,
+    OldOrderReplacementContextOut,
     ReplacementReturnCreateRequest,
     ReplacementReturnPreviewOut,
     ReplacementReturnPreviewRequest,
@@ -79,6 +80,14 @@ def get_eligible_new_orders(
     )
 
 
+@router.get("/old-order-context/{order_number}", response_model=OldOrderReplacementContextOut)
+def get_old_order_replacement_context(
+    order_number: str,
+    db: Session = Depends(get_db),
+):
+    return replacement_service.get_old_order_replacement_context(db, old_order_number=order_number)
+
+
 @router.post("/preview-replacement", response_model=ReplacementReturnPreviewOut)
 def preview_replacement_return(
     payload: ReplacementReturnPreviewRequest,
@@ -88,6 +97,7 @@ def preview_replacement_return(
         return replacement_service.preview_replacement_return(
             db,
             old_delivery_request_order_id=payload.old_delivery_request_order_id,
+            old_order_number=payload.old_order_number,
             new_order_number=payload.new_order_number,
         )
     except ValueError as exc:
@@ -104,6 +114,7 @@ def create_replacement_return(
         return replacement_service.create_replacement_return(
             db,
             old_delivery_request_order_id=payload.old_delivery_request_order_id,
+            old_order_number=payload.old_order_number,
             new_order_number=payload.new_order_number,
             created_by=current_user.username,
             note=payload.note,

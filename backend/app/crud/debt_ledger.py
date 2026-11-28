@@ -1161,6 +1161,8 @@ def cancel_delivery_return(
         if rep and getattr(rep, "replacement_type", "MANUAL") not in ("SPLIT", "MERGE"):
             if not ret.order or rep.replaced_order_number == ret.order.order_number:
                 db.delete(rep)
+        if ret.order and ret.order.delivery_status == "PARTIAL_DELIVERED" and float(ret.order.returned_amount or 0) <= 0:
+            ret.order.delivery_status = "PENDING"
 
     db.commit()
     db.refresh(ret)

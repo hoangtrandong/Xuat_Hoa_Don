@@ -249,22 +249,99 @@ def list_eligible_new_orders(
     return results[:limit]
 
 
-def preview_replacement_return(
+def _resolve_old_dro(
     db: Session,
-    old_delivery_request_order_id: int,
-    new_order_number: str,
-) -> dict[str, Any]:
-    """Đối chiếu đơn cũ (đã xuất kho) và đơn mới (DMS), tính phần hàng chênh lệch cần trả kho."""
-    old_dro = db.scalar(
+    old_delivery_request_order_id: int | None = None,
+    old_order_number: str | None = None,
+) -> DeliveryRequestOrder | None:
+    base_stmt = (
         select(DeliveryRequestOrder)
         .options(
             selectinload(DeliveryRequestOrder.request),
             selectinload(DeliveryRequestOrder.order_items).selectinload(DeliveryRequestOrderItem.product),
         )
-        .where(DeliveryRequestOrder.id == old_delivery_request_order_id)
     )
+    if old_delivery_request_order_id:
+        return db.scalar(base_stmt.where(DeliveryRequestOrder.id == old_delivery_request_order_id))
+    if old_order_number and old_order_number.strip():
+        return db.scalar(
+            base_stmt
+            .join(DeliveryRequest, DeliveryRequest.id == DeliveryRequestOrder.delivery_request_id)
+            .where(
+                func.upper(func.trim(DeliveryRequestOrder.order_number)) == old_order_number.strip().upper(),
+                DeliveryRequest.status == "COMPLETED",
+            )
+            .order_by(DeliveryRequest.completed_at.desc(), DeliveryRequestOrder.id.desc())
+        )
+    return None
+
+
+def get_old_order_replacement_context(
+    db: Session,
+    old_order_number: str,
+) -> dict[str, Any]:
+    """Kiểm tra 1 đơn hàng (theo số đơn) có đủ điều kiện gán đơn thay thế & tạo lệnh trả hàng hay không."""
+    ord_num = (old_order_number or "").strip()
+    if not ord_num:
+        return {"eligible": False, "reason": "Số đơn hàng không hợp lệ."}
+
+    old_dro = _resolve_old_dro(db, old_order_number=ord_num)
     if not old_dro:
-        raise ValueError("Không tìm thấy đơn hàng cũ trong hệ thống xuất kho.")
+        return {
+            "eligible": False,
+            "reason": "Đơn hàng chưa ở trạng thái Đã xuất kho nên không thuộc diện thay thế trả hàng.",
+        }
+
+    existing_ret = db.scalar(
+        select(DeliveryReturn)
+        .where(
+            DeliveryReturn.order_id == old_dro.id,
+            DeliveryReturn.return_type == "ORDER_REPLACEMENT",
+            DeliveryReturn.status.in_(("PENDING_WAREHOUSE", "WAREHOUSE_RECEIVED", "APPROVED")),
+        )
+        .order_by(DeliveryReturn.id.desc())
+    )
+    if existing_ret:
+        return {
+            "eligible": False,
+            "reason": f"Đơn này đã được gán thay thế bởi đơn {existing_ret.replacement_order_number} (Phiếu trả {existing_ret.code}).",
+            "old_order": _serialize_old_order(old_dro),
+            "existing_return_code": existing_ret.code,
+            "existing_return_status": existing_ret.status,
+            "existing_replacement_order_number": existing_ret.replacement_order_number,
+        }
+
+    if old_dro.delivery_status in ("DELIVERED", "RETURNED_ALL"):
+        return {
+            "eligible": False,
+            "reason": f"Đơn hàng đang ở trạng thái {old_dro.delivery_status}, không thể gán thay thế trả hàng.",
+            "old_order": _serialize_old_order(old_dro),
+        }
+
+    if old_dro.payment_status == "RETURNED":
+        return {
+            "eligible": False,
+            "reason": "Đơn hàng đã được trả toàn bộ.",
+            "old_order": _serialize_old_order(old_dro),
+        }
+
+    return {
+        "eligible": True,
+        "reason": None,
+        "old_order": _serialize_old_order(old_dro),
+    }
+
+
+def preview_replacement_return(
+    db: Session,
+    old_delivery_request_order_id: int | None = None,
+    new_order_number: str = "",
+    old_order_number: str | None = None,
+) -> dict[str, Any]:
+    """Đối chiếu đơn cũ (đã xuất kho) và đơn mới (DMS), tính phần hàng chênh lệch cần trả kho."""
+    old_dro = _resolve_old_dro(db, old_delivery_request_order_id, old_order_number)
+    if not old_dro:
+        raise ValueError("Không tìm thấy đơn hàng cũ đã xuất kho trong hệ thống.")
 
     new_ord_num = new_order_number.strip()
     if not new_ord_num:
@@ -375,16 +452,39 @@ def preview_replacement_return(
 
     # 2. Tổng hợp SKU & tiền của ĐƠN MỚI từ VinamilkOrderSnapshot
     new_by_prod: dict[int, dict[str, Any]] = {}
+    new_order_lines: list[dict[str, Any]] = []
     new_total_qty = 0
     new_total_amount = Decimal("0")
     new_first = new_snapshots[0]
     new_payload_first = new_first.raw_payload if isinstance(new_first.raw_payload, dict) else {}
 
     for snap in new_snapshots:
+        payload = snap.raw_payload if isinstance(snap.raw_payload, dict) else {}
+        sale_qty = int(round(float(_to_decimal(
+            next((payload[k] for k in ("Số lượng", "quantity", "qty") if payload.get(k) not in (None, "")), 0)
+        ))))
+        promo_qty = int(round(float(_to_decimal(
+            next((payload[k] for k in ("Số lượng KM", "promotionQuantity", "freeQuantity") if payload.get(k) not in (None, "")), 0)
+        ))))
         qty, amt = _snapshot_line_qty_and_amount(snap)
         if qty <= 0 and amt <= 0:
             continue
         canon_id, prod = _resolve_snapshot_sku(db, snap.product_code, product_lookup)
+        display_sku = (snap.product_code or "").strip()
+        display_name = (snap.product_name or "").strip()
+        if prod is not None and canon_id is not None:
+            display_sku, display_name = directory.label(canon_id, prod.sku, prod.name)
+        unit_price = round(float(amt) / qty, 2) if qty > 0 else 0.0
+        new_order_lines.append({
+            "product_id": canon_id,
+            "sku": display_sku or "—",
+            "product_name": display_name or "—",
+            "quantity": max(0, sale_qty),
+            "promo_quantity": max(0, promo_qty),
+            "total_qty": qty,
+            "unit_price": unit_price,
+            "amount": round(float(amt), 2),
+        })
         if canon_id is None or prod is None:
             errors.append(f"Đơn mới {canonical_new_order_number}: không tìm thấy mã SP {snap.product_code} trong danh mục.")
             continue
@@ -498,6 +598,7 @@ def preview_replacement_return(
     return {
         "old_order": old_order_out,
         "new_order": new_order_out,
+        "new_order_lines": new_order_lines,
         "comparison_lines": comparison_lines,
         "old_amount": round(old_net_amount, 2),
         "new_amount": new_amt_float,
@@ -513,40 +614,54 @@ def preview_replacement_return(
 
 def create_replacement_return(
     db: Session,
-    old_delivery_request_order_id: int,
-    new_order_number: str,
-    created_by: str,
+    old_delivery_request_order_id: int | None = None,
+    new_order_number: str = "",
+    created_by: str = "",
     note: str | None = None,
+    old_order_number: str | None = None,
 ) -> DeliveryReturn:
     """Thực thi thay thế đơn cũ bằng đơn mới và tạo lệnh yêu cầu trả phần hàng còn lại về kho (PENDING_WAREHOUSE)."""
+    resolved_old = _resolve_old_dro(db, old_delivery_request_order_id, old_order_number)
+    if not resolved_old:
+        raise ValueError("Không tìm thấy đơn hàng cũ đã xuất kho.")
+
     locked_old = db.scalar(
         select(DeliveryRequestOrder)
-        .where(DeliveryRequestOrder.id == old_delivery_request_order_id)
+        .where(DeliveryRequestOrder.id == resolved_old.id)
         .with_for_update()
     )
     if not locked_old:
         raise ValueError("Không tìm thấy đơn hàng cũ.")
 
-    preview = preview_replacement_return(db, old_delivery_request_order_id, new_order_number)
+    preview = preview_replacement_return(
+        db,
+        old_delivery_request_order_id=locked_old.id,
+        new_order_number=new_order_number,
+    )
     if not preview["can_create"]:
         raise ValueError(" ".join(preview["errors"]) or "Không thể tạo lệnh trả hàng thay thế.")
 
     old_order_num = locked_old.order_number.strip()
     canonical_new_num = preview["new_order"]["order_number"]
 
-    # 1. Lưu liên kết thay thế đơn hàng trên DMS (VinamilkOrderReplacement)
+    # 1. Lưu liên kết thay thế đơn hàng trên DMS (VinamilkOrderReplacement) với loại PARTIAL_RETURN
+    #    -> Đơn mới hiển thị trạng thái "Đã giao", đơn cũ hiển thị trạng thái "Giao 1 phần"
     existing_rep = db.get(VinamilkOrderReplacement, canonical_new_num)
     if existing_rep is None:
         db.add(VinamilkOrderReplacement(
             new_order_number=canonical_new_num,
             replaced_order_number=old_order_num,
-            replacement_type="MANUAL",
+            replacement_type="PARTIAL_RETURN",
             performed_by=created_by,
         ))
     else:
         existing_rep.replaced_order_number = old_order_num
+        existing_rep.replacement_type = "PARTIAL_RETURN"
         existing_rep.performed_by = created_by
         existing_rep.updated_at = datetime.utcnow()
+
+    # Chuyển đơn cũ sang trạng thái Giao 1 phần ngay khi xác nhận thay thế
+    locked_old.delivery_status = "PARTIAL_DELIVERED"
 
     # 2. Chuẩn bị danh sách hàng chênh lệch trả về kho
     return_items_payload = []

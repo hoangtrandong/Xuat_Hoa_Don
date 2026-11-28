@@ -31,6 +31,7 @@ import DataTable, { Column } from "@/components/ui/DataTable";
 import Drawer from "@/components/ui/Drawer";
 import OrderActionModal from "@/components/ui/OrderActionModal";
 import CreateOrderForm from "@/components/sales/CreateOrderForm";
+import OrderDetailReplacementPanel from "@/components/sales/OrderDetailReplacementPanel";
 import OrderSyncProgressPanel, {
   type SyncProgressLogEntry,
   type SyncProgressState,
@@ -4237,6 +4238,20 @@ return Array.from(map.values());
                       </table>
                     </div>
                   </div>
+                )}
+
+                {/* Khối 4: Gán đơn hàng thay thế (Giao 1 phần) & Tạo lệnh trả hàng về kho */}
+                {detailOrderNumber && (
+                  <OrderDetailReplacementPanel
+                    orderNumber={detailOrderNumber}
+                    customerCode={customerCode}
+                    onConfirmed={({ returnCode, oldOrderNumber, newOrderNumber }) => {
+                      setToast(
+                        `Đã chuyển đơn ${oldOrderNumber} sang Giao 1 phần, đơn ${newOrderNumber} sang Đã giao và tạo lệnh trả kho ${returnCode}.`
+                      );
+                      void loadLocalOrders().catch(() => {});
+                    }}
+                  />
                 )}
               </>
             );

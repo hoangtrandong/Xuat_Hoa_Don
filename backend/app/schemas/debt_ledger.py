@@ -264,8 +264,20 @@ class EligibleNewOrderOut(BaseModel):
 
 
 class ReplacementReturnPreviewRequest(BaseModel):
-    old_delivery_request_order_id: int = Field(gt=0)
+    old_delivery_request_order_id: Optional[int] = Field(default=None, gt=0)
+    old_order_number: Optional[str] = Field(default=None, max_length=120)
     new_order_number: str = Field(min_length=1, max_length=120)
+
+
+class NewOrderLineDetail(BaseModel):
+    product_id: Optional[int] = None
+    sku: str
+    product_name: str
+    quantity: int = 0
+    promo_quantity: int = 0
+    total_qty: int = 0
+    unit_price: float = 0.0
+    amount: float = 0.0
 
 
 class ReplacementReturnComparisonLine(BaseModel):
@@ -287,6 +299,7 @@ class ReplacementReturnComparisonLine(BaseModel):
 class ReplacementReturnPreviewOut(BaseModel):
     old_order: EligibleOldOrderOut
     new_order: EligibleNewOrderOut
+    new_order_lines: List[NewOrderLineDetail] = Field(default_factory=list)
     comparison_lines: List[ReplacementReturnComparisonLine] = Field(default_factory=list)
     old_amount: float = 0.0
     new_amount: float = 0.0
@@ -300,9 +313,19 @@ class ReplacementReturnPreviewOut(BaseModel):
 
 
 class ReplacementReturnCreateRequest(BaseModel):
-    old_delivery_request_order_id: int = Field(gt=0)
+    old_delivery_request_order_id: Optional[int] = Field(default=None, gt=0)
+    old_order_number: Optional[str] = Field(default=None, max_length=120)
     new_order_number: str = Field(min_length=1, max_length=120)
     note: Optional[str] = Field(default=None, max_length=255)
+
+
+class OldOrderReplacementContextOut(BaseModel):
+    eligible: bool = False
+    reason: Optional[str] = None
+    old_order: Optional[EligibleOldOrderOut] = None
+    existing_return_code: Optional[str] = None
+    existing_return_status: Optional[str] = None
+    existing_replacement_order_number: Optional[str] = None
 
 
 class DeliveryReturnCancelRequest(BaseModel):

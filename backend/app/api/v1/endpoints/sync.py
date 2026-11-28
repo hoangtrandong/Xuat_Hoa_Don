@@ -2036,6 +2036,46 @@ def list_local_vinamilk_orders(
                 )
             )
         filters.append(or_(*dist_conditions))
+
+        # Ẩn các đơn đồng bộ từ nguồn NCC đã bị xóa khỏi NPP này (VD: đã xóa NAZZY khỏi NPP Mai Gold)
+        configured_for_dist = [
+            f"NCC:{sup_code}"
+            for sup_code, d_codes in all_supplier_distributor_codes.items()
+            if effective_dist_code in d_codes
+        ]
+        if configured_for_dist:
+            filters.append(
+                or_(
+                    VinamilkOrderSnapshot.processing_status.is_(None),
+                    ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
+                    func.upper(VinamilkOrderSnapshot.processing_status).in_(configured_for_dist),
+                )
+            )
+        else:
+            filters.append(
+                or_(
+                    VinamilkOrderSnapshot.processing_status.is_(None),
+                    ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
+                )
+            )
+    else:
+        # Khi xem tất cả NPP: vẫn ẩn các đơn NCC:<SUPPLIER> của nguồn NCC đã bị xóa khỏi toàn bộ hệ thống
+        all_configured_ncc = [f"NCC:{sup_code}" for sup_code in all_supplier_distributor_codes.keys()]
+        if all_configured_ncc:
+            filters.append(
+                or_(
+                    VinamilkOrderSnapshot.processing_status.is_(None),
+                    ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
+                    func.upper(VinamilkOrderSnapshot.processing_status).in_(all_configured_ncc),
+                )
+            )
+        else:
+            filters.append(
+                or_(
+                    VinamilkOrderSnapshot.processing_status.is_(None),
+                    ~func.upper(VinamilkOrderSnapshot.processing_status).like("NCC:%"),
+                )
+            )
     snapshot_total = db.scalar(select(func.count()).select_from(VinamilkOrderSnapshot).where(*filters)) or 0
     raw_snapshot_total = snapshot_total
     rows = db.scalars(
@@ -2204,6 +2244,7 @@ def list_local_vinamilk_orders(
                     DeliveryRequestOrder.employee_code,
                     DeliveryRequestOrder.employee_name,
                     DeliveryRequest.status,
+                    DeliveryRequestOrder.delivery_status,
                 )
                 .join(
                     DeliveryRequest,
@@ -2223,12 +2264,19 @@ def list_local_vinamilk_orders(
                 "COMPLETED": "Đã xuất kho",
                 "CANCELLED": "Đã hủy yêu cầu",
             }
-            for o_num, order_date, emp_code, emp_name, req_status in dr_rows:
+            for o_num, order_date, emp_code, emp_name, req_status, order_deliv_status in dr_rows:
                 if not o_num:
                     continue
                 key = o_num.strip().upper()
                 if key not in order_delivery_status:
-                    order_delivery_status[key] = delivery_status_labels.get(req_status, "Chưa yêu cầu")
+                    if req_status == "COMPLETED" and order_deliv_status == "PARTIAL_DELIVERED":
+                        order_delivery_status[key] = "Giao 1 phần"
+                    elif req_status == "COMPLETED" and order_deliv_status == "DELIVERED":
+                        order_delivery_status[key] = "Đã giao"
+                    elif req_status == "COMPLETED" and order_deliv_status == "RETURNED_ALL":
+                        order_delivery_status[key] = "Đã trả toàn bộ"
+                    else:
+                        order_delivery_status[key] = delivery_status_labels.get(req_status, "Chưa yêu cầu")
                 if req_status in ("SUBMITTED", "RECEIVED", "COMPLETED"):
                     normalized_code = (emp_code or "").strip()
                     if normalized_code:
@@ -2296,11 +2344,21 @@ def list_local_vinamilk_orders(
                     d_status = min(sub_statuses, key=lambda status: progress.get(status, 0))
         if is_merged_source:
             d_status = "Không áp dụng"
+        elif rep_type == "PARTIAL_RETURN" and rep_order:
+            d_status = "Đã giao"
+        elif rep_type == "PARTIAL_RETURN" and rep_by_list:
+            d_status = "Giao 1 phần"
 
         raw_proc = (getattr(row, "processing_status", None) or "").strip()
         clean_raw_proc = "" if (raw_proc.upper().startswith("NCC:") or raw_proc == "Đã cập nhật kho") else raw_proc
         if is_merged_source:
             proc_status = "Đã Hủy"
+        elif rep_type == "PARTIAL_RETURN" and rep_order:
+            proc_status = "Đã giao"
+        elif rep_type == "PARTIAL_RETURN" and rep_by_list:
+            proc_status = "Giao 1 phần"
+        elif d_status == "Giao 1 phần":
+            proc_status = "Giao 1 phần"
         elif pending_req and not getattr(row, "is_synthetic", False):
             proc_status = "Chờ KT duyệt tách"
         elif rep_type == "MERGE" and rep_order:

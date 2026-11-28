@@ -26,6 +26,7 @@ from app.models.product import Product, ProductCategory, ProductGroup, ProductGr
 from app.models.vinamilk import VinamilkOrderReplacement, VinamilkOrderSnapshot
 from app.services.order_replacement_return import (
     create_replacement_return,
+    get_old_order_replacement_context,
     list_eligible_new_orders,
     list_eligible_old_orders,
     preview_replacement_return,
@@ -231,9 +232,16 @@ def test_order_replacement_partial_return_and_warehouse_receive(db):
     assert len(new_list) == 1
     assert new_list[0]["order_number"] == "SO-NEW-002"
 
-    # 2. Xem trước đối chiếu chênh lệch
-    preview = preview_replacement_return(session, dro.id, "SO-NEW-002")
+    # 1b. Kiểm tra context từ số đơn cũ (khi click chi tiết đơn cũ)
+    ctx_info = get_old_order_replacement_context(session, "SO-OLD-001")
+    assert ctx_info["eligible"] is True
+    assert ctx_info["old_order"]["order_number"] == "SO-OLD-001"
+
+    # 2. Xem trước đối chiếu chênh lệch (bằng old_order_number)
+    preview = preview_replacement_return(session, old_order_number="SO-OLD-001", new_order_number="SO-NEW-002")
     assert preview["can_create"] is True
+    assert len(preview["new_order_lines"]) == 1
+    assert preview["new_order_lines"][0]["total_qty"] == 12
     assert preview["old_amount"] == 290000.0
     assert preview["new_amount"] == 120000.0
     assert preview["return_amount"] == 170000.0
@@ -247,10 +255,13 @@ def test_order_replacement_partial_return_and_warehouse_receive(db):
     assert float(ret.amount) == 170000.0
     assert len(ret.items) == 2
 
-    # Liên kết thay thế DMS đã được lưu
+    # Đơn cũ chuyển ngay sang Giao 1 phần, liên kết thay thế có loại PARTIAL_RETURN (đơn mới hiển thị Đã giao)
+    session.refresh(dro)
+    assert dro.delivery_status == "PARTIAL_DELIVERED"
     rep = session.get(VinamilkOrderReplacement, "SO-NEW-002")
     assert rep is not None
     assert rep.replaced_order_number == "SO-OLD-001"
+    assert rep.replacement_type == "PARTIAL_RETURN"
 
     # CHƯA giảm công nợ NVGH & CHƯA cộng tồn kho trước khi thủ kho xác nhận!
     assert get_employee_balance(session, emp.id) == 290000.0
@@ -296,4 +307,6 @@ def test_cancel_pending_replacement_return_cleans_up_link(db):
     cancelled = cancel_delivery_return(session, ret.id, cancelled_by="nv_sale", reason="Chon nham don")
     assert cancelled.status == "CANCELLED"
     assert session.get(VinamilkOrderReplacement, "SO-NEW-002") is None
+    session.refresh(dro)
+    assert dro.delivery_status == "PENDING"
     assert get_employee_balance(session, ctx["emp"].id) == 290000.0

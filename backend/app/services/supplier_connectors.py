@@ -1732,6 +1732,38 @@ def asiafoods_login_and_get_cookie(
         return "; ".join(cookie_pairs)
 
 
+def _resolve_asiafoods_shop_id(
+    client: httpx.Client,
+    origin: str,
+    headers: dict[str, str],
+    configured_shop_id: str | None = None,
+    username: str | None = None,
+) -> str:
+    """Tự động xác định lstShopId cho AsiaFoods từ config, từ trang search-sale/info, hoặc từ username."""
+    import re
+
+    clean_cfg = (configured_shop_id or "").strip()
+    if clean_cfg and clean_cfg.isdigit():
+        return clean_cfg
+    try:
+        r_info = client.get(f"{origin}/sale-product/search-sale/info", headers=headers)
+        if r_info.status_code == 200 and r_info.text:
+            html = r_info.text
+            for pat in (
+                r'id=["\']lstShopId["\'][^>]*value=["\'](\d+)["\']',
+                r'name=["\']lstShopId["\'][^>]*value=["\'](\d+)["\']',
+                r'id=["\']shopId["\'][^>]*value=["\'](\d+)["\']',
+                r'shopId\s*[:=]\s*["\']?(\d{2,10})["\']?',
+            ):
+                m = re.search(pat, html, re.I)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
+    clean_user = (username or "").strip()
+    return clean_cfg or clean_user or "3001"
+
+
 def fetch_asiafoods_orders(
     config: DistributorSupplierConfig,
     from_date: date,
@@ -1785,12 +1817,11 @@ def fetch_asiafoods_orders(
         )
 
     req_cfg = config.request_config if isinstance(config.request_config, dict) else {}
-    shop_id = str(
+    configured_shop_id = str(
         req_cfg.get("lstShopId")
         or req_cfg.get("shop_id")
-        or req_cfg.get("distributor_code")
-        or "3001"
-    ).strip() or "3001"
+        or ""
+    ).strip()
     order_type = str(req_cfg.get("orderType") or "IN").strip() or "IN"
     order_source = str(req_cfg.get("orderSource") or "0").strip() or "0"
     priority_code = str(req_cfg.get("priorityCode") or "-1").strip() or "-1"
@@ -1808,7 +1839,6 @@ def fetch_asiafoods_orders(
 
     from_str = from_date.strftime("%d/%m/%Y")
     to_str = to_date.strftime("%d/%m/%Y")
-    _report(f"Đang tải danh sách đơn Gấu Đỏ ({from_str} → {to_str}, Shop {shop_id})...", 0)
 
     all_summaries: list[dict[str, Any]] = []
     seen_order_ids: set[str] = set()
@@ -1818,6 +1848,8 @@ def fetch_asiafoods_orders(
     retried_login = False
 
     with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+        shop_id = _resolve_asiafoods_shop_id(client, origin, base_headers, configured_shop_id, clean_user)
+        _report(f"Đang tải danh sách đơn Gấu Đỏ ({from_str} → {to_str}, Shop {shop_id})...", 0)
         while current_page <= 50:
             form_data = {
                 "orderNumber": "",

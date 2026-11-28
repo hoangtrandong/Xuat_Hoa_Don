@@ -25,7 +25,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const session = useAuthSession();
   const { resolvedTheme, toggleTheme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [companyCode, setCompanyCode] = useState("");
   const [loginUsername, setLoginUsername] = useState("");
   const [password, setPassword] = useState("");
   const [rememberLogin, setRememberLogin] = useState(true);
@@ -95,7 +94,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          company_code: companyCode.trim(),
           username: loginUsername.trim(),
           password,
         }),
@@ -105,7 +103,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         setLoginError(
           data.detail ||
             (response.status === 401
-              ? "Mã DN, Mã NV hoặc mật khẩu không chính xác."
+              ? "Tên đăng nhập hoặc mật khẩu không chính xác."
               : "Không thể đăng nhập. Vui lòng thử lại sau."),
         );
         return;
@@ -175,7 +173,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                   Đăng nhập tài khoản NVBH
                 </h1>
                 <p className="mt-0.5 text-xs text-slate-500">
-                  Nhập Mã DN, Mã NV và mật khẩu để bắt đầu bấm đơn
+                  Nhập tên đăng nhập (Mã NV) và mật khẩu để bắt đầu
                 </p>
               </div>
 
@@ -191,26 +189,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
                 <div>
                   <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                    Mã DN / Nhà phân phối <span className="text-red-600">*</span>
-                  </label>
-                  <input
-                    required
-                    autoCapitalize="characters"
-                    placeholder="VD: NPP-DONGDO"
-                    value={companyCode}
-                    onChange={(event) => setCompanyCode(event.target.value)}
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 text-base text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                    Mã nhân viên / Tài khoản <span className="text-red-600">*</span>
+                    Tên đăng nhập <span className="text-red-600">*</span>
                   </label>
                   <input
                     autoComplete="username"
                     required
-                    placeholder="Nhập mã NV hoặc tên đăng nhập"
+                    placeholder="Nhập tên đăng nhập hoặc mã NV"
                     value={loginUsername}
                     onChange={(event) => setLoginUsername(event.target.value)}
                     className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 text-base text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
@@ -302,25 +286,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
               <div>
                 <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                  Mã DN <span className="text-red-600">(*)</span>
-                </label>
-                <input
-                  required
-                  placeholder="Nhập mã doanh nghiệp / mã NPP (VD: NPP-DONGDO)..."
-                  value={companyCode}
-                  onChange={(event) => setCompanyCode(event.target.value)}
-                  className={inputCls}
-                />
-              </div>
-
-              <div>
-                <label className="text-[10px] font-semibold text-slate-600 block mb-0.5">
-                  Mã NV <span className="text-red-600">(*)</span>
+                  Tên đăng nhập <span className="text-red-600">(*)</span>
                 </label>
                 <input
                   autoComplete="username"
                   required
-                  placeholder="Nhập mã nhân viên / tài khoản..."
+                  placeholder="Nhập tên đăng nhập hoặc mã NV..."
                   value={loginUsername}
                   onChange={(event) => setLoginUsername(event.target.value)}
                   className={inputCls}
@@ -355,7 +326,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             {/* 1.4 Footer Action Bar */}
             <div className="border-t border-slate-300 bg-slate-100 px-3.5 py-2 flex items-center justify-between gap-3">
               <span className="text-[10px] text-slate-500">
-                Nhập Mã DN, Mã NV và Mật khẩu để tiếp tục.
+                Nhập tên đăng nhập và mật khẩu để tiếp tục.
               </span>
               <button
                 type="submit"

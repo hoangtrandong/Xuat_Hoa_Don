@@ -1042,6 +1042,7 @@ def test_supplier_connection(
                 from urllib.parse import urlparse
                 from app.services.supplier_connectors import (
                     _normalize_asiafoods_cookie,
+                    _resolve_asiafoods_shop_id,
                     asiafoods_login_and_get_cookie,
                 )
 
@@ -1061,9 +1062,7 @@ def test_supplier_connection(
                     message = "Thiếu Tài khoản/Mật khẩu hoặc Cookie JSESSIONID cho nguồn Gấu Đỏ (AsiaFoods)."
                 else:
                     req_cfg = payload.request_config if isinstance(payload.request_config, dict) else {}
-                    shop_id = str(
-                        req_cfg.get("lstShopId") or req_cfg.get("shop_id") or req_cfg.get("distributor_code") or "3001"
-                    ).strip() or "3001"
+                    configured_shop = str(req_cfg.get("lstShopId") or req_cfg.get("shop_id") or "").strip()
                     today_dt = date.today()
                     from_dt_str = (today_dt - timedelta(days=14)).strftime("%d/%m/%Y")
                     to_dt_str = today_dt.strftime("%d/%m/%Y")
@@ -1077,6 +1076,7 @@ def test_supplier_connection(
                         "Cookie": af_cookie,
                     }
                     with httpx.Client(timeout=20.0, follow_redirects=False) as af_client:
+                        shop_id = _resolve_asiafoods_shop_id(af_client, af_origin, af_headers, configured_shop, af_user)
                         r_af = af_client.post(
                             af_search_url,
                             headers=af_headers,

@@ -588,8 +588,6 @@ export default function MultiTenantSupplierConfigsPage() {
       distributor_code:
         code === "NAZZY"
           ? (prev.distributor_code || "MAITRUNG")
-          : code === "GAUDO"
-          ? (prev.distributor_code || "3001")
           : prev.distributor_code,
       field_mapping: { ...((preset.field_mapping as Record<string, string>) || {}) },
     }));
@@ -1604,29 +1602,6 @@ export default function MultiTenantSupplierConfigsPage() {
                 className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
               />
             </div>
-            {supForm.supplier_code === "GAUDO" && (
-              <div className="sm:col-span-2 rounded-lg border border-rose-300 bg-rose-50/70 p-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold uppercase tracking-wide text-rose-800">
-                    Mã Shop ID Gấu Đỏ / AsiaFoods (lstShopId) *
-                  </label>
-                  <span className="rounded bg-rose-200/80 px-2 py-0.5 text-[10px] font-semibold text-rose-900">
-                    AsiaFoods DMS (HTTP thuần)
-                  </span>
-                </div>
-                <input
-                  value={supForm.distributor_code}
-                  onChange={(e) =>
-                    setSupForm({ ...supForm, distributor_code: e.target.value.trim() })
-                  }
-                  placeholder="VD: 3001 (lấy từ tham số lstShopId trên sales.asiafoods.vn)"
-                  className="mt-1.5 w-full rounded-lg border border-rose-300 bg-white px-3 py-2 text-sm font-mono font-bold text-slate-800 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
-                />
-                <p className="mt-1 text-[11px] text-slate-600">
-                  Hệ thống hỗ trợ <strong>tự động đăng nhập HTTP thuần bằng Tài khoản &amp; Mật khẩu</strong> bên dưới để lấy <code>JSESSIONID</code> và tự gia hạn khi hết phiên (hoặc có thể dán trực tiếp <code>JSESSIONID=...</code> / dùng nút <strong>Đồng bộ bằng cURL</strong>).
-                </p>
-              </div>
-            )}
             {supForm.supplier_code === "NAZZY" && (
               <div className="sm:col-span-2 rounded-lg border border-sky-300 bg-sky-50/70 p-3">
                 <div className="flex items-center justify-between">
@@ -1655,7 +1630,7 @@ export default function MultiTenantSupplierConfigsPage() {
                 {supForm.supplier_code === "NAZZY"
                   ? "Mã Nhân viên / Tài khoản Nazzy (txtCode) *"
                   : supForm.supplier_code === "GAUDO"
-                  ? "Tài khoản Gấu Đỏ / AsiaFoods (username)"
+                  ? "Tên đăng nhập Gấu Đỏ (Mã Shop)"
                   : supForm.supplier_code === "KIOTVIET"
                   ? "Tài khoản (KiotViet: ctyquyanhna/TênĐăngNhập)"
                   : "Tài khoản đăng nhập"}
